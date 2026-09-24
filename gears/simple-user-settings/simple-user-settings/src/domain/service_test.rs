@@ -1497,4 +1497,78 @@ mod tests {
             2
         );
     }
+
+    /// A PDP that grants a fixed set of tenants at once, as a subtree grant
+    /// does: the scope names several tenants and no user.
+    struct TenantsAuthZ(Vec<Uuid>);
+
+    #[async_trait]
+    impl AuthZResolverApi for TenantsAuthZ {
+        async fn evaluate(
+            &self,
+            _ctx: PlatformSecurityContext,
+            _request: EvaluationRequest,
+        ) -> Result<EvaluationResponse, CanonicalError> {
+            Ok(EvaluationResponse {
+                decision: true,
+                context: EvaluationResponseContext {
+                    constraints: vec![Constraint {
+                        predicates: vec![Predicate::In(InPredicate::new(
+                            pep_properties::OWNER_TENANT_ID,
+                            self.0.clone(),
+                        ))],
+                    }],
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    /// With a scope covering two tenants, one user's two rows stay apart: the
+    /// read and the patch merge use the row of the tenant the request is in.
+    #[tokio::test]
+    async fn a_multi_tenant_grant_still_reads_the_requested_tenants_row() {
+        let (org_a, org_b) = (Uuid::from_u128(0xA), Uuid::from_u128(0xB));
+        let service = build_service_with(
+            inmem_db().await,
+            ServiceConfig::default(),
+            Arc::new(TenantsAuthZ(vec![org_a, org_b])),
+        );
+        let person = Uuid::from_u128(1);
+        let in_a = in_tenant(person, org_a);
+        let in_b = in_tenant(person, org_b);
+
+        service
+            .update_settings(
+                &in_a,
+                SimpleUserSettingsUpdate {
+                    theme: "dark".to_owned(),
+                    language: "en".to_owned(),
+                },
+            )
+            .await
+            .expect("stored in A");
+
+        let seen_in_b = service.get_settings(&in_b).await.expect("read in B");
+        assert_eq!(seen_in_b.tenant_id, org_b);
+        assert_eq!(seen_in_b.theme, None, "A's row is not B's");
+
+        let patched_in_b = service
+            .patch_settings(
+                &in_b,
+                SimpleUserSettingsPatch {
+                    theme: Some("light".to_owned()),
+                    language: None,
+                },
+            )
+            .await
+            .expect("patched in B");
+        assert_eq!(
+            patched_in_b.language, None,
+            "A's language did not merge into B"
+        );
+
+        let seen_in_a = service.get_settings(&in_a).await.expect("read in A");
+        assert_eq!(seen_in_a.theme.as_deref(), Some("dark"));
+    }
 }
