@@ -81,10 +81,13 @@ impl SettingsRepository for SeaOrmSettingsRepository {
         &self,
         conn: &C,
         scope: &AccessScope,
+        user_id: Uuid,
     ) -> Result<Option<SimpleUserSettings>, DomainError> {
         let result = SettingsEntity::find()
             .secure()
             .scope_with(scope)
+            .and_id(user_id)
+            .map_err(map_scope_error)?
             .one(conn)
             .await
             .map_err(map_scope_error)?;
@@ -154,6 +157,8 @@ impl SettingsRepository for SeaOrmSettingsRepository {
         let existing = SettingsEntity::find()
             .secure()
             .scope_with(scope)
+            .and_id(user_id)
+            .map_err(map_scope_error)?
             .one(conn)
             .await
             .map_err(map_scope_error)?;

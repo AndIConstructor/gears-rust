@@ -119,11 +119,132 @@ mod tests {
     }
 
     fn build_service(db: Db, config: ServiceConfig) -> ConcreteService {
+        build_service_with(db, config, Arc::new(MockAuthZResolver))
+    }
+
+    fn build_service_with(
+        db: Db,
+        config: ServiceConfig,
+        authz: Arc<dyn AuthZResolverApi>,
+    ) -> ConcreteService {
         let repo = Arc::new(SeaOrmSettingsRepository::new());
         let db: Arc<DBProvider<toolkit_db::DbError>> = Arc::new(DBProvider::new(db));
-        let authz: Arc<dyn AuthZResolverApi> = Arc::new(MockAuthZResolver);
         let policy_enforcer = PolicyEnforcer::new(authz);
         Service::new(db, repo, policy_enforcer, config)
+    }
+
+    /// A PDP that clamps to the caller's tenant and nothing more.
+    ///
+    /// The shape the platform's static-authz plugin returns, and a legitimate
+    /// one for any PDP: "this subject may use settings in its tenant" says
+    /// nothing about *which user's* row. Choosing the row is the gear's job.
+    struct TenantOnlyAuthZ;
+
+    #[async_trait]
+    impl AuthZResolverApi for TenantOnlyAuthZ {
+        async fn evaluate(
+            &self,
+            _ctx: PlatformSecurityContext,
+            request: EvaluationRequest,
+        ) -> Result<EvaluationResponse, CanonicalError> {
+            let tenant = request
+                .subject
+                .properties
+                .get("tenant_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| CanonicalError::internal("no tenant".to_owned()).create())?;
+            Ok(EvaluationResponse {
+                decision: true,
+                context: EvaluationResponseContext {
+                    constraints: vec![Constraint {
+                        predicates: vec![Predicate::In(InPredicate::new(
+                            pep_properties::OWNER_TENANT_ID,
+                            [tenant],
+                        ))],
+                    }],
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    fn in_tenant(subject_id: Uuid, tenant_id: Uuid) -> SecurityContext {
+        SecurityContext::builder()
+            .subject_id(subject_id)
+            .subject_tenant_id(tenant_id)
+            .build()
+            .unwrap()
+    }
+
+    // =========================================================================
+    // a tenant-wide grant still reads and writes only the caller's own row
+    // =========================================================================
+
+    #[tokio::test]
+    async fn a_colleague_in_the_same_tenant_does_not_read_my_settings() {
+        let service = build_service_with(
+            inmem_db().await,
+            ServiceConfig::default(),
+            Arc::new(TenantOnlyAuthZ),
+        );
+        let org = Uuid::new_v4();
+        let me = in_tenant(Uuid::from_u128(1), org);
+        let colleague = in_tenant(Uuid::from_u128(2), org);
+
+        service
+            .update_settings(
+                &me,
+                SimpleUserSettingsUpdate {
+                    theme: "dark".to_owned(),
+                    language: "en".to_owned(),
+                },
+            )
+            .await
+            .expect("stored");
+
+        let seen = service.get_settings(&colleague).await.expect("read");
+        assert_eq!(seen.user_id, colleague.subject_id());
+        assert_eq!(seen.theme, None, "my theme is not the colleague's");
+        assert_eq!(seen.language, None);
+    }
+
+    #[tokio::test]
+    async fn a_colleague_patch_does_not_pick_up_my_fields() {
+        let service = build_service_with(
+            inmem_db().await,
+            ServiceConfig::default(),
+            Arc::new(TenantOnlyAuthZ),
+        );
+        let org = Uuid::new_v4();
+        let me = in_tenant(Uuid::from_u128(1), org);
+        let colleague = in_tenant(Uuid::from_u128(2), org);
+
+        service
+            .update_settings(
+                &me,
+                SimpleUserSettingsUpdate {
+                    theme: "dark".to_owned(),
+                    language: "en".to_owned(),
+                },
+            )
+            .await
+            .expect("stored");
+
+        let patched = service
+            .patch_settings(
+                &colleague,
+                SimpleUserSettingsPatch {
+                    theme: Some("light".to_owned()),
+                    language: None,
+                },
+            )
+            .await
+            .expect("patched");
+        assert_eq!(patched.language, None, "my language did not leak in");
+
+        let mine = service.get_settings(&me).await.expect("read");
+        assert_eq!(mine.theme.as_deref(), Some("dark"), "and mine is intact");
     }
 
     // =========================================================================
@@ -722,8 +843,12 @@ mod tests {
             &self,
             conn: &C,
             scope: &AccessScope,
+            tenant_id: Uuid,
+            user_id: Uuid,
         ) -> Result<Option<SimpleUserSettings>, DomainError> {
-            self.inner.find_by_user(conn, scope).await
+            self.inner
+                .find_by_user(conn, scope, tenant_id, user_id)
+                .await
         }
 
         async fn upsert_full<C: DBRunner>(
@@ -979,40 +1104,6 @@ mod tests {
 
         let fixed = service.get_settings(&ctx).await.expect("read");
         assert_eq!(fixed.theme.as_deref(), Some("dark"));
-    }
-
-    /// A PDP that clamps to the caller's tenant and nothing more, as the
-    /// platform's static-authz plugin does. Which user's rows these are is the
-    /// gear's to pin, not the PDP's.
-    struct TenantOnlyAuthZ;
-
-    #[async_trait]
-    impl AuthZResolverApi for TenantOnlyAuthZ {
-        async fn evaluate(
-            &self,
-            _ctx: PlatformSecurityContext,
-            request: EvaluationRequest,
-        ) -> Result<EvaluationResponse, CanonicalError> {
-            let tenant = request
-                .subject
-                .properties
-                .get("tenant_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .ok_or_else(|| CanonicalError::internal("no tenant".to_owned()).create())?;
-            Ok(EvaluationResponse {
-                decision: true,
-                context: EvaluationResponseContext {
-                    constraints: vec![Constraint {
-                        predicates: vec![Predicate::In(InPredicate::new(
-                            pep_properties::OWNER_TENANT_ID,
-                            [tenant],
-                        ))],
-                    }],
-                    ..Default::default()
-                },
-            })
-        }
     }
 
     #[tokio::test]
