@@ -443,6 +443,8 @@ still works but is not required (ADR-0007).
 | 19-14 | Hard Purge After Grace Period          | —               | N/A — not implemented (ADR-0009)                                  |
 | 19-15 | Audit Event for Chat Deletion          | —               | N/A — not implemented (ADR-0009)                                  |
 | 19-16 | Chat Deletion Does Not Cancel a Running Turn: it completes and is billed (ADR-0009) | test_cleanup.py | TestCleanup::test_running_turn_completes_and_is_billed_after_chat_delete |
+| 19-17 | Provider 403 on Every File Delete → the attachment cleanup is retried `max_attempts` times and ends in `failed` | test_cleanup.py | TestProviderCleanupOpenAI::test_attachment_cleanup_provider_403_ends_failed, TestProviderCleanupAzure::test_attachment_cleanup_provider_403_ends_failed |
+| 19-18 | Provider 500 on Every Vector Store Delete → the chat cleanup message is dead-lettered after `max_attempts` deliveries, not retried again; the `chat_vector_stores` row stays | test_cleanup.py | TestProviderCleanupOpenAI::test_vector_store_delete_500_is_dead_lettered, TestProviderCleanupAzure::test_vector_store_delete_500_is_dead_lettered |
 
 ## 20 — Authorization
 

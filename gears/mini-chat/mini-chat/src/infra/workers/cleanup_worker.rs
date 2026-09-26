@@ -161,7 +161,7 @@ impl LeasedMessageHandler for AttachmentCleanupHandler {
         };
 
         // 4. Delete provider file via OAGW.
-        //    RagHttpClient.delete() is best-effort (404 = success).
+        //    404 counts as success (file already gone).
         let ctx = tenant_security_context(event.tenant_id);
         if let Err(e) = self
             .file_storage
@@ -625,7 +625,12 @@ impl LeasedMessageHandler for ChatCleanupHandler {
                         metric_labels::resource_type::VECTOR_STORE,
                         metric_labels::cleanup_retry_reason::VECTOR_STORE_DELETE_FAILED,
                     );
-                    return MessageResult::Retry;
+                    return bound_vector_store_retry(
+                        msg.attempts,
+                        self.max_attempts,
+                        chat_id,
+                        vs_id,
+                    );
                 }
 
                 info!(chat_id = %chat_id, vector_store_id = vs_id, "chat cleanup: vector store deleted on provider");
@@ -648,6 +653,32 @@ impl LeasedMessageHandler for ChatCleanupHandler {
         info!(chat_id = %chat_id, "chat cleanup: complete");
         MessageResult::Ok
     }
+}
+
+/// Retry a failed vector-store delete until the message has been delivered
+/// `max_attempts` times, then dead-letter it. Deliveries spent waiting on
+/// pending attachments count toward the same budget. The
+/// `chat_vector_stores` row stays in place, so a replayed dead letter
+/// retries the delete.
+fn bound_vector_store_retry(
+    attempts: i16,
+    max_attempts: u32,
+    chat_id: uuid::Uuid,
+    vector_store_id: &str,
+) -> MessageResult {
+    let this_attempt = u32::try_from(attempts).unwrap_or(0).saturating_add(1);
+    if this_attempt < max_attempts {
+        return MessageResult::Retry;
+    }
+    warn!(
+        chat_id = %chat_id,
+        vector_store_id,
+        max_attempts,
+        "chat cleanup: vector store delete failed on the last attempt -- dead-lettering"
+    );
+    MessageResult::Reject(format!(
+        "vector store delete: max attempts ({max_attempts}) reached"
+    ))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -1109,5 +1140,127 @@ mod tests {
             failed, 1,
             "one attachment should be in terminal failed state"
         );
+    }
+
+    #[test]
+    fn bound_vector_store_retry_rejects_on_last_attempt() {
+        let chat_id = uuid::Uuid::new_v4();
+        assert!(matches!(
+            bound_vector_store_retry(0, 3, chat_id, "vs-1"),
+            MessageResult::Retry
+        ));
+        assert!(matches!(
+            bound_vector_store_retry(1, 3, chat_id, "vs-1"),
+            MessageResult::Retry
+        ));
+        assert!(matches!(
+            bound_vector_store_retry(2, 3, chat_id, "vs-1"),
+            MessageResult::Reject(_)
+        ));
+        assert!(matches!(
+            bound_vector_store_retry(7, 3, chat_id, "vs-1"),
+            MessageResult::Reject(_)
+        ));
+    }
+
+    /// Vector store provider whose delete always fails.
+    struct FailingVectorStoreDelete;
+
+    #[async_trait]
+    impl crate::domain::ports::VectorStoreProvider for FailingVectorStoreDelete {
+        async fn create_vector_store(
+            &self,
+            _ctx: SecurityContext,
+            _provider_id: &str,
+        ) -> Result<String, crate::domain::ports::FileStorageError> {
+            Ok("vs-unused".to_owned())
+        }
+
+        async fn add_file_to_vector_store(
+            &self,
+            _ctx: SecurityContext,
+            _provider_id: &str,
+            _params: crate::domain::ports::AddFileToVectorStoreParams,
+        ) -> Result<(), crate::domain::ports::FileStorageError> {
+            Ok(())
+        }
+
+        async fn delete_vector_store(
+            &self,
+            _ctx: SecurityContext,
+            _provider_id: &str,
+            _vector_store_id: &str,
+        ) -> Result<(), crate::domain::ports::FileStorageError> {
+            Err(crate::domain::ports::FileStorageError::Unavailable {
+                message: "delete returned 500".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_cleanup_vector_store_delete_failure_is_bounded() {
+        use crate::domain::repos::{InsertVectorStoreParams, VectorStoreRepository as _};
+        use crate::domain::service::test_helpers::{NoopFileStorage, inmem_db};
+
+        let db = inmem_db().await;
+        let db_provider = crate::domain::service::test_helpers::mock_db_provider(db.clone());
+        let (chat_id, tenant_id) = seed_deleted_chat(&db_provider).await;
+
+        let vs_repo = crate::infra::db::repo::vector_store_repo::VectorStoreRepository;
+        let scope = toolkit_security::AccessScope::allow_all();
+        let conn = db_provider.conn().unwrap();
+        let row = vs_repo
+            .insert(
+                &conn,
+                &scope,
+                InsertVectorStoreParams {
+                    id: uuid::Uuid::new_v4(),
+                    tenant_id,
+                    chat_id,
+                    provider: "openai".to_owned(),
+                },
+            )
+            .await
+            .expect("insert vector store row");
+        vs_repo
+            .cas_set_vector_store_id(&conn, &scope, row.id, "vs-abc")
+            .await
+            .expect("set vector store id");
+
+        let handler = ChatCleanupHandler::new(
+            Arc::new(NoopFileStorage),
+            Arc::new(FailingVectorStoreDelete),
+            Arc::clone(&db_provider),
+            crate::infra::db::repo::chat_repo::ChatRepository::new(toolkit_db::odata::LimitCfg {
+                default: 20,
+                max: 100,
+            }),
+            3, // max_attempts
+            Arc::new(crate::domain::ports::metrics::NoopMetrics),
+            None,
+        );
+
+        let mut msg = make_chat_cleanup_payload(chat_id);
+        for attempts in 0..2 {
+            msg.attempts = attempts;
+            let result = handler.handle(&msg).await;
+            assert!(
+                matches!(result, MessageResult::Retry),
+                "delivery {attempts}: expected Retry, got {result:?}"
+            );
+        }
+        msg.attempts = 2;
+        let result = handler.handle(&msg).await;
+        assert!(
+            matches!(result, MessageResult::Reject(ref r) if r.contains("max attempts (3)")),
+            "last delivery: expected Reject, got {result:?}"
+        );
+
+        // The row stays so a replayed dead letter retries the delete.
+        let remaining = vs_repo
+            .find_by_chat_system(&conn, chat_id)
+            .await
+            .expect("load vector store row");
+        assert!(remaining.is_some(), "chat_vector_stores row must stay");
     }
 }

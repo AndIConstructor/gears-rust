@@ -163,7 +163,10 @@ impl RagHttpClient {
         Ok(())
     }
 
-    /// Send a DELETE request. Returns `Ok(())` on success.
+    /// Send a DELETE request.
+    ///
+    /// 2xx and 404 (already gone) are `Ok(())`; any other status is an error,
+    /// mapped the same way as [`Self::send`].
     pub async fn delete(&self, ctx: SecurityContext, uri: &str) -> Result<(), FileStorageError> {
         let req = http::Request::builder()
             .method(http::Method::DELETE)
@@ -173,15 +176,11 @@ impl RagHttpClient {
                 message: format!("failed to build delete request: {e}"),
             })?;
 
-        // For delete, we don't check status — best-effort.
-        self.oagw
-            .proxy_request(ctx, req)
-            .await
-            .map_err(|e| FileStorageError::Unavailable {
-                message: format!("delete request failed: {e}"),
-            })?;
-
-        Ok(())
+        let (status, bytes) = self.proxy(ctx, req, "delete").await?;
+        if status == http::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        check_status(status, &bytes, "delete")
     }
 
     /// Send a request through OAGW and return the response bytes,
@@ -192,6 +191,18 @@ impl RagHttpClient {
         req: http::Request<Body>,
         op_name: &str,
     ) -> Result<Bytes, FileStorageError> {
+        let (status, bytes) = self.proxy(ctx, req, op_name).await?;
+        check_status(status, &bytes, op_name)?;
+        Ok(bytes)
+    }
+
+    /// Send a request through OAGW and return the status and body bytes.
+    async fn proxy(
+        &self,
+        ctx: SecurityContext,
+        req: http::Request<Body>,
+        op_name: &str,
+    ) -> Result<(http::StatusCode, Bytes), FileStorageError> {
         let response =
             self.oagw
                 .proxy_request(ctx, req)
@@ -209,22 +220,30 @@ impl RagHttpClient {
                     message: format!("failed to read {op_name} response body: {e}"),
                 })?;
 
-        if parts.status.is_server_error() {
-            let detail = String::from_utf8_lossy(&bytes);
-            return Err(FileStorageError::Unavailable {
-                message: format!("{op_name} returned {}: {detail}", parts.status),
-            });
-        }
-        if !parts.status.is_success() {
-            let detail = String::from_utf8_lossy(&bytes);
-            return Err(FileStorageError::Rejected {
-                code: format!("{op_name}_failed"),
-                message: format!("{op_name} returned {}: {detail}", parts.status),
-            });
-        }
-
-        Ok(bytes)
+        Ok((parts.status, bytes))
     }
+}
+
+/// 5xx maps to `Unavailable`, any other non-2xx to `Rejected`.
+fn check_status(
+    status: http::StatusCode,
+    bytes: &[u8],
+    op_name: &str,
+) -> Result<(), FileStorageError> {
+    if status.is_server_error() {
+        let detail = String::from_utf8_lossy(bytes);
+        return Err(FileStorageError::Unavailable {
+            message: format!("{op_name} returned {status}: {detail}"),
+        });
+    }
+    if !status.is_success() {
+        let detail = String::from_utf8_lossy(bytes);
+        return Err(FileStorageError::Rejected {
+            code: format!("{op_name}_failed"),
+            message: format!("{op_name} returned {status}: {detail}"),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -380,6 +399,57 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), FileStorageError::Rejected { .. }),
             "400 should map to Rejected"
+        );
+    }
+
+    async fn delete_with_status(status: http::StatusCode) -> Result<(), FileStorageError> {
+        let oagw: Arc<dyn ServiceGatewayClientV1> = Arc::new(StatusCodeOagw {
+            status,
+            body: "detail".to_owned(),
+        });
+        RagHttpClient::new(oagw)
+            .delete(test_ctx(), "http://test/v1/files/file-1")
+            .await
+    }
+
+    #[tokio::test]
+    async fn delete_2xx_and_404_are_ok() {
+        for status in [
+            http::StatusCode::OK,
+            http::StatusCode::NO_CONTENT,
+            http::StatusCode::NOT_FOUND,
+        ] {
+            assert!(
+                delete_with_status(status).await.is_ok(),
+                "{status} should be Ok"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_4xx_returns_rejected() {
+        for status in [
+            http::StatusCode::BAD_REQUEST,
+            http::StatusCode::UNAUTHORIZED,
+            http::StatusCode::FORBIDDEN,
+            http::StatusCode::CONFLICT,
+        ] {
+            let err = delete_with_status(status).await.unwrap_err();
+            assert!(
+                matches!(err, FileStorageError::Rejected { ref code, .. } if code == "delete_failed"),
+                "{status} should map to Rejected, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_5xx_returns_unavailable() {
+        let err = delete_with_status(http::StatusCode::INTERNAL_SERVER_ERROR)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FileStorageError::Unavailable { .. }),
+            "500 should map to Unavailable, got {err:?}"
         );
     }
 }

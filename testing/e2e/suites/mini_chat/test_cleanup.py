@@ -12,6 +12,7 @@ the E2E time budget.
 from __future__ import annotations
 
 import io
+import json
 import time
 import uuid
 
@@ -182,6 +183,67 @@ def check_vector_store_deleted_after_files(mock_provider, model: str) -> None:
     assert max(i for v in file_deletes.values() for i in v) < vs_deletes[0], paths
 
 
+# Default `cleanup_worker.max_attempts` (base.yaml does not override it).
+CLEANUP_MAX_ATTEMPTS = 5
+
+
+def _dead_letters(chat_id: str) -> list[dict]:
+    """Dead-lettered outbox messages whose payload mentions `chat_id`."""
+    return query_db(
+        "SELECT payload, last_error FROM toolkit_outbox_dead_letters WHERE payload LIKE ?",
+        (f"%{chat_id}%",),
+    )
+
+
+def check_attachment_cleanup_403_ends_failed(mock_provider, model: str) -> None:
+    chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
+    file_id = provider_file_id(att_id)
+
+    # More faults than attempts: every delete of this file answers 403.
+    mock_provider.set_fault("DELETE", f"/files/{file_id}", 403, count=50)
+    resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+    assert resp.status_code == 204
+
+    assert wait_cleanup_terminal([att_id], timeout=30.0) == {att_id: "failed"}
+    row = query_db(
+        "SELECT cleanup_attempts, last_cleanup_error FROM attachments WHERE id = ?", (att_id,),
+    )[0]
+    assert row["cleanup_attempts"] == CLEANUP_MAX_ATTEMPTS, row
+    assert "403" in row["last_cleanup_error"], row
+    assert len(_file_deletes(mock_provider, file_id)) == CLEANUP_MAX_ATTEMPTS, (
+        mock_provider.get_request_paths()
+    )
+
+
+def _vs_deletes(mock_provider, vs_id: str) -> int:
+    return sum(
+        1 for m, p in mock_provider.get_request_paths()
+        if m == "DELETE" and p.split("?")[0].rstrip("/").endswith(f"/vector_stores/{vs_id}")
+    )
+
+
+def check_vector_store_delete_500_is_dead_lettered(mock_provider, model: str) -> None:
+    chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
+    vs_id = _vector_store_rows(chat_id)[0]["vector_store_id"]
+    assert vs_id
+
+    mock_provider.set_fault("DELETE", f"/vector_stores/{vs_id}", 500, count=50)
+    assert delete_chat(chat_id).status_code == 204
+
+    assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
+    dead = _wait_for(lambda: _dead_letters(chat_id), "the chat cleanup dead letter", timeout=30.0)
+    assert len(dead) == 1, dead
+    assert json.loads(dead[0]["payload"])["reason"] == "chat_soft_delete", dead
+    assert "max attempts (5)" in dead[0]["last_error"], dead
+    assert _vs_deletes(mock_provider, vs_id) == CLEANUP_MAX_ATTEMPTS, (
+        mock_provider.get_request_paths()
+    )
+    # The row stays for a dead-letter replay; no further deliveries.
+    assert len(_vector_store_rows(chat_id)) == 1
+    time.sleep(2.0)
+    assert _vs_deletes(mock_provider, vs_id) == CLEANUP_MAX_ATTEMPTS
+
+
 # Provider-side cleanup for both storage backends (openai, azure).
 
 @pytest.mark.usefixtures("offline_only")
@@ -206,6 +268,19 @@ class TestProviderCleanupOpenAI:
         attachment: the attachment cleanup ends in `done`."""
         check_attachment_cleanup_404_is_success(mock_provider, STANDARD_MODEL)
 
+    @pytest.mark.timeout(60)
+    def test_attachment_cleanup_provider_403_ends_failed(self, mock_provider):
+        """19-17: every file delete of a deleted attachment answers 403:
+        the cleanup is retried `max_attempts` times and ends in `failed`."""
+        check_attachment_cleanup_403_ends_failed(mock_provider, STANDARD_MODEL)
+
+    @pytest.mark.timeout(60)
+    def test_vector_store_delete_500_is_dead_lettered(self, mock_provider):
+        """19-18: every vector store delete of a deleted chat answers 500:
+        after `max_attempts` deliveries the chat cleanup message is
+        dead-lettered and not retried again; the chat_vector_stores row stays."""
+        check_vector_store_delete_500_is_dead_lettered(mock_provider, STANDARD_MODEL)
+
 
 @pytest.mark.usefixtures("offline_only")
 class TestProviderCleanupAzure:
@@ -225,6 +300,19 @@ class TestProviderCleanupAzure:
     def test_attachment_cleanup_provider_404_is_success(self, mock_provider):
         """19-03 (azure): see TestProviderCleanupOpenAI."""
         check_attachment_cleanup_404_is_success(mock_provider, DEFAULT_MODEL)
+
+    @pytest.mark.timeout(60)
+    def test_attachment_cleanup_provider_403_ends_failed(self, mock_provider):
+        """19-17 (azure): every file delete of a deleted attachment answers 403:
+        the cleanup is retried `max_attempts` times and ends in `failed`."""
+        check_attachment_cleanup_403_ends_failed(mock_provider, DEFAULT_MODEL)
+
+    @pytest.mark.timeout(60)
+    def test_vector_store_delete_500_is_dead_lettered(self, mock_provider):
+        """19-18 (azure): every vector store delete of a deleted chat answers 500:
+        after `max_attempts` deliveries the chat cleanup message is
+        dead-lettered and not retried again; the chat_vector_stores row stays."""
+        check_vector_store_delete_500_is_dead_lettered(mock_provider, DEFAULT_MODEL)
 
 
 # ---------------------------------------------------------------------------
