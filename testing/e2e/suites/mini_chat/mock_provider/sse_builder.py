@@ -39,14 +39,52 @@ def _count_input_tokens(request_body: dict | None, base_tokens: int) -> int:
     return base_tokens
 
 
+def _usage(scenario: "Scenario", request_body: dict | None) -> dict:
+    """`response.usage`, with the token details the real API always sends."""
+    usage = scenario.usage
+    input_tokens = (
+        _count_input_tokens(request_body, usage.input_tokens)
+        if usage.scale_input else usage.input_tokens
+    )
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": usage.cached_tokens},
+        "output_tokens": usage.output_tokens,
+        "output_tokens_details": {"reasoning_tokens": usage.reasoning_tokens},
+        "total_tokens": input_tokens + usage.output_tokens,
+    }
+
+
+def _completed_output(scenario: "Scenario", text: str, request_body: dict | None) -> list[dict]:
+    from .responses import has_tool
+
+    if scenario.output is not None:
+        # A web_search_call item exists only when the request offered the tool.
+        return [
+            item for item in scenario.output
+            if item.get("type") != "web_search_call" or has_tool(request_body or {}, "web_search")
+        ]
+    return [
+        *scenario.output_items,
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": text,
+                    "annotations": scenario.citations or [],
+                },
+            ],
+        },
+    ]
+
+
 def _build_completed_data(
     scenario: "Scenario", model: str, response_id: str, text: str,
     request_body: dict | None = None,
 ) -> dict:
     # OpenAI wraps the response object inside a "response" key
-    annotations = scenario.citations or []
-    input_tokens = _count_input_tokens(request_body, scenario.usage.input_tokens)
-    output_tokens = scenario.usage.output_tokens
     return {
         "type": "response.completed",
         "response": {
@@ -54,25 +92,8 @@ def _build_completed_data(
             "object": "response",
             "status": "completed",
             "model": model,
-            "output": [
-                *scenario.output_items,
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": text,
-                            "annotations": annotations,
-                        },
-                    ],
-                },
-            ],
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens,
-            },
+            "output": _completed_output(scenario, text, request_body),
+            "usage": _usage(scenario, request_body),
         },
     }
 
@@ -98,8 +119,6 @@ def _build_incomplete_data(
     scenario: "Scenario", model: str, response_id: str, text: str,
     request_body: dict | None = None,
 ) -> dict:
-    input_tokens = _count_input_tokens(request_body, scenario.usage.input_tokens)
-    output_tokens = scenario.usage.output_tokens
     return {
         "type": "response.incomplete",
         "response": {
@@ -123,11 +142,7 @@ def _build_incomplete_data(
                     ],
                 },
             ],
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens,
-            },
+            "usage": _usage(scenario, request_body),
         },
     }
 
@@ -161,6 +176,9 @@ def build_sse_stream(
         if request_body and not should_include_tool_event(ev, request_body):
             continue
         chunks.append(_sse_event(ev.event_type, _event_data(ev, request_body)))
+        if ev.event_type == "error":
+            # A flat `error` event ends a real stream: no terminal event follows.
+            return b"".join(chunks)
 
     text = _accumulate_text(scenario)
 

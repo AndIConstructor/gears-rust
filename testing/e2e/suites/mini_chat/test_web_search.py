@@ -98,15 +98,22 @@ class TestWebSearchCitations:
         assert len(citation_events[0]["items"]) == 1, citation_events
 
     def test_citation_has_required_fields(self, provider_chat):
-        """The citation carries source `web`, the title and the snippet. The
-        OpenAI `url_citation` has no text: the snippet is the cited range
-        [0, 9) of the answer, "Searching"."""
+        """The citation carries source `web`, the title, the URL, the snippet
+        and the span. The OpenAI `url_citation` has no text: the snippet is
+        the cited range [3, 8) of the `output_text` part that carries the
+        annotation, the second message of the answer ("...found results"):
+        "found". Sliced from the whole answer ("Searching...found results")
+        the same range would be "rchin"."""
         events = stream_search(provider_chat["id"], "SEARCH: when was the Eiffel Tower built")
+        assert delta_text(events) == "Searching...found results"
         (citations,) = [e.data for e in events if e.event == "citations"]
-        (c,) = citations["items"]
-        assert (c["source"], c["title"], c["snippet"]) == (
-            "web", "Mock Search Result", "Searching",
-        ), c
+        assert citations["items"] == [{
+            "source": "web",
+            "title": "Mock Search Result",
+            "url": "https://example.com",
+            "snippet": "found",
+            "span": {"start": 3, "end": 8},
+        }], citations
 
     def test_web_citation_has_url(self, provider_chat):
         """A web citation carries the URL of the source."""

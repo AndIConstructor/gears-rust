@@ -10,6 +10,13 @@ from dataclasses import dataclass, field
 class Usage:
     input_tokens: int = 50
     output_tokens: int = 12
+    # `input_tokens_details.cached_tokens` / `output_tokens_details.reasoning_tokens`
+    # of `response.usage` (subsets of input_tokens / output_tokens).
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    # True: input_tokens is a floor that grows with the request's input items
+    # (sse_builder._count_input_tokens). False: input_tokens is sent as is.
+    scale_input: bool = True
 
 
 @dataclass
@@ -26,9 +33,15 @@ class Scenario:
     usage: Usage = field(default_factory=Usage)
     citations: list[dict] = field(default_factory=list)
     # Extra `response.completed` output items placed before the message item,
-    # e.g. a `function_call` item (the Responses API reports function calls
-    # only there).
+    # e.g. a `function_call` item. The real API also streams each output item
+    # (`response.output_item.added` / `.done`, and for a function call
+    # `response.function_call_arguments.delta` / `.done`); the mock sends
+    # these items only in `response.completed`, where the gear reads
+    # function calls.
     output_items: list[dict] = field(default_factory=list)
+    # The whole `response.completed` output. When set, it replaces the
+    # message item built from the deltas, `citations` and `output_items`.
+    output: list[dict] | None = None
     # Terminal type: "completed" (default), "failed", "incomplete"
     terminal: str = "completed"
     error: dict | None = None
@@ -47,6 +60,43 @@ class Scenario:
     http_error_body: dict | None = None
 
 
+def _message_item(item_id: str, text: str | None,
+                  annotations: list[dict] | None = None) -> dict:
+    """A Responses API `message` output item with one `output_text` part;
+    `text=None` is the item as `response.output_item.added` sends it."""
+    if text is None:
+        return {
+            "type": "message", "id": item_id, "status": "in_progress",
+            "role": "assistant", "content": [],
+        }
+    return {
+        "type": "message", "id": item_id, "status": "completed", "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": annotations or []}],
+    }
+
+
+# `SEARCH:*` answer: two message items around the web search call. The one
+# citation is on the second message; url_citation indices are character
+# offsets into the `output_text` part that carries the annotation, so
+# [3, 8) is "found" (in the whole answer it would be "rchin").
+SEARCH_TEXT_1 = "Searching"
+SEARCH_TEXT_2 = "...found results"
+SEARCH_CALL_ITEM = {
+    "type": "web_search_call",
+    "id": "ws_mock_1",
+    "status": "completed",
+    "action": {"type": "search", "query": "mock query"},
+}
+# OpenAI url_citation: no text; the snippet comes from the text range.
+SEARCH_CITATION = {
+    "type": "url_citation",
+    "url": "https://example.com",
+    "title": "Mock Search Result",
+    "start_index": 3,
+    "end_index": 8,
+}
+
+
 # ── Built-in scenario registry ─────────────────────────────────────────────
 
 SCENARIOS: dict[str, Scenario] = {
@@ -57,24 +107,70 @@ SCENARIOS: dict[str, Scenario] = {
         ],
         usage=Usage(input_tokens=30, output_tokens=2),
     ),
+    # A web search answer as the Responses API streams it: a message, the
+    # web_search_call item, then a second message that carries the citation.
     "SEARCH:*": Scenario(
         events=[
-            MockEvent("response.output_text.delta", {"delta": "Searching"}),
-            MockEvent("response.web_search_call.searching", {}),
-            MockEvent("response.output_text.delta", {"delta": "...found"}),
-            MockEvent("response.web_search_call.completed", {}),
-            MockEvent("response.output_text.delta", {"delta": " results"}),
-            MockEvent("response.output_text.done", {"text": "Searching...found results"}),
+            MockEvent("response.output_item.added", {
+                "output_index": 0, "item": _message_item("msg_mock_ws_1", None),
+            }),
+            MockEvent("response.output_text.delta", {
+                "item_id": "msg_mock_ws_1", "output_index": 0, "content_index": 0,
+                "delta": SEARCH_TEXT_1,
+            }),
+            MockEvent("response.output_text.done", {
+                "item_id": "msg_mock_ws_1", "output_index": 0, "content_index": 0,
+                "text": SEARCH_TEXT_1,
+            }),
+            MockEvent("response.output_item.done", {
+                "output_index": 0, "item": _message_item("msg_mock_ws_1", SEARCH_TEXT_1),
+            }),
+            MockEvent("response.output_item.added", {
+                "output_index": 1,
+                "item": {"type": "web_search_call", "id": "ws_mock_1", "status": "in_progress"},
+            }),
+            MockEvent("response.web_search_call.in_progress", {
+                "item_id": "ws_mock_1", "output_index": 1,
+            }),
+            MockEvent("response.web_search_call.searching", {
+                "item_id": "ws_mock_1", "output_index": 1,
+            }),
+            MockEvent("response.web_search_call.completed", {
+                "item_id": "ws_mock_1", "output_index": 1,
+            }),
+            MockEvent("response.output_item.done", {
+                "output_index": 1, "item": SEARCH_CALL_ITEM,
+            }),
+            MockEvent("response.output_item.added", {
+                "output_index": 2, "item": _message_item("msg_mock_ws_2", None),
+            }),
+            MockEvent("response.output_text.delta", {
+                "item_id": "msg_mock_ws_2", "output_index": 2, "content_index": 0,
+                "delta": "...found",
+            }),
+            MockEvent("response.output_text.delta", {
+                "item_id": "msg_mock_ws_2", "output_index": 2, "content_index": 0,
+                "delta": " results",
+            }),
+            MockEvent("response.output_text.annotation.added", {
+                "item_id": "msg_mock_ws_2", "output_index": 2, "content_index": 0,
+                "annotation_index": 0, "annotation": SEARCH_CITATION,
+            }),
+            MockEvent("response.output_text.done", {
+                "item_id": "msg_mock_ws_2", "output_index": 2, "content_index": 0,
+                "text": SEARCH_TEXT_2,
+            }),
+            MockEvent("response.output_item.done", {
+                "output_index": 2,
+                "item": _message_item("msg_mock_ws_2", SEARCH_TEXT_2, [SEARCH_CITATION]),
+            }),
         ],
         usage=Usage(input_tokens=80, output_tokens=15),
-        # OpenAI url_citation: no text; the snippet comes from the text range.
-        citations=[{
-            "type": "url_citation",
-            "url": "https://example.com",
-            "title": "Mock Search Result",
-            "start_index": 0,
-            "end_index": 9,
-        }],
+        output=[
+            _message_item("msg_mock_ws_1", SEARCH_TEXT_1),
+            SEARCH_CALL_ITEM,
+            _message_item("msg_mock_ws_2", SEARCH_TEXT_2, [SEARCH_CITATION]),
+        ],
     ),
     "FILESEARCH:*": Scenario(
         events=[

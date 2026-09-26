@@ -27,7 +27,7 @@ from .conftest import (
     slow_scenario,
     stream_message,
 )
-from .mock_provider.responses import Scenario
+from .mock_provider.responses import MockEvent, Scenario, Usage
 
 
 def total_daily_used() -> int:
@@ -269,6 +269,54 @@ class TestSettlement:
         ) == ("completed", "completed", "actual"), event
         assert event["actual_credits_micro"] == cost, event
         assert total_daily_used() - used_before == cost
+
+    @pytest.mark.usefixtures("offline_only")
+    def test_cached_and_reasoning_tokens_recorded_not_billed(self, chat, mock_provider):
+        """The provider reports 300 cached of 400 input tokens and 40
+        reasoning of 60 output tokens (`input_tokens_details.cached_tokens`,
+        `output_tokens_details.reasoning_tokens`). They are subsets of the
+        totals, stored on the assistant message and sent in the usage event;
+        the `done` usage carries only the totals. Credits use only the totals
+        (DESIGN, "Credit computation in P1 uses only total input_tokens and
+        output_tokens"): azure-gpt-4.1 (base.yaml, 3 and 15 credits_micro per
+        token) charges 400 * 3 + 60 * 15 = 2100."""
+        mock_provider.set_next_scenario(Scenario(
+            events=[
+                MockEvent("response.output_text.delta", {"delta": "Thought it through."}),
+                MockEvent("response.output_text.done", {"text": "Thought it through."}),
+            ],
+            usage=Usage(
+                input_tokens=400, output_tokens=60, cached_tokens=300,
+                reasoning_tokens=40, scale_input=False,
+            ),
+        ))
+        rid = str(uuid.uuid4())
+        used_before = total_daily_used()
+        status, events, raw = stream_message(chat["id"], "Think.", request_id=rid)
+        assert status == 200, raw
+        assert expect_done(events).data["usage"] == {"input_tokens": 400, "output_tokens": 60}
+
+        assert poll_turn(chat["id"], rid)["state"] == "done"
+        rows = query_db(
+            "SELECT m.input_tokens, m.output_tokens, m.cache_read_input_tokens, "
+            "m.cache_write_input_tokens, m.reasoning_tokens FROM chat_turns t "
+            "JOIN messages m ON m.id = t.assistant_message_id WHERE t.request_id = ?",
+            (rid,),
+        )
+        assert rows == [{
+            "input_tokens": 400, "output_tokens": 60, "cache_read_input_tokens": 300,
+            "cache_write_input_tokens": 0, "reasoning_tokens": 40,
+        }], rows
+
+        assert_no_reserves(USER_A_ID)
+        (event,) = usage_events(rid)
+        assert event["usage"] == {
+            "input_tokens": 400, "output_tokens": 60, "cache_read_input_tokens": 300,
+            "cache_write_input_tokens": 0, "reasoning_tokens": 40,
+        }, event
+        assert event["settlement_method"] == "actual", event
+        assert event["actual_credits_micro"] == 2100, event
+        assert total_daily_used() - used_before == 2100
 
     def test_one_usage_outbox_event_per_turn(self, chat):
         """A completed turn enqueues exactly one usage event, even after a
