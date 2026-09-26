@@ -270,6 +270,21 @@ mod tests {
     }
 
     #[test]
+    fn orphan_watchdog_timeout_bounds() {
+        let with = |secs| OrphanWatchdogConfig {
+            timeout_secs: secs,
+            ..OrphanWatchdogConfig::default()
+        };
+        for secs in [89, 3601] {
+            let err = with(secs).validate().unwrap_err();
+            assert!(err.contains("timeout_secs"), "{err}");
+        }
+        for secs in [90, 3600] {
+            with(secs).validate().unwrap();
+        }
+    }
+
+    #[test]
     fn claim_timeout_bounds() {
         let with = |secs| ThreadSummaryWorkerConfig {
             claim_timeout_secs: secs,
