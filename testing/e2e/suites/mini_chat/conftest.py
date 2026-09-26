@@ -9,6 +9,7 @@ import re
 import sqlite3
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,6 +42,26 @@ TOKEN_USER_A = "mini-chat-e2e"
 TOKEN_USER_B = "mini-chat-e2e-user-b"
 TOKEN_TENANT_B = "mini-chat-e2e-tenant-b"
 USER_A_ID = "11111111-6a88-4768-9dfc-6bcd5187d9ed"
+TENANT_A_ID = "00000000-df51-5b42-9538-d2b56b7ee953"
+
+# Dedicated users for quota-policy tests (test_quota_policy.py). Their usage
+# rows are rewritten directly in the DB, so they must not share state with
+# user A. Same tenant as user A.
+TOKEN_QUOTA_USER_1 = "mini-chat-e2e-quota-1"
+TOKEN_QUOTA_USER_2 = "mini-chat-e2e-quota-2"
+TOKEN_QUOTA_USER_3 = "mini-chat-e2e-quota-3"
+QUOTA_USER_1_ID = "55555555-6a88-4768-9dfc-6bcd5187d9ed"
+QUOTA_USER_2_ID = "66666666-6a88-4768-9dfc-6bcd5187d9ed"
+QUOTA_USER_3_ID = "77777777-6a88-4768-9dfc-6bcd5187d9ed"
+
+# Catalog entry with `enabled: false` (config/base.yaml).
+DISABLED_MODEL = "gpt-4o-retired"
+
+# System prompt of every catalog model (config/base.yaml).
+CATALOG_SYSTEM_PROMPT = (
+    "You are a helpful assistant. IMPORTANT RULE: When the user says exactly "
+    "'PING', you MUST respond with exactly 'PONG' and nothing else."
+)
 
 # Marker header: a request carrying it is sent without any Authorization
 # header (see _default_auth_header).
@@ -133,6 +154,301 @@ def _log_request(method: str, url: str, body=None, status: int = 0, response_tex
     log.info(f"<<< {status}")
     if response_text:
         log.info(f"<<< {response_text[:500]}")
+
+
+def delta_text(events: list[SSEEvent]) -> str:
+    """Concatenated text of all `delta` events."""
+    return "".join(
+        e.data.get("content", "") for e in events
+        if e.event == "delta" and isinstance(e.data, dict)
+    )
+
+
+# ── Canonical error (RFC 9457 Problem) assertions ────────────────────────
+
+# `Problem.type` is `gts://gts.cf.core.errors.err.v1~cf.core.err.<category>.v1~`
+# (libs/toolkit-canonical-errors/src/problem.rs, ProblemCategory::gts_fragment).
+PROBLEM_FIELDS = ("type", "title", "status", "detail", "context")
+
+
+def assert_problem(
+    resp: httpx.Response,
+    status: int,
+    category: str,
+    *,
+    reason: str | None = None,
+    field_reason: str | None = None,
+    violation_type: str | None = None,
+    violation_subject: str | None = None,
+) -> dict:
+    """Assert `resp` is a canonical Problem of `category` and return its body.
+
+    - `reason`: `context.reason` (aborted, permission_denied).
+    - `field_reason`: some `context.field_violations[].reason`
+      (invalid_argument, out_of_range).
+    - `violation_type` / `violation_subject`: one `context.violations[]` entry
+      matches both given values (failed_precondition: subject/type;
+      resource_exhausted: subject only).
+    """
+    assert resp.status_code == status, (
+        f"expected HTTP {status}, got {resp.status_code}: {resp.text[:500]}"
+    )
+    body = resp.json()
+    for key in PROBLEM_FIELDS:
+        assert key in body, f"Problem is missing {key!r}: {body}"
+    assert "code" not in body, f"Problem must not carry a top-level 'code': {body}"
+    assert body["status"] == status, body
+    suffix = f"cf.core.err.{category}.v1~"
+    assert body["type"].endswith(suffix), (
+        f"expected Problem type ending with {suffix!r}, got {body['type']!r}"
+    )
+    ctx = body["context"]
+    if reason is not None:
+        assert ctx.get("reason") == reason, (
+            f"expected context.reason={reason!r}, got {ctx.get('reason')!r}: {body}"
+        )
+    if field_reason is not None:
+        reasons = [v.get("reason") for v in ctx.get("field_violations", [])]
+        assert field_reason in reasons, (
+            f"expected field_violations reason {field_reason!r}, got {reasons}: {body}"
+        )
+    if violation_type is not None or violation_subject is not None:
+        violations = ctx.get("violations", [])
+        matching = [
+            v for v in violations
+            if (violation_type is None or v.get("type") == violation_type)
+            and (violation_subject is None or v.get("subject") == violation_subject)
+        ]
+        assert matching, (
+            f"expected a violation with type={violation_type!r} "
+            f"subject={violation_subject!r}, got {violations}: {body}"
+        )
+    return body
+
+
+# ── Direct DB access (sqlite, offline rig) ───────────────────────────────
+
+def _to_blob(value):
+    """UUID strings are stored as 16-byte blobs; bind them the same way."""
+    if isinstance(value, str):
+        try:
+            return uuid.UUID(value).bytes
+        except ValueError:
+            pass
+    return value
+
+
+def _require_db() -> None:
+    if not os.path.exists(DB_PATH):
+        pytest.fail(f"mini-chat DB not found at {DB_PATH}")
+
+
+def query_db(sql: str, params: tuple = ()) -> list[dict]:
+    """Run a read-only query against the mini-chat DB. UUID params bind as blobs."""
+    _require_db()
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(sql, tuple(_to_blob(p) for p in params)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def exec_db(sql: str, params: tuple = ()) -> int:
+    """Run one write statement against the mini-chat DB; return rowcount.
+
+    Only for deterministic test seeding (quota usage, chat model).
+    """
+    _require_db()
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    try:
+        cur = conn.execute(sql, tuple(_to_blob(p) for p in params))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def uuid_from_db(value) -> str | None:
+    """Normalize a UUID column value (blob or text) to its string form."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        return str(uuid.UUID(bytes=bytes(value)))
+    return str(value)
+
+
+def reserved_credits_total(user_id: str = USER_A_ID) -> int:
+    """SUM(quota_usage.reserved_credits_micro) over all rows of a user."""
+    rows = query_db(
+        "SELECT COALESCE(SUM(reserved_credits_micro), 0) AS total "
+        "FROM quota_usage WHERE user_id = ?",
+        (user_id,),
+    )
+    return rows[0]["total"]
+
+
+def assert_no_reserves(user_id: str = USER_A_ID, timeout: float = 5.0) -> None:
+    """Poll until the user's quota reserves are fully released."""
+    deadline = time.monotonic() + timeout
+    total = reserved_credits_total(user_id)
+    while total != 0 and time.monotonic() < deadline:
+        time.sleep(0.1)
+        total = reserved_credits_total(user_id)
+    assert total == 0, f"quota reserve not released for {user_id}: {total} credits_micro"
+
+
+# ── Turn / stream helpers ─────────────────────────────────────────────────
+
+TERMINAL_STATES = ("done", "error", "cancelled")
+
+
+def poll_turn(
+    chat_id: str,
+    request_id: str,
+    states: tuple[str, ...] = TERMINAL_STATES,
+    *,
+    timeout: float = 15.0,
+    token: str = TOKEN_USER_A,
+) -> dict:
+    """Poll GET /turns/{request_id} until its state is one of `states`."""
+    deadline = time.monotonic() + timeout
+    body = None
+    while time.monotonic() < deadline:
+        resp = httpx.get(
+            f"{API_PREFIX}/chats/{chat_id}/turns/{request_id}",
+            headers=auth_headers(token), timeout=5,
+        )
+        if resp.status_code == 200:
+            body = resp.json()
+            if body["state"] in states:
+                return body
+        time.sleep(0.2)
+    raise AssertionError(
+        f"turn {request_id} did not reach {states} within {timeout}s (last: {body})"
+    )
+
+
+def slow_scenario(n_deltas: int = 20, *, slow: float = 0.3, prefix: str = "w"):
+    """Mock scenario with `n_deltas` deltas and `slow` seconds between events."""
+    from .mock_provider.responses import MockEvent, Scenario
+    events = [
+        MockEvent("response.output_text.delta", {"delta": f"{prefix}{i} "})
+        for i in range(n_deltas)
+    ]
+    text = "".join(f"{prefix}{i} " for i in range(n_deltas))
+    events.append(MockEvent("response.output_text.done", {"text": text}))
+    return Scenario(events=events, slow=slow)
+
+
+class OpenStream:
+    """An SSE stream kept open by the test.
+
+    `read_until(pred)` parses events as they arrive. Leaving the context
+    closes the connection (a client disconnect) unless `drain()` read the
+    stream to its end first.
+    """
+
+    def __init__(self, url: str, body: dict | None, *, token: str = TOKEN_USER_A,
+                 method: str = "POST"):
+        self._client = httpx.Client(timeout=60)
+        self._cm = self._client.stream(
+            method, url, json=body,
+            headers={"Accept": "text/event-stream", **auth_headers(token)},
+        )
+        self.resp = None
+        self.events: list[SSEEvent] = []
+        self._lines = None
+        self._event = None
+        self._data: list[str] = []
+
+    def __enter__(self) -> "OpenStream":
+        self.resp = self._cm.__enter__()
+        assert self.resp.status_code == 200, (
+            f"stream failed: {self.resp.status_code} {self.resp.read()[:500]!r}"
+        )
+        self._lines = self.resp.iter_lines()
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            self._cm.__exit__(*exc)
+        finally:
+            self._client.close()
+
+    def _next_event(self) -> SSEEvent | None:
+        for line in self._lines:
+            if line.startswith("event:"):
+                self._event = line[len("event:"):].strip()
+                self._data = []
+            elif line.startswith("data:"):
+                self._data.append(line[len("data:"):].strip())
+            elif line == "" and self._event is not None:
+                raw = "\n".join(self._data)
+                try:
+                    data = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    data = raw
+                ev = SSEEvent(event=self._event, data=data)
+                self._event = None
+                self.events.append(ev)
+                return ev
+        return None
+
+    def read_until(self, pred) -> SSEEvent:
+        """Read events until `pred(event)` is true; return that event."""
+        while True:
+            ev = self._next_event()
+            if ev is None:
+                raise AssertionError(
+                    f"stream ended before the expected event: {[e.event for e in self.events]}"
+                )
+            if pred(ev):
+                return ev
+
+    def read_until_started(self) -> SSEEvent:
+        return self.read_until(lambda e: e.event == "stream_started")
+
+    def drain(self) -> list[SSEEvent]:
+        """Read the stream to its end and return all events."""
+        while self._next_event() is not None:
+            pass
+        return self.events
+
+
+def open_stream(chat_id: str, content: str, *, request_id: str | None = None,
+                token: str = TOKEN_USER_A, **extra) -> OpenStream:
+    body = {"content": content, **extra}
+    if request_id is not None:
+        body["request_id"] = request_id
+    return OpenStream(
+        f"{API_PREFIX}/chats/{chat_id}/messages:stream", body, token=token,
+    )
+
+
+def list_messages(chat_id: str, *, token: str = TOKEN_USER_A) -> list[dict]:
+    resp = httpx.get(
+        f"{API_PREFIX}/chats/{chat_id}/messages",
+        params={"limit": 100}, headers=auth_headers(token), timeout=10,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["items"]
+
+
+def get_quota_status(*, token: str = TOKEN_USER_A) -> dict:
+    resp = httpx.get(f"{API_PREFIX}/quota/status", headers=auth_headers(token), timeout=10)
+    assert resp.status_code == 200, f"GET /quota/status: {resp.status_code} {resp.text}"
+    return resp.json()
+
+
+def find_period(status: dict, tier: str, period: str) -> dict:
+    for t in status["tiers"]:
+        if t["tier"] == tier:
+            for p in t["periods"]:
+                if p["period"] == period:
+                    return p
+    raise AssertionError(f"no {tier}/{period} period in {status}")
 
 
 def poll_until(call, *, until, timeout: int = 60):

@@ -30,7 +30,12 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _log_path(self):
+        server: MockProviderServer = self.server  # type: ignore[assignment]
+        server.log_request_path(self.command, self.path)
+
     def do_POST(self):
+        self._log_path()
         content_length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
 
@@ -44,6 +49,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(404, "Not found")
 
     def do_GET(self):
+        self._log_path()
         if "/files/" in self.path and "/content" in self.path:
             self._handle_file_content()
         elif "/files/" in self.path:
@@ -54,6 +60,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(404, "Not found")
 
     def do_DELETE(self):
+        self._log_path()
         if "/files/" in self.path:
             self._handle_file_delete()
         elif "/vector_stores/" in self.path:
@@ -96,8 +103,13 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
 
-        if scenario.slow:
+        if scenario.slow or scenario.initial_delay:
             # Stream events with delays so tests can disconnect mid-stream
+            try:
+                self.wfile.flush()
+            except BrokenPipeError:
+                return
+            time.sleep(scenario.initial_delay)
             for chunk in sse_bytes.split(b"\n\n"):
                 if chunk:
                     try:
@@ -220,6 +232,7 @@ class MockProviderServer(ThreadingHTTPServer):
         self._files: dict[str, dict] = {}
         self._vector_stores: dict[str, dict] = {}
         self._captured_requests: list[dict] = []
+        self._request_paths: list[tuple[str, str]] = []
         self._capture_lock = threading.Lock()
         # Guards _files and _vector_stores: handler threads outlive per-test
         # fixtures, and the in-flight delete path is not atomic.
@@ -239,10 +252,26 @@ class MockProviderServer(ThreadingHTTPServer):
         with self._capture_lock:
             return self._captured_requests[-1] if self._captured_requests else None
 
+    def get_captured_requests(self) -> list[dict]:
+        """Return all captured Responses API request bodies, oldest first."""
+        with self._capture_lock:
+            return list(self._captured_requests)
+
+    def log_request_path(self, method: str, path: str) -> None:
+        """Record the method and path of every request (thread-safe)."""
+        with self._capture_lock:
+            self._request_paths.append((method, path))
+
+    def get_request_paths(self) -> list[tuple[str, str]]:
+        """Return (method, path) of every request since the last clear."""
+        with self._capture_lock:
+            return list(self._request_paths)
+
     def clear_captured_requests(self) -> None:
-        """Clear all captured request bodies."""
+        """Clear all captured request bodies and request paths."""
         with self._capture_lock:
             self._captured_requests.clear()
+            self._request_paths.clear()
 
     def clear_override_scenarios(self) -> None:
         """Drop any queued per-request overrides left by previous tests."""
@@ -284,6 +313,12 @@ class _DummyMockProvider:
 
     def get_last_request(self) -> dict | None:
         return None
+
+    def get_captured_requests(self) -> list[dict]:
+        return []
+
+    def get_request_paths(self) -> list[tuple[str, str]]:
+        return []
 
     def clear_captured_requests(self) -> None:
         pass
