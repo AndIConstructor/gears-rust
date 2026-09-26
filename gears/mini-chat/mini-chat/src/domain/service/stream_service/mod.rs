@@ -334,8 +334,10 @@ impl<
             .await
             .map_err(|e| StreamError::TurnCreationFailed { source: e })?
         {
+            // A soft-deleted turn (replaced by retry/edit or deleted) is never
+            // replayed; its request_id stays taken by UNIQUE(chat_id, request_id).
             return Err(match existing_turn.state {
-                TurnState::Completed => StreamError::Replay {
+                TurnState::Completed if existing_turn.deleted_at.is_none() => StreamError::Replay {
                     turn: Box::new(existing_turn),
                 },
                 _ => StreamError::Conflict {
@@ -909,10 +911,22 @@ impl<
                             code: "invalid_attachment".to_owned(),
                             message: err.message,
                         },
-                        Err(anyhow_err) => StreamError::TurnCreationFailed {
-                            source: match anyhow_err.downcast::<DomainError>() {
-                                Ok(domain_err) => domain_err,
-                                Err(err) => DomainError::from(toolkit_db::DbError::Other(err)),
+                        Err(anyhow_err) => match anyhow_err.downcast::<DomainError>() {
+                            // Lost the race on the one-running-turn-per-chat
+                            // index (or on UNIQUE(chat_id, request_id)).
+                            Ok(DomainError::Conflict { code, message })
+                                if code == "unique_violation" =>
+                            {
+                                StreamError::Conflict {
+                                    code: "turn_already_running".to_owned(),
+                                    message,
+                                }
+                            }
+                            Ok(domain_err) => {
+                                StreamError::TurnCreationFailed { source: domain_err }
+                            }
+                            Err(err) => StreamError::TurnCreationFailed {
+                                source: DomainError::from(toolkit_db::DbError::Other(err)),
                             },
                         },
                     }
@@ -2464,6 +2478,66 @@ mod tests {
             matches!(err, StreamError::Replay { .. }),
             "expected Replay, got: {err:?}"
         );
+    }
+
+    /// A completed but soft-deleted turn (replaced by retry/edit) is not
+    /// replayed: its `request_id` returns `request_id_conflict`.
+    #[tokio::test]
+    async fn idempotency_deleted_completed_turn_returns_conflict() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        insert_running_turn(&db, tenant_id, user_id, chat_id, request_id, turn_id).await;
+
+        let scope = AccessScope::allow_all();
+        let conn = db.conn().unwrap();
+        TurnRepo
+            .cas_update_state(
+                &conn,
+                &scope,
+                CasTerminalParams {
+                    turn_id,
+                    state: TurnState::Completed,
+                    error_code: None,
+                    error_detail: None,
+                    assistant_message_id: None,
+                    provider_response_id: None,
+                },
+            )
+            .await
+            .expect("complete turn");
+        TurnRepo
+            .soft_delete(&conn, &scope, turn_id, Some(Uuid::new_v4()))
+            .await
+            .expect("soft-delete turn");
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["hi"]));
+        let svc = build_stream_service(db, provider);
+        let (tx, _rx) = mpsc::channel(32);
+
+        let err = svc
+            .run_stream(
+                test_security_ctx_with_id(tenant_id, user_id),
+                chat_id,
+                request_id,
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect_err("should be Conflict");
+
+        match err {
+            StreamError::Conflict { code, .. } => assert_eq!(code, "request_id_conflict"),
+            other => panic!("expected Conflict, got: {other:?}"),
+        }
     }
 
     /// 6.2: Running turn with same `request_id` → Conflict (not Replay).

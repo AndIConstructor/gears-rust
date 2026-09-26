@@ -469,15 +469,32 @@ async fn delete_already_deleted_turn_returns_not_latest() {
 
     // Try to delete again — should fail (soft-deleted turns excluded from latest check)
     let err = svc.delete(&ctx, chat_id, request_id).await.unwrap_err();
-    // After soft-delete, find_latest_for_update won't find the turn,
-    // so the turn won't match the latest. The exact error depends on
-    // whether there are other turns or not.
+    // A soft-deleted turn is never the latest turn.
     assert!(
-        matches!(
-            err,
-            MutationError::NotLatestTurn | MutationError::TurnNotFound { .. }
-        ),
-        "expected NotLatestTurn or TurnNotFound, got: {err:?}"
+        matches!(err, MutationError::NotLatestTurn),
+        "expected NotLatestTurn, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn get_deleted_turn_returns_not_found() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+
+    let request_id = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+    svc.delete(&ctx, chat_id, request_id).await.unwrap();
+
+    let err = svc.get(&ctx, chat_id, request_id).await.unwrap_err();
+    assert!(
+        matches!(err, MutationError::TurnNotFound { .. }),
+        "expected TurnNotFound, got: {err:?}"
     );
 }
 

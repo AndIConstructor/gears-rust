@@ -206,12 +206,15 @@ impl<
 
         let scope = chat_scope.tenant_only();
 
+        // Soft-deleted turns (replaced by retry/edit, or deleted) are gone
+        // from the client's point of view.
         self.turn_repo
             .find_by_chat_and_request_id(&conn, &scope, chat_id, request_id)
             .await
             .map_err(|e| MutationError::Internal {
                 message: e.to_string(),
             })?
+            .filter(|turn| turn.deleted_at.is_none())
             .ok_or(MutationError::TurnNotFound {
                 chat_id,
                 request_id,
