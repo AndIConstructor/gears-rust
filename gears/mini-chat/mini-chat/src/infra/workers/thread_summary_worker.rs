@@ -281,10 +281,20 @@ impl ThreadSummaryHandler {
             let user_content =
                 build_summary_prompt(existing_summary, &messages_for_prompt, content_limit);
 
+            // System task identity: tenant plus the platform default subject.
+            let system_user = toolkit_security::constants::DEFAULT_SUBJECT_ID.to_string();
             let request = crate::infra::llm::llm_request(&resolved_model.provider_model_id)
                 .system_instructions(&system_prompt)
                 .message(crate::infra::llm::LlmMessage::user(&user_content))
                 .max_output_tokens(u64::from(resolved_model.max_output_tokens))
+                .metadata(crate::infra::llm::RequestMetadata {
+                    tenant_id: payload.tenant_id.to_string(),
+                    user_id: system_user.clone(),
+                    chat_id: payload.chat_id.to_string(),
+                    request_type: crate::infra::llm::RequestType::Summary,
+                    features: Vec::new(),
+                })
+                .user_identity(payload.tenant_id.to_string(), system_user)
                 .build_non_streaming();
 
             let ctx = security_ctx.clone();

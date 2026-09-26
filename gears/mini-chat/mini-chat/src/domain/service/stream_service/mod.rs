@@ -6373,8 +6373,8 @@ mod tests {
         // Reserve: 2 calls (daily + monthly)
         assert_eq!(metrics.quota_reserve.load(Ordering::Relaxed), 2);
         assert_eq!(metrics.quota_estimated_tokens.load(Ordering::Relaxed), 1);
-        // Finalization: audit emit + latency
-        assert_eq!(metrics.audit_emit.load(Ordering::Relaxed), 1);
+        // Finalization: latency. audit_emit is recorded on delivery, not here.
+        assert_eq!(metrics.audit_emit.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.finalization_latency_ms.load(Ordering::Relaxed), 1);
     }
 

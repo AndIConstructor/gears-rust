@@ -270,6 +270,11 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
             features,
         };
         builder = builder.metadata(metadata);
+        // Provider-side abuse attribution (`user` field on adapters that send it).
+        builder = builder.user_identity(
+            ctx.subject_tenant_id().to_string(),
+            ctx.subject_id().to_string(),
+        );
 
         // Forward typed model-policy API params; each adapter selects the
         // fields its protocol supports.
@@ -554,6 +559,32 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                                                     warn!(turn_id = %fctx.turn_id, error = %e, "failed to acquire DB connection for web_search_completed_count");
                                                 }
                                             }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Count provider-native file_search calls. They share the
+                            // file_search counter with search_knowledge: the two tools
+                            // are never enabled in the same request, so the agentic
+                            // iteration cap below is not affected.
+                            if let ClientSseEvent::Tool {
+                                phase: ToolPhase::Done,
+                                name,
+                                ..
+                            } = client_event
+                                && name == "file_search"
+                            {
+                                knowledge_call_count += 1;
+                                if let Some(ref fctx) = fin_ctx {
+                                    match fctx.db.conn() {
+                                        Ok(conn) => {
+                                            if let Err(e) = fctx.turn_repo.increment_tool_calls(&conn, &fctx.scope, fctx.turn_id, ToolCallType::FileSearch).await {
+                                                warn!(turn_id = %fctx.turn_id, error = %e, "failed to persist file_search_completed_count");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(turn_id = %fctx.turn_id, error = %e, "failed to acquire DB connection for file_search_completed_count");
                                         }
                                     }
                                 }

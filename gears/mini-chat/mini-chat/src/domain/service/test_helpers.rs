@@ -1279,6 +1279,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64};
 /// and histogram observation counts via atomics. Used to verify that
 /// service code emits the expected metrics.
 pub struct TestMetrics {
+    pub thread_summary_trigger: Mutex<Vec<String>>,
     pub turn_mutation: AtomicU64,
     pub turn_mutation_latency_ms: AtomicU64,
     pub audit_emit: AtomicU64,
@@ -1296,6 +1297,7 @@ pub struct TestMetrics {
 impl TestMetrics {
     pub fn new() -> Self {
         Self {
+            thread_summary_trigger: Mutex::new(Vec::new()),
             turn_mutation: AtomicU64::new(0),
             turn_mutation_latency_ms: AtomicU64::new(0),
             audit_emit: AtomicU64::new(0),
@@ -1379,7 +1381,12 @@ impl crate::domain::ports::MiniChatMetricsPort for TestMetrics {
     fn record_orphan_detected(&self, _: &str) {}
     fn record_orphan_finalized(&self, _: &str) {}
     fn record_orphan_scan_duration_seconds(&self, _: f64) {}
-    fn record_thread_summary_trigger(&self, _: &str) {}
+    fn record_thread_summary_trigger(&self, result: &str) {
+        self.thread_summary_trigger
+            .lock()
+            .unwrap()
+            .push(result.to_owned());
+    }
     fn record_thread_summary_execution(&self, _: &str) {}
     fn record_thread_summary_cas_conflict(&self) {}
     fn record_summary_fallback(&self) {}

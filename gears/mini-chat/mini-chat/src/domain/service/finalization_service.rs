@@ -29,7 +29,7 @@ use crate::infra::db::entity::chat_turn::TurnState;
 use crate::infra::llm::Usage;
 
 use crate::domain::ports::MiniChatMetricsPort;
-use crate::domain::ports::metric_labels::{period, result as result_label, trigger};
+use crate::domain::ports::metric_labels::{period, trigger};
 
 use super::DbProvider;
 
@@ -153,6 +153,9 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                 if outcome.won_cas {
                     wake.fire();
                 }
+                if let Some(label) = outcome.summary_trigger {
+                    self.metrics.record_thread_summary_trigger(label);
+                }
                 if let Some(billing) = outcome.billing_outcome {
                     let ms = start.elapsed().as_secs_f64() * 1000.0;
                     Self::emit_post_commit_side_effects(&input, billing, ms, &*self.metrics);
@@ -247,7 +250,6 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
         let message_repo = Arc::clone(&self.message_repo);
         let quota_settler = Arc::clone(&self.quota_settler);
         let outbox_enqueuer = Arc::clone(&self.outbox_enqueuer);
-        let metrics = Arc::clone(&self.metrics);
         let summary_config = self.summary_config.clone();
         let input = input.clone();
 
@@ -285,6 +287,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                                 persisted_state: input.terminal_state.clone(),
                                 billing_outcome: None,
                                 settlement_outcome: None,
+                                summary_trigger: None,
                             },
                             Wake::empty(),
                         ));
@@ -407,6 +410,8 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                                 false, // optimistic: assume no summary for threshold check
                             ));
 
+                    // Recorded after commit; `None` when the trigger was not evaluated.
+                    let mut summary_trigger = may_trigger.then_some("not_needed");
                     let (current_summary, summary_triggered) = if may_trigger {
                         let summary = crate::domain::repos::ThreadSummaryRepository::get_latest(
                             &ts_repo,
@@ -477,9 +482,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                                     .enqueue_thread_summary(tx, payload)
                                     .await
                                     .map_err(to_db)?;
-                                metrics.record_thread_summary_trigger("scheduled");
-                            } else {
-                                metrics.record_thread_summary_trigger("not_needed");
+                                summary_trigger = Some("scheduled");
                             }
                         }
                     }
@@ -490,6 +493,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                             persisted_state: input.terminal_state.clone(),
                             billing_outcome: Some(billing),
                             settlement_outcome: Some(settlement_outcome),
+                            summary_trigger,
                         },
                         wake,
                     ))
@@ -524,7 +528,6 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
         finalization_ms: f64,
         metrics: &dyn MiniChatMetricsPort,
     ) {
-        metrics.record_audit_emit(result_label::OK);
         metrics.record_finalization_latency_ms(finalization_ms);
         Self::emit_quota_metrics(input, billing, metrics);
         Self::emit_billing_side_effects(input, billing, metrics);
@@ -744,7 +747,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                         code_interpreter_calls: input.code_interpreter_completed_count,
                         file_search_calls: input.file_search_completed_count,
                         timestamp: now,
-                        requester_type: "user".to_owned(),
+                        requester_type: requester_type_label(input.requester_type).to_owned(),
                         dedupe_key: Some(turn_dedupe_key(
                             input.tenant_id,
                             input.turn_id,
@@ -819,7 +822,6 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
         if tx_result {
             wake.fire();
             let ms = start.elapsed().as_secs_f64() * 1000.0;
-            self.metrics.record_audit_emit(result_label::OK);
             self.metrics.record_finalization_latency_ms(ms);
             self.metrics.record_streams_aborted(trigger::ORPHAN_TIMEOUT);
         }
@@ -927,7 +929,7 @@ fn build_usage_event(
         code_interpreter_calls: input.code_interpreter_calls,
         file_search_calls: input.file_search_calls,
         timestamp: time::OffsetDateTime::now_utc(),
-        requester_type: "user".to_owned(),
+        requester_type: requester_type_label(input.requester_type).to_owned(),
         dedupe_key: Some(turn_dedupe_key(
             input.tenant_id,
             input.turn_id,
@@ -954,6 +956,14 @@ fn turn_dedupe_key(tenant_id: Uuid, turn_id: Uuid, request_id: Uuid) -> String {
 enum FinalizationError {
     Domain(DomainError),
     MessagePersistenceFailed(String),
+}
+
+/// Usage-event `requester_type` value (same spelling as the audit event).
+fn requester_type_label(requester_type: mini_chat_sdk::RequesterType) -> &'static str {
+    match requester_type {
+        mini_chat_sdk::RequesterType::User => "user",
+        mini_chat_sdk::RequesterType::System => "system",
+    }
 }
 
 #[cfg(test)]
@@ -1495,6 +1505,48 @@ mod tests {
     // ── Metrics emission on successful finalization ──
 
     #[tokio::test]
+    async fn summary_trigger_metric_is_recorded_after_commit() {
+        use crate::domain::service::test_helpers::TestMetrics;
+
+        let db = mock_db_provider(inmem_db().await);
+        let metrics = Arc::new(TestMetrics::new());
+        let (svc, _outbox) =
+            build_finalization_service_with_metrics(Arc::clone(&db), Arc::clone(&metrics) as _);
+        let (tenant_id, chat_id, user_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        let finalize = |truncated: bool| {
+            let svc = &svc;
+            let db = &db;
+            async move {
+                let (turn_id, request_id) = (Uuid::new_v4(), Uuid::new_v4());
+                insert_running_turn(db, tenant_id, chat_id, turn_id, request_id).await;
+                let mut input = make_input(
+                    tenant_id,
+                    chat_id,
+                    turn_id,
+                    request_id,
+                    user_id,
+                    TurnState::Completed,
+                );
+                input.messages_truncated = truncated;
+                svc.finalize_turn_cas(input).await.unwrap().summary_trigger
+            }
+        };
+
+        // Not truncated and below the threshold: not evaluated, nothing recorded.
+        assert_eq!(finalize(false).await, None);
+        assert!(metrics.thread_summary_trigger.lock().unwrap().is_empty());
+
+        // First truncated turn in a fresh chat state: the only earlier message
+        // is the answer finalized above, so a summary is scheduled.
+        assert_eq!(finalize(true).await, Some("scheduled"));
+        assert_eq!(
+            *metrics.thread_summary_trigger.lock().unwrap(),
+            ["scheduled"]
+        );
+    }
+
+    #[tokio::test]
     async fn cas_winner_emits_audit_and_quota_metrics() {
         use crate::domain::service::test_helpers::TestMetrics;
         use std::sync::atomic::Ordering;
@@ -1527,11 +1579,12 @@ mod tests {
             .expect("finalization should succeed");
         assert!(outcome.won_cas);
 
-        // Audit emission metrics
+        // audit_emit counts delivery outcomes and is recorded by the outbox
+        // audit handler, not when the event is enqueued here.
         assert_eq!(
             metrics.audit_emit.load(Ordering::Relaxed),
-            1,
-            "should record audit_emit"
+            0,
+            "finalization must not record audit_emit"
         );
         assert_eq!(
             metrics.finalization_latency_ms.load(Ordering::Relaxed),

@@ -85,6 +85,9 @@ pub struct FinalizationOutcome {
     pub persisted_state: TurnState,
     pub billing_outcome: Option<BillingDerivation>,
     pub settlement_outcome: Option<SettlementOutcome>,
+    /// `thread_summary_trigger` result label when the trigger was evaluated
+    /// (`scheduled` or `not_needed`); recorded after commit.
+    pub summary_trigger: Option<&'static str>,
 }
 
 /// Determine whether provider-reported usage is "known" for billing purposes.
