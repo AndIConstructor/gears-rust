@@ -220,9 +220,10 @@ impl From<authz_resolver_sdk::EnforcerError> for DomainError {
                 tracing::warn!(error = %err, "AuthZ constraint compile failed - access denied");
                 Self::Forbidden
             }
+            // Fail closed: an unreachable or failing PDP denies access.
             authz_resolver_sdk::EnforcerError::EvaluationFailed(ref err) => {
-                tracing::error!(error = %err, "AuthZ evaluation failed (internal error)");
-                Self::internal(err.to_string())
+                tracing::error!(error = %err, "AuthZ evaluation failed - access denied");
+                Self::Forbidden
             }
         }
     }
@@ -245,4 +246,19 @@ fn map_db_err(db_err: &sea_orm::DbErr) -> DomainError {
         };
     }
     DomainError::database(db_err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DomainError;
+
+    #[test]
+    fn pdp_evaluation_failure_denies_access() {
+        let e = authz_resolver_sdk::EnforcerError::EvaluationFailed(
+            toolkit_canonical_errors::CanonicalError::service_unavailable()
+                .with_detail("authz-resolver unreachable")
+                .create(),
+        );
+        assert!(matches!(DomainError::from(e), DomainError::Forbidden));
+    }
 }

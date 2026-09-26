@@ -22,7 +22,11 @@ pub(super) fn register_turn_routes(
         .path_param("id", "Chat UUID")
         .path_param("request_id", "Turn request UUID")
         .handler(handlers::turns::get_turn)
-        .json_response(http::StatusCode::OK, "Turn found")
+        .json_response_with_schema::<handlers::turns::TurnStatusResponse>(
+            openapi,
+            http::StatusCode::OK,
+            "Turn found",
+        )
         .standard_errors(openapi)
         .register(router, openapi);
 
@@ -37,28 +41,35 @@ pub(super) fn register_turn_routes(
         "{prefix}/v1/chats/{{id}}/turns/{{request_id}}/retry"
     ))
     .operation_id("mini_chat.retry_turn")
-    .summary("Retry a failed turn")
+    .summary("Retry the latest terminal turn and stream the new response via SSE")
     .tag(API_TAG)
     .authenticated()
     .require_license_features([&AiChatLicense])
     .path_param("id", "Chat UUID")
     .path_param("request_id", "Turn request UUID")
     .handler(handlers::turns::retry_turn)
-    .json_response(http::StatusCode::OK, "Turn retry initiated")
+    .sse_json::<crate::domain::stream_events::StreamEvent>(
+        openapi,
+        "SSE stream of the regenerated response",
+    )
     .standard_errors(openapi)
     .register(router, openapi);
 
     // PATCH {prefix}/v1/chats/{id}/turns/{request_id}
     router = OperationBuilder::patch(format!("{prefix}/v1/chats/{{id}}/turns/{{request_id}}"))
         .operation_id("mini_chat.edit_turn")
-        .summary("Edit a turn (user message)")
+        .summary("Edit the latest turn's user message and stream the new response via SSE")
         .tag(API_TAG)
         .authenticated()
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")
         .path_param("request_id", "Turn request UUID")
+        .json_request::<handlers::turns::EditTurnRequest>(openapi, "Replacement user message")
         .handler(handlers::turns::edit_turn)
-        .json_response(http::StatusCode::OK, "Turn edited")
+        .sse_json::<crate::domain::stream_events::StreamEvent>(
+            openapi,
+            "SSE stream of the regenerated response",
+        )
         .standard_errors(openapi)
         .register(router, openapi);
 

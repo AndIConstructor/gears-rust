@@ -24,7 +24,7 @@ use crate::infra::db::entity::chat_turn::TurnState;
 // ════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Serialize, ToSchema)]
-pub(crate) struct TurnStatusResponse {
+pub struct TurnStatusResponse {
     request_id: uuid::Uuid,
     state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,6 +34,8 @@ pub(crate) struct TurnStatusResponse {
     #[serde(with = "time::serde::rfc3339")]
     updated_at: time::OffsetDateTime,
 }
+
+impl toolkit::api::api_dto::ResponseApiDto for TurnStatusResponse {}
 
 fn map_turn_state(state: &TurnState) -> &'static str {
     match state {

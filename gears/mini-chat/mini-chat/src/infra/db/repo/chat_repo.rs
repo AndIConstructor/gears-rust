@@ -78,7 +78,7 @@ impl crate::domain::repos::ChatRepository for ChatRepository {
             Into::into,
         )
         .await
-        .map_err(db_err)?;
+        .map_err(super::odata_err)?;
 
         Ok(page)
     }

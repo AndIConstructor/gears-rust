@@ -88,11 +88,10 @@ impl From<EnforcerError> for MutationError {
                 tracing::warn!(error = %err, "AuthZ constraint compile failed - access denied");
                 Self::Forbidden
             }
+            // Fail closed: an unreachable or failing PDP denies access.
             EnforcerError::EvaluationFailed(ref err) => {
-                tracing::error!(error = %err, "AuthZ evaluation failed (internal error)");
-                Self::Internal {
-                    message: err.to_string(),
-                }
+                tracing::error!(error = %err, "AuthZ evaluation failed - access denied");
+                Self::Forbidden
             }
         }
     }

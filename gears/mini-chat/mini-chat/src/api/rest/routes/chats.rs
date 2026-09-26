@@ -68,6 +68,7 @@ pub(super) fn register_chat_routes(
             "Paginated list of chats",
         )
         .with_odata_filter::<ChatCursorField>()
+        .with_odata_orderby::<ChatCursorField>()
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)

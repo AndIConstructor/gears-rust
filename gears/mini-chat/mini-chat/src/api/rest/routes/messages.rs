@@ -1,9 +1,10 @@
 use axum::Router;
 use toolkit::api::OpenApiRegistry;
-use toolkit::api::operation_builder::OperationBuilder;
+use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt};
 
 use super::AiChatLicense;
 use crate::api::rest::{dto, handlers};
+use crate::infra::db::odata_mapper::MessageField;
 
 const API_TAG: &str = "Mini Chat Messages";
 
@@ -33,6 +34,8 @@ pub(super) fn register_message_routes(
             http::StatusCode::OK,
             "Paginated list of messages",
         )
+        .with_odata_filter::<MessageField>()
+        .with_odata_orderby::<MessageField>()
         .standard_errors(openapi)
         .register(router, openapi);
 

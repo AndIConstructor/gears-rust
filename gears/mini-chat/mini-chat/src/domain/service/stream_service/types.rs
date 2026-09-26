@@ -165,14 +165,9 @@ pub enum StreamError {
 
 impl From<authz_resolver_sdk::EnforcerError> for StreamError {
     fn from(e: authz_resolver_sdk::EnforcerError) -> Self {
-        match e {
-            e @ authz_resolver_sdk::EnforcerError::Denied { .. } => Self::AuthorizationFailed {
-                source: DomainError::from(e),
-            },
-            e @ (authz_resolver_sdk::EnforcerError::EvaluationFailed(_)
-            | authz_resolver_sdk::EnforcerError::CompileFailed(_)) => Self::TurnCreationFailed {
-                source: DomainError::from(e),
-            },
+        // Every enforcer failure denies access (fail closed).
+        Self::AuthorizationFailed {
+            source: DomainError::from(e),
         }
     }
 }

@@ -4,7 +4,7 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::api::operation_builder::OperationBuilder;
 
 use super::AiChatLicense;
-use crate::api::rest::handlers;
+use crate::api::rest::{dto, handlers};
 
 const API_TAG: &str = "Mini Chat Attachments";
 
@@ -33,8 +33,11 @@ pub(super) fn register_attachment_routes(
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")
         .handler(handlers::attachments::upload_attachment)
-        .json_response(http::StatusCode::CREATED, "Attachment uploaded")
-        .error_415(openapi)
+        .json_response_with_schema::<dto::AttachmentDetailDto>(
+            openapi,
+            http::StatusCode::CREATED,
+            "Attachment uploaded and processed",
+        )
         .standard_errors(openapi)
         .register(router, openapi)
         .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT));
@@ -51,7 +54,11 @@ pub(super) fn register_attachment_routes(
     .path_param("id", "Chat UUID")
     .path_param("attachment_id", "Attachment UUID")
     .handler(handlers::attachments::get_attachment)
-    .json_response(http::StatusCode::OK, "Attachment metadata")
+    .json_response_with_schema::<dto::AttachmentDetailDto>(
+        openapi,
+        http::StatusCode::OK,
+        "Attachment metadata",
+    )
     .standard_errors(openapi)
     .register(router, openapi);
 

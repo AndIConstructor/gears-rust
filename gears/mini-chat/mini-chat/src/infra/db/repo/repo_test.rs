@@ -1321,3 +1321,25 @@ async fn create_turn_persists_web_search_enabled() {
         "web_search_enabled should default to false"
     );
 }
+
+#[test]
+fn odata_client_errors_map_to_validation() {
+    use crate::domain::error::DomainError;
+    use crate::infra::db::repo::odata_err;
+
+    for e in [
+        toolkit_odata::Error::InvalidFilter("unknown field".to_owned()),
+        toolkit_odata::Error::InvalidOrderByField("nope".to_owned()),
+        toolkit_odata::Error::InvalidCursor,
+        toolkit_odata::Error::FilterMismatch,
+    ] {
+        assert!(
+            matches!(odata_err(e.clone()), DomainError::Validation { .. }),
+            "{e} must be a client error"
+        );
+    }
+    assert!(matches!(
+        odata_err(toolkit_odata::Error::Db("boom".to_owned())),
+        DomainError::Database { .. }
+    ));
+}

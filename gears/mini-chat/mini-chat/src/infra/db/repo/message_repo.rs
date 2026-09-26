@@ -207,7 +207,7 @@ impl crate::domain::repos::MessageRepository for MessageRepository {
             std::convert::identity,
         )
         .await
-        .map_err(|e| DomainError::database(e.to_string()))?;
+        .map_err(super::odata_err)?;
 
         Ok(page)
     }
