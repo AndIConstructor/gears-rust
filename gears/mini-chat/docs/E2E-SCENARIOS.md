@@ -233,7 +233,7 @@ still works but is not required (ADR-0007).
 |-------|----------------------------------------------|--------------------------|-------------------------------------------------------------|
 | 10-01 | Upload Attachment → 201 `ready`              | test_attachments.py      | TestUploadAndGet::test_upload_and_get_attachment            |
 | 10-02 | GET Attachment — Status `ready`              | test_attachments.py      | TestUploadAndGet::test_upload_and_get_attachment            |
-| 10-03 | DELETE Attachment → 204, GET → 404 `not_found` | test_attachments.py | TestDeleteAndVerifyGone::test_delete_and_verify_gone |
+| 10-03 | DELETE Attachment → 204, GET → 404 `not_found` (attachment `resource_type`) | test_attachments.py | TestDeleteAndVerifyGone::test_delete_and_verify_gone |
 | 10-04 | DELETE Referenced Attachment → 409 `already_exists` (`attachment_locked`) | test_attachments.py | TestDeleteReferencedAttachment::test_delete_referenced_attachment_409 |
 | 10-05 | Unsupported MIME → 400 `invalid_argument` (`UNSUPPORTED_CONTENT_TYPE`) | test_attachments.py | TestUploadInvalidType::test_upload_invalid_type_rejected |
 | 10-06 | Oversize Image → 400 `out_of_range` (`FILE_TOO_LARGE`) | test_attachments.py | TestUploadSizeEnforcement::test_oversize_image_rejected |
@@ -255,7 +255,7 @@ still works but is not required (ADR-0007).
 | 10-22 | Stream with Document → `file_search` Tool in the Provider Request | test_provider_request.py | TestFileSearchMaxNumResults::test_file_search_has_max_num_results; test_code_interpreter.py TestXlsxPurposeRouting::test_txt_triggers_file_search_not_code_interpreter; test_attachments.py TestUploadSearchCitationFlow::test_upload_search_citation_flow (online only) |
 | 10-23 | Mixed XLSX + TXT → Both Tools                | test_code_interpreter.py | TestMixedAttachments::test_mixed_xlsx_and_txt_both_tools_in_request |
 | 10-24 | Image + Document Combined                    | test_attachments.py      | TestDocumentAndImageTogether::test_document_and_image_combined (online only) |
-| 10-25 | GET Nonexistent Attachment → 404 `not_found` | test_attachments.py      | TestUploadAndGet::test_get_nonexistent_attachment_404       |
+| 10-25 | GET Nonexistent Attachment → 404 `not_found` (attachment `resource_type`) | test_attachments.py      | TestUploadAndGet::test_get_nonexistent_attachment_404       |
 | 10-26 | Documents per Chat Exceeded → 429 `resource_exhausted` (`document_limit`) | test_attachments.py | TestPerChatLimits::test_document_limit_exceeded |
 | 10-27 | Storage per Chat Exceeded → 429 `resource_exhausted` (`storage_limit`): documents 1 KiB under the 100 MB chat limit, each within the per-file limit; a 100-byte upload fits, a 2 KiB upload is rejected, provider not called | test_attachments.py | TestPerChatLimits::test_storage_limit_exceeded |
 | 10-28 | Max Indexed Chunks per Chat                  | —                        | N/A — not implemented (ADR-0007)                            |
@@ -266,12 +266,12 @@ still works but is not required (ADR-0007).
 | 10-33 | Code Interpreter Real Answer                 | test_code_interpreter.py | TestCodeInterpreterOnline::test_xlsx_code_interpreter_produces_answer (online only) |
 | 10-34 | Image Sent to the Model as `input_image`; Recognized by the Model | test_attachments.py | TestImageInProviderRequest::test_image_sent_as_input_image; TestImageRecognition::test_image_recognition_cat (online only) |
 | 10-35 | Per-Provider Send with Attachment; Medium File Pipeline | test_attachments.py | TestProviderSendMessageWithAttachment::test_send_message_with_attachment (online only), TestUploadStreamingPipeline::test_medium_file_upload_and_stream (online only) |
-| 10-36 | DELETE Unknown Attachment → 404 `not_found`  | test_attachments.py      | TestDeleteMissingAttachment::test_delete_unknown_attachment_404 |
+| 10-36 | DELETE Unknown Attachment → 404 `not_found` (attachment `resource_type`) | test_attachments.py      | TestDeleteMissingAttachment::test_delete_unknown_attachment_404 |
 | 10-37 | XLSX Upload While Code Interpreter Is Unavailable (model without it) → 400 `invalid_argument`, nothing stored | test_code_interpreter.py | TestXlsxUploadAccepted::test_xlsx_rejected_without_code_interpreter |
 | 10-38 | Send Message Referencing Two Ready Documents → 200, `done` | test_attachments.py | TestSendMessageWithAttachments::test_send_message_with_attachments |
 | 10-39 | Repeated DELETE of an Attachment → 204 (idempotent), then GET → 404 | test_attachments.py | TestDeleteMissingAttachment::test_second_delete_attachment_is_idempotent |
 | 10-40 | Upload While All `max_concurrent_uploads` (10) Permits Are Taken → 503 `service_unavailable`, `Retry-After: 5`, nothing stored; the held uploads then complete `ready` | test_attachments.py | TestUploadConcurrencyLimit::test_upload_over_concurrency_limit_503 |
-| 10-41 | Upload to an Unknown Chat → 404 `not_found` | test_attachments.py | TestUploadUnknownChat::test_upload_to_unknown_chat_404 |
+| 10-41 | Upload to an Unknown Chat → 404 `not_found` (chat `resource_type`) | test_attachments.py | TestUploadUnknownChat::test_upload_to_unknown_chat_404 |
 
 ## 11 — Models API
 

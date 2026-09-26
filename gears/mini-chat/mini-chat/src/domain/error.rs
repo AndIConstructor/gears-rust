@@ -5,6 +5,24 @@ use toolkit_db::secure::ScopeError;
 use toolkit_macros::domain_model;
 use uuid::Uuid;
 
+/// Resource kind carried by [`DomainError::NotFound`]. The REST layer picks the
+/// problem `resource_type` from it, so it is an enum rather than a free string.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotFoundEntity {
+    Chat,
+    Attachment,
+}
+
+impl std::fmt::Display for NotFoundEntity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Chat => "Chat",
+            Self::Attachment => "Attachment",
+        })
+    }
+}
+
 /// Domain-specific errors for the mini-chat gear.
 #[domain_model]
 #[derive(Error, Debug)]
@@ -25,7 +43,7 @@ pub enum DomainError {
     Conflict { code: String, message: String },
 
     #[error("{entity} not found: {id}")]
-    NotFound { entity: String, id: Uuid },
+    NotFound { entity: NotFoundEntity, id: Uuid },
 
     #[error("Access denied")]
     Forbidden,
@@ -111,11 +129,14 @@ impl DomainError {
         }
     }
 
-    pub fn not_found(entity: impl Into<String>, id: Uuid) -> Self {
-        Self::NotFound {
-            entity: entity.into(),
-            id,
-        }
+    #[must_use]
+    pub fn not_found(entity: NotFoundEntity, id: Uuid) -> Self {
+        Self::NotFound { entity, id }
+    }
+
+    #[must_use]
+    pub fn attachment_not_found(id: Uuid) -> Self {
+        Self::not_found(NotFoundEntity::Attachment, id)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {

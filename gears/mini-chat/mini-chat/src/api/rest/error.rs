@@ -10,7 +10,7 @@
 
 use toolkit_canonical_errors::{CanonicalError, resource_error};
 
-use crate::domain::error::DomainError;
+use crate::domain::error::{DomainError, NotFoundEntity};
 use crate::domain::service::{MutationError, StreamError};
 
 // ---------------------------------------------------------------------------
@@ -65,17 +65,11 @@ impl From<DomainError> for CanonicalError {
             DomainError::NotFound { entity, id } => {
                 let detail = format!("{entity} not found: {id}");
                 let resource = id.to_string();
-                match entity.as_str() {
-                    "message" => MiniChatMessageError::not_found(detail)
+                match entity {
+                    NotFoundEntity::Attachment => MiniChatAttachmentError::not_found(detail)
                         .with_resource(resource)
                         .create(),
-                    "turn" => MiniChatTurnError::not_found(detail)
-                        .with_resource(resource)
-                        .create(),
-                    "attachment" => MiniChatAttachmentError::not_found(detail)
-                        .with_resource(resource)
-                        .create(),
-                    _ => MiniChatChatError::not_found(detail)
+                    NotFoundEntity::Chat => MiniChatChatError::not_found(detail)
                         .with_resource(resource)
                         .create(),
                 }
@@ -449,14 +443,20 @@ mod tests {
     #[test]
     fn attachment_not_found_uses_attachment_resource_scope() {
         let id = Uuid::new_v4();
-        let p: Problem = DomainError::NotFound {
-            entity: "attachment".into(),
-            id,
-        }
-        .into_test_problem();
+        let p: Problem = DomainError::attachment_not_found(id).into_test_problem();
         assert_eq!(p.status, Some(404));
         assert_eq!(p.problem_type, NOT_FOUND_TYPE);
         assert_eq!(p.context["resource_type"], ATTACHMENT_GTS);
+        assert_eq!(p.context["resource_name"], id.to_string());
+        assert_eq!(p.detail, format!("Attachment not found: {id}"));
+    }
+
+    #[test]
+    fn generic_chat_not_found_uses_chat_resource_scope() {
+        let id = Uuid::new_v4();
+        let p: Problem = DomainError::not_found(NotFoundEntity::Chat, id).into_test_problem();
+        assert_eq!(p.status, Some(404));
+        assert_eq!(p.context["resource_type"], CHAT_GTS);
         assert_eq!(p.context["resource_name"], id.to_string());
     }
 

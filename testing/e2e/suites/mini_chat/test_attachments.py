@@ -18,6 +18,8 @@ from .conftest import (
     API_PREFIX,
     BARE_MODEL,
     DEFAULT_MODEL,
+    RESOURCE_ATTACHMENT,
+    RESOURCE_CHAT,
     STANDARD_MODEL,
     assert_problem,
     exec_db,
@@ -90,8 +92,10 @@ class TestUploadAndGet:
                 assert field not in body, f"{field} exposed: {body}"
 
     def test_get_nonexistent_attachment_404(self, provider_chat):
-        resp = httpx.get(f"{API_PREFIX}/chats/{provider_chat['id']}/attachments/{uuid.uuid4()}")
-        assert_problem(resp, 404, "not_found")
+        att_id = str(uuid.uuid4())
+        resp = httpx.get(f"{API_PREFIX}/chats/{provider_chat['id']}/attachments/{att_id}")
+        body = assert_problem(resp, 404, "not_found", resource_type=RESOURCE_ATTACHMENT)
+        assert body["context"].get("resource_name") == att_id, body
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +133,7 @@ class TestDeleteAndVerifyGone:
         assert resp.status_code == 204
 
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
-        assert_problem(resp, 404, "not_found")
+        assert_problem(resp, 404, "not_found", resource_type=RESOURCE_ATTACHMENT)
 
 
 # ---------------------------------------------------------------------------
@@ -1130,15 +1134,17 @@ class TestUploadUnknownChat:
 
     def test_upload_to_unknown_chat_404(self, server):
         resp = _upload(str(uuid.uuid4()), "a.txt", b"no chat", "text/plain")
-        assert_problem(resp, 404, "not_found")
+        assert_problem(resp, 404, "not_found", resource_type=RESOURCE_CHAT)
 
 
 class TestDeleteMissingAttachment:
     """DELETE /attachments/{id} for an attachment that does not exist."""
 
     def test_delete_unknown_attachment_404(self, chat):
-        resp = httpx.delete(f"{API_PREFIX}/chats/{chat['id']}/attachments/{uuid.uuid4()}")
-        assert_problem(resp, 404, "not_found")
+        att_id = str(uuid.uuid4())
+        resp = httpx.delete(f"{API_PREFIX}/chats/{chat['id']}/attachments/{att_id}")
+        body = assert_problem(resp, 404, "not_found", resource_type=RESOURCE_ATTACHMENT)
+        assert body["context"].get("resource_name") == att_id, body
 
     def test_second_delete_attachment_is_idempotent(self, chat):
         """A repeated DELETE of an attachment returns 204 (idempotent)."""

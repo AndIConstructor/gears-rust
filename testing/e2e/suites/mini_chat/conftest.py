@@ -187,6 +187,13 @@ def delta_text(events: list[SSEEvent]) -> str:
 # (libs/toolkit-canonical-errors/src/problem.rs, ProblemCategory::gts_fragment).
 PROBLEM_FIELDS = ("type", "title", "status", "detail", "context")
 
+# `context.resource_type` suffixes (the GTS id prefix is configurable, so
+# match the tail; see `resource_error` scopes in src/api/rest/error.rs).
+RESOURCE_CHAT = "cf.core.mini_chat.chat.v1~"
+RESOURCE_MESSAGE = "cf.core.mini_chat.message.v1~"
+RESOURCE_TURN = "cf.core.mini_chat.turn.v1~"
+RESOURCE_ATTACHMENT = "cf.core.mini_chat.attachment.v1~"
+
 
 def assert_problem(
     resp: httpx.Response,
@@ -197,6 +204,7 @@ def assert_problem(
     field_reason: str | None = None,
     violation_type: str | None = None,
     violation_subject: str | None = None,
+    resource_type: str | None = None,
 ) -> dict:
     """Assert `resp` is a canonical Problem of `category` and return its body.
 
@@ -206,6 +214,8 @@ def assert_problem(
     - `violation_type` / `violation_subject`: one `context.violations[]` entry
       matches both given values (failed_precondition: subject/type;
       resource_exhausted: subject only).
+    - `resource_type`: `context.resource_type` ends with this value (use the
+      `RESOURCE_*` constants).
     """
     assert resp.status_code == status, (
         f"expected HTTP {status}, got {resp.status_code}: {resp.text[:500]}"
@@ -223,6 +233,12 @@ def assert_problem(
     if reason is not None:
         assert ctx.get("reason") == reason, (
             f"expected context.reason={reason!r}, got {ctx.get('reason')!r}: {body}"
+        )
+    if resource_type is not None:
+        actual = ctx.get("resource_type") or ""
+        assert actual.endswith(resource_type), (
+            f"expected context.resource_type ending with {resource_type!r}, "
+            f"got {actual!r}: {body}"
         )
     if field_reason is not None:
         reasons = [v.get("reason") for v in ctx.get("field_violations", [])]

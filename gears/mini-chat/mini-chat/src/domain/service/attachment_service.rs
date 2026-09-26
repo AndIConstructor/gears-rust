@@ -8,7 +8,7 @@ use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
 use crate::config::{RagConfig, ThumbnailConfig};
-use crate::domain::error::DomainError;
+use crate::domain::error::{DomainError, NotFoundEntity};
 use crate::domain::mime_validation::{AttachmentKind, AttachmentPurpose};
 use crate::domain::ports::MiniChatMetricsPort;
 use crate::domain::ports::metric_labels::{kind as kind_label, upload_result};
@@ -264,7 +264,7 @@ impl<
             .chat_repo
             .get(&conn, &chat_scope, chat_id)
             .await?
-            .ok_or_else(|| DomainError::not_found("Chat", chat_id))?;
+            .ok_or_else(|| DomainError::not_found(NotFoundEntity::Chat, chat_id))?;
 
         // ConfigMap ceiling (always available).
         let config_file_bytes = u64::from(self.rag_config.uploaded_file_max_size_kb) * 1024;
@@ -430,7 +430,7 @@ impl<
         self.chat_repo
             .get(&conn, &chat_scope, chat_id)
             .await?
-            .ok_or_else(|| DomainError::not_found("Chat", chat_id))?;
+            .ok_or_else(|| DomainError::not_found(NotFoundEntity::Chat, chat_id))?;
 
         // Attachment entity is no_owner — use tenant-only scope.
         let att_scope = scope.tenant_only();
@@ -438,16 +438,16 @@ impl<
             .attachment_repo
             .get(&conn, &att_scope, attachment_id)
             .await?
-            .ok_or_else(|| DomainError::not_found("Attachment", attachment_id))?;
+            .ok_or_else(|| DomainError::attachment_not_found(attachment_id))?;
 
         // Chat-scoped access: attachment must belong to the requested chat
         if row.chat_id != chat_id {
-            return Err(DomainError::not_found("Attachment", attachment_id));
+            return Err(DomainError::attachment_not_found(attachment_id));
         }
 
         // Handler-level 404 for soft-deleted
         if row.deleted_at.is_some() {
-            return Err(DomainError::not_found("Attachment", attachment_id));
+            return Err(DomainError::attachment_not_found(attachment_id));
         }
 
         Ok(row)
@@ -485,7 +485,7 @@ impl<
             .chat_repo
             .get(conn, chat_scope, chat_id)
             .await?
-            .ok_or_else(|| DomainError::not_found("Chat", chat_id))?;
+            .ok_or_else(|| DomainError::not_found(NotFoundEntity::Chat, chat_id))?;
 
         let resolved = match self
             .model_resolver
@@ -549,7 +549,7 @@ impl<
         self.chat_repo
             .get(&conn, &chat_scope, chat_id)
             .await?
-            .ok_or_else(|| DomainError::not_found("Chat", chat_id))?;
+            .ok_or_else(|| DomainError::not_found(NotFoundEntity::Chat, chat_id))?;
 
         // Load row (including soft-deleted); attachment is no_owner → tenant scope.
         let att_scope = scope.tenant_only();
@@ -557,11 +557,11 @@ impl<
             .attachment_repo
             .get(&conn, &att_scope, attachment_id)
             .await?
-            .ok_or_else(|| DomainError::not_found("Attachment", attachment_id))?;
+            .ok_or_else(|| DomainError::attachment_not_found(attachment_id))?;
 
         // Chat-scoped access: attachment must belong to the requested chat
         if row.chat_id != chat_id {
-            return Err(DomainError::not_found("Attachment", attachment_id));
+            return Err(DomainError::attachment_not_found(attachment_id));
         }
 
         // Ownership check (explicit since entity uses no_owner)
@@ -1188,7 +1188,7 @@ impl<
                 // P1-14: Concurrent soft-delete — best-effort cleanup provider file
                 tracing::warn!(attachment_id = %attachment_id, "CAS set_uploaded returned 0 (concurrent delete?)");
                 self.spawn_delete_file(ctx.clone(), &provider_id, &provider_file_id);
-                return Err(DomainError::not_found("Attachment", attachment_id));
+                return Err(DomainError::attachment_not_found(attachment_id));
             }
 
             // 4b. Post-upload aggregate storage check.
@@ -1502,7 +1502,7 @@ impl<
                 if let Some((alias, file_id)) = secondary_cleanup.take() {
                     self.spawn_delete_secondary_file(ctx.clone(), alias, file_id);
                 }
-                return Err(DomainError::not_found("Attachment", attachment_id));
+                return Err(DomainError::attachment_not_found(attachment_id));
             }
         }
 
@@ -1519,7 +1519,7 @@ impl<
         self.attachment_repo
             .get(&conn, &scope, attachment_id)
             .await?
-            .ok_or_else(|| DomainError::not_found("Attachment", attachment_id))
+            .ok_or_else(|| DomainError::attachment_not_found(attachment_id))
     }
 
     /// Best-effort CAS `set_failed` — log on failure, never propagate.
