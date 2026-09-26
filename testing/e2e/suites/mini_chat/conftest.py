@@ -65,6 +65,10 @@ BARE_MODEL = "gpt-5-bare"
 # thread summary and input-limit tests.
 TINY_CTX_MODEL = "gpt-4.1-mini-tiny-ctx"
 
+# TINY_CTX_MODEL with `max_input_tokens: 0` (no separate input limit,
+# config/base.yaml).
+NO_INPUT_LIMIT_MODEL = "gpt-4.1-mini-tiny-ctx-no-input-limit"
+
 # System prompt of every catalog model (config/base.yaml).
 CATALOG_SYSTEM_PROMPT = (
     "You are a helpful assistant. IMPORTANT RULE: When the user says exactly "
@@ -193,6 +197,7 @@ RESOURCE_CHAT = "cf.core.mini_chat.chat.v1~"
 RESOURCE_MESSAGE = "cf.core.mini_chat.message.v1~"
 RESOURCE_TURN = "cf.core.mini_chat.turn.v1~"
 RESOURCE_ATTACHMENT = "cf.core.mini_chat.attachment.v1~"
+RESOURCE_MODEL = "cf.core.mini_chat.model.v1~"
 # `$filter` / `$orderby` / `limit` / cursor errors (libs/toolkit-odata/src/errors.rs).
 RESOURCE_ODATA = "cf.core.odata.query.v1~"
 

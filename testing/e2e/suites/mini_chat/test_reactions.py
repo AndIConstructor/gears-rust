@@ -122,9 +122,11 @@ class TestReactions:
         assert my_reaction(chat_id, assistant_msg_id) is None
 
     def test_reaction_on_nonexistent_message_404(self, chat):
-        url = reaction_url(chat["id"], str(uuid.uuid4()))
-        assert_problem(httpx.put(url, json={"reaction": "like"}), 404, "not_found")
-        assert_problem(httpx.delete(url), 404, "not_found")
+        msg_id = str(uuid.uuid4())
+        url = reaction_url(chat["id"], msg_id)
+        for resp in (httpx.put(url, json={"reaction": "like"}), httpx.delete(url)):
+            body = assert_problem(resp, 404, "not_found", resource_type=RESOURCE_MESSAGE)
+            assert body["context"]["resource_name"] == msg_id, body
 
     def test_remove_reaction_204(self, server):
         chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()

@@ -174,7 +174,11 @@ class TestQuotaExhaustion:
         mock_provider.clear_captured_requests()
         resp = user1.post_stream(chat_id, {"content": "Blocked?", "request_id": str(uuid.uuid4())})
 
-        assert_problem(resp, 429, "resource_exhausted", violation_subject="tokens")
+        body = assert_problem(resp, 429, "resource_exhausted", violation_subject="tokens")
+        # One quota violation: subject = the exhausted quota, description = the error code.
+        assert [(v["subject"], v["description"]) for v in body["context"]["violations"]] == [
+            ("tokens", "quota_exceeded"),
+        ], body
         assert mock_provider.get_captured_requests() == [], "provider must not be called"
         assert list_messages(chat_id, token=user1.token) == messages_before
         assert turn_count(chat_id) == turns_before

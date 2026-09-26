@@ -4,7 +4,9 @@ import re
 
 import httpx
 
-from .conftest import API_PREFIX, DEFAULT_MODEL, DISABLED_MODEL, MODULE_DIR, assert_problem
+from .conftest import (
+    API_PREFIX, DEFAULT_MODEL, DISABLED_MODEL, MODULE_DIR, RESOURCE_MODEL, assert_problem,
+)
 
 
 def enabled_catalog_model_ids() -> set[str]:
@@ -59,6 +61,7 @@ class TestListModels:
             "azure-gpt-4.1": "3x",
             "gpt-5-bare": "0.5x",
             "gpt-4.1-mini-tiny-ctx": "0.5x",
+            "gpt-4.1-mini-tiny-ctx-no-input-limit": "0.5x",
         }
 
 
@@ -67,7 +70,8 @@ class TestGetModel:
 
     def test_get_nonexistent_model(self, server):
         resp = httpx.get(f"{API_PREFIX}/models/fake-model-xyz")
-        assert_problem(resp, 404, "not_found")
+        body = assert_problem(resp, 404, "not_found", resource_type=RESOURCE_MODEL)
+        assert body["context"]["resource_name"] == "fake-model-xyz", body
 
     def test_internal_fields_not_exposed(self, server):
         """11-04, 11-06: GET returns the requested model without internal fields."""
@@ -101,4 +105,7 @@ class TestDisabledModel:
         assert DISABLED_MODEL not in ids
 
     def test_get_disabled_model_404(self, server):
-        assert_problem(httpx.get(f"{API_PREFIX}/models/{DISABLED_MODEL}"), 404, "not_found")
+        assert_problem(
+            httpx.get(f"{API_PREFIX}/models/{DISABLED_MODEL}"), 404, "not_found",
+            resource_type=RESOURCE_MODEL,
+        )

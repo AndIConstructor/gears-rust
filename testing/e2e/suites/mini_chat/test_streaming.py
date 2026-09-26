@@ -8,13 +8,18 @@ import httpx
 
 from .conftest import (
     API_PREFIX,
+    CATALOG_SYSTEM_PROMPT,
     DEFAULT_MODEL,
+    NO_INPUT_LIMIT_MODEL,
+    RESOURCE_CHAT,
     TINY_CTX_MODEL,
     assert_problem,
     delta_text,
+    exec_db,
     expect_done,
     expect_stream_started,
     parse_sse,
+    provider_input,
     query_db,
     slow_scenario,
     turn_count,
@@ -268,9 +273,85 @@ class TestStreamInputLimits:
     def test_mandatory_context_over_budget_400(self, chat_with_model, mock_provider):
         """01-08: 6000 bytes (2200 tokens) pass max_input_tokens, but with the
         system prompt (587 tokens) they exceed the context budget
-        4096 - 1024 - 500 = 2572: 400 out_of_range CONTEXT_BUDGET_EXCEEDED."""
+        min(3000, 4096 - 1024) - 500 = 2500 (see
+        test_mandatory_context_capped_by_max_input_tokens_400): 400
+        out_of_range CONTEXT_BUDGET_EXCEEDED."""
         chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
         self._assert_rejected(chat_id, "x" * 6_000, "CONTEXT_BUDGET_EXCEEDED", mock_provider)
+
+    def test_mandatory_context_capped_by_max_input_tokens_400(self, chat_with_model, mock_provider):
+        """01-08: the context budget is capped by max_input_tokens.
+
+        Budget (context_assembly.rs `compute_available_budget`), no tools:
+          min(max_input_tokens, context_window - max_output_tokens_applied)
+            - fixed_overhead_tokens = min(3000, 4096 - 1024) - 500 = 2500.
+        Without the max_input_tokens cap it would be 3072 - 500 = 2572.
+
+        Mandatory context (`estimate_item_tokens` per item:
+        (ceil(bytes / 4) + 500) * 110 / 100, integer division):
+          system prompt, 134 bytes: (34 + 500) * 1.1 = 587
+          message, 5000 bytes: (1250 + 500) * 1.1 = 1925
+          total 2512: over 2500, within 2572.
+        The message alone (1925, `estimate_tokens`) is under
+        max_input_tokens 3000, so INPUT_TOO_LONG does not apply: 400
+        out_of_range CONTEXT_BUDGET_EXCEEDED."""
+        assert len(CATALOG_SYSTEM_PROMPT.encode()) == 134
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        self._assert_rejected(chat_id, "x" * 5_000, "CONTEXT_BUDGET_EXCEEDED", mock_provider)
+
+    def test_max_input_tokens_zero_is_no_limit(self, chat_with_model, mock_provider):
+        """01-08: `max_input_tokens: 0` sets no separate input limit. On
+        NO_INPUT_LIMIT_MODEL (TINY_CTX_MODEL with max_input_tokens 0) the
+        budget is 4096 - 1024 - 500 = 2572, so the 2512-token mandatory
+        context that test_mandatory_context_capped_by_max_input_tokens_400
+        rejects on TINY_CTX_MODEL is sent."""
+        chat_id = chat_with_model(NO_INPUT_LIMIT_MODEL)["id"]
+        content = "x" * 5_000
+        mock_provider.clear_captured_requests()
+        resp = _post_stream(chat_id, {"content": content})
+        assert resp.status_code == 200, resp.text
+        expect_done(parse_sse(resp.text))
+        (req,) = mock_provider.get_captured_requests()
+        assert provider_input(req) == [("user", content)]
+
+    def test_max_input_tokens_zero_skips_input_too_long(self, chat_with_model, mock_provider):
+        """01-08: 12000 bytes (3850 tokens, INPUT_TOO_LONG on TINY_CTX_MODEL)
+        on NO_INPUT_LIMIT_MODEL are not checked against an input limit; with
+        the system prompt (4437 tokens) they exceed the 2572-token context
+        budget: 400 out_of_range CONTEXT_BUDGET_EXCEEDED."""
+        chat_id = chat_with_model(NO_INPUT_LIMIT_MODEL)["id"]
+        mock_provider.clear_captured_requests()
+        resp = _post_stream(chat_id, {"content": "x" * 12_000})
+        body = assert_problem(resp, 400, "out_of_range", field_reason="CONTEXT_BUDGET_EXCEEDED")
+        assert [v["reason"] for v in body["context"]["field_violations"]] == [
+            "CONTEXT_BUDGET_EXCEEDED",
+        ], body
+        assert mock_provider.get_captured_requests() == []
+        assert turn_count(chat_id) == 0
+
+
+@pytest.mark.usefixtures("offline_only")
+class TestChatModelLeftCatalog:
+    """The chat's model is no longer in the catalog (not just disabled:
+    a disabled model is downgraded, test_quota_policy.py
+    TestDowngrade::test_disabled_chat_model_downgrades)."""
+
+    def test_send_to_chat_with_model_missing_from_catalog_400(self, chat, mock_provider):
+        """The chat row points at a model id the catalog does not have
+        (seeded in the DB, as after a catalog change): sending is 400
+        invalid_argument INVALID_MODEL, before any turn or provider call."""
+        chat_id = chat["id"]
+        assert exec_db(
+            "UPDATE chats SET model = ? WHERE id = ?", ("gpt-removed-from-catalog", chat_id),
+        ) == 1
+        mock_provider.clear_captured_requests()
+        resp = _post_stream(chat_id, {"content": "Anyone there?"})
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="INVALID_MODEL", resource_type=RESOURCE_CHAT,
+        )
+        assert mock_provider.get_captured_requests() == []
+        assert turn_count(chat_id) == 0
 
 
 @pytest.mark.multi_provider

@@ -135,6 +135,16 @@ class TestThreadSummary:
             (chat_id,),
         )
         assert [r["is_compressed"] for r in compressed] == [1, 1, 0, 0]
+        # The summary's usage event, enqueued in the transaction that stored
+        # the summary: a system task, with no user and no turn.
+        (summary_usage,) = [
+            p for p in outbox_payloads(chat_id)
+            if p.get("chat_id") == chat_id
+            and p.get("system_task_type") == "thread_summary_update"
+            and "settlement_method" in p
+        ]
+        assert summary_usage["requester_type"] == "system", summary_usage
+        assert "user_id" not in summary_usage and "turn_id" not in summary_usage, summary_usage
 
         # The summary request: non-streaming, on the summary model, with the
         # first turn in the prompt and without the second.

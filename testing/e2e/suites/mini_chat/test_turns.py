@@ -5,7 +5,7 @@ import uuid
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, assert_problem, expect_done, expect_stream_started, stream_message
+from .conftest import API_PREFIX, RESOURCE_TURN, assert_problem, expect_done, expect_stream_started, stream_message
 
 
 @pytest.mark.multi_provider
@@ -34,4 +34,5 @@ class TestTurnStatus:
     def test_turn_not_found(self, provider_chat):
         fake_request_id = str(uuid.uuid4())
         resp = httpx.get(f"{API_PREFIX}/chats/{provider_chat['id']}/turns/{fake_request_id}")
-        assert_problem(resp, 404, "not_found")
+        body = assert_problem(resp, 404, "not_found", resource_type=RESOURCE_TURN)
+        assert body["context"]["resource_name"] == fake_request_id, body

@@ -693,6 +693,71 @@ gears:
               audio_transcription: false
               audio_translation: false
 
+        # gpt-4.1-mini-tiny-ctx with max_input_tokens 0 (no separate input
+        # limit): the context budget is context_window - max_output_tokens
+        # only (test_streaming.py TestStreamInputLimits). Last in the catalog
+        # for the same reason as gpt-5-bare.
+        - id: "gpt-4.1-mini-tiny-ctx-no-input-limit"
+          provider_model_id: "gpt-4.1-mini"
+          display_name: "GPT-4.1 Mini (tiny context, no input limit)"
+          tier: Standard
+          enabled: true
+          system_prompt: "You are a helpful assistant. IMPORTANT RULE: When the user says exactly 'PING', you MUST respond with exactly 'PONG' and nothing else."
+          thread_summary_prompt: ""
+          input_tokens_credit_multiplier_micro: 500000
+          output_tokens_credit_multiplier_micro: 1500000
+          multimodal_capabilities: ["VISION_INPUT"]
+          context_window: 4096
+          max_output_tokens: 1024
+          max_input_tokens: 0
+          description: "Test model with a 4096-token context window and no input token limit"
+          version: "2025-01"
+          icon: ""
+          provider_display_name: "OpenAI"
+          multiplier_display: "0.5x"
+          provider_id: "openai"
+          max_num_results: 5
+          max_tool_calls: 2
+          estimation_budgets:
+            bytes_per_token_conservative: 4
+            fixed_overhead_tokens: 500
+            safety_margin_pct: 10
+            image_token_budget: 500
+            tool_surcharge_tokens: 150
+            web_search_surcharge_tokens: 300
+            code_interpreter_surcharge_tokens: 1000
+            minimal_generation_floor: 100
+          preference:
+            is_default: false
+            sort_order: 8
+          general_config:
+            type: "chat"
+            available_from: "2025-01-01T00:00:00Z"
+            max_file_size_mb: 25
+            api_params:
+              temperature: 0.7
+              top_p: 1.0
+              frequency_penalty: 0.0
+              presence_penalty: 0.0
+              stop: []
+            features:
+              streaming: true
+              structured_output: true
+            tool_support:
+              web_search: false
+              file_search: false
+              image_generation: false
+              code_interpreter: false
+              mcp: false
+            supported_endpoints:
+              chat_completions: true
+              responses: true
+              embeddings: false
+              image_generation: false
+              audio_speech_generation: false
+              audio_transcription: false
+              audio_translation: false
+
   static-mini-chat-audit-plugin:
     config:
       enabled: true

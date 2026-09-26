@@ -317,3 +317,13 @@ class TestPathParameters:
     def test_non_uuid_path_parameter_400(self, chat, path):
         resp = httpx.get(API_PREFIX + path.format(chat_id=chat["id"]))
         assert_problem(resp, 400, "invalid_argument", field_reason="invalid_path_params")
+
+    @pytest.mark.parametrize("method", ["PUT", "DELETE"])
+    def test_non_uuid_message_id_in_reaction_path_400(self, chat, method):
+        """The message id of the reaction path is not a UUID (PUT with a
+        valid body, and DELETE)."""
+        body = {"reaction": "like"} if method == "PUT" else None
+        resp = httpx.request(
+            method, f"{API_PREFIX}/chats/{chat['id']}/messages/not-a-uuid/reaction", json=body,
+        )
+        assert_problem(resp, 400, "invalid_argument", field_reason="invalid_path_params")

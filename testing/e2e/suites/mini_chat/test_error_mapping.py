@@ -103,7 +103,9 @@ class TestErrorMapping:
         assert (turn["state"], turn["error_code"]) == ("error", "unexpected_tool_use"), turn
 
     def test_provider_504_is_provider_error(self, chat, mock_provider):
-        """An HTTP 504 returned by the provider is a non-429 provider error: `provider_error`.
+        """An HTTP 504 returned by the provider is a non-429 provider error:
+        `provider_error` with the sanitized `error.message` of the provider's
+        JSON body.
 
         `provider_timeout` is for the gateway's own timeout
         (test_provider_timeout_error_code).
@@ -113,7 +115,7 @@ class TestErrorMapping:
             http_error_body={"error": {"message": "Gateway Timeout", "type": "timeout"}},
         ))
         data, _ = _stream_error(chat["id"])
-        assert data["code"] == "provider_error"
+        assert data == {"code": "provider_error", "message": "Gateway Timeout"}, data
 
     @pytest.mark.timeout(30)
     def test_provider_timeout_error_code(self, chat, mock_provider):
@@ -127,22 +129,25 @@ class TestErrorMapping:
         assert turn["state"] == "error"
 
     def test_provider_unavailable_error_code(self, chat, mock_provider):
-        """An HTTP 503 from the provider is `provider_error`."""
+        """An HTTP 503 from the provider is `provider_error` with the
+        sanitized `error.message` of the provider's JSON body."""
         mock_provider.set_next_scenario(Scenario(
             http_error_status=503,
             http_error_body={"error": {"message": "Service Unavailable", "type": "server_error"}},
         ))
         data, _ = _stream_error(chat["id"])
-        assert data["code"] == "provider_error"
+        assert data == {"code": "provider_error", "message": "Service Unavailable"}, data
 
     def test_rate_limited_error_code(self, chat, mock_provider):
-        """An HTTP 429 from the provider is `rate_limited`."""
+        """An HTTP 429 from the provider is `rate_limited`. The message is the
+        gear's own text, not the provider's body; without a `Retry-After`
+        header (the mock sends none) it names no delay."""
         mock_provider.set_next_scenario(Scenario(
             http_error_status=429,
             http_error_body={"error": {"message": "Rate limited", "type": "rate_limit_error"}},
         ))
         data, _ = _stream_error(chat["id"])
-        assert data["code"] == "rate_limited"
+        assert data == {"code": "rate_limited", "message": "Rate limited by provider"}, data
 
     @pytest.mark.parametrize("source", ["response_failed", "http_500"])
     def test_error_message_no_provider_ids(self, chat, mock_provider, source):

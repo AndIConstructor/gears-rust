@@ -153,6 +153,59 @@ class TestMessages:
         resp = httpx.get(f"{API_PREFIX}/chats/{chat['id']}/messages", params={"limit": 0})
         assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_LIMIT")
 
+    def test_limit_above_100_is_clamped(self, server):
+        """`limit=500` is not rejected: the page size is clamped to 100."""
+        chat_id = _create_chat_with_messages(1)
+        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages", params={"limit": 500})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["page_info"]["limit"] == 100, body["page_info"]
+        assert len(body["items"]) == 2, body["items"]
+
+    def test_select_accepted_and_ignored(self, server):
+        """03-02: a valid `$select` is accepted and ignored: the page is the
+        one returned without it, with every message field."""
+        chat_id = _create_chat_with_messages(1)
+        url = f"{API_PREFIX}/chats/{chat_id}/messages"
+        plain = httpx.get(url)
+        assert plain.status_code == 200, plain.text
+        selected = httpx.get(url, params={"$select": "id"})
+        assert selected.status_code == 200, selected.text
+        assert selected.json() == plain.json()
+        assert all("content" in m and "role" in m for m in selected.json()["items"])
+
+    def test_invalid_select_400(self, chat):
+        """03-02: the `$select` syntax is validated: a duplicate field is 400
+        invalid_argument INVALID_SELECT."""
+        resp = httpx.get(
+            f"{API_PREFIX}/chats/{chat['id']}/messages", params={"$select": "id,id"},
+        )
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="INVALID_SELECT", resource_type=RESOURCE_ODATA,
+        )
+
+    def test_unsupported_query_option_400(self, chat):
+        """A `$` option the OData extractor does not bind (`$skip`) is 400
+        invalid_argument UNSUPPORTED_QUERY_PARAM, not silently ignored."""
+        resp = httpx.get(f"{API_PREFIX}/chats/{chat['id']}/messages", params={"$skip": "1"})
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="UNSUPPORTED_QUERY_PARAM", resource_type=RESOURCE_ODATA,
+        )
+
+    def test_filter_too_long_400(self, chat):
+        """A `$filter` longer than MAX_FILTER_LEN (8 KiB,
+        libs/toolkit/src/api/odata.rs) is 400 invalid_argument FILTER_TOO_LONG."""
+        long_filter = "role eq '" + "a" * (8 * 1024) + "'"
+        resp = httpx.get(
+            f"{API_PREFIX}/chats/{chat['id']}/messages", params={"$filter": long_filter},
+        )
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="FILTER_TOO_LONG", resource_type=RESOURCE_ODATA,
+        )
+
     def test_orderby_with_cursor_400(self, server):
         chat_id = _create_chat_with_messages(1)
         url = f"{API_PREFIX}/chats/{chat_id}/messages"

@@ -336,6 +336,10 @@ class TestSettlement:
         assert len(events) == 1, events
         event = events[0]
         assert event["terminal_state"] == "completed"
+        # A user's turn; the thread summary's usage event is "system"
+        # (test_thread_summary.py).
+        assert event["requester_type"] == "user", event
+        assert event["user_id"] == USER_A_ID, event
         # dedupe_key = {tenant_id}/{turn_id}/{request_id} (UUIDs in simple form).
         expected = "/".join(uuid.UUID(v).hex for v in (TENANT_A_ID, event["turn_id"], rid))
         assert event["dedupe_key"] == expected
