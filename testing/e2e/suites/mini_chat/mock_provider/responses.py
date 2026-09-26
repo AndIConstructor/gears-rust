@@ -160,6 +160,47 @@ def match_scenario(user_input: str) -> Scenario:
     return SCENARIOS["*"]
 
 
+SUMMARY_OUTPUT_TOKENS = 25
+
+
+def mock_summary_text(prompt: str) -> str:
+    """Summary the mock returns for a thread summary prompt.
+
+    Counts the `User:` / `Assistant:` lines of the prompt, so a test can tell
+    which messages the prompt contained.
+    """
+    lines = prompt.splitlines()
+    users = sum(1 for line in lines if line.startswith("User: "))
+    assistants = sum(1 for line in lines if line.startswith("Assistant: "))
+    return f"MOCK-SUMMARY {users} user and {assistants} assistant messages"
+
+
+def build_summary_response(body: dict, model: str, response_id: str) -> dict:
+    """Non-streaming Responses API object for a thread summary request.
+
+    The text has the `<analysis>` and `<summary>` blocks that the summary
+    worker parses (thread_summary_worker.rs, `format_summary_output`).
+    """
+    summary = mock_summary_text(extract_last_user_message(body))
+    text = f"<analysis>Mock analysis.</analysis>\n<summary>{summary}</summary>"
+    return {
+        "id": response_id,
+        "object": "response",
+        "status": "completed",
+        "model": model,
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }],
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": SUMMARY_OUTPUT_TOKENS,
+            "total_tokens": 100 + SUMMARY_OUTPUT_TOKENS,
+        },
+    }
+
+
 def extract_last_user_message(body: dict) -> str:
     """Extract the last user message content from a Responses API request body."""
     input_field = body.get("input", "")

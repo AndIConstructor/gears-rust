@@ -10,7 +10,9 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .responses import Scenario, extract_last_user_message, match_scenario
+from .responses import (
+    Scenario, build_summary_response, extract_last_user_message, match_scenario,
+)
 from .sse_builder import build_sse_stream
 
 _response_counter = 0
@@ -97,6 +99,11 @@ class _Handler(BaseHTTPRequestHandler):
 
         server: MockProviderServer = self.server  # type: ignore[assignment]
         server.capture_request(body)
+        if body.get("stream") is False:
+            # Non-streaming requests come from background work (thread
+            # summary), so they never consume a test's queued scenario.
+            self._json_response(200, build_summary_response(body, model, response_id))
+            return
         try:
             scenario = server._override_queue.get_nowait()
         except queue.Empty:

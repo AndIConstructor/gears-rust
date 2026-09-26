@@ -210,7 +210,9 @@ gears:
         timeout_secs: 90
       thread_summary_worker:
         enabled: true
-        summary_model_id: ""
+        # A catalog model: the built-in fallback (gpt-4.1-mini) is not in this
+        # catalog, so summaries could not be generated with it.
+        summary_model_id: "gpt-5-mini"
         compression_threshold_pct: 60
         summary_system_prompt: "You are a conversation summarizer. Given a conversation (and optionally an existing summary), produce a detailed structured summary. Respond with an <analysis> block (your reasoning) followed by a <summary> block (the final summary). Only the <summary> content will be stored. Do not invent information not present in the conversation."
       # S2S credentials for obtaining SecurityContext
@@ -595,6 +597,73 @@ gears:
           preference:
             is_default: false
             sort_order: 6
+          general_config:
+            type: "chat"
+            available_from: "2025-01-01T00:00:00Z"
+            max_file_size_mb: 25
+            api_params:
+              temperature: 0.7
+              top_p: 1.0
+              frequency_penalty: 0.0
+              presence_penalty: 0.0
+              stop: []
+            features:
+              streaming: true
+              structured_output: true
+            tool_support:
+              web_search: false
+              file_search: false
+              image_generation: false
+              code_interpreter: false
+              mcp: false
+            supported_endpoints:
+              chat_completions: true
+              responses: true
+              embeddings: false
+              image_generation: false
+              audio_speech_generation: false
+              audio_transcription: false
+              audio_translation: false
+
+        # Small context window, so the thread summary threshold
+        # (compression_threshold_pct of context_window - max_output_tokens) is
+        # reached after two short turns and INPUT_TOO_LONG /
+        # CONTEXT_BUDGET_EXCEEDED are reachable with small messages
+        # (test_thread_summary.py, test_preflight_limits.py). Last in the
+        # catalog for the same reason as gpt-5-bare.
+        - id: "gpt-4.1-mini-tiny-ctx"
+          provider_model_id: "gpt-4.1-mini"
+          display_name: "GPT-4.1 Mini (tiny context)"
+          tier: Standard
+          enabled: true
+          system_prompt: "You are a helpful assistant. IMPORTANT RULE: When the user says exactly 'PING', you MUST respond with exactly 'PONG' and nothing else."
+          thread_summary_prompt: ""
+          input_tokens_credit_multiplier_micro: 500000
+          output_tokens_credit_multiplier_micro: 1500000
+          multimodal_capabilities: ["VISION_INPUT"]
+          context_window: 4096
+          max_output_tokens: 1024
+          max_input_tokens: 3000
+          description: "Test model with a 4096-token context window"
+          version: "2025-01"
+          icon: ""
+          provider_display_name: "OpenAI"
+          multiplier_display: "0.5x"
+          provider_id: "openai"
+          max_num_results: 5
+          max_tool_calls: 2
+          estimation_budgets:
+            bytes_per_token_conservative: 4
+            fixed_overhead_tokens: 500
+            safety_margin_pct: 10
+            image_token_budget: 500
+            tool_surcharge_tokens: 150
+            web_search_surcharge_tokens: 300
+            code_interpreter_surcharge_tokens: 1000
+            minimal_generation_floor: 100
+          preference:
+            is_default: false
+            sort_order: 7
           general_config:
             type: "chat"
             available_from: "2025-01-01T00:00:00Z"
