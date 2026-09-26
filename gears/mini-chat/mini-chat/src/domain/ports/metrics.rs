@@ -124,7 +124,7 @@ pub trait MiniChatMetricsPort: Send + Sync {
     fn record_time_to_abort_ms(&self, trigger: &str, ms: f64);
 
     /// `{prefix}_streams_aborted_total` — counter
-    /// `trigger`: `client_disconnect`, `pod_crash`, `orphan_timeout`, `internal_abort`
+    /// `trigger`: `client_disconnect`, `orphan_timeout`, `internal_abort`
     fn record_streams_aborted(&self, trigger: &str);
 
     // ── P1: Attachment Upload (3 metrics) ──────────────────────────────
@@ -155,7 +155,8 @@ pub trait MiniChatMetricsPort: Send + Sync {
     fn record_cleanup_failed(&self, resource_type: &str);
 
     /// `{prefix}_cleanup_retry` — counter
-    /// `resource_type`: `file`, `vector_store`; `reason`: free-form
+    /// `resource_type`: `file`, `vector_store`; `reason`: `provider_error`,
+    /// `vector_store_delete_failed` (see `metric_labels::cleanup_retry_reason`)
     fn record_cleanup_retry(&self, resource_type: &str, reason: &str);
 
     /// `{prefix}_cleanup_backlog` — gauge

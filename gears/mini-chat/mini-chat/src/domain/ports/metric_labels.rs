@@ -90,6 +90,15 @@ pub mod resource_type {
     pub const VECTOR_STORE: &str = "vector_store";
 }
 
+/// Cleanup retry reason labels (`reason` label of `cleanup_retry`).
+/// Bounded values only; the error text goes to the log.
+pub mod cleanup_retry_reason {
+    /// The provider file delete failed.
+    pub const PROVIDER_ERROR: &str = "provider_error";
+    /// The provider vector store delete failed.
+    pub const VECTOR_STORE_DELETE_FAILED: &str = "vector_store_delete_failed";
+}
+
 /// Cleanup backlog state labels (`state` label).
 pub mod cleanup_state {
     #[allow(dead_code)] // declared ahead of call site (metrics infra uses string literals)

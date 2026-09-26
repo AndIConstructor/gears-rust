@@ -293,8 +293,10 @@ impl AttachmentCleanupHandler {
                 MessageResult::Ok
             }
             Ok(CleanupOutcome::StillPending) => {
-                self.metrics
-                    .record_cleanup_retry(metric_labels::resource_type::FILE, error);
+                self.metrics.record_cleanup_retry(
+                    metric_labels::resource_type::FILE,
+                    metric_labels::cleanup_retry_reason::PROVIDER_ERROR,
+                );
                 MessageResult::Retry
             }
             Err(e) => {
@@ -452,7 +454,7 @@ impl LeasedMessageHandler for ChatCleanupHandler {
                         Ok(crate::domain::repos::CleanupOutcome::StillPending) => {
                             self.metrics.record_cleanup_retry(
                                 metric_labels::resource_type::FILE,
-                                &error_str,
+                                metric_labels::cleanup_retry_reason::PROVIDER_ERROR,
                             );
                             any_still_pending = true;
                         }
@@ -618,10 +620,11 @@ impl LeasedMessageHandler for ChatCleanupHandler {
                     .delete_vector_store(vs_ctx, &vs_row.provider, vs_id)
                     .await
                 {
-                    let reason = format!("vector store delete failed: {e}");
                     warn!(chat_id = %chat_id, vector_store_id = vs_id, error = %e, "chat cleanup: vector store delete failed");
-                    self.metrics
-                        .record_cleanup_retry(metric_labels::resource_type::VECTOR_STORE, &reason);
+                    self.metrics.record_cleanup_retry(
+                        metric_labels::resource_type::VECTOR_STORE,
+                        metric_labels::cleanup_retry_reason::VECTOR_STORE_DELETE_FAILED,
+                    );
                     return MessageResult::Retry;
                 }
 
