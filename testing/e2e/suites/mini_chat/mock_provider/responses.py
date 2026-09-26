@@ -34,6 +34,9 @@ class Scenario:
     # Seconds to wait after the response headers and before the first SSE
     # event. Keeps the stream idle so the gear sends `ping` keepalives.
     initial_delay: float = 0
+    # Seconds to wait before sending the response status line and headers.
+    # Longer than OAGW `proxy_timeout_secs` makes the gateway time out.
+    header_delay: float = 0
     # HTTP-level error: return this status code + JSON body instead of SSE stream.
     # When set, no SSE is produced — the mock returns a plain JSON error response.
     http_error_status: int | None = None

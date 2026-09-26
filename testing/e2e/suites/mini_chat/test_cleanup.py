@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import io
 import json
+import time
 
 import httpx
+import pytest
 
 from .conftest import (
     API_PREFIX,
+    DEFAULT_MODEL,
+    STANDARD_MODEL,
     assert_problem,
     poll_until,
     query_db,
@@ -66,6 +70,173 @@ def chat_cleanup_payloads(chat_id: str) -> list[dict]:
         p for p in payloads
         if p.get("chat_id") == chat_id and p.get("reason") == "chat_soft_delete"
     ]
+
+
+# ---------------------------------------------------------------------------
+# Provider-side cleanup (mock provider, offline only)
+# ---------------------------------------------------------------------------
+
+def _require_offline(request):
+    if request.config.getoption("mode") == "online":
+        pytest.skip("inspects the mock provider (offline mode)")
+
+
+def _wait_for(predicate, what: str, timeout: float = 20.0, interval: float = 0.2):
+    """Poll `predicate()` until it returns a truthy value; return that value."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out after {timeout}s waiting for {what}")
+        time.sleep(interval)
+
+
+def _cleanup_status(attachment_id: str) -> str | None:
+    rows = query_db("SELECT cleanup_status FROM attachments WHERE id = ?", (attachment_id,))
+    assert len(rows) == 1, rows
+    return rows[0]["cleanup_status"]
+
+
+def _file_deletes(mock_provider) -> list[str]:
+    """Paths of DELETE /files/{id} requests (not vector-store file removals)."""
+    return [
+        p for m, p in mock_provider.get_request_paths()
+        if m == "DELETE" and "/files/" in p and "/vector_stores/" not in p
+    ]
+
+
+def _vector_store_rows(chat_id: str) -> list[dict]:
+    return query_db(
+        "SELECT vector_store_id FROM chat_vector_stores WHERE chat_id = ?", (chat_id,),
+    )
+
+
+
+def _chat_with_ready_docs(model: str, n: int) -> tuple[str, list[str]]:
+    chat_id = create_chat(model)["id"]
+    att_ids = []
+    for i in range(n):
+        resp = upload_file(chat_id, f"doc {i}".encode(), f"doc{i}.txt")
+        assert resp.status_code == 201, resp.text
+        att_ids.append(resp.json()["id"])
+        poll_attachment_ready(chat_id, att_ids[-1])
+    return chat_id, att_ids
+
+
+def _wait_cleanup_terminal(att_ids: list[str]) -> dict[str, str]:
+    """Wait until every attachment's cleanup_status is terminal; return them."""
+    def statuses():
+        st = {a: _cleanup_status(a) for a in att_ids}
+        return st if all(v in ("done", "failed") for v in st.values()) else None
+    return _wait_for(statuses, "terminal cleanup_status of every attachment")
+
+
+def check_chat_cleanup_404_is_success(mock_provider, model: str) -> None:
+    chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
+
+    mock_provider.set_fault("DELETE", "/files/", 404)
+    assert delete_chat(chat_id).status_code == 204
+
+    assert _wait_cleanup_terminal([att_id]) == {att_id: "done"}
+    row = query_db("SELECT cleanup_attempts FROM attachments WHERE id = ?", (att_id,))[0]
+    assert row["cleanup_attempts"] == 0, row
+    # The one delete that was made got the 404.
+    assert len(_file_deletes(mock_provider)) == 1, mock_provider.get_request_paths()
+
+
+def check_attachment_cleanup_404_is_success(mock_provider, model: str) -> None:
+    chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
+
+    mock_provider.set_fault("DELETE", "/files/", 404)
+    resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+    assert resp.status_code == 204
+
+    _wait_for(lambda: _file_deletes(mock_provider), "the provider file delete", timeout=10.0)
+    # The handler marks the row right after the provider answered.
+    _wait_for(
+        lambda: _cleanup_status(att_id) in ("done", "failed"), "terminal cleanup_status",
+        timeout=5.0,
+    )
+    assert _cleanup_status(att_id) == "done"
+    assert len(_file_deletes(mock_provider)) == 1, mock_provider.get_request_paths()
+
+
+def check_vector_store_deleted_after_files(mock_provider, model: str) -> None:
+    chat_id, att_ids = _chat_with_ready_docs(model, 2)
+    vs_rows = _vector_store_rows(chat_id)
+    assert len(vs_rows) == 1 and vs_rows[0]["vector_store_id"], vs_rows
+    vs_id = vs_rows[0]["vector_store_id"]
+
+    mock_provider.clear_captured_requests()
+    assert delete_chat(chat_id).status_code == 204
+    assert set(_wait_cleanup_terminal(att_ids).values()) == {"done"}
+    _wait_for(lambda: not _vector_store_rows(chat_id), "chat_vector_stores row removal")
+
+    paths = [(m, p.split("?")[0]) for m, p in mock_provider.get_request_paths()]
+    file_deletes = [
+        i for i, (m, p) in enumerate(paths)
+        if m == "DELETE" and "/files/" in p and "/vector_stores/" not in p
+    ]
+    vs_deletes = [
+        i for i, (m, p) in enumerate(paths)
+        if m == "DELETE" and p.rstrip("/").endswith(f"/vector_stores/{vs_id}")
+    ]
+    assert len(file_deletes) == 2, paths
+    assert len(vs_deletes) == 1, paths
+    assert max(file_deletes) < vs_deletes[0], paths
+
+
+# Provider-side cleanup for both storage backends (openai, azure).
+
+class TestProviderCleanupOpenAI:
+    """Provider-side cleanup of an OpenAI-backed chat (storage_backend = provider id)."""
+
+    @pytest.fixture(autouse=True)
+    def _offline_only(self, request):
+        _require_offline(request)
+
+    @pytest.mark.timeout(40)
+    def test_chat_cleanup_provider_404_is_success(self, mock_provider):
+        """19-03: the provider answers 404 to the file delete of a deleted chat:
+        the attachment cleanup ends in `done`, not `failed` or retrying."""
+        check_chat_cleanup_404_is_success(mock_provider, STANDARD_MODEL)
+
+    @pytest.mark.timeout(40)
+    def test_vector_store_deleted_after_files(self, mock_provider):
+        """19-04: chat cleanup deletes every provider file before the chat
+        vector store, then removes the chat_vector_stores row."""
+        check_vector_store_deleted_after_files(mock_provider, STANDARD_MODEL)
+
+    @pytest.mark.timeout(40)
+    def test_attachment_cleanup_provider_404_is_success(self, mock_provider):
+        """19-03: the provider answers 404 to the file delete of a deleted
+        attachment: the attachment cleanup ends in `done`."""
+        check_attachment_cleanup_404_is_success(mock_provider, STANDARD_MODEL)
+
+
+class TestProviderCleanupAzure:
+    """The same scenarios for an Azure-backed chat (storage_backend "azure")."""
+
+    @pytest.fixture(autouse=True)
+    def _offline_only(self, request):
+        _require_offline(request)
+
+    @pytest.mark.timeout(40)
+    def test_chat_cleanup_provider_404_is_success(self, mock_provider):
+        """19-03 (azure): see TestProviderCleanupOpenAI."""
+        check_chat_cleanup_404_is_success(mock_provider, DEFAULT_MODEL)
+
+    @pytest.mark.timeout(40)
+    def test_vector_store_deleted_after_files(self, mock_provider):
+        """19-04 (azure): see TestProviderCleanupOpenAI."""
+        check_vector_store_deleted_after_files(mock_provider, DEFAULT_MODEL)
+
+    @pytest.mark.timeout(40)
+    def test_attachment_cleanup_provider_404_is_success(self, mock_provider):
+        """19-03 (azure): see TestProviderCleanupOpenAI."""
+        check_attachment_cleanup_404_is_success(mock_provider, DEFAULT_MODEL)
 
 
 # ---------------------------------------------------------------------------

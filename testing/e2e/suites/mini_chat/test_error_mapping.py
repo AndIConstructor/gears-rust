@@ -61,8 +61,8 @@ class TestErrorMapping:
     def test_provider_504_is_provider_error(self, chat, mock_provider):
         """An HTTP 504 returned by the provider is a non-429 provider error: `provider_error`.
 
-        `provider_timeout` is for the gear's own request timeout (OAGW
-        `proxy_timeout_secs`, 30 s in this rig), which is too slow to exercise here.
+        `provider_timeout` is for the gateway's own timeout
+        (test_provider_timeout_error_code).
         """
         mock_provider.set_next_scenario(Scenario(
             http_error_status=504,
@@ -70,6 +70,17 @@ class TestErrorMapping:
         ))
         data, _ = _stream_error(chat["id"])
         assert data["code"] == "provider_error"
+
+    @pytest.mark.timeout(30)
+    def test_provider_timeout_error_code(self, chat, mock_provider):
+        """17-03: the provider sends no response headers within OAGW
+        `proxy_timeout_secs` (8 s in base.yaml): SSE error `provider_timeout`;
+        the turn fails."""
+        mock_provider.set_next_scenario(Scenario(header_delay=10))
+        data, rid = _stream_error(chat["id"])
+        assert data["code"] == "provider_timeout", data
+        turn = poll_turn(chat["id"], rid)
+        assert turn["state"] == "error"
 
     def test_provider_unavailable_error_code(self, chat, mock_provider):
         """An HTTP 503 from the provider is `provider_error`."""

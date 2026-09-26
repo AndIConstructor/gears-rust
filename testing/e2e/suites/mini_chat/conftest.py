@@ -57,10 +57,23 @@ QUOTA_USER_3_ID = "77777777-6a88-4768-9dfc-6bcd5187d9ed"
 # Catalog entry with `enabled: false` (config/base.yaml).
 DISABLED_MODEL = "gpt-4o-retired"
 
+# Enabled catalog entry without a system prompt and without tools
+# (config/base.yaml).
+BARE_MODEL = "gpt-5-bare"
+
 # System prompt of every catalog model (config/base.yaml).
 CATALOG_SYSTEM_PROMPT = (
     "You are a helpful assistant. IMPORTANT RULE: When the user says exactly "
     "'PING', you MUST respond with exactly 'PONG' and nothing else."
+)
+
+# ContextConfig default `web_search_guard` (gears/mini-chat/mini-chat/src/config.rs),
+# appended to the instructions when web search is enabled; not overridden in
+# config/base.yaml.
+WEB_SEARCH_GUARD = (
+    "Use web_search only if the answer cannot be obtained from the provided "
+    "context or your training data. Never use it for general knowledge "
+    "questions. At most one web_search call per request."
 )
 
 # Marker header: a request carrying it is sent without any Authorization
@@ -425,6 +438,26 @@ def open_stream(chat_id: str, content: str, *, request_id: str | None = None,
     return OpenStream(
         f"{API_PREFIX}/chats/{chat_id}/messages:stream", body, token=token,
     )
+
+
+def provider_input(body: dict) -> list[tuple[str, str]]:
+    """(role, text) of each message in a captured Responses API `input`."""
+    items = body.get("input") or []
+    if isinstance(items, str):
+        return [("user", items)]
+    out = []
+    for item in items:
+        if not isinstance(item, dict) or "role" not in item:
+            continue
+        content = item.get("content", "")
+        if isinstance(content, list):
+            text = "".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+        else:
+            text = str(content)
+        out.append((item["role"], text))
+    return out
 
 
 def list_messages(chat_id: str, *, token: str = TOKEN_USER_A) -> list[dict]:

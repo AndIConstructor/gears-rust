@@ -34,11 +34,23 @@ class _Handler(BaseHTTPRequestHandler):
         server: MockProviderServer = self.server  # type: ignore[assignment]
         server.log_request_path(self.command, self.path)
 
+    def _inject_fault(self) -> bool:
+        """Answer with a fault registered via `set_fault`; True if one matched."""
+        server: MockProviderServer = self.server  # type: ignore[assignment]
+        fault = server.take_fault(self.command, self.path)
+        if fault is None:
+            return False
+        status, body = fault
+        self._json_response(status, body)
+        return True
+
     def do_POST(self):
         self._log_path()
         content_length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
 
+        if self._inject_fault():
+            return
         if "responses" in self.path:
             self._handle_responses(raw)
         elif "/files" in self.path and "/content" not in self.path:
@@ -50,6 +62,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._log_path()
+        if self._inject_fault():
+            return
         if "/files/" in self.path and "/content" in self.path:
             self._handle_file_content()
         elif "/files/" in self.path:
@@ -61,6 +75,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self._log_path()
+        if self._inject_fault():
+            return
         if "/files/" in self.path:
             self._handle_file_delete()
         elif "/vector_stores/" in self.path:
@@ -86,6 +102,11 @@ class _Handler(BaseHTTPRequestHandler):
         except queue.Empty:
             user_input = extract_last_user_message(body)
             scenario = match_scenario(user_input)
+
+        if scenario.header_delay:
+            # Silent before the status line: trips the gateway's upstream
+            # read timeout (OAGW `proxy_timeout_secs`).
+            time.sleep(scenario.header_delay)
 
         # HTTP-level error — return JSON instead of SSE
         if scenario.http_error_status is not None:
@@ -234,6 +255,9 @@ class MockProviderServer(ThreadingHTTPServer):
         self._captured_requests: list[dict] = []
         self._request_paths: list[tuple[str, str]] = []
         self._capture_lock = threading.Lock()
+        # One-shot HTTP faults: [method, path_contains, status, body, remaining].
+        self._faults: list[list] = []
+        self._fault_lock = threading.Lock()
         # Guards _files and _vector_stores: handler threads outlive per-test
         # fixtures, and the in-flight delete path is not atomic.
         self._state_lock = threading.Lock()
@@ -273,8 +297,33 @@ class MockProviderServer(ThreadingHTTPServer):
             self._captured_requests.clear()
             self._request_paths.clear()
 
+    def set_fault(
+        self, method: str, path_contains: str, status: int,
+        body: dict | None = None, count: int = 1,
+    ) -> None:
+        """Answer the next `count` `method` requests whose path contains
+        `path_contains` with `status` and a JSON `body`, before normal handling."""
+        if body is None:
+            body = {"error": {"message": f"Mock fault {status}", "type": "mock_fault"}}
+        with self._fault_lock:
+            self._faults.append([method.upper(), path_contains, status, body, count])
+
+    def take_fault(self, method: str, path: str) -> tuple[int, dict] | None:
+        """Consume one matching fault; return (status, body) or None."""
+        with self._fault_lock:
+            for fault in self._faults:
+                f_method, f_path, status, body, _ = fault
+                if f_method == method and f_path in path:
+                    fault[4] -= 1
+                    if fault[4] <= 0:
+                        self._faults.remove(fault)
+                    return status, body
+        return None
+
     def clear_override_scenarios(self) -> None:
-        """Drop any queued per-request overrides left by previous tests."""
+        """Drop queued per-request overrides and faults left by previous tests."""
+        with self._fault_lock:
+            self._faults.clear()
         while True:
             try:
                 self._override_queue.get_nowait()
@@ -309,6 +358,10 @@ class _DummyMockProvider:
     port = None
 
     def set_next_scenario(self, scenario: Scenario) -> None:
+        pass
+
+    def set_fault(self, method: str, path_contains: str, status: int,
+                  body: dict | None = None, count: int = 1) -> None:
         pass
 
     def get_last_request(self) -> dict | None:

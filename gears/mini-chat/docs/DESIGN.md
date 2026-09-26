@@ -2117,7 +2117,7 @@ Soft-delete rules:
 | filename | VARCHAR(255) | Original filename |
 | content_type | VARCHAR(128) | MIME type |
 | size_bytes | BIGINT | File size |
-| storage_backend | VARCHAR(32) | Internal storage routing label (`providers.<id>.storage_backend`, or the provider ID; column default `azure`). Used by cleanup to pick the provider API. Not exposed in public API. Does NOT store URLs. |
+| storage_backend | VARCHAR(32) | Internal storage routing label (`providers.<id>.storage_backend`, or the provider ID; column default `azure`). Used by cleanup to pick the provider API: the storage dispatchers map the label back to the provider ID. Not exposed in public API. Does NOT store URLs. |
 | provider_file_id | VARCHAR(128) | LLM provider file ID - OpenAI `file-*` or Azure OpenAI `assistant-*` (nullable until upload completes). Internal-only; MUST NOT be exposed via any API response. |
 | status | VARCHAR(16) | `pending`, `uploaded`, `ready`, `failed` (`uploaded` = provider upload done, indexing not finished) |
 | attachment_kind | VARCHAR(16) | `document` or `image`. Derived from `content_type` on INSERT: MIME types `image/png`, `image/jpeg`, `image/webp`, `image/gif` -> `image`; all others -> `document`. Stored explicitly for efficient query filtering. |
@@ -2129,7 +2129,7 @@ Soft-delete rules:
 | img_thumbnail_height | INTEGER | Thumbnail height in pixels (nullable) |
 | summary_model | VARCHAR(1024) | Reserved; never populated |
 | summary_updated_at | TIMESTAMPTZ | Reserved; never populated |
-| cleanup_status | VARCHAR(16) | `pending`, `done`, `failed` (nullable). `pending` means provider cleanup is still outstanding for the soft-deleted chat. For chat-level provider purge semantics, only `done` counts as cleanup complete; `failed` remains unresolved cleanup debt. |
+| cleanup_status | VARCHAR(16) | `pending`, `done`, `failed` (nullable). Set to `pending` when the attachment is deleted directly or its chat is deleted; `pending` means provider cleanup is still outstanding. For chat-level provider purge semantics, only `done` counts as cleanup complete; `failed` remains unresolved cleanup debt. |
 | cleanup_attempts | INTEGER | Cleanup retry attempts (default 0) |
 | last_cleanup_error | TEXT | Last cleanup error (nullable) |
 | cleanup_updated_at | TIMESTAMPTZ | When cleanup state was last updated (nullable) |

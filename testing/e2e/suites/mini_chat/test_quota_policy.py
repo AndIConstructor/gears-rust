@@ -18,6 +18,7 @@ unit tests, not here.
 
 from __future__ import annotations
 
+import io
 import uuid
 
 import httpx
@@ -47,12 +48,14 @@ from .conftest import (
     query_db,
     stream_message,
 )
+from .test_code_interpreter import XLSX_CONTENT_TYPE, _make_minimal_xlsx
 
 TOTAL_MONTHLY_LIMIT = 1_000_000_000
 PREMIUM_MONTHLY_LIMIT = 500_000_000
 TOTAL_DAILY_LIMIT = 100_000_000
 PREMIUM_DAILY_LIMIT = 50_000_000
 WEB_SEARCH_DAILY_QUOTA = 75  # QuotaConfig default (config.rs), not overridden in base.yaml
+CODE_INTERPRETER_DAILY_QUOTA = 50  # QuotaConfig default (config.rs), not overridden in base.yaml
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -196,6 +199,37 @@ class TestQuotaExhaustion:
         assert roles == [("user", rid), ("assistant", rid), ("user", new_rid), ("assistant", new_rid)]
 
 
+class TestPeriodsCheckedSeparately:
+    """14-04: the daily and the monthly period are each enforced on their own."""
+
+    @pytest.mark.parametrize(
+        ("user_fixture", "exhausted", "limit", "other"),
+        [
+            ("user1", "daily", TOTAL_DAILY_LIMIT, "monthly"),
+            ("user2", "monthly", TOTAL_MONTHLY_LIMIT, "daily"),
+        ],
+    )
+    def test_single_exhausted_period_rejects(
+        self, request, mock_provider, user_fixture, exhausted, limit, other,
+    ):
+        """14-04: only the `total` bucket of one period is at its limit → 429
+        `tokens`; the other period is untouched and not exhausted."""
+        user = request.getfixturevalue(user_fixture)
+        chat_id = user.create_chat(STANDARD_MODEL)
+        user.seed(bucket="total", period_type=exhausted, spent_credits_micro=limit)
+
+        status = get_quota_status(token=user.token)
+        assert find_period(status, "total", exhausted)["exhausted"] is True
+        untouched = find_period(status, "total", other)
+        assert (untouched["used_credits_micro"], untouched["exhausted"]) == (0, False)
+
+        mock_provider.clear_captured_requests()
+        resp = user.post_stream(chat_id, {"content": "Blocked?", "request_id": str(uuid.uuid4())})
+        assert_problem(resp, 429, "resource_exhausted", violation_subject="tokens")
+        assert mock_provider.get_captured_requests() == []
+        assert_no_reserves(user.user_id)
+
+
 class TestDowngrade:
     """Premium bucket exhausted, or chat model disabled: the turn runs on a standard model."""
 
@@ -264,6 +298,38 @@ class TestWebSearchDailyQuota:
         })
         assert resp.status_code == 200, resp.text
         expect_done(parse_sse(resp.text))
+
+
+class TestCodeInterpreterDailyQuota:
+    """The daily code_interpreter quota only applies to chats with code-interpreter files."""
+
+    def test_code_interpreter_quota_only_blocks_ci_chats(self, user3, mock_provider):
+        """14-20: code_interpreter_calls at the daily quota → a message in a chat
+        with a ready XLSX is 429 `code_interpreter` (provider not called); a
+        message in a chat without one is allowed."""
+        ci_chat = user3.create_chat(STANDARD_MODEL)  # code_interpreter-capable model
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{ci_chat}/attachments",
+            files={"file": ("data.xlsx", io.BytesIO(_make_minimal_xlsx()), XLSX_CONTENT_TYPE)},
+            headers=user3.headers, timeout=60,
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["status"] == "ready", resp.json()
+        user3.seed(
+            bucket="total", period_type="daily",
+            code_interpreter_calls=CODE_INTERPRETER_DAILY_QUOTA,
+        )
+
+        mock_provider.clear_captured_requests()
+        resp = user3.post_stream(ci_chat, {
+            "content": "CODEINTERP: analyze", "request_id": str(uuid.uuid4()),
+        })
+        assert_problem(resp, 429, "resource_exhausted", violation_subject="code_interpreter")
+        assert mock_provider.get_captured_requests() == []
+        assert_no_reserves(user3.user_id)
+
+        plain_chat = user3.create_chat(STANDARD_MODEL)
+        user3.complete_turn(plain_chat, "No files here.")
 
 
 class TestQuotaStatusFlags:

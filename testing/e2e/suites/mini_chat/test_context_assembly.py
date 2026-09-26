@@ -11,9 +11,40 @@ import uuid
 
 import httpx
 
-from .conftest import API_PREFIX, CATALOG_SYSTEM_PROMPT, parse_sse, expect_done
+from .conftest import (
+    API_PREFIX,
+    BARE_MODEL,
+    CATALOG_SYSTEM_PROMPT,
+    DEFAULT_MODEL,
+    WEB_SEARCH_GUARD,
+    delta_text,
+    expect_done,
+    list_messages,
+    open_stream,
+    parse_sse,
+    poll_turn,
+    provider_input,
+    slow_scenario,
+    stream_message,
+)
 
 import pytest
+
+
+def _require_offline(request):
+    if request.config.getoption("mode") == "online":
+        pytest.skip("inspects the mock provider's captured request")
+
+
+def _send_and_capture(mock_provider, chat_id: str, content: str, **extra) -> dict:
+    """Complete one turn; return the provider request body it produced."""
+    mock_provider.clear_captured_requests()
+    status, events, raw = stream_message(chat_id, content, **extra)
+    assert status == 200, raw
+    expect_done(events)
+    captured = mock_provider.get_captured_requests()
+    assert len(captured) == 1, f"expected one provider request, got {len(captured)}"
+    return captured[0]
 
 
 @pytest.mark.multi_provider
@@ -51,6 +82,87 @@ class TestSystemPrompt:
         assert "PONG" in text.upper(), (
             f"System prompt instructs model to reply 'PONG' to 'PING'. Got: {text!r}"
         )
+
+
+class TestSystemInstructions:
+    """Tool guards and a missing system prompt in the provider `instructions`."""
+
+    def test_web_search_guard_appended(self, request, chat_with_model, mock_provider):
+        """16-14: with web search enabled the `instructions` are the catalog
+        prompt followed by the web_search guard; without it, the guard is absent."""
+        _require_offline(request)
+        chat_id = chat_with_model(DEFAULT_MODEL)["id"]  # web_search-capable model
+
+        with_ws = _send_and_capture(
+            mock_provider, chat_id, "SEARCH: weather", web_search={"enabled": True},
+        )["instructions"]
+        assert with_ws.startswith(CATALOG_SYSTEM_PROMPT), with_ws
+        assert with_ws.endswith(WEB_SEARCH_GUARD), with_ws
+
+        without_ws = _send_and_capture(mock_provider, chat_id, "No search.")["instructions"]
+        assert without_ws == CATALOG_SYSTEM_PROMPT
+
+    def test_no_system_prompt_no_instructions(self, request, chat_with_model, mock_provider):
+        """16-15: a model without a system prompt (and no tools) sends no `instructions`."""
+        _require_offline(request)
+        chat_id = chat_with_model(BARE_MODEL)["id"]
+        body = _send_and_capture(mock_provider, chat_id, "Hello")
+        assert "instructions" not in body, body.get("instructions")
+
+
+class TestCancelledTurnContext:
+    """A cancelled turn contributes to the next context only through its persisted text."""
+
+    @pytest.mark.timeout(30)
+    def test_cancelled_partial_answer_in_next_request(self, request, chat, mock_provider):
+        """16-12: the partial answer persisted at the cancel point is sent to the
+        provider as the assistant message of that turn."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        rid = str(uuid.uuid4())
+        mock_provider.set_next_scenario(slow_scenario(20, slow=0.3, prefix="part"))
+
+        with open_stream(chat_id, "Write a long essay.", request_id=rid) as s:
+            seen = []
+            s.read_until(lambda e: e.event == "delta" and (seen.append(e) or len(seen) == 3))
+            received = delta_text(s.events)
+        assert poll_turn(chat_id, rid)["state"] == "cancelled"
+
+        partial = [
+            m["content"] for m in list_messages(chat_id)
+            if m["role"] == "assistant" and m["request_id"] == rid
+        ]
+        assert len(partial) == 1, list_messages(chat_id)
+        # The gear may have read a few more deltas than the client before the cancel.
+        assert partial[0].startswith(received), (partial[0], received)
+
+        body = _send_and_capture(mock_provider, chat_id, "Continue.")
+        assert provider_input(body) == [
+            ("user", "Write a long essay."),
+            ("assistant", partial[0]),
+            ("user", "Continue."),
+        ]
+
+    @pytest.mark.timeout(30)
+    def test_empty_cancelled_turn_adds_no_message(self, request, chat, mock_provider):
+        """16-13: a turn cancelled before the first delta leaves no assistant
+        message, so the next provider request has none for it."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        rid = str(uuid.uuid4())
+        scenario = slow_scenario(3, slow=0.5)
+        scenario.initial_delay = 3.0  # provider silent after the headers
+        mock_provider.set_next_scenario(scenario)
+
+        with open_stream(chat_id, "Write slowly.", request_id=rid) as s:
+            s.read_until_started()
+        assert poll_turn(chat_id, rid)["state"] == "cancelled"
+
+        body = _send_and_capture(mock_provider, chat_id, "Are you there?")
+        assert provider_input(body) == [
+            ("user", "Write slowly."),
+            ("user", "Are you there?"),
+        ]
 
 
 @pytest.mark.multi_provider

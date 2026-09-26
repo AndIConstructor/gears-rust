@@ -12,7 +12,21 @@ import zlib
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, DEFAULT_MODEL, STANDARD_MODEL, SSEEvent, assert_problem, expect_done, expect_stream_started, parse_sse, poll_until, stream_message
+from .conftest import (
+    API_PREFIX,
+    DEFAULT_MODEL,
+    STANDARD_MODEL,
+    SSEEvent,
+    assert_problem,
+    exec_db,
+    expect_done,
+    expect_stream_started,
+    parse_sse,
+    poll_until,
+    query_db,
+    stream_message,
+    uuid_from_db,
+)
 
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 
@@ -870,3 +884,226 @@ class TestUploadStreamingPipeline:
         done = expect_done(events)
         assert done is not None, "Expected done event"
         assert done.data.get("usage", {}).get("input_tokens", 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Helpers for limit and failure scenarios
+# ---------------------------------------------------------------------------
+
+# RagConfig defaults (gears/mini-chat/mini-chat/src/config.rs), not overridden
+# in config/base.yaml.
+MAX_IMAGES_PER_MESSAGE = 4
+MAX_DOCUMENTS_PER_CHAT = 50
+MAX_TOTAL_UPLOAD_BYTES_PER_CHAT = 100 * 1_048_576
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def _require_offline(request):
+    if request.config.getoption("mode") == "online":
+        pytest.skip("uses the mock provider or seeds the DB (offline mode)")
+
+
+def _upload(chat_id: str, filename: str, payload: bytes, content_type: str) -> httpx.Response:
+    return httpx.post(
+        f"{API_PREFIX}/chats/{chat_id}/attachments",
+        files={"file": (filename, io.BytesIO(payload), content_type)},
+        timeout=60,
+    )
+
+
+def _upload_ready(chat_id: str, filename: str, payload: bytes, content_type: str) -> str:
+    """Upload a file and wait until it is ready; return the attachment id."""
+    resp = _upload(chat_id, filename, payload, content_type)
+    assert resp.status_code == 201, f"upload failed: {resp.status_code} {resp.text}"
+    att_id = resp.json()["id"]
+    if resp.json()["status"] != "ready":
+        resp = poll_until(
+            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
+            until=lambda r: r.json()["status"] in ("ready", "failed"),
+        )
+        assert resp.json()["status"] == "ready", resp.json()
+    return att_id
+
+
+def _clone_attachment(src_id: str, *, size_bytes: int | None = None) -> str:
+    """Insert a copy of attachment row `src_id` under a new id; return the id."""
+    cols = [r["name"] for r in query_db("PRAGMA table_info(attachments)")]
+    exprs = []
+    params: list = []
+    for col in cols:
+        if col == "id":
+            exprs.append("?")
+            new_id = str(uuid.uuid4())
+            params.append(new_id)
+        elif col == "size_bytes" and size_bytes is not None:
+            exprs.append("?")
+            params.append(size_bytes)
+        else:
+            exprs.append(col)
+    params.append(src_id)
+    inserted = exec_db(
+        f"INSERT INTO attachments ({', '.join(cols)}) "
+        f"SELECT {', '.join(exprs)} FROM attachments WHERE id = ?",
+        tuple(params),
+    )
+    assert inserted == 1
+    return new_id
+
+
+def _file_upload_calls(mock_provider) -> list[tuple[str, str]]:
+    """POST /files requests (provider file uploads) seen by the mock."""
+    return [
+        (m, p) for m, p in mock_provider.get_request_paths()
+        if m == "POST" and p.split("?")[0].endswith("/files") and "/vector_stores/" not in p
+    ]
+
+
+def _chunked_multipart(filename: str, content_type: str, payload: bytes,
+                       chunk_size: int = 64 * 1024):
+    """A multipart body as a generator (httpx sends it chunked, without
+    Content-Length); returns (Content-Type header, body generator)."""
+    boundary = uuid.uuid4().hex
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode()
+    tail = f"\r\n--{boundary}--\r\n".encode()
+
+    def body():
+        yield head
+        for i in range(0, len(payload), chunk_size):
+            yield payload[i:i + chunk_size]
+        yield tail
+
+    return f"multipart/form-data; boundary={boundary}", body()
+
+
+def _upload_chunked(chat_id: str, filename: str, payload: bytes, content_type: str) -> httpx.Response:
+    ct, body = _chunked_multipart(filename, content_type, payload)
+    resp = httpx.post(
+        f"{API_PREFIX}/chats/{chat_id}/attachments",
+        content=body, headers={"Content-Type": ct}, timeout=60,
+    )
+    assert resp.request.headers.get("transfer-encoding") == "chunked"
+    assert "content-length" not in resp.request.headers
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# 04-11: Too many images in one message
+# ---------------------------------------------------------------------------
+
+class TestTooManyImages:
+    """More ready images than `max_images_per_message` in one message."""
+
+    def test_too_many_images_rejected(self, request, chat, mock_provider):
+        """04-11: max_images_per_message + 1 images → 400 out_of_range
+        TOO_MANY_IMAGES; the provider is not called."""
+        _require_offline(request)
+        chat_id = chat["id"]  # vision-capable default model
+        att_ids = [
+            _upload_ready(chat_id, f"img{i}.png", make_minimal_png(color=(i * 40, 0, 0)), "image/png")
+            for i in range(MAX_IMAGES_PER_MESSAGE + 1)
+        ]
+
+        mock_provider.clear_captured_requests()
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
+            json={"content": "Compare these images.", "attachment_ids": att_ids},
+            headers={"Accept": "text/event-stream"}, timeout=30,
+        )
+        assert_problem(resp, 400, "out_of_range", field_reason="TOO_MANY_IMAGES")
+        assert mock_provider.get_captured_requests() == [], "provider must not be called"
+
+
+# ---------------------------------------------------------------------------
+# 10-16: provider upload failure → 503, attachment failed with error_code
+# ---------------------------------------------------------------------------
+
+class TestUploadProviderFailure:
+    """The provider Files API fails during the upload."""
+
+    def test_upload_failure_marks_attachment_failed(self, request, chat, mock_provider):
+        """10-16: provider 500 on POST /files → 503 service_unavailable with
+        Retry-After; the inserted row is visible with status failed and an error_code."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        mock_provider.set_fault("POST", "/files", 500)
+
+        resp = _upload(chat_id, "fail.txt", b"provider will fail", "text/plain")
+        assert_problem(resp, 503, "service_unavailable")
+        assert resp.headers.get("Retry-After", "").isdigit(), resp.headers
+
+        # The Problem carries no attachment id; the row is found in the DB.
+        rows = query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,))
+        assert len(rows) == 1, rows
+        att_id = uuid_from_db(rows[0]["id"])
+        detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+        assert detail.status_code == 200, detail.text
+        body = detail.json()
+        assert body["status"] == "failed", body
+        assert body.get("error_code"), body
+
+
+# ---------------------------------------------------------------------------
+# 10-17, 10-19: chunked uploads (no Content-Length) — streaming size counter
+# ---------------------------------------------------------------------------
+
+class TestChunkedUpload:
+    """Uploads without Content-Length are measured while streaming."""
+
+    def test_chunked_oversize_image_rejected(self, request, chat, mock_provider):
+        """10-17: a chunked image over uploaded_image_max_size_kb (5 MB) passes
+        the Content-Length pre-check and is stopped by the streaming counter:
+        400 out_of_range FILE_TOO_LARGE; nothing reaches the provider."""
+        _require_offline(request)
+        payload = b"\x89PNG" + b"\x00" * (MAX_IMAGE_BYTES - 4 + 1)
+        resp = _upload_chunked(chat["id"], "big.png", payload, "image/png")
+        assert_problem(resp, 400, "out_of_range", field_reason="FILE_TOO_LARGE")
+        assert _file_upload_calls(mock_provider) == []
+
+    def test_chunked_upload_within_limit_ready(self, request, chat):
+        """10-19: a chunked document within the limit → 201, ready, exact size_bytes."""
+        _require_offline(request)
+        payload = b"chunked upload line\n" * 10_000  # 200 KB
+        resp = _upload_chunked(chat["id"], "chunked.txt", payload, "text/plain")
+        assert resp.status_code == 201, f"{resp.status_code} {resp.text}"
+        body = resp.json()
+        assert body["status"] == "ready", body
+        assert body["size_bytes"] == len(payload)
+
+
+# ---------------------------------------------------------------------------
+# 10-26, 10-27: per-chat document count and storage limits
+# ---------------------------------------------------------------------------
+
+class TestPerChatLimits:
+    """Per-chat limits, reached by seeding attachment rows in the DB."""
+
+    def test_document_limit_exceeded(self, request, chat, mock_provider):
+        """10-26: a chat with max_documents_per_chat (50) documents rejects the
+        next document: 429 resource_exhausted, violation document_limit."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        src = _upload_ready(chat_id, "seed.txt", b"seed document", "text/plain")
+        for _ in range(MAX_DOCUMENTS_PER_CHAT - 1):
+            _clone_attachment(src)
+
+        mock_provider.clear_captured_requests()
+        resp = _upload(chat_id, "one-more.txt", b"over the limit", "text/plain")
+        assert_problem(resp, 429, "resource_exhausted", violation_subject="document_limit")
+        assert _file_upload_calls(mock_provider) == []
+
+    def test_storage_limit_exceeded(self, request, chat, mock_provider):
+        """10-27: a chat whose attachments already total max_total_upload_mb_per_chat
+        (100 MB) rejects the next upload: 429 resource_exhausted, violation storage_limit."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        src = _upload_ready(chat_id, "seed.txt", b"seed document", "text/plain")
+        _clone_attachment(src, size_bytes=MAX_TOTAL_UPLOAD_BYTES_PER_CHAT)
+
+        mock_provider.clear_captured_requests()
+        resp = _upload(chat_id, "one-more.txt", b"over the limit", "text/plain")
+        assert_problem(resp, 429, "resource_exhausted", violation_subject="storage_limit")
+        assert _file_upload_calls(mock_provider) == []

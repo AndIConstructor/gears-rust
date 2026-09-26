@@ -89,6 +89,43 @@ class TestSettlement:
         assert rows[0]["reserved_credits_micro"] > 0
         assert_no_reserves(USER_A_ID)
 
+    def test_web_search_surcharge_in_reserve(self, request, chat):
+        """14-12: the same message with web search reserves more tokens and
+        credits than without it (web_search_surcharge_tokens).
+
+        The web-search turn runs first: the second turn also reserves the first
+        turn's tokens as prior context, which only narrows the difference.
+        """
+        _require_offline(request)
+        chat_id = chat["id"]  # web_search-capable default model
+        content = "SEARCH: weather"
+
+        rid_ws = str(uuid.uuid4())
+        status, events, raw = stream_message(
+            chat_id, content, request_id=rid_ws, web_search={"enabled": True},
+        )
+        assert status == 200, raw
+        expect_done(events)
+        poll_turn(chat_id, rid_ws, ("done",))
+
+        rid_plain = str(uuid.uuid4())
+        status, events, raw = stream_message(chat_id, content, request_id=rid_plain)
+        assert status == 200, raw
+        expect_done(events)
+        poll_turn(chat_id, rid_plain, ("done",))
+
+        def reserve(rid: str) -> dict:
+            rows = query_db(
+                "SELECT reserve_tokens, reserved_credits_micro FROM chat_turns "
+                "WHERE request_id = ?", (rid,),
+            )
+            assert len(rows) == 1, rows
+            return rows[0]
+
+        ws, plain = reserve(rid_ws), reserve(rid_plain)
+        assert ws["reserve_tokens"] > plain["reserve_tokens"], (ws, plain)
+        assert ws["reserved_credits_micro"] > plain["reserved_credits_micro"], (ws, plain)
+
     @pytest.mark.timeout(30)
     def test_cancelled_with_usage(self, request, chat, mock_provider):
         """Disconnect after some deltas: the turn is cancelled and the reserve released."""

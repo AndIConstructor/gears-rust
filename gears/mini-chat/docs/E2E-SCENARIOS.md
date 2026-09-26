@@ -44,7 +44,7 @@ valid token are 401. Resources of another user or tenant are 404.
 | 01-06 | Model Image Capability Constraint | —                     | (enforced by catalog)                                                   |
 | 01-07 | No Credential Storage             | —                     | (architectural)                                                         |
 | 01-08 | Context Window Budget             | —                     | (enforced internally)                                                   |
-| 01-09 | License Gate                      | —                     | GAP — the rig always grants the base license feature; the gate is the interim base-license check (ADR-0008) |
+| 01-09 | License Gate                      | GAP — the rig always grants the base license feature (interim gate, ADR-0008); rejection is tested in gears/system/api-gateway/tests/license_middleware.rs | — |
 | 01-10 | No Buffering Constraint           | test_principles.py    | TestPrinciples::test_no_buffering                                       |
 | 01-11 | Model Locked Per Chat             | test_principles.py    | TestPrinciples::test_model_locked_per_chat                              |
 | 01-12 | Quota Before Outbound             | test_quota_policy.py  | TestQuotaExhaustion::test_all_tiers_exhausted_429 (provider not called) |
@@ -114,7 +114,7 @@ toggled per test.
 | 04-08 | Chat Not Found → 404 `not_found` (JSON)    | test_streaming.py      | TestStreamPreflightErrors::test_chat_not_found                |
 | 04-09 | Messages Persisted After Stream            | test_streaming.py      | TestMessages::test_messages_persisted_after_stream, TestMessages::test_user_message_content_matches |
 | 04-10 | Assistant Message Has Token Counts         | test_streaming.py      | TestMessages::test_assistant_message_has_tokens               |
-| 04-11 | Too Many Images per Message → 400 `out_of_range` | —                | GAP — no test sends more than `max_images_per_message` images |
+| 04-11 | Too Many Images per Message → 400 `out_of_range` | test_attachments.py `TestTooManyImages::test_too_many_images_rejected` | — |
 
 ## 05 — SSE Event Contract
 
@@ -192,7 +192,7 @@ toggled per test.
 |-------|---------------------------------------------|------------------------|--------------------------------------------------------------|
 | 09-01 | Turn Row Created Before SSE Opens (`running` while streaming) | test_turn_mutations.py | TestTurnRetry::test_retry_running_turn_400 |
 | 09-02 | Preflight Rejection → JSON Error, No Turn Row | test_quota_policy.py | TestQuotaExhaustion::test_all_tiers_exhausted_429            |
-| 09-03 | Atomic User Message + Turn                  | —                      | GAP — a failure between the two inserts cannot be injected over HTTP |
+| 09-03 | Atomic User Message + Turn                  | unit tests: gears/mini-chat/mini-chat/src/domain/service/stream_service/mod.rs (`reserve_and_create_turn_rolls_back_on_running_turn_conflict`, `reserve_and_create_turn_rolls_back_on_duplicate_request_id`) | — |
 | 09-04 | Immutable Quota Fields Persisted            | test_full_scenario.py  | TestTurnDetailsInDb::test_max_output_tokens_applied; test_settlement.py TestSettlement::test_reservation_snapshot_persisted |
 | 09-05 | Completed → assistant_message_id Set        | test_turns.py          | TestTurnStatus::test_turn_completed_after_stream             |
 | 09-06 | Cancelled With Content → Partial Message    | test_stream_started.py | TestCancelledMessagePersistence::test_cancelled_turn_has_assistant_message_id |
@@ -226,18 +226,18 @@ still works but is not required (ADR-0007).
 | 10-13 | Multi-Provider Upload                        | test_attachments.py      | TestDualProviderUpload::test_dual_provider_upload; TestDualProviderRAGStream::test_dual_provider_rag_stream (online only) |
 | 10-14 | doc_summary: Async for Docs, Null for Images | —                        | N/A — not implemented (ADR-0007): `doc_summary` is always `null` |
 | 10-15 | img_thumbnail Present for Ready Images       | test_attachments.py      | TestImageUploadAndSend::test_image_upload_and_send (non-null only; format not checked) |
-| 10-16 | error_code on Failed Status                  | —                        | GAP — no test forces a provider upload failure              |
-| 10-17 | Mid-Stream Size Limit → 400 `out_of_range`   | —                        | GAP — the client always sends Content-Length, so the early check rejects first |
+| 10-16 | error_code on Failed Status                  | test_attachments.py `TestUploadProviderFailure::test_upload_failure_marks_attachment_failed` | — |
+| 10-17 | Mid-Stream Size Limit → 400 `out_of_range`   | test_attachments.py `TestChunkedUpload::test_chunked_oversize_image_rejected` | — |
 | 10-18 | Content-Length Early Check → 400 `out_of_range` | test_attachments.py   | TestUploadSizeEnforcement::test_oversize_image_rejected, TestUploadSizeEnforcement::test_oversize_document_rejected_by_gateway |
-| 10-19 | Chunked-Encoding Streaming Counter           | —                        | GAP — no test uploads with chunked transfer encoding        |
+| 10-19 | Chunked-Encoding Streaming Counter           | test_attachments.py `TestChunkedUpload::test_chunked_upload_within_limit_ready` | — |
 | 10-20 | Images Not Added to Vector Store             | test_attachments.py      | TestImageUploadAndSend::test_image_upload_and_send          |
 | 10-21 | provider_file_id Never Exposed               | test_attachments.py      | TestUploadAndGet::test_provider_storage_fields_not_exposed  |
 | 10-22 | Stream with Document → file_search           | test_attachments.py      | TestSendMessageWithAttachments::test_send_message_with_attachments; TestUploadSearchCitationFlow::test_upload_search_citation_flow (online only) |
 | 10-23 | Mixed XLSX + TXT → Both Tools                | test_code_interpreter.py | TestMixedAttachments::test_mixed_xlsx_and_txt_both_tools_in_request |
 | 10-24 | Image + Document Combined                    | test_attachments.py      | TestDocumentAndImageTogether::test_document_and_image_combined (online only) |
 | 10-25 | GET Nonexistent Attachment → 404 `not_found` | test_attachments.py      | TestUploadAndGet::test_get_nonexistent_attachment_404       |
-| 10-26 | Documents per Chat Exceeded → 429 `resource_exhausted` (`document_limit`) | — | GAP — not exercised end to end; mapping covered by unit tests in gears/mini-chat/mini-chat/src/api/rest/error.rs |
-| 10-27 | Storage per Chat Exceeded → 429 `resource_exhausted` (`storage_limit`) | — | GAP — not exercised end to end; mapping covered by unit tests in gears/mini-chat/mini-chat/src/api/rest/error.rs |
+| 10-26 | Documents per Chat Exceeded → 429 `resource_exhausted` (`document_limit`) | test_attachments.py `TestPerChatLimits::test_document_limit_exceeded` | — |
+| 10-27 | Storage per Chat Exceeded → 429 `resource_exhausted` (`storage_limit`) | test_attachments.py `TestPerChatLimits::test_storage_limit_exceeded` | — |
 | 10-28 | Max Indexed Chunks per Chat                  | —                        | N/A — not implemented (ADR-0007)                            |
 | 10-29 | Deleted Document Immediately Excluded from file_search | —              | N/A — not implemented (ADR-0007)                            |
 | 10-30 | XLSX Upload Accepted and Ready               | test_code_interpreter.py | TestXlsxUploadAccepted                                      |
@@ -295,23 +295,23 @@ still works but is not required (ADR-0007).
 | 14-01 | Preflight Reserve Persisted               | test_settlement.py        | TestSettlement::test_reservation_snapshot_persisted; test_full_scenario.py TestTurnDetailsInDb::test_max_output_tokens_applied |
 | 14-02 | Tier Downgrade: Premium Exhausted → Standard | test_quota_policy.py   | TestDowngrade::test_premium_exhausted_downgrades_to_standard |
 | 14-03 | Bucket Model: total + tier:premium        | test_quota_enforcement.py | TestQuotaEnforcement::test_bucket_model_premium_counts_total, TestQuotaEnforcement::test_bucket_model_standard_counts_total |
-| 14-04 | Daily + Monthly Periods Both Checked      | —                         | GAP — tests exhaust all periods at once; none exhausts only daily or only monthly |
+| 14-04 | Daily + Monthly Periods Both Checked      | test_quota_policy.py `TestPeriodsCheckedSeparately::test_single_exhausted_period_rejects` | — |
 | 14-05 | All Tiers Exhausted → 429 `resource_exhausted` (`tokens`) | test_quota_policy.py | TestQuotaExhaustion::test_all_tiers_exhausted_429 |
 | 14-06 | Reserve Before Provider Call              | test_quota_policy.py      | TestQuotaExhaustion::test_all_tiers_exhausted_429 (rejected reserve: provider not called) |
 | 14-07 | Credits Formula: Integer Arithmetic       | test_quota_enforcement.py | TestQuotaEnforcement::test_bucket_model_premium_counts_total, TestQuotaEnforcement::test_bucket_model_standard_counts_total; test_settlement.py TestSettlement::test_completed_turn_charged_once |
 | 14-08 | max_output_tokens Hard Cap                | test_full_scenario.py     | TestTurnDetailsInDb::test_max_output_tokens_applied          |
 | 14-09 | policy_version_applied Persisted          | test_quota_enforcement.py | TestQuotaEnforcement::test_policy_version_persisted_per_turn |
-| 14-10 | Settlement Uses Persisted Policy          | —                         | GAP — needs a second policy version; the static plugin has a fixed version (ADR-0008) |
+| 14-10 | Settlement Uses Persisted Policy          | unit tests: gears/mini-chat/mini-chat/src/domain/service/quota_service.rs (`settle_uses_snapshot_of_policy_version_applied_not_current`) | — |
 | 14-11 | No Stuck Reserves After Completion        | test_full_scenario.py     | TestQuotaAccumulation::test_no_stuck_reserves_after_completion |
-| 14-12 | Web Search Surcharge in Reserve           | —                         | GAP — the reserve of a web-search turn is not asserted       |
-| 14-13 | warning_threshold_pct Configurable        | —                         | GAP (config-level; only the default 80 is exercised by test_quota_policy.py TestQuotaStatusFlags) |
-| 14-14 | Invalid Threshold → Gear Fails to Start   | —                         | GAP (startup test)                                           |
+| 14-12 | Web Search Surcharge in Reserve           | test_settlement.py `TestSettlement::test_web_search_surcharge_in_reserve` | — |
+| 14-13 | warning_threshold_pct Configurable        | unit tests: gears/mini-chat/mini-chat/src/domain/service/quota_service.rs (`quota_status_warning_uses_configured_threshold`, `quota_warnings_follow_configured_threshold`) | — |
+| 14-14 | Invalid Threshold → Gear Fails to Start   | unit tests: gears/mini-chat/mini-chat/src/config.rs (`quota_config_warning_threshold_boundaries`); validated in `init` (gear.rs) | — |
 | 14-15 | Retry While Exhausted → 429, Old Turn Kept | test_quota_policy.py     | TestQuotaExhaustion::test_retry_while_exhausted_keeps_old_turn |
 | 14-16 | Disabled Chat Model → Downgrade (`model_disabled`) | test_quota_policy.py | TestDowngrade::test_disabled_chat_model_downgrades     |
 | 14-17 | Web Search Daily Quota → 429 `resource_exhausted` (`web_search`) only for web-search requests | test_quota_policy.py | TestWebSearchDailyQuota |
 | 14-18 | Web Search Turn Credits and Tokens        | test_web_search_usage.py  | TestWebSearchUsageAccounting                                 |
 | 14-19 | Code Interpreter Turn Credits and `code_interpreter_calls` | test_code_interpreter_usage.py | TestCodeInterpreterUsageAccounting |
-| 14-20 | Code Interpreter Daily Quota → 429        | —                         | GAP — no test seeds `code_interpreter_calls` to the daily quota |
+| 14-20 | Code Interpreter Daily Quota → 429        | test_quota_policy.py `TestCodeInterpreterDailyQuota::test_code_interpreter_quota_only_blocks_ci_chats` | — |
 | 14-21 | Per-User Daily Image-Input Quota          | —                         | N/A — not implemented (ADR-0008)                             |
 | 14-22 | Per-User Daily file_search Limit          | —                         | N/A — not implemented (ADR-0007)                             |
 
@@ -330,7 +330,7 @@ still works but is not required (ADR-0007).
 | 15-09 | Orphan Timeout → Estimated Settlement    | —                  | unit tests: gears/mini-chat/mini-chat/src/domain/service/finalization_service.rs, gears/mini-chat/mini-chat/src/infra/db/repo/turn_repo.rs |
 | 15-10 | Atomic: CAS + Quota + Outbox             | —                  | unit tests: gears/mini-chat/mini-chat/src/domain/service/finalization_service.rs |
 | 15-11 | Outbox Dedupe Key Format                 | test_settlement.py | TestSettlement::test_one_usage_outbox_event_per_turn            |
-| 15-12 | Duplicate Outbox Insert Ignored          | —                  | GAP — a duplicate insert cannot be triggered over HTTP          |
+| 15-12 | Duplicate Outbox Insert Ignored          | N/A — the toolkit-db outbox has no dedupe; consumers drop duplicates by `dedupe_key` (pinned in unit test gears/mini-chat/mini-chat/src/domain/service/finalization_service.rs `finalization_propagates_token_breakdown_fields`) | — |
 | 15-13 | One Outbox Message Per Terminal Turn     | test_settlement.py | TestSettlement::test_one_usage_outbox_event_per_turn            |
 | 15-14 | Completed Turn Releases Reserve          | test_settlement.py | TestSettlement::test_completed_turn_releases_reserve            |
 | 15-15 | Settlement with Real Provider Token Counts | test_settlement.py | TestSettlementPerProvider::test_completed_settlement_per_provider (online only) |
@@ -345,16 +345,16 @@ still works but is not required (ADR-0007).
 | 16-03 | Recent Messages: Up to K                 | test_context_assembly.py | TestContextInputTokenGrowth, TestContextMessageTokens::test_message_input_tokens_increase |
 | 16-04 | Deleted Turns Excluded                   | test_turn_mutations.py   | TestTurnDelete::test_deleted_turn_not_sent_to_provider       |
 | 16-05 | Thread Summary Replaces Older Messages   | test_live_smoke.py       | TestLiveThreadSummaryTrigger::test_summary_trigger_fires_and_applied_on_next_turn (online only) |
-| 16-06 | Only Messages After Summary Boundary     | —                        | GAP — not asserted end to end; unit tests in gears/mini-chat/mini-chat/src/domain/service/context_assembly.rs |
+| 16-06 | Only Messages After Summary Boundary     | unit tests: gears/mini-chat/mini-chat/src/domain/service/context_assembly.rs (`thread_summary_included_as_first_message`, `truncation_drops_thread_summary`) | — |
 | 16-07 | Model Recall from Earlier Turns          | test_context_assembly.py | TestContextRecall (online only); test_multi_turn.py TestMultiTurn::test_two_turns_in_sequence (online only) |
 | 16-08 | web_search Tool with search_context_size | test_provider_request.py | TestWebSearchToolType::test_web_search_tool_type_is_web_search, TestWebSearchToolType::test_web_search_has_search_context_size |
 | 16-09 | file_search Tool with max_num_results    | test_provider_request.py | TestFileSearchMaxNumResults::test_file_search_has_max_num_results |
 | 16-10 | web_search Disabled → No Tool            | test_provider_request.py | TestWebSearchToolType::test_no_web_search_tool_without_flag; test_web_search.py TestWebSearchDisabledByDefault |
 | 16-11 | max_tool_calls in Provider Request       | test_provider_request.py | TestMaxToolCalls                                             |
-| 16-12 | Cancelled Partial Message in Context     | —                        | GAP — no test inspects the provider request after a cancelled turn |
-| 16-13 | Empty Cancelled Turn → No Message        | —                        | GAP — no test inspects the provider request after an empty cancelled turn |
-| 16-14 | Tool Guard Instructions Appended         | —                        | GAP — the captured `instructions` are compared only with the catalog prompt |
-| 16-15 | Missing System Prompt → None             | —                        | GAP — every catalog model in the rig has a system prompt     |
+| 16-12 | Cancelled Partial Message in Context     | test_context_assembly.py `TestCancelledTurnContext::test_cancelled_partial_answer_in_next_request` | — |
+| 16-13 | Empty Cancelled Turn → No Message        | test_context_assembly.py `TestCancelledTurnContext::test_empty_cancelled_turn_adds_no_message` | — |
+| 16-14 | Tool Guard Instructions Appended         | test_context_assembly.py `TestSystemInstructions::test_web_search_guard_appended` | — |
+| 16-15 | Missing System Prompt → None             | test_context_assembly.py `TestSystemInstructions::test_no_system_prompt_no_instructions` | — |
 
 ## 17 — Error Mapping & Sanitization
 
@@ -362,7 +362,7 @@ still works but is not required (ADR-0007).
 |-------|---------------------------------------|-----------------------|-------------------------------------------------------------|
 | 17-01 | Pre-Stream Errors → Problem JSON      | test_streaming.py     | TestStreamPreflightErrors                                   |
 | 17-02 | Post-Stream → SSE event: error        | test_error_mapping.py | TestErrorMapping::test_post_stream_sse_error_event          |
-| 17-03 | Provider Timeout → provider_timeout   | —                     | GAP — the gear's request timeout (30 s) does not fit the test budget; a provider HTTP 504 is `provider_error` (test_error_mapping.py TestErrorMapping::test_provider_504_is_provider_error) |
+| 17-03 | Provider Timeout → provider_timeout   | test_error_mapping.py `TestErrorMapping::test_provider_timeout_error_code` | — |
 | 17-04 | Provider Unavailable → provider_error | test_error_mapping.py | TestErrorMapping::test_provider_unavailable_error_code      |
 | 17-05 | Provider 429 → rate_limited           | test_error_mapping.py | TestErrorMapping::test_rate_limited_error_code              |
 | 17-06 | Error Sanitization: No Provider IDs   | test_error_mapping.py | TestErrorMapping::test_error_message_no_provider_ids        |
@@ -392,12 +392,12 @@ still works but is not required (ADR-0007).
 |-------|----------------------------------------|-----------------|-------------------------------------------------------------------|
 | 19-01 | Chat Deletion → Background Cleanup     | test_cleanup.py | TestCleanup::test_deleted_chat_hides_chat_and_attachment, TestCleanupWorkerDB::test_chat_deletion_enqueues_chat_cleanup_event |
 | 19-02 | Cleanup Marks Attachments Pending      | test_cleanup.py | TestCleanupWorkerDB::test_chat_deletion_marks_attachments_for_cleanup |
-| 19-03 | Provider 404 on Delete → Success       | —               | GAP — the mock provider does not return 404 on file delete in any test |
-| 19-04 | Vector Store Deleted After Attachments | —               | GAP — provider delete calls are not asserted                      |
+| 19-03 | Provider 404 on Delete → Success       | test_cleanup.py `TestProviderCleanupOpenAI` / `TestProviderCleanupAzure` (`test_chat_cleanup_provider_404_is_success`, `test_attachment_cleanup_provider_404_is_success`) | — |
+| 19-04 | Vector Store Deleted After Attachments | test_cleanup.py `TestProviderCleanupOpenAI` / `TestProviderCleanupAzure` `test_vector_store_deleted_after_files` | — |
 | 19-05 | Attachment Cleanup State Machine       | test_cleanup.py | TestCleanupWorkerDB::test_chat_deletion_with_multiple_attachments |
 | 19-06 | Orphan Watchdog Detects Stuck Turns    | —               | unit tests: gears/mini-chat/mini-chat/src/infra/db/repo/turn_repo.rs, gears/mini-chat/mini-chat/src/infra/workers/orphan_watchdog.rs (minimum timeout 90 s) |
 | 19-07 | Orphan → Estimated Settlement + Outbox | —               | unit tests: gears/mini-chat/mini-chat/src/domain/service/finalization_service.rs |
-| 19-08 | Crash Recovery: Turn Status API        | —               | GAP — needs a server restart mid-stream                           |
+| 19-08 | Crash Recovery: Turn Status API        | unit tests: gears/mini-chat/mini-chat/src/infra/db/repo/turn_repo.rs (`cas_finalize_orphan_transitions_to_failed`), gears/mini-chat/mini-chat/src/domain/service/finalization_service.rs (`finalize_orphan_cas_winner`); the restart itself is not exercised | — |
 | 19-09 | Thread Summary Trigger                 | test_live_smoke.py | TestLiveThreadSummaryTrigger::test_summary_trigger_fires_and_applied_on_next_turn (online only) |
 | 19-10 | Thread Summary Worker                  | test_live_smoke.py | TestLiveThreadSummaryTrigger::test_summary_trigger_fires_and_applied_on_next_turn (online only) |
 | 19-11 | Attachment Deletion Enqueues Cleanup Event | test_cleanup.py | TestCleanupWorkerDB::test_attachment_deletion_enqueues_cleanup_event |
@@ -412,7 +412,7 @@ still works but is not required (ADR-0007).
 | ID    | Scenario                                   | Test File         | Covered by                                                 |
 |-------|--------------------------------------------|-------------------|------------------------------------------------------------|
 | 20-01 | PEP Before Every Operation                 | test_isolation.py | TestAuthentication, TestIsolation (every public operation) |
-| 20-02 | PDP Unreachable → 403 Fail-Closed          | —                 | GAP — the rig cannot make the PDP unreachable; mapping covered by unit tests in gears/mini-chat/mini-chat/src/domain/error.rs |
+| 20-02 | PDP Unreachable → 403 Fail-Closed          | unit tests: gears/mini-chat/mini-chat/src/domain/error.rs (`pdp_evaluation_failure_denies_access`) | — |
 | 20-03 | Foreign Resource → 404, Provider Not Called | test_isolation.py | TestIsolation::test_foreign_resource_is_404               |
 | 20-04 | Constraints Compiled to SQL WHERE          | test_isolation.py | TestIsolation::test_foreign_chat_not_listed                |
 | 20-05 | Missing Token → 401                        | test_isolation.py | TestAuthentication::test_missing_token_is_401              |
