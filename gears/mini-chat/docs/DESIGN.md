@@ -1065,7 +1065,7 @@ data: {"items": [{"source": "file", "title": "Q3 Report.pdf", "attachment_id": "
 | `items[].url` | string (optional) | URL for web sources. |
 | `items[].attachment_id` | UUID (optional) | Internal attachment identifier for file sources. This is the only file identifier exposed to clients. |
 | `items[].span` | object (optional) | `{ "start": number, "end": number }`: the provider annotation's `start_index` / `end_index`, present only when the annotation has both. Web citations carry it; OpenAI file citations (`{file_id, filename, index}`) have no range and no `span`. |
-| `items[].snippet` | string | Excerpt. Web citations: the annotation text, or the answer text in the annotation range. The range is applied as byte offsets into the accumulated answer text; if it does not fall on UTF-8 character boundaries the snippet is empty. OpenAI file citations: always `""`. |
+| `items[].snippet` | string | Excerpt. Web citations: the annotation text, or the answer text in the annotation range. The range is applied as character offsets into the `output_text` part that carries the annotation; a range outside that text gives an empty snippet. OpenAI file citations: always `""`. |
 | `items[].score` | number (optional) | Relevance score (0-1). Not populated in P1 (never serialized). |
 
 **Provider identifier non-exposure invariant**: no provider-issued identifier — including `provider_file_id`, `provider_response_id`, `vector_store_id`, provider correlation IDs, or any other provider-scoped ID — MUST appear in any API response body, SSE event payload, or error message. This includes error message text: provider error messages that contain provider-scoped IDs MUST be sanitized or replaced with a generic message before being returned to clients. Internal systems (DB columns, structured logs, audit events, operator tooling) may store and reference these identifiers, but they MUST NOT be returned to public clients. All client-visible identifiers are internal UUIDs only (`chat_id`, `turn_id`, `request_id`, `attachment_id`, `message_id`).
@@ -1186,7 +1186,7 @@ Provider-specific streaming events are internal to `llm_provider` and the domain
 | `response.failed` | `event: error` (`code: "provider_error"`) | The error is read from `response.error`, with a top-level `error` as fallback. `message` is the sanitized provider message. |
 | `error` (SSE event) | `event: error` (`code: "provider_error"`) | Parsed like `response.failed`, then as flat `{code, message}`; unparseable data becomes the message. The provider code and message are kept internally; the client `message` is the sanitized provider message. |
 | Provider HTTP error / disconnect | `event: error` (`code: "provider_error"` or `"provider_timeout"`) | Error details sanitized (provider file, assistant and `vs_` identifiers are scrubbed); provider internals not exposed. |
-| Provider 429 | `event: error` (`code: "rate_limited"`) | After OAGW retry exhaustion. |
+| Provider 429 | `event: error` (`code: "rate_limited"`) | OAGW does not retry; the provider's 429 is passed through and mapped directly. |
 
 This mapping is intentionally provider-agnostic in the stable contract. If the provider changes its event format or a new provider is added, only the translation layer in `llm_provider` is updated. The client contract remains unchanged.
 
@@ -1213,6 +1213,7 @@ The mapping is implemented in `api/rest/error.rs`:
 | Bad OData query on a list endpoint (`GET /chats`, `GET /chats/{id}/messages`: `$filter`, `$orderby`, `$select`, page size, cursor, unsupported query option) | `invalid_argument` | 400 | `context.resource_type = gts.cf.core.odata.query.v1~` (not the chat type, not a `format` violation), for errors raised by the query extractor and by the repository while paginating. `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER` (`$filter`), `INVALID_ORDERBY_FIELD` (`$orderby`), `INVALID_LIMIT` (field `$top`, `limit=0`), `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR` (`cursor` combined with `$orderby`); from the platform OData extractor (`toolkit::api::odata`): `FILTER_TOO_LONG`, `FILTER_TOO_COMPLEX` (`$filter`), `INVALID_SELECT` (`$select`), `UNSUPPORTED_QUERY_PARAM` (a `$` option the extractor does not bind, e.g. `$skip`, `$count`), `INVALID_QUERY_PARAMS` (unparsable query string). A `limit` above 100 is clamped to 100, not rejected |
 | Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | platform JSON extractor (`toolkit::api::rest::extract::Json`) |
 | Malformed JSON body | `invalid_argument` | 400 | `field_violations[body].reason = json_syntax_error` (platform JSON extractor) |
+| Path parameter that is not a UUID (chat, message, turn `request_id`, attachment id) | `invalid_argument` | 400 | `field_violations[].reason = invalid_path_params` (platform path extractor) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` |
 | Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `detail` |
 | Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
@@ -1425,7 +1426,7 @@ Requests are sent with `ServiceGatewayClientV1::proxy_request` to `{alias}{api_p
 |--------|--------|--------------|
 | **Base URL** | `https://api.openai.com/v1` | `https://{resource}.openai.azure.com/openai/v1` |
 | **Authentication** | `Authorization: Bearer {api_key}` | `api-key: {key}` header or Entra ID bearer token |
-| **API version** | Not required | Azure may require an `api-version` query parameter depending on feature/rollout; OAGW owns this provider-specific detail |
+| **API version** | Not required | Mini Chat sends it: for chat in the configured `api_path`, for files and vector stores from `api_version`, which `storage_kind: azure` requires (validated at startup) |
 | **File upload `purpose` (documents)** | `assistants` (P1) | `assistants` only (`user_data` not supported) |
 | **File upload `purpose` (images)** | `assistants` (P1) | `assistants` |
 | **Vector stores per `file_search`** | Multiple | **One** (sufficient for P1: one store per chat) |
@@ -2801,7 +2802,7 @@ A turn is a user-message + assistant-response pair identified by `request_id` in
 | Target `request_id` is not the most recent non-deleted turn (including an already deleted turn) | 409 | `aborted`, `NOT_LATEST_TURN` |
 | Concurrent retry/edit lost the insert race on the one-running-turn-per-chat index (rule 7) | 409 | `aborted`, `GENERATION_IN_PROGRESS` |
 | Target turn is still `running` (checked before the latest-turn check) | 400 | `failed_precondition`, `turn_state` / `STATE` |
-| Turn does not belong to the requesting user, or PDP denied | 403 | `permission_denied`, `AUTHZ_DENIED` |
+| PDP denied, or PDP failure (fail closed) | 403 | `permission_denied`, `AUTHZ_DENIED`. A turn in another user's chat is not visible: 404 |
 | Chat or turn does not exist or not accessible | 404 | `not_found` |
 | Preflight rejection (quota, kill switch, image guards) | 429 / 400 | as for `messages:stream` |
 
@@ -2972,7 +2973,7 @@ All values are those of the effective model's catalog entry (`context_window`, `
 |----------|-------|------|
 | Never truncated | System prompt + tool guard instructions, user message + image attachments | Always included. If these alone exceed the budget, the turn is rejected with HTTP 400 `out_of_range` (`CONTEXT_BUDGET_EXCEEDED`) before the provider call. |
 | Droppable | Thread summary | Dropped if it doesn't fit after mandatory items. |
-| Truncatable | Recent messages, retrieval excerpts | Removed in reverse priority order (lowest priority first, per the table above). There is no document-summary tier. |
+| Truncatable | Recent messages (whole turns), then the thread summary | Oldest whole turns are dropped first; the thread summary is dropped if it does not fit after the mandatory items. Retrieval excerpts are not part of the assembled context. There is no document-summary tier. |
 
 **Algorithm** (step by step):
 
@@ -3414,7 +3415,7 @@ Rate limiting and quota enforcement are split into three ownership tiers with st
 |------|-------|-----------------|----------|
 | **Product quota** | `quota_service` (in the domain service) | Per-user credit-based rate limits per model tier (daily, monthly) tracked in real-time; credits are computed from provider tokens via model multipliers; premium models have stricter limits, standard-tier models have separate, higher limits; file_search and web_search call limits; downgrade cascade | "Premium-tier daily/monthly quota exhausted → downgrade to standard tier"; "All tiers exhausted → reject with quota_exceeded" |
 | **Platform rate limit** | `api_gateway` middleware | Per-user/per-IP request rate, concurrent stream caps, abuse protection | "20 rps per user"; "Max 5 concurrent SSE streams" |
-| **Provider rate limit** | OAGW | Provider 429 handling, `Retry-After` respect, circuit breaker, global concurrency cap | "OpenAI 429 -> wait `Retry-After` -> retry once -> propagate 429 upstream" |
+| **Provider rate limit** | OAGW | Passes the provider's 429 (with `Retry-After`) through without retrying; circuit breaker and global concurrency cap | "OpenAI 429 -> propagated to Mini Chat -> SSE `rate_limited`" |
 
 **Key rules**:
 - Product quota decisions happen BEFORE the request reaches OAGW. If quota is exhausted, the request never leaves the gear.
@@ -6519,7 +6520,7 @@ A monotonic, strictly increasing integer that identifies a specific immutable po
 
 **Critical constraints**:
 - For a fixed `(user_id, policy_version)`, CCM must return exactly the same snapshot forever.
-- Multipliers represent micro-credits per 1,000 tokens and must be positive integers.
+- Multipliers represent micro-credits per 1,000,000 tokens (credit arithmetic divides by 1,000,000) and must be positive integers.
 - `provider_display_name` is UI-only and MUST NOT be a routing key, deployment handle, or internal provider identifier.
 
 **P1 Note — Estimation Budgets**:
