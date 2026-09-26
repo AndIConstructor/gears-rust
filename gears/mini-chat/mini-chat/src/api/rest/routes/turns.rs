@@ -3,7 +3,7 @@ use toolkit::api::OpenApiRegistry;
 use toolkit::api::operation_builder::OperationBuilder;
 
 use super::AiChatLicense;
-use crate::api::rest::handlers;
+use crate::api::rest::{dto, handlers};
 
 const API_TAG: &str = "Mini Chat Turns";
 
@@ -22,7 +22,7 @@ pub(super) fn register_turn_routes(
         .path_param("id", "Chat UUID")
         .path_param("request_id", "Turn request UUID")
         .handler(handlers::turns::get_turn)
-        .json_response_with_schema::<handlers::turns::TurnStatusResponse>(
+        .json_response_with_schema::<dto::TurnStatusResponse>(
             openapi,
             http::StatusCode::OK,
             "Turn found",
@@ -64,7 +64,7 @@ pub(super) fn register_turn_routes(
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")
         .path_param("request_id", "Turn request UUID")
-        .json_request::<handlers::turns::EditTurnRequest>(openapi, "Replacement user message")
+        .json_request::<dto::EditTurnRequest>(openapi, "Replacement user message")
         .handler(handlers::turns::edit_turn)
         .sse_json::<crate::domain::stream_events::StreamEvent>(
             openapi,

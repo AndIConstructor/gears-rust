@@ -313,3 +313,31 @@ impl toolkit::api::api_dto::RequestApiDto for StreamMessageRequest {}
 pub struct WebSearchConfig {
     pub enabled: bool,
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Turn DTOs
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Response DTO for `GET /chats/{id}/turns/{request_id}`.
+#[derive(Debug, serde::Serialize, ToSchema)]
+pub struct TurnStatusResponse {
+    pub request_id: Uuid,
+    /// `running`, `done`, `error` or `cancelled`.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_message_id: Option<Uuid>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+impl toolkit::api::api_dto::ResponseApiDto for TurnStatusResponse {}
+
+/// Request DTO for `PATCH /chats/{id}/turns/{request_id}` (edit).
+#[derive(Debug, serde::Deserialize, ToSchema)]
+pub struct EditTurnRequest {
+    pub content: String,
+}
+
+impl toolkit::api::api_dto::RequestApiDto for EditTurnRequest {}

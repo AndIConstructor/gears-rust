@@ -5,15 +5,14 @@ use axum::extract::Path;
 use axum::response::sse::KeepAlive;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::{Extension, Json};
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use toolkit::api::canonical_prelude::*;
 use toolkit_security::SecurityContext;
 use tracing::{Instrument, info, warn};
-use utoipa::ToSchema;
 
 use super::messages::SseRelay;
+use crate::api::rest::dto::{EditTurnRequest, TurnStatusResponse};
 use crate::api::rest::error::MiniChatChatError;
 use crate::domain::stream_events::StreamEvent;
 use crate::gear::AppServices;
@@ -22,20 +21,6 @@ use crate::infra::db::entity::chat_turn::TurnState;
 // ════════════════════════════════════════════════════════════════════════════
 // GET turn status
 // ════════════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct TurnStatusResponse {
-    request_id: uuid::Uuid,
-    state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    assistant_message_id: Option<uuid::Uuid>,
-    #[serde(with = "time::serde::rfc3339")]
-    updated_at: time::OffsetDateTime,
-}
-
-impl toolkit::api::api_dto::ResponseApiDto for TurnStatusResponse {}
 
 fn map_turn_state(state: &TurnState) -> &'static str {
     match state {
@@ -105,13 +90,6 @@ pub(crate) async fn retry_turn(
 // PATCH edit turn
 // ════════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct EditTurnRequest {
-    pub content: String,
-}
-
-impl toolkit::api::api_dto::RequestApiDto for EditTurnRequest {}
-
 /// PATCH /mini-chat/v1/chats/{id}/turns/{request_id}
 #[tracing::instrument(skip(svc, ctx, body), fields(chat_id = %chat_id, turn_request_id = %request_id))]
 pub(crate) async fn edit_turn(
@@ -148,7 +126,7 @@ async fn start_mutation_stream(
 ) -> Response {
     let preview = match svc
         .turns
-        .preview_mutation(&ctx, chat_id, request_id, new_content.clone())
+        .preview_mutation(&ctx, chat_id, request_id, new_content.as_deref())
         .await
     {
         Ok(p) => p,

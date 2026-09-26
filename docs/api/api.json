@@ -5135,6 +5135,7 @@
         "type": "object"
       },
       "EditTurnRequest": {
+        "description": "Request DTO for `PATCH /chats/{id}/turns/{request_id}` (edit).",
         "properties": {
           "content": {
             "type": "string"
@@ -18684,6 +18685,7 @@
         "type": "object"
       },
       "TurnStatusResponse": {
+        "description": "Response DTO for `GET /chats/{id}/turns/{request_id}`.",
         "properties": {
           "assistant_message_id": {
             "format": "uuid",
@@ -18703,6 +18705,7 @@
             "type": "string"
           },
           "state": {
+            "description": "`running`, `done`, `error` or `cancelled`.",
             "type": "string"
           },
           "updated_at": {

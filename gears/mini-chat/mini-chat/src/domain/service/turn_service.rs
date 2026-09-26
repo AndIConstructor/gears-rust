@@ -398,7 +398,7 @@ impl<
         ctx: &SecurityContext,
         chat_id: Uuid,
         request_id: Uuid,
-        new_content: Option<String>,
+        new_content: Option<&str>,
     ) -> Result<MutationPreview, MutationError> {
         let action = if new_content.is_some() {
             actions::EDIT_TURN
@@ -438,7 +438,7 @@ impl<
 
         Ok(MutationPreview {
             source_message_id: original_msg.id,
-            user_content: new_content.unwrap_or(original_msg.content),
+            user_content: new_content.map_or(original_msg.content, str::to_owned),
             chat_model,
             web_search_enabled: target.web_search_enabled,
         })
