@@ -2,14 +2,13 @@
 
 Verifies:
 - XLSX files are accepted and reach 'ready' status (no vector-store indexing)
-- XLSX uploads get purpose = 'code_interpreter' in the attachment response
+- XLSX uploads route to code_interpreter, not file_search (provider request tools)
 - Messages with XLSX attachments produce code_interpreter tool events in SSE
 - Provider request includes code_interpreter tool with container.file_ids
-- Non-XLSX documents still route to file_search (purpose = 'file_search')
+- Non-XLSX documents still route to file_search
 """
 
 import io
-import time
 
 import httpx
 import pytest
@@ -29,7 +28,8 @@ from .conftest import (
 
 @pytest.fixture
 def openai_chat(chat_with_model):
-    """Chat using the OpenAI model — code_interpreter is OpenAI-only."""
+    """Chat on gpt-5.2 (OpenAI provider). azure-gpt-4.1 supports
+    code_interpreter too; its accounting runs in test_code_interpreter_usage.py."""
     return chat_with_model(STANDARD_MODEL)
 
 
@@ -204,7 +204,6 @@ class TestXlsxPurposeRouting:
         assert status == 200
         expect_done(events)
 
-        time.sleep(0.5)
         req = mock_provider.get_last_request()
         assert req is not None
         tools = req.get("tools", [])
@@ -239,7 +238,6 @@ class TestXlsxPurposeRouting:
         assert status == 200
         expect_done(events)
 
-        time.sleep(0.5)
         req = mock_provider.get_last_request()
         assert req is not None
         tools = req.get("tools", [])
@@ -509,7 +507,6 @@ class TestCodeInterpreterProviderRequest:
         assert status == 200
         expect_done(events)
 
-        time.sleep(0.5)
         req = mock_provider.get_last_request()
         assert req is not None, "No request captured by mock provider"
 
@@ -525,10 +522,10 @@ class TestCodeInterpreterProviderRequest:
         assert container.get("type") == "auto", (
             f"Expected container.type='auto', got: {container}"
         )
-        file_ids = container.get("file_ids", [])
-        assert len(file_ids) > 0, (
-            f"Expected non-empty file_ids in container: {container}"
-        )
+        provider_file_id = query_db(
+            "SELECT provider_file_id FROM attachments WHERE id = ?", (att_id,),
+        )[0]["provider_file_id"]
+        assert container.get("file_ids") == [provider_file_id], container
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +584,6 @@ class TestMixedAttachments:
         assert status == 200
         expect_done(events)
 
-        time.sleep(0.5)
         req = mock_provider.get_last_request()
         assert req is not None, "No request captured"
 

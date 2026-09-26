@@ -92,7 +92,7 @@ def xlsx_chat(provider):
     return {"chat_id": chat_id, "att_id": att_id, "model": model}
 
 
-@pytest.mark.openai
+@pytest.mark.multi_provider
 class TestCodeInterpreterUsageAccounting:
     """Verify that code interpreter turns produce correct quota and message records."""
 

@@ -8,8 +8,6 @@ correctly in the outgoing provider request.
 Provider-parameterized — runs against both OpenAI and Azure mock endpoints.
 """
 
-import time
-
 import httpx
 import pytest
 
@@ -39,24 +37,16 @@ class TestMaxToolCalls:
         assert status == 200
         expect_done(events)
 
-        time.sleep(0.5)
         req = mock_provider.get_last_request()
         assert req is not None, "No request captured by mock provider"
         assert "max_tool_calls" in req, (
             f"max_tool_calls missing from provider request body. Keys: {list(req.keys())}"
         )
+        # max_tool_calls: 2 for both models (config/base.yaml), sent as a JSON integer.
         assert req["max_tool_calls"] == 2, (
             f"Expected max_tool_calls=2, got {req['max_tool_calls']}"
         )
-
-    def test_max_tool_calls_numeric(self, provider_chat, mock_provider):
-        """max_tool_calls should be a number, not a string."""
-        status, _, _ = stream_message(provider_chat["id"], "Say OK.")
-        assert status == 200
-        time.sleep(0.5)
-        req = mock_provider.get_last_request()
-        assert req is not None
-        assert isinstance(req.get("max_tool_calls"), int)
+        assert type(req["max_tool_calls"]) is int, req["max_tool_calls"]
 
 
 @pytest.mark.multi_provider
@@ -73,7 +63,6 @@ class TestWebSearchToolType:
         assert status == 200
         expect_done(events)
 
-        time.sleep(0.5)
         req = mock_provider.get_last_request()
         assert req is not None, "No request captured"
         tools = req.get("tools", [])
@@ -94,24 +83,19 @@ class TestWebSearchToolType:
             web_search={"enabled": True},
         )
         assert status == 200
-        time.sleep(0.5)
         req = mock_provider.get_last_request()
         assert req is not None
         tools = req.get("tools", [])
         ws_tools = [t for t in tools if t.get("type") == "web_search"]
         assert len(ws_tools) == 1
-        assert "search_context_size" in ws_tools[0], (
-            f"search_context_size missing from web_search tool: {ws_tools[0]}"
-        )
-        assert ws_tools[0]["search_context_size"] in ("low", "medium", "high"), (
-            f"Unexpected search_context_size: {ws_tools[0]['search_context_size']}"
-        )
+        # The catalog entries set no web_search_context_size: the default `low`
+        # (WebSearchContextSize, mini-chat-sdk models.rs).
+        assert ws_tools[0]["search_context_size"] == "low", ws_tools[0]
 
     def test_no_web_search_tool_without_flag(self, provider_chat, mock_provider):
         """Without web_search flag, no web_search tool in provider request."""
         status, _, _ = stream_message(provider_chat["id"], "Say hello.")
         assert status == 200
-        time.sleep(0.5)
         req = mock_provider.get_last_request()
         assert req is not None
         tools = req.get("tools", [])

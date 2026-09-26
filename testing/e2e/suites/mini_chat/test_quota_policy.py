@@ -8,9 +8,11 @@ The rig's limits are the static policy plugin defaults
 
 Usage is seeded deterministically: a normal turn creates the user's
 quota_usage rows (daily + monthly, total + tier:premium), then the rows are
-rewritten in the DB. Each test runs as a dedicated quota user (config/base.yaml)
-so the seeded state never reaches user A, and the rows are zeroed before and
-after every test.
+rewritten in the DB. Seeded values are ones the product can reach: a daily
+row never exceeds its limit, the monthly row of a bucket is at least the
+daily one, and `total` includes `tier:premium`. Each test runs as a
+dedicated quota user (config/base.yaml) so the seeded state never reaches
+user A, and the rows are zeroed before and after every test.
 
 Kill switches are fixed plugin configuration (all off) and are covered by
 unit tests, not here.
@@ -51,7 +53,6 @@ from .conftest import (
 from .test_code_interpreter import XLSX_CONTENT_TYPE, _make_minimal_xlsx
 
 TOTAL_MONTHLY_LIMIT = 1_000_000_000
-PREMIUM_MONTHLY_LIMIT = 500_000_000
 TOTAL_DAILY_LIMIT = 100_000_000
 PREMIUM_DAILY_LIMIT = 50_000_000
 WEB_SEARCH_DAILY_QUOTA = 75  # QuotaConfig default (config.rs), not overridden in base.yaml
@@ -101,6 +102,17 @@ class QuotaUser:
             sql += " AND period_type = ?"
             params.append(period_type)
         assert exec_db(sql, tuple(params)) > 0, f"no quota_usage rows to seed for {self.user_id}"
+
+    def seed_spent(self, *, total: int, premium: int = 0, total_monthly: int | None = None) -> None:
+        """Spent credits of today: `total` and `premium` in the daily rows and,
+        unless `total_monthly` is given, the same amounts in the monthly rows."""
+        self.seed(bucket="total", period_type="daily", spent_credits_micro=total)
+        self.seed(
+            bucket="total", period_type="monthly",
+            spent_credits_micro=total if total_monthly is None else total_monthly,
+        )
+        self.seed(bucket="tier:premium", period_type="daily", spent_credits_micro=premium)
+        self.seed(bucket="tier:premium", period_type="monthly", spent_credits_micro=premium)
 
     def reset(self) -> None:
         exec_db(
@@ -162,7 +174,7 @@ class TestQuotaExhaustion:
         user1.complete_turn(chat_id, "Before exhaustion.")
         messages_before = list_messages(chat_id, token=user1.token)
         turns_before = turn_count(chat_id)
-        user1.seed(spent_credits_micro=TOTAL_MONTHLY_LIMIT)
+        user1.seed_spent(total=TOTAL_DAILY_LIMIT, premium=PREMIUM_DAILY_LIMIT)
 
         mock_provider.clear_captured_requests()
         resp = user1.post_stream(chat_id, {"content": "Blocked?", "request_id": str(uuid.uuid4())})
@@ -178,7 +190,7 @@ class TestQuotaExhaustion:
         chat_id = user1.create_chat(DEFAULT_MODEL)
         rid, _ = user1.complete_turn(chat_id, "Keep my answer.")
         messages_before = list_messages(chat_id, token=user1.token)
-        user1.seed(spent_credits_micro=TOTAL_MONTHLY_LIMIT)
+        user1.seed_spent(total=TOTAL_DAILY_LIMIT, premium=PREMIUM_DAILY_LIMIT)
 
         mock_provider.clear_captured_requests()
         resp = httpx.post(
@@ -203,25 +215,27 @@ class TestPeriodsCheckedSeparately:
     """14-04: the daily and the monthly period are each enforced on their own."""
 
     @pytest.mark.parametrize(
-        ("user_fixture", "exhausted", "limit", "other"),
+        ("user_fixture", "daily", "monthly", "exhausted", "other", "other_used"),
         [
-            ("user1", "daily", TOTAL_DAILY_LIMIT, "monthly"),
-            ("user2", "monthly", TOTAL_MONTHLY_LIMIT, "daily"),
+            # The daily limit spent today; the month holds only today's usage.
+            ("user1", TOTAL_DAILY_LIMIT, TOTAL_DAILY_LIMIT, "daily", "monthly", TOTAL_DAILY_LIMIT),
+            # The monthly limit spent on earlier days; nothing today.
+            ("user2", 0, TOTAL_MONTHLY_LIMIT, "monthly", "daily", 0),
         ],
     )
     def test_single_exhausted_period_rejects(
-        self, request, mock_provider, user_fixture, exhausted, limit, other,
+        self, request, mock_provider, user_fixture, daily, monthly, exhausted, other, other_used,
     ):
         """14-04: only the `total` bucket of one period is at its limit → 429
-        `tokens`; the other period is untouched and not exhausted."""
+        `tokens`; the other period is not exhausted."""
         user = request.getfixturevalue(user_fixture)
         chat_id = user.create_chat(STANDARD_MODEL)
-        user.seed(bucket="total", period_type=exhausted, spent_credits_micro=limit)
+        user.seed_spent(total=daily, total_monthly=monthly)
 
         status = get_quota_status(token=user.token)
         assert find_period(status, "total", exhausted)["exhausted"] is True
         untouched = find_period(status, "total", other)
-        assert (untouched["used_credits_micro"], untouched["exhausted"]) == (0, False)
+        assert (untouched["used_credits_micro"], untouched["exhausted"]) == (other_used, False)
 
         mock_provider.clear_captured_requests()
         resp = user.post_stream(chat_id, {"content": "Blocked?", "request_id": str(uuid.uuid4())})
@@ -235,7 +249,7 @@ class TestDowngrade:
 
     def test_premium_exhausted_downgrades_to_standard(self, user2, mock_provider):
         chat_id = user2.create_chat(DEFAULT_MODEL)
-        user2.seed(bucket="tier:premium", spent_credits_micro=PREMIUM_MONTHLY_LIMIT)
+        user2.seed_spent(total=PREMIUM_DAILY_LIMIT, premium=PREMIUM_DAILY_LIMIT)
         premium_before = find_period(get_quota_status(token=user2.token), "premium", "daily")
 
         mock_provider.clear_captured_requests()
@@ -346,7 +360,7 @@ class TestQuotaStatusFlags:
         ],
     )
     def test_total_daily_flags(self, user2, spent, remaining_pct, warning, exhausted):
-        user2.seed(bucket="total", period_type="daily", spent_credits_micro=spent)
+        user2.seed_spent(total=spent)
 
         status = get_quota_status(token=user2.token)
         assert status["warning_threshold_pct"] == 80
@@ -357,14 +371,19 @@ class TestQuotaStatusFlags:
         assert daily["remaining_percentage"] == remaining_pct
         assert (daily["warning"], daily["exhausted"]) == (warning, exhausted)
 
-        # Other periods are untouched.
-        for tier, period in (("total", "monthly"), ("premium", "daily"), ("premium", "monthly")):
-            p = find_period(status, tier, period)
+        # The monthly row holds the same spend, far from the monthly limit;
+        # the premium tier is untouched (standard usage).
+        monthly = find_period(status, "total", "monthly")
+        assert (monthly["used_credits_micro"], monthly["warning"], monthly["exhausted"]) == (
+            spent, False, False,
+        )
+        for period in ("daily", "monthly"):
+            p = find_period(status, "premium", period)
             assert (p["used_credits_micro"], p["warning"], p["exhausted"]) == (0, False, False)
 
     def test_done_quota_warnings_match_status(self, user2):
         """The SSE done `quota_warnings` report the same flags as GET /quota/status."""
-        user2.seed(bucket="total", period_type="daily", spent_credits_micro=90_000_000)
+        user2.seed_spent(total=90_000_000)
         chat_id = user2.create_chat(STANDARD_MODEL)
         _, done = user2.complete_turn(chat_id, "Near the limit.")
 

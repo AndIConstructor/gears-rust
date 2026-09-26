@@ -56,9 +56,9 @@ class TestWebSearchBasic:
         assert "request_id" in ss.data
         assert "message_id" in ss.data
         assert ss.data.get("is_new_turn") is True
-        assert "effective_model" in done.data, "done must have effective_model"
-        assert "selected_model" in done.data, "done must have selected_model"
-        assert done.data.get("quota_decision") in ("allow", "downgrade"), f"unexpected quota_decision: {done.data.get('quota_decision')}"
+        assert done.data["effective_model"] == provider_chat["model"]
+        assert done.data["selected_model"] == provider_chat["model"]
+        assert done.data["quota_decision"] == "allow"
         usage = done.data.get("usage")
         assert usage is not None, f"Done event missing usage: {done.data}"
         assert usage["input_tokens"] > 0
@@ -173,8 +173,8 @@ class TestWebSearchCitations:
 class TestWebSearchEventOrdering:
     """SSE event grammar: ping* (delta|tool)* citations? (done|error)"""
 
-    def test_citations_before_done(self, provider_chat):
-        """If citations are present, they must appear before the done event."""
+    def test_citations_before_done(self, request, provider_chat):
+        """One `citations` event, sent right before `done` (grammar: ... citations? done)."""
         resp = httpx.post(
             f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
             json={"content": "SEARCH: capital of France", "web_search": {"enabled": True}},
@@ -185,20 +185,11 @@ class TestWebSearchEventOrdering:
         events = parse_sse(resp.text)
         expect_done(events)
 
-        citation_idx = None
-        done_idx = None
-        for i, e in enumerate(events):
-            if e.event == "citations" and citation_idx is None:
-                citation_idx = i
-            if e.event == "done":
-                done_idx = i
-
-        # Citations are optional (provider may not always return them),
-        # but if present they must come before done.
-        if citation_idx is not None:
-            assert citation_idx < done_idx, (
-                f"citations at index {citation_idx} should come before done at {done_idx}"
-            )
+        types = [e.event for e in events]
+        if "citations" not in types and request.config.getoption("mode") == "online":
+            pytest.skip("Provider did not return citations for this query")
+        assert types.count("citations") == 1, types
+        assert types[-2:] == ["citations", "done"], types
 
     def test_tool_events_before_done(self, provider_chat):
         """Tool events must appear before the terminal done event."""

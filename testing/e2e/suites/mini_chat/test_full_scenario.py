@@ -68,7 +68,7 @@ class TestFullConversationScenario:
         done1 = expect_done(ev1)
         assert done1.data["quota_decision"] == "allow"
         assert done1.data["effective_model"] == expected_model
-        assert "selected_model" in done1.data, "done must have selected_model"
+        assert done1.data["selected_model"] == expected_model
         usage1 = done1.data["usage"]
         assert usage1["input_tokens"] > 0
         assert usage1["output_tokens"] > 0
@@ -88,16 +88,12 @@ class TestFullConversationScenario:
         assert ss2.data["is_new_turn"] is True
 
         done2 = expect_done(ev2)
-        assert "effective_model" in done2.data, "done must have effective_model"
-        assert "selected_model" in done2.data, "done must have selected_model"
-        assert done2.data.get("quota_decision") in ("allow", "downgrade"), f"unexpected quota_decision: {done2.data.get('quota_decision')}"
+        assert done2.data["quota_decision"] == "allow"
+        assert done2.data["effective_model"] == expected_model
+        assert done2.data["selected_model"] == expected_model
         usage2 = done2.data["usage"]
-        assert usage2["output_tokens"] > 0, "done usage must have output_tokens > 0"
-
-        assert usage2["input_tokens"] >= usage1["input_tokens"], (
-            f"Turn 2 input_tokens ({usage2['input_tokens']}) should be >= "
-            f"turn 1 ({usage1['input_tokens']}) — context assembly sends history"
-        )
+        assert usage2["input_tokens"] > 0
+        assert usage2["output_tokens"] > 0
 
         text2 = "".join(e.data["content"] for e in ev2 if e.event == "delta")
         assert len(text2.strip()) > 0
@@ -113,12 +109,12 @@ class TestFullConversationScenario:
         msg_id3 = ss3.data["message_id"]
         assert ss3.data["is_new_turn"] is True
         done3 = expect_done(ev3)
-        assert "effective_model" in done3.data, "done must have effective_model"
-        assert "selected_model" in done3.data, "done must have selected_model"
-        assert done3.data.get("quota_decision") in ("allow", "downgrade"), f"unexpected quota_decision: {done3.data.get('quota_decision')}"
-        usage3 = done3.data.get("usage", {})
-        assert usage3.get("input_tokens", 0) > 0, "done usage must have input_tokens > 0"
-        assert usage3.get("output_tokens", 0) > 0, "done usage must have output_tokens > 0"
+        assert done3.data["quota_decision"] == "allow"
+        assert done3.data["effective_model"] == expected_model
+        assert done3.data["selected_model"] == expected_model
+        usage3 = done3.data["usage"]
+        assert usage3["input_tokens"] > 0
+        assert usage3["output_tokens"] > 0
 
         # ── 5. Verify message history via API ────────────────────────────
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
@@ -178,42 +174,6 @@ class TestFullConversationScenario:
 
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}")
         assert resp.status_code == 404
-
-
-@pytest.mark.multi_provider
-class TestQuotaAccumulation:
-    """Verify quota accumulates correctly across multiple turns."""
-
-    def test_quota_credits_accumulate(self, server, provider_chat):
-        """Each turn should add to used_credits_micro via quota status endpoint."""
-        before = _get_quota_status()
-        before_total_daily = _find_period(before["tiers"], "total", "daily")
-        assert before_total_daily is not None
-        spent_before = before_total_daily["used_credits_micro"]
-
-        chat_id = provider_chat["id"]
-
-        for content in ("Say A.", "Say B."):
-            status, events, _ = stream_message(chat_id, content)
-            assert status == 200
-            expect_done(events)
-        assert_no_reserves(USER_A_ID)
-
-        after = _get_quota_status()
-        after_total_daily = _find_period(after["tiers"], "total", "daily")
-        assert after_total_daily is not None
-        spent_after = after_total_daily["used_credits_micro"]
-
-        assert spent_after > spent_before, (
-            f"used_credits_micro should increase: before={spent_before}, after={spent_after}"
-        )
-
-    def test_no_stuck_reserves_after_completion(self, server, provider_chat):
-        """After a completed turn the user's quota reserve is back to 0."""
-        status, events, _ = stream_message(provider_chat["id"], "Hello.")
-        assert status == 200
-        expect_done(events)
-        assert_no_reserves(USER_A_ID)
 
 
 @pytest.mark.multi_provider

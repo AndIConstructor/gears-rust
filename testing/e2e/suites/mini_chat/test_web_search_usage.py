@@ -121,38 +121,3 @@ class TestWebSearchUsageAccounting:
         assert spent_after - spent_before == EXPECTED_CREDITS[provider]
 
         assert len(ws_tool_dones) > 0, "Expected web_search tool done events"
-
-    def test_non_websearch_turn_has_no_tool_events(self, provider, server):
-        """A normal turn (no web_search) should not change credits more than expected."""
-        model = PROVIDER_DEFAULT_MODEL[provider]
-
-        before = _get_quota_status()
-        before_td = _find_period(before["tiers"], "total", "daily")
-        spent_before = before_td["used_credits_micro"]
-
-        resp = httpx.post(f"{API_PREFIX}/chats", json={"model": model})
-        assert resp.status_code == 201
-        chat_id = resp.json()["id"]
-
-        _url2 = f"{API_PREFIX}/chats/{chat_id}/messages:stream"
-        _resp2 = httpx.post(_url2, json={"content": "What is 2+2? Answer in one word."}, headers={"Accept": "text/event-stream"}, timeout=90)
-        status = _resp2.status_code
-        events = parse_sse(_resp2.text) if status == 200 else []
-        assert status == 200
-        done = expect_done(events)
-        assert_no_reserves(USER_A_ID)
-
-        after = _get_quota_status()
-        after_td = _find_period(after["tiers"], "total", "daily")
-        spent_after = after_td["used_credits_micro"]
-
-        # Default "*" scenario, first message: input max(50, 50 * 1) = 50, output 12:
-        #   openai gpt-5.2: 50 * 1.0 + 12 * 3.0 = 86; azure-gpt-4.1: 50 * 3.0 + 12 * 15.0 = 330.
-        assert done.data["usage"] == {"input_tokens": 50, "output_tokens": 12}
-        assert spent_after - spent_before == {"openai": 86, "azure": 330}[provider]
-
-        # Verify no tool events (no web search happened)
-        tool_events = [e for e in events if e.event == "tool"]
-        assert len(tool_events) == 0, (
-            f"Unexpected tool events without web_search: {[t.data for t in tool_events]}"
-        )

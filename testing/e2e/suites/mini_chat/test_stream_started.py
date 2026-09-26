@@ -138,23 +138,17 @@ class TestStreamStartedOrdering:
     """Grammar: stream_started ping* (delta | tool)* citations? (done | error)."""
 
     def test_stream_started_before_deltas_before_done(self, provider_chat):
+        """A plain message: one `stream_started`, then deltas (and pings), then
+        exactly one terminal event, `done`, as the last event."""
         url = f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream"
         resp = httpx.post(url, json={"content": "Say hello briefly."}, headers=_STREAM_HEADERS, timeout=90)
-        events = parse_sse(resp.text) if resp.status_code == 200 else []
-        types = [e.event for e in events]
+        assert resp.status_code == 200, resp.text
+        types = [e.event for e in parse_sse(resp.text)]
 
-        # stream_started must be first
-        assert types[0] == "stream_started"
-
-        # done must be last
-        assert types[-1] == "done"
-
-        # No stream_started after the first one
-        assert types.count("stream_started") == 1
-
-        # Deltas between stream_started and done
-        deltas = [e for e in events if e.event == "delta"]
-        assert len(deltas) > 0
+        assert types[0] == "stream_started", types
+        assert types[-1] == "done", types
+        assert set(types[1:-1]) <= {"ping", "delta"}, types
+        assert "delta" in types, types
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +249,8 @@ class TestStreamStartedOnReplay:
         assert ss_replay.data["is_new_turn"] is False
         assert ss_replay.data["message_id"] == orig_msg_id
         assert ss_replay.data["request_id"] == rid
+        expect_done(events2)
+        assert delta_text(events2) == delta_text(events)
 
 
 # ---------------------------------------------------------------------------

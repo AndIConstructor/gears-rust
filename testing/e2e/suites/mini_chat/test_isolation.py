@@ -26,6 +26,7 @@ from .conftest import (
     expect_stream_started,
     find_period,
     get_quota_status,
+    list_messages,
     stream_message,
 )
 
@@ -123,6 +124,7 @@ FOREIGN_OPERATIONS = [
     (m, p) for (m, p) in OPERATIONS
     if "{chat_id}" in p
 ]
+FOREIGN_MUTATIONS = [(m, p) for (m, p) in FOREIGN_OPERATIONS if m != "GET"]
 
 
 @pytest.mark.parametrize("token", [TOKEN_USER_B, TOKEN_TENANT_B], ids=["same_tenant", "other_tenant"])
@@ -144,25 +146,30 @@ class TestIsolation:
         assert owned["chat_id"] not in ids
 
     def test_owner_resources_unchanged(self, owned, token):
-        # Runs after the foreign PATCH/DELETE attempts in this class.
-        chat = httpx.get(f"{API_PREFIX}/chats/{owned['chat_id']}")
+        """Every foreign mutation of A's chat (404) leaves A's chat, messages,
+        turn, attachment and reactions as they were."""
+        chat_url = f"{API_PREFIX}/chats/{owned['chat_id']}"
+        messages_before = list_messages(owned["chat_id"])
+
+        for method, path in FOREIGN_MUTATIONS:
+            resp = _call(method, path, owned, auth_headers(token))
+            assert resp.status_code == 404, f"{method} {path}: {resp.status_code} {resp.text}"
+
+        chat = httpx.get(chat_url)
         assert chat.status_code == 200
         assert chat.json()["title"] == "owned by A"
+        assert list_messages(owned["chat_id"]) == messages_before
 
-        turn = httpx.get(
-            f"{API_PREFIX}/chats/{owned['chat_id']}/turns/{owned['request_id']}"
-        )
+        turn = httpx.get(f"{chat_url}/turns/{owned['request_id']}")
         assert turn.status_code == 200
         assert turn.json()["state"] == "done"
 
-        att = httpx.get(
-            f"{API_PREFIX}/chats/{owned['chat_id']}/attachments/{owned['attachment_id']}"
-        )
+        att = httpx.get(f"{chat_url}/attachments/{owned['attachment_id']}")
         assert att.status_code == 200
+        assert att.json()["status"] == "ready"
 
-        messages = httpx.get(f"{API_PREFIX}/chats/{owned['chat_id']}/messages")
-        assistant = [m for m in messages.json()["items"] if m["role"] == "assistant"]
-        assert assistant and assistant[0]["my_reaction"] is None
+        assistant = [m for m in messages_before if m["role"] == "assistant"]
+        assert {m["my_reaction"] for m in assistant} == {None}
 
 
 class TestQuotaIsolation:

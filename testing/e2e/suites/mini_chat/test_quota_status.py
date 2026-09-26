@@ -11,7 +11,6 @@ Covers:
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timezone
 
 import httpx
@@ -19,6 +18,10 @@ import httpx
 from .conftest import API_PREFIX, USER_A_ID, assert_no_reserves, expect_done, stream_message
 
 import pytest
+
+# Credit multipliers (credits_micro per token: input, output) of the default
+# models (config/base.yaml, *_tokens_credit_multiplier_micro / 1e6).
+CREDIT_MULTIPLIERS = {"gpt-5.2": (1, 3), "azure-gpt-4.1": (3, 15)}
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +60,8 @@ class TestQuotaStatusEndpoint:
         assert "tiers" in status
         assert isinstance(status["tiers"], list)
         assert len(status["tiers"]) > 0
-        assert "warning_threshold_pct" in status
-        assert 1 <= status["warning_threshold_pct"] <= 99
+        # QuotaConfig default (config.rs), not overridden in config/base.yaml.
+        assert status["warning_threshold_pct"] == 80
 
     def test_each_tier_has_periods(self, server):
         status = get_quota_status()
@@ -106,29 +109,26 @@ class TestQuotaUsageTracking:
     """Quota usage increases after sending messages."""
 
     def test_used_credits_increase_after_send(self, provider_chat):
+        """Each completed turn adds its cost to the total daily usage.
+
+        cost = input_tokens * input multiplier + output_tokens * output
+        multiplier, in credits_micro per token (base.yaml: gpt-5.2 1 and 3,
+        azure-gpt-4.1 3 and 15); the token counts are the ones in `done`.
+        """
         chat_id = provider_chat["id"]
+        in_mult, out_mult = CREDIT_MULTIPLIERS[provider_chat["model"]]
+        before = find_period(get_quota_status()["tiers"], "total", "daily")["used_credits_micro"]
 
-        before = get_quota_status()
-        before_total_daily = find_period(before["tiers"], "total", "daily")
-        assert before_total_daily is not None, "Should have total/daily period"
-        before_used = before_total_daily["used_credits_micro"]
+        cost = 0
+        for content in ("Say A.", "Say B."):
+            status, events, _ = stream_message(chat_id, content)
+            assert status == 200
+            usage = expect_done(events).data["usage"]
+            cost += usage["input_tokens"] * in_mult + usage["output_tokens"] * out_mult
+        assert_no_reserves(USER_A_ID)
 
-        # Send a message
-        status, events, _ = stream_message(chat_id, "Say OK.")
-        assert status == 200
-        expect_done(events)
-
-        # Small delay for settlement
-        time.sleep(0.5)
-
-        after = get_quota_status()
-        after_total_daily = find_period(after["tiers"], "total", "daily")
-        after_used = after_total_daily["used_credits_micro"]
-
-        assert after_used > before_used, (
-            f"used_credits_micro should increase after send: "
-            f"before={before_used}, after={after_used}"
-        )
+        after = find_period(get_quota_status()["tiers"], "total", "daily")["used_credits_micro"]
+        assert after - before == cost
 
     def test_remaining_credits_decrease_after_send(self, provider_chat):
         """remaining_credits_micro strictly decreases after a charged turn.
@@ -176,28 +176,18 @@ class TestQuotaWarningsInDoneEvent:
             assert isinstance(w["exhausted"], bool)
 
     def test_quota_warnings_consistent_with_endpoint(self, provider_chat):
+        """Every `quota_warnings` entry of `done` equals the same tier/period of
+        GET /quota/status read right after the turn."""
         chat_id = provider_chat["id"]
         _, events, _ = stream_message(chat_id, "Say hello.")
-        done = expect_done(events)
-
-        sse_warnings = done.data.get("quota_warnings", [])
-
-        # Small delay then fetch endpoint
-        time.sleep(0.3)
+        sse_warnings = expect_done(events).data["quota_warnings"]
+        assert_no_reserves(USER_A_ID)
         endpoint_status = get_quota_status()
 
-        # Compare each SSE warning entry with the endpoint
+        assert len(sse_warnings) > 0
         for sw in sse_warnings:
-            ep = find_period(
-                endpoint_status["tiers"], sw["tier"], sw["period"]
-            )
-            assert ep is not None, (
-                f"SSE warning tier={sw['tier']} period={sw['period']} "
-                f"not found in endpoint response"
-            )
-            # Percentages should be close (may differ slightly due to timing)
-            diff = abs(ep["remaining_percentage"] - sw["remaining_percentage"])
-            assert diff <= 2, (
-                f"remaining_percentage mismatch for {sw['tier']}/{sw['period']}: "
-                f"SSE={sw['remaining_percentage']}, endpoint={ep['remaining_percentage']}"
-            )
+            ep = find_period(endpoint_status["tiers"], sw["tier"], sw["period"])
+            assert ep is not None, (sw, endpoint_status)
+            assert (sw["remaining_percentage"], sw["warning"], sw["exhausted"]) == (
+                ep["remaining_percentage"], ep["warning"], ep["exhausted"],
+            ), (sw, ep)

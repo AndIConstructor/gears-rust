@@ -1,4 +1,5 @@
-"""Tests for turn lifecycle — null assistant_message_id on content-less cancel/failure."""
+"""Tests for turn lifecycle: running → terminal, and null assistant_message_id on
+content-less cancel/failure."""
 
 import uuid
 
@@ -60,18 +61,21 @@ class TestTurnLifecycle:
         assert turn.get("assistant_message_id") is None
         assert [m["role"] for m in list_messages(chat_id)] == ["user"]
 
-    def test_done_turn_state_stable_after_completion(self, chat):
-        """Once GET turn reports `done`, later reads keep reporting `done` with the same message."""
+    @pytest.mark.timeout(30)
+    def test_turn_running_then_done(self, chat, mock_provider):
+        """09-11: GET turn reports `running` while the stream is open and `done`
+        after it ended, with the assistant message announced in stream_started."""
         chat_id = chat["id"]
         rid = str(uuid.uuid4())
-        status, events, _ = stream_message(chat_id, "Say OK.", request_id=rid)
-        assert status == 200
-        expect_done(events)
+        mock_provider.set_next_scenario(slow_scenario(5, slow=0.3))
 
-        first = poll_turn(chat_id, rid)
-        assert first["state"] == "done"
-        for _ in range(5):
+        with open_stream(chat_id, "Answer slowly.", request_id=rid) as s:
+            started = s.read_until_started()
             resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/turns/{rid}", timeout=5)
             assert resp.status_code == 200
-            assert resp.json()["state"] == "done"
-            assert resp.json()["assistant_message_id"] == first["assistant_message_id"]
+            assert resp.json()["state"] == "running"
+            expect_done(s.drain())
+
+        turn = poll_turn(chat_id, rid)
+        assert turn["state"] == "done"
+        assert turn["assistant_message_id"] == started.data["message_id"]

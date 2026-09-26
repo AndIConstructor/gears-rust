@@ -42,7 +42,7 @@ INTERNAL_ATTACHMENT_FIELDS = ("provider_file_id", "storage_backend", "vector_sto
 
 @pytest.mark.multi_provider
 class TestUploadAndGet:
-    """Upload a file, poll until ready, GET returns full detail."""
+    """Upload a file; the 201 response and GET return the full detail."""
 
     def test_upload_and_get_attachment(self, provider_chat):
         chat_id = provider_chat["id"]
@@ -61,16 +61,17 @@ class TestUploadAndGet:
         assert body["content_type"] == "text/plain"
         assert body["size_bytes"] == len(content)
         assert body["kind"] == "document"
-        assert body["status"] == "pending" or body["status"] == "ready"
+        # Upload is synchronous (ADR-0007): the 201 already reports `ready`.
+        assert body["status"] == "ready", body
 
-        # Poll until ready
-        resp = poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+        assert resp.status_code == 200, resp.text
         detail = resp.json()
-        assert detail["status"] == "ready", f"Expected ready, got: {detail}"
         assert detail["id"] == att_id
+        assert detail["status"] == "ready", detail
+        assert (detail["filename"], detail["content_type"], detail["size_bytes"], detail["kind"]) == (
+            "notes.txt", "text/plain", len(content), "document",
+        )
 
     def test_provider_storage_fields_not_exposed(self, provider_chat):
         """Neither the upload response nor GET exposes provider storage details."""
@@ -285,24 +286,16 @@ class TestUploadSearchCitationFlow:
         )
         assert resp.status_code == 200, f"Stream failed: {resp.status_code} {resp.text[:500]}"
         events = parse_sse(resp.text)
-        done = expect_done(events)
+        expect_done(events)
 
-        # Citations are not guaranteed — the LLM may answer from retrieved context
-        # without emitting structured citations. Verify format if present.
+        # The question names the document, so the model cites it.
         citation_events = [e for e in events if e.event == "citations"]
-        if citation_events:
-            data = citation_events[0].data
-            # Citations are wrapped in {"items": [...]}
-            citations = data.get("items", []) if isinstance(data, dict) else data
-            assert isinstance(citations, list)
-            for c in citations:
-                assert "source" in c or "type" in c
-                if c.get("source") == "file" or c.get("type") == "file":
-                    # File citations should have internal UUID, not provider file-xxx
-                    file_id = c.get("attachment_id") or c.get("file_id", "")
-                    assert not file_id.startswith("file-"), (
-                        f"Citation contains provider file_id instead of UUID: {file_id}"
-                    )
+        assert len(citation_events) == 1, [e.event for e in events]
+        file_citations = [c for c in citation_events[0].data["items"] if c["source"] == "file"]
+        assert file_citations, citation_events[0].data
+        for c in file_citations:
+            assert c["attachment_id"] == att_id, c
+            assert c["title"] == "zembla.txt", c
 
 
 # ---------------------------------------------------------------------------
@@ -720,15 +713,11 @@ class TestDocumentAndImageTogether:
             f"Image inlining (input_image) may not be working. Response: {delta_text!r}"
         )
 
-        # Should mention the code word from the document (file_search)
-        # Soft check: file_search depends on vector store indexing timing
-        has_code_word = "flamingo" in response_lower
-        if not has_code_word:
-            print(
-                f"\n[WARN] LLM saw the cat but did not find 'FLAMINGO' from the document. "
-                f"file_search may not have retrieved the document (indexing timing). "
-                f"Response: {delta_text!r}"
-            )
+        # Must mention the code word from the document (file_search).
+        assert "flamingo" in response_lower, (
+            f"LLM did not find 'FLAMINGO' from the document (file_search). "
+            f"Response: {delta_text!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -771,7 +760,7 @@ class TestUploadSizeEnforcement:
             f"Expected FILE_TOO_LARGE field violation, got: {violations}"
         )
 
-    def test_oversize_document_rejected_by_gateway(self, provider_chat):
+    def test_oversize_document_rejected(self, provider_chat):
         """Upload a document exceeding the per-kind handler limit (25 MB) → 400.
 
         Documents are capped at 25 MB by the per-kind handler size check.
@@ -880,12 +869,9 @@ class TestUploadStreamingPipeline:
         assert resp.status_code == 200, f"Stream failed: {resp.status_code} {resp.text}"
         events = parse_sse(resp.text)
 
-        started = expect_stream_started(events)
-        assert started is not None, "Expected stream_started event"
-
+        expect_stream_started(events)
         done = expect_done(events)
-        assert done is not None, "Expected done event"
-        assert done.data.get("usage", {}).get("input_tokens", 0) > 0
+        assert done.data["usage"]["input_tokens"] > 0
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +884,7 @@ MAX_IMAGES_PER_MESSAGE = 4
 MAX_DOCUMENTS_PER_CHAT = 50
 MAX_TOTAL_UPLOAD_BYTES_PER_CHAT = 100 * 1_048_576
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 25 * 1024 * 1024  # uploaded_file_max_size_kb 25600
 
 
 def _require_offline(request):
@@ -928,18 +915,19 @@ def _upload_ready(chat_id: str, filename: str, payload: bytes, content_type: str
 
 
 def _clone_attachment(src_id: str, *, size_bytes: int | None = None) -> str:
-    """Insert a copy of attachment row `src_id` under a new id; return the id."""
+    """Insert a copy of attachment row `src_id` under a new id and a new
+    provider file id (each upload has its own provider file); return the id."""
     cols = [r["name"] for r in query_db("PRAGMA table_info(attachments)")]
     exprs = []
     params: list = []
+    new_id = str(uuid.uuid4())
+    overrides = {"id": new_id, "provider_file_id": f"file-seed-{uuid.uuid4().hex[:12]}"}
+    if size_bytes is not None:
+        overrides["size_bytes"] = size_bytes
     for col in cols:
-        if col == "id":
+        if col in overrides:
             exprs.append("?")
-            new_id = str(uuid.uuid4())
-            params.append(new_id)
-        elif col == "size_bytes" and size_bytes is not None:
-            exprs.append("?")
-            params.append(size_bytes)
+            params.append(overrides[col])
         else:
             exprs.append(col)
     params.append(src_id)
@@ -1099,11 +1087,13 @@ class TestPerChatLimits:
 
     def test_storage_limit_exceeded(self, request, chat, mock_provider):
         """10-27: a chat whose attachments already total max_total_upload_mb_per_chat
-        (100 MB) rejects the next upload: 429 resource_exhausted, violation storage_limit."""
+        (100 MB, as 4 files at the 25 MB per-file limit) rejects the next
+        upload: 429 resource_exhausted, violation storage_limit."""
         _require_offline(request)
         chat_id = chat["id"]
         src = _upload_ready(chat_id, "seed.txt", b"seed document", "text/plain")
-        _clone_attachment(src, size_bytes=MAX_TOTAL_UPLOAD_BYTES_PER_CHAT)
+        for _ in range(MAX_TOTAL_UPLOAD_BYTES_PER_CHAT // MAX_DOCUMENT_BYTES):
+            _clone_attachment(src, size_bytes=MAX_DOCUMENT_BYTES)
 
         mock_provider.clear_captured_requests()
         resp = _upload(chat_id, "one-more.txt", b"over the limit", "text/plain")

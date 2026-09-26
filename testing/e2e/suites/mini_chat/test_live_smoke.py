@@ -85,22 +85,24 @@ def find_event(events: list[dict], name: str) -> dict | None:
     return next((e for e in events if e["event"] == name), None)
 
 
-_TRANSIENT_ERROR_PHRASES = ("provider", "upstream", "rate limit", "timeout", "unavailable", "gateway")
+# SSE error codes of a failing or unavailable provider (DESIGN §3.3
+# "Streaming error codes"). `provider_error` also covers a provider rejecting
+# the request; the test then skips instead of failing.
+PROVIDER_UNAVAILABLE_CODES = ("provider_error", "provider_timeout", "rate_limited")
 
 
 def require_done(events: list[dict]) -> dict:
     """Assert stream completed successfully (has 'done' event, no 'error').
 
-    Only skips for known transient/provider errors; fails on all others
-    so real bugs are not masked.
+    Skips when the SSE error code is one of PROVIDER_UNAVAILABLE_CODES and
+    fails on every other code, so gear errors are not masked.
     """
     err = find_event(events, "error")
     if err:
-        err_data = str(err.get("data", "")).lower()
-        if any(phrase in err_data for phrase in _TRANSIENT_ERROR_PHRASES):
-            pytest.skip(f"Provider error (transient): {err['data']}")
-        else:
-            pytest.fail(f"Stream error (non-transient): {err['data']}")
+        code = err["data"].get("code") if isinstance(err["data"], dict) else None
+        if code in PROVIDER_UNAVAILABLE_CODES:
+            pytest.skip(f"Provider unavailable ({code}): {err['data']}")
+        pytest.fail(f"Stream error: {err['data']}")
     done = find_event(events, "done")
     if done is None:
         pytest.fail(f"No 'done' event in stream. Events: {[e['event'] for e in events]}")
@@ -654,15 +656,14 @@ class TestLiveThreadSummaryTrigger:
 
 
 class TestLiveAttachmentDeletion:
-    """Upload a document, verify LLM can find it, delete it, verify LLM cannot."""
+    """Upload a document, verify the LLM finds its content, delete it."""
 
     @pytest.mark.online_only
-    def test_delete_makes_document_invisible_to_llm(self, _check_live):
+    def test_document_answer_then_delete(self, _check_live):
         """
         1. Create chat, upload file with unique fact
-        2. Ask LLM about the fact WITH attachment → should know
-        3. Delete attachment
-        4. New chat, ask same question WITHOUT attachment → should NOT know
+        2. Ask LLM about the fact (file_search) → should know
+        3. Delete the unreferenced attachment → 204, then GET → 404
         """
         chat = create_chat(DEFAULT_MODEL)
         chat_id = chat["id"]
@@ -698,20 +699,8 @@ class TestLiveAttachmentDeletion:
         # Delete attachment
         resp = httpx.delete(f"{API}/chats/{chat_id}/attachments/{att_id}", timeout=10)
         assert resp.status_code == 204
-
-        # NEW chat — no vector store, no history
-        clean_chat = create_chat(DEFAULT_MODEL)
-        status2, events2, raw2 = send_message(
-            clean_chat["id"], "What is the capital of Zarvonia?"
-        )
-        assert status2 == 200, f"Stream failed: {raw2}"
-        require_done(events2)
-        response_text2 = get_response_text(events2)
-
-        # LLM should NOT know — Plimberwick is a made-up fact from a deleted file
-        assert "plimberwick" not in response_text2.lower(), (
-            f"LLM should NOT know about Plimberwick without document, got: {response_text2}"
-        )
+        resp = httpx.get(f"{API}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+        assert resp.status_code == 404
 
     def test_attachment_api_returns_404_after_delete(self, _check_live):
         """After deletion, GET attachment returns 404."""

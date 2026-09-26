@@ -848,10 +848,21 @@ def server(test_env):
     """Alias for backward compat — yields base URL after server is running."""
     global _db_summary_text
     yield test_env.base_url
-    # DB summary on teardown
-    import time
-    time.sleep(3)
+    # DB summary on teardown, once no turn is still running.
+    _wait_no_running_turns()
     _db_summary_text = _print_db_summary()
+
+
+def _wait_no_running_turns(timeout: float = 5.0) -> None:
+    """Best effort: wait until no turn is `running` (the summary would show it)."""
+    if not os.path.exists(DB_PATH):
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        running = query_db("SELECT COUNT(*) AS n FROM chat_turns WHERE state = 'running'")
+        if running[0]["n"] == 0:
+            return
+        time.sleep(0.1)
 
 
 @pytest.fixture(scope="session", autouse=True)

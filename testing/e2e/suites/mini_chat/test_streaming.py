@@ -1,8 +1,5 @@
-"""Tests for the streaming message endpoint (POST /v1/chats/{id}/messages:stream).
-
-These tests hit a real LLM provider — they require valid API keys in .provider-keys
-and a running server (started automatically or via run-server.sh --bg).
-"""
+"""Tests for the streaming message endpoint (POST /v1/chats/{id}/messages:stream):
+SSE contract, pre-stream errors and message persistence."""
 
 import uuid
 
@@ -22,10 +19,6 @@ from .conftest import (
     uuid_from_db,
 )
 from .test_attachments import _upload, _upload_ready
-
-# A request body that fails JSON deserialization (missing required field,
-# wrong type) is rejected by axum's `Json` extractor before the handler runs.
-
 
 
 @pytest.mark.multi_provider
@@ -47,24 +40,6 @@ class TestStreamBasic:
         assert "request_id" in ss.data
         assert "message_id" in ss.data
         assert ss.data.get("is_new_turn") is True
-
-    def test_stream_has_terminal_done(self, provider_chat):
-        """Stream must end with exactly one 'done' event."""
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "Say hi."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        ss = expect_stream_started(events)
-        assert "request_id" in ss.data
-        assert "message_id" in ss.data
-        assert ss.data.get("is_new_turn") is True
-        terminal = [e for e in events if e.event in ("done", "error")]
-        assert len(terminal) == 1
-        assert terminal[0].event == "done"
 
     def test_stream_has_delta_events(self, provider_chat):
         """Stream should contain at least one delta with text content."""
@@ -130,30 +105,6 @@ class TestStreamDoneEvent:
         # Token breakdown fields are internal-only and not exposed in the SSE API.
         for internal in ("cache_read_input_tokens", "cache_write_input_tokens", "reasoning_tokens"):
             assert internal not in usage
-
-
-@pytest.mark.multi_provider
-class TestStreamEventOrdering:
-    """SSE event ordering: ping* (delta|tool)* citations? (done|error)"""
-
-    def test_no_events_after_terminal(self, provider_chat):
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "Say hi."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        terminal_idx = None
-        for i, e in enumerate(events):
-            if e.event in ("done", "error"):
-                terminal_idx = i
-                break
-        assert terminal_idx is not None
-        # Nothing after terminal
-        assert terminal_idx == len(events) - 1
-
 
 
 class TestStreamPing:
@@ -363,6 +314,7 @@ class TestMessages:
         assert any(prompt in m["content"] for m in user_msgs)
 
     def test_assistant_message_has_tokens(self, provider_chat):
+        """The assistant message stores the token counts of the turn's `done` usage."""
         chat_id = provider_chat["id"]
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",
@@ -371,11 +323,13 @@ class TestMessages:
             timeout=90,
         )
         assert resp.status_code == 200
+        usage = expect_done(parse_sse(resp.text)).data["usage"]
+        assert usage["input_tokens"] > 0 and usage["output_tokens"] > 0, usage
 
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
         assert resp.status_code == 200
-        msgs = resp.json()["items"]
-        asst = [m for m in msgs if m["role"] == "assistant"]
-        assert len(asst) >= 1
-        # Token counts should be populated
-        assert asst[0].get("input_tokens", 0) > 0 and asst[0].get("output_tokens", 0) > 0
+        asst = [m for m in resp.json()["items"] if m["role"] == "assistant"]
+        assert len(asst) == 1
+        assert (asst[0]["input_tokens"], asst[0]["output_tokens"]) == (
+            usage["input_tokens"], usage["output_tokens"],
+        )

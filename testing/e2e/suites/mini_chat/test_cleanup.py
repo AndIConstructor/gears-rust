@@ -347,29 +347,22 @@ class TestCleanupWorkerDB:
     """
 
     def test_chat_deletion_marks_attachments_for_cleanup(self, server):
-        """DELETE chat → all attachments get cleanup_status set (not NULL)."""
+        """DELETE chat → the attachment's cleanup ends in `done` after one
+        successful provider delete (cleanup_attempts stays 0)."""
         chat = create_chat()
         chat_id = chat["id"]
 
-        # Upload an attachment and wait until it's ready
         upload_resp = upload_file(chat_id)
         assert upload_resp.status_code == 201
         att_id = upload_resp.json()["id"]
         poll_attachment_ready(chat_id, att_id)
+        assert _cleanup_status(att_id) is None
 
-        # Delete the chat
-        del_resp = delete_chat(chat_id)
-        assert del_resp.status_code == 204
+        assert delete_chat(chat_id).status_code == 204
 
-        # Verify: attachment cleanup_status was set by the delete TX.
-        # It may already be 'done' if the outbox handler processed it quickly.
+        assert _wait_cleanup_terminal([att_id]) == {att_id: "done"}
         rows = get_attachment_rows(chat_id)
-        assert len(rows) >= 1, f"Expected at least 1 attachment row, got {len(rows)}"
-        for row in rows:
-            assert row["cleanup_status"] in ("pending", "done", "failed"), (
-                f"Attachment {row['id']} should have cleanup_status set, "
-                f"got {row['cleanup_status']!r}"
-            )
+        assert [(r["cleanup_status"], r["cleanup_attempts"]) for r in rows] == [("done", 0)], rows
 
     def test_chat_deletion_enqueues_chat_cleanup_event(self, server):
         """DELETE chat → chat_cleanup outbox message is enqueued."""
@@ -451,7 +444,7 @@ class TestCleanupWorkerDB:
         )
 
     def test_chat_deletion_with_multiple_attachments(self, server):
-        """DELETE chat with 3 attachments → all get cleanup_status set."""
+        """DELETE chat with 3 attachments → the cleanup of each one ends in `done`."""
         chat = create_chat()
         chat_id = chat["id"]
 
@@ -473,13 +466,8 @@ class TestCleanupWorkerDB:
         del_resp = delete_chat(chat_id)
         assert del_resp.status_code == 204
 
-        # All 3 attachments should have cleanup_status set (may already be 'done')
-        rows = get_attachment_rows(chat_id)
-        cleanup_rows = [r for r in rows if r["cleanup_status"] in ("pending", "done", "failed")]
-        assert len(cleanup_rows) == 3, (
-            f"Expected 3 attachments with cleanup_status set, got {len(cleanup_rows)} "
-            f"(total rows: {len(rows)})"
-        )
+        # Every attachment's cleanup ends in `done`.
+        assert _wait_cleanup_terminal(att_ids) == {a: "done" for a in att_ids}
 
     def test_second_delete_chat_404_single_cleanup_event(self, server):
         """A second DELETE of a chat is 404 and enqueues no second cleanup event."""
