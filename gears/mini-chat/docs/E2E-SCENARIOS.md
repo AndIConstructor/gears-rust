@@ -299,7 +299,7 @@ still works but is not required (ADR-0007).
 |-------|--------------------------------|-------------------|--------------------------------------------------------|
 | 12-01 | Set Reaction (like) → 200      | test_reactions.py | TestReactions::test_set_reaction_like                  |
 | 12-02 | Reaction Upsert Idempotent     | test_reactions.py | TestReactions::test_put_same_reaction_twice_is_idempotent |
-| 12-03 | Reaction on User Message → 400 `failed_precondition` (`reaction_target`/`STATE`) | test_reactions.py | TestReactions::test_reaction_on_user_message_400 |
+| 12-03 | Reaction on User Message (PUT and DELETE) → 400 `failed_precondition` (`reaction_target`/`STATE`) | test_reactions.py | TestReactions::test_reaction_on_user_message_400 |
 | 12-04 | Remove Reaction → 204          | test_reactions.py | TestReactions::test_remove_reaction_204                |
 | 12-05 | Remove Reaction Idempotent → 204 | test_reactions.py | TestReactions::test_remove_reaction_idempotent       |
 | 12-06 | Switch Reaction like → dislike | test_reactions.py | TestReactions::test_switch_reaction_like_to_dislike    |

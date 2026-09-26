@@ -4,7 +4,7 @@ import uuid
 
 import httpx
 
-from .conftest import API_PREFIX, assert_problem, expect_done, list_messages, query_db, stream_message
+from .conftest import API_PREFIX, RESOURCE_MESSAGE, assert_problem, expect_done, list_messages, query_db, stream_message
 
 
 def _create_chat_with_assistant_message() -> tuple[str, str, str]:
@@ -85,13 +85,17 @@ class TestReactions:
         assert my_reaction(chat_id, assistant_msg_id) == "like"
 
     def test_reaction_on_user_message_400(self, server):
+        """PUT and DELETE on a user message are both rejected the same way."""
         chat_id, user_msg_id, _ = _create_chat_with_assistant_message()
+        url = reaction_url(chat_id, user_msg_id)
 
-        resp = httpx.put(reaction_url(chat_id, user_msg_id), json={"reaction": "like"})
-        assert_problem(
-            resp, 400, "failed_precondition",
-            violation_subject="reaction_target", violation_type="STATE",
-        )
+        for resp in (httpx.put(url, json={"reaction": "like"}), httpx.delete(url)):
+            body = assert_problem(
+                resp, 400, "failed_precondition",
+                violation_subject="reaction_target", violation_type="STATE",
+                resource_type=RESOURCE_MESSAGE,
+            )
+            assert body["context"].get("resource_name") == user_msg_id, body
 
     def test_invalid_reaction_value_400(self, server):
         """A reaction other than `like` / `dislike` is a validation error:
