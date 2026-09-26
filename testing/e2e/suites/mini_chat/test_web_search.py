@@ -12,7 +12,8 @@ import uuid
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, expect_done, expect_stream_started, parse_sse
+from .conftest import API_PREFIX, expect_done, expect_stream_started, parse_sse, poll_turn
+from .mock_provider.responses import MockEvent, Scenario
 
 
 @pytest.mark.multi_provider
@@ -295,6 +296,40 @@ class TestWebSearchTurnStatus:
         roles = [m["role"] for m in msgs]
         assert "user" in roles
         assert "assistant" in roles
+
+
+class TestWebSearchPerMessageLimit:
+    """At most `web_search_max_calls_per_message` (2, StreamingConfig default,
+    not overridden in base.yaml) web searches per message."""
+
+    def test_third_web_search_fails_the_turn(self, request, chat, mock_provider):
+        """18-10: the provider starts a third web search in one answer: the
+        stream ends with SSE `error` `web_search_calls_exceeded` and the turn
+        fails."""
+        if request.config.getoption("mode") == "online":
+            pytest.skip("requires mock provider (offline mode)")
+        search = [
+            MockEvent("response.web_search_call.searching", {}),
+            MockEvent("response.web_search_call.completed", {}),
+        ]
+        mock_provider.set_next_scenario(Scenario(events=[
+            *search, *search, *search,
+            MockEvent("response.output_text.delta", {"delta": "Too many searches"}),
+            MockEvent("response.output_text.done", {"text": "Too many searches"}),
+        ]))
+        rid = str(uuid.uuid4())
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat['id']}/messages:stream",
+            json={"content": "SEARCH: everything", "web_search": {"enabled": True},
+                  "request_id": rid},
+            headers={"Accept": "text/event-stream"},
+            timeout=30,
+        )
+        assert resp.status_code == 200
+        events = parse_sse(resp.text)
+        assert events[-1].event == "error", [e.event for e in events]
+        assert events[-1].data["code"] == "web_search_calls_exceeded"
+        assert poll_turn(chat["id"], rid)["state"] == "error"
 
 
 # ── Online-only tests ────────────────────────────────────────────────────

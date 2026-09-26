@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import time
+import uuid
 
 import httpx
 import pytest
@@ -22,9 +23,16 @@ from .conftest import (
     API_PREFIX,
     DEFAULT_MODEL,
     STANDARD_MODEL,
+    USER_A_ID,
+    assert_no_reserves,
     assert_problem,
+    expect_done,
+    find_period,
+    get_quota_status,
+    open_stream,
     poll_until,
     query_db,
+    slow_scenario,
 )
 
 
@@ -99,12 +107,21 @@ def _cleanup_status(attachment_id: str) -> str | None:
     return rows[0]["cleanup_status"]
 
 
-def _file_deletes(mock_provider) -> list[str]:
-    """Paths of DELETE /files/{id} requests (not vector-store file removals)."""
+def _file_deletes(mock_provider, file_id: str) -> list[str]:
+    """Paths of DELETE /files/{file_id} requests (not vector-store file removals).
+
+    Filtered by file id: the cleanup of an earlier test's chat or attachment
+    may still be running."""
     return [
         p for m, p in mock_provider.get_request_paths()
-        if m == "DELETE" and "/files/" in p and "/vector_stores/" not in p
+        if m == "DELETE" and f"/files/{file_id}" in p and "/vector_stores/" not in p
     ]
+
+
+def _provider_file_id(attachment_id: str) -> str:
+    rows = query_db("SELECT provider_file_id FROM attachments WHERE id = ?", (attachment_id,))
+    assert len(rows) == 1 and rows[0]["provider_file_id"], rows
+    return rows[0]["provider_file_id"]
 
 
 def _vector_store_rows(chat_id: str) -> list[dict]:
@@ -135,32 +152,34 @@ def _wait_cleanup_terminal(att_ids: list[str]) -> dict[str, str]:
 
 def check_chat_cleanup_404_is_success(mock_provider, model: str) -> None:
     chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
+    file_id = _provider_file_id(att_id)
 
-    mock_provider.set_fault("DELETE", "/files/", 404)
+    mock_provider.set_fault("DELETE", f"/files/{file_id}", 404)
     assert delete_chat(chat_id).status_code == 204
 
     assert _wait_cleanup_terminal([att_id]) == {att_id: "done"}
     row = query_db("SELECT cleanup_attempts FROM attachments WHERE id = ?", (att_id,))[0]
     assert row["cleanup_attempts"] == 0, row
     # The one delete that was made got the 404.
-    assert len(_file_deletes(mock_provider)) == 1, mock_provider.get_request_paths()
+    assert len(_file_deletes(mock_provider, file_id)) == 1, mock_provider.get_request_paths()
 
 
 def check_attachment_cleanup_404_is_success(mock_provider, model: str) -> None:
     chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
+    file_id = _provider_file_id(att_id)
 
-    mock_provider.set_fault("DELETE", "/files/", 404)
+    mock_provider.set_fault("DELETE", f"/files/{file_id}", 404)
     resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
     assert resp.status_code == 204
 
-    _wait_for(lambda: _file_deletes(mock_provider), "the provider file delete", timeout=10.0)
+    _wait_for(lambda: _file_deletes(mock_provider, file_id), "the provider file delete", timeout=10.0)
     # The handler marks the row right after the provider answered.
     _wait_for(
         lambda: _cleanup_status(att_id) in ("done", "failed"), "terminal cleanup_status",
         timeout=5.0,
     )
     assert _cleanup_status(att_id) == "done"
-    assert len(_file_deletes(mock_provider)) == 1, mock_provider.get_request_paths()
+    assert len(_file_deletes(mock_provider, file_id)) == 1, mock_provider.get_request_paths()
 
 
 def check_vector_store_deleted_after_files(mock_provider, model: str) -> None:
@@ -245,6 +264,30 @@ class TestProviderCleanupAzure:
 
 class TestCleanup:
     """Chat deletion — observable effects."""
+
+    @pytest.mark.timeout(30)
+    def test_running_turn_completes_and_is_billed_after_chat_delete(self, request, mock_provider):
+        """19-16 (DESIGN, chat deletion): a turn running when its chat is
+        deleted is not cancelled: the stream ends with `done`, the turn is
+        completed and its usage is charged."""
+        _require_offline(request)
+        chat_id = create_chat()["id"]  # azure-gpt-4.1
+        rid = str(uuid.uuid4())
+        used_before = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
+        mock_provider.set_next_scenario(slow_scenario(10, slow=0.3))
+
+        with open_stream(chat_id, "Keep answering.", request_id=rid) as s:
+            s.read_until_started()
+            assert delete_chat(chat_id).status_code == 204
+            usage = expect_done(s.drain()).data["usage"]
+
+        assert_no_reserves(USER_A_ID)
+        rows = query_db("SELECT state FROM chat_turns WHERE request_id = ?", (rid,))
+        assert rows == [{"state": "completed"}], rows
+        # azure-gpt-4.1 multipliers (base.yaml): 3 and 15 credits_micro per token.
+        cost = usage["input_tokens"] * 3 + usage["output_tokens"] * 15
+        used_after = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
+        assert used_after - used_before == cost
 
     def test_deleted_chat_hides_chat_and_attachment(self, server):
         """After DELETE chat, the chat and its attachment return 404."""

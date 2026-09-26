@@ -6,6 +6,7 @@ Run via: ~/projects/gears-rust-worktrees/scripts/run-tests.sh tests/test_attachm
 import io
 import pathlib
 import struct
+import time
 import uuid
 import zlib
 
@@ -734,7 +735,7 @@ class TestUploadSizeEnforcement:
     - ``uploaded_image_max_size_kb``: 5120 (5 MB) for images
     """
 
-    def test_oversize_image_rejected(self, provider_chat):
+    def test_oversize_image_rejected(self, provider_chat, mock_provider):
         """Upload an image exceeding uploaded_image_max_size_kb (5 MB) → 400.
 
         Uses ~6 MB which is over the image limit but under the API gateway's
@@ -759,8 +760,9 @@ class TestUploadSizeEnforcement:
         assert any(v.get("reason") == "FILE_TOO_LARGE" for v in violations), (
             f"Expected FILE_TOO_LARGE field violation, got: {violations}"
         )
+        assert _file_upload_calls(mock_provider) == []
 
-    def test_oversize_document_rejected(self, provider_chat):
+    def test_oversize_document_rejected(self, provider_chat, mock_provider):
         """Upload a document exceeding the per-kind handler limit (25 MB) → 400.
 
         Documents are capped at 25 MB by the per-kind handler size check.
@@ -786,6 +788,7 @@ class TestUploadSizeEnforcement:
         assert any(v.get("reason") == "FILE_TOO_LARGE" for v in violations), (
             f"Expected FILE_TOO_LARGE field violation, got: {violations}"
         )
+        assert _file_upload_calls(mock_provider) == []
 
     def test_document_within_limit_succeeds(self, provider_chat):
         """Upload a document just under the limit → succeeds."""
@@ -1105,6 +1108,19 @@ class TestPerChatLimits:
 # 05-07, 10-34, 01-06: citations and images in the provider exchange
 # ---------------------------------------------------------------------------
 
+def _wait_cleanup_done(attachment_id: str, timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    status = None
+    while time.monotonic() < deadline:
+        status = query_db(
+            "SELECT cleanup_status FROM attachments WHERE id = ?", (attachment_id,),
+        )[0]["cleanup_status"]
+        if status == "done":
+            return
+        time.sleep(0.2)
+    raise AssertionError(f"cleanup of {attachment_id} not done within {timeout}s: {status}")
+
+
 def _provider_file_id(attachment_id: str) -> str:
     rows = query_db("SELECT provider_file_id FROM attachments WHERE id = ?", (attachment_id,))
     assert len(rows) == 1 and rows[0]["provider_file_id"], rows
@@ -1153,6 +1169,38 @@ class TestFileCitationMapping:
             "span": {"start": 0, "end": 13},
         }]}]
         assert file_id not in resp.text
+
+    def test_citation_of_deleted_attachment_dropped(self, request, chat, mock_provider):
+        """10-29: file_search may still return a deleted document until its
+        provider file is removed (ADR-0007), but a citation of it is omitted;
+        the citation of a kept document is sent."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        deleted = _upload_ready(chat_id, "old.txt", b"Old notes.", "text/plain")
+        kept = _upload_ready(chat_id, "new.txt", b"New notes.", "text/plain")
+        deleted_file, kept_file = _provider_file_id(deleted), _provider_file_id(kept)
+        resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{deleted}", timeout=10)
+        assert resp.status_code == 204
+
+        mock_provider.set_next_scenario(_file_search_scenario([
+            {"type": "file_citation", "file_id": deleted_file, "title": "old.txt",
+             "start_index": 0, "end_index": 5, "text": "Based"},
+            {"type": "file_citation", "file_id": kept_file, "title": "new.txt",
+             "start_index": 0, "end_index": 13, "text": "Based on docs"},
+        ]))
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
+            json={"content": "FILESEARCH: what is in the notes?"},
+            headers={"Accept": "text/event-stream"}, timeout=30,
+        )
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        expect_done(events)
+        citations = [e.data for e in events if e.event == "citations"]
+        assert [[c["attachment_id"] for c in d["items"]] for d in citations] == [[kept]]
+        assert deleted_file not in resp.text
+        # Let the provider cleanup of the deleted attachment finish inside this test.
+        _wait_cleanup_done(deleted)
 
 
 class TestImageInProviderRequest:

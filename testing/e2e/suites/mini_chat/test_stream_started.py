@@ -214,8 +214,17 @@ class TestStreamStartedOnMutation:
         new_rid = ss.data["request_id"]
         assert new_rid != orig_rid, "Edit should generate a new request_id"
         uuid.UUID(new_rid)
+        assert ss.data["is_new_turn"] is True
 
-        expect_done(edit_events)
+        # Same grammar and `done` fields as a send.
+        types = [e.event for e in edit_events]
+        assert types[0] == "stream_started", types
+        assert types[-1] == "done", types
+        assert set(types[1:-1]) <= {"ping", "delta"}, types
+        done = expect_done(edit_events).data
+        assert (done["selected_model"], done["effective_model"], done["quota_decision"]) == (
+            provider_chat["model"], provider_chat["model"], "allow",
+        )
 
 
 # ---------------------------------------------------------------------------
