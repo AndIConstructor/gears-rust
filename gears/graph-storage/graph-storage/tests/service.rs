@@ -1991,6 +1991,62 @@ async fn a_filtered_walk_survives_a_store_without_node_types_and_not_one_that_fa
     );
 }
 
+/// A store that inherits the trait's default `node_types` -- the case of an
+/// external or older store -- is served the same way as one that says
+/// `Unsupported` itself.
+///
+/// `FakeGraphStore::without_node_types` reconstructs the default's answer;
+/// this double omits the method, so the default body is what the walk meets,
+/// and a default that quietly changed (to an empty answer, say) fails here.
+#[tokio::test]
+async fn a_store_that_inherits_the_default_node_types_is_hydrated_and_filtered() {
+    let fake = Arc::new(graph_storage::infra::fake_store::FakeGraphStore::new());
+    let harness = Harness::configured_over_store(
+        Arc::new(support::without_node_types::StoreWithoutNodeTypes(
+            Arc::clone(&fake),
+        )),
+        fake,
+        Arc::new(support::AllowInOwnTenant),
+        GraphStorageConfig::default(),
+    );
+    let ctx = harness.ctx();
+    harness.seed_ontology(&ctx).await;
+    harness
+        .services
+        .ingest(
+            &ctx,
+            conformance::batch(
+                vec![
+                    conformance::node("seed", "seed"),
+                    conformance::node("kept", "kept"),
+                ],
+                vec![
+                    conformance::edge("seed", "kept"),
+                    conformance::edge("seed", "ghost"),
+                ],
+            ),
+        )
+        .await
+        .expect("the batch commits");
+    let walked = harness
+        .services
+        .traverse(
+            &ctx,
+            TraverseRequest {
+                seeds: vec!["seed".to_owned()],
+                depth: 1,
+                edge_type_patterns: Vec::new(),
+                node_type_patterns: vec![conformance::OWNED.to_owned()],
+                max_nodes: Some(1_000),
+            },
+        )
+        .await
+        .expect("the default answer is `Unsupported`, and the walk hydrates and filters");
+    let mut keys: Vec<&str> = walked.nodes.iter().map(|n| n.node_key.as_str()).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["kept", "seed"], "the filter applies after hydration");
+}
+
 /// How many rows one piece asks for when the whole budget remains -- the
 /// widest a piece can be.
 fn budgeted_piece(budget: u64, item_ceiling: u64) -> u64 {

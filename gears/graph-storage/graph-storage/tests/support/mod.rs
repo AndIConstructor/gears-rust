@@ -351,6 +351,26 @@ impl Harness {
         }
     }
 
+    /// The same, over any store, with the fake the test engine walks.
+    pub fn configured_over_store(
+        store: Arc<dyn GraphStoreV1>,
+        fake: Arc<FakeGraphStore>,
+        authz: Arc<dyn AuthZResolverApi>,
+        config: GraphStorageConfig,
+    ) -> Self {
+        let engine = Arc::new(HopOverStore { store: fake });
+        Self {
+            services: Arc::new(GraphServices::new(
+                ValidatedConfig::unchecked(config),
+                store,
+                engine,
+                PolicyEnforcer::new(authz),
+                conformance::coordinator(),
+            )),
+            tenant: Uuid::now_v7(),
+        }
+    }
+
     /// Over an embedding coordinator the case supplies -- one whose space is
     /// blocked, for instance, which no store write can produce.
     pub fn with_coordinator(
@@ -397,5 +417,179 @@ impl Harness {
             .register_types(ctx, conformance::ontology_batch())
             .await
             .expect("the ontology registers");
+    }
+}
+
+/// A store that does **not** implement `node_types`, so the trait's default
+/// answers -- the thing an external or older store would rely on, and the
+/// thing `FakeGraphStore::without_node_types` only imitates. Every required
+/// method delegates to the fake it wraps; the optional ones keep their
+/// defaults. Generated from the trait's required signatures; a new required
+/// method is a compile error here, which is the point.
+pub mod without_node_types {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use graph_storage::infra::fake_store::FakeGraphStore;
+    use graph_storage_sdk::models::*;
+    use graph_storage_sdk::plugin_api::*;
+
+    pub struct StoreWithoutNodeTypes(pub Arc<FakeGraphStore>);
+
+    #[async_trait]
+    impl GraphStoreV1 for StoreWithoutNodeTypes {
+        fn capabilities(&self) -> StoreCapabilities {
+            self.0.capabilities()
+        }
+
+        async fn register_types_with(
+            &self,
+            ctx: &StoreCtx<'_>,
+            batch: Vec<TypeRegistration>,
+            options: TypeRegistrationOptions,
+        ) -> Result<Vec<RegisteredType>, GraphStoreError> {
+            self.0.register_types_with(ctx, batch, options).await
+        }
+
+        async fn get_type(
+            &self,
+            ctx: &StoreCtx<'_>,
+            id: &GtsTypeId,
+        ) -> Result<TypeRecord, GraphStoreError> {
+            self.0.get_type(ctx, id).await
+        }
+
+        async fn list_types(
+            &self,
+            ctx: &StoreCtx<'_>,
+            query: TypeQuery,
+        ) -> Result<Page<TypeRecord>, GraphStoreError> {
+            self.0.list_types(ctx, query).await
+        }
+
+        async fn probe_readiness(&self) -> Vec<ComponentReadiness> {
+            self.0.probe_readiness().await
+        }
+
+        async fn list_source_namespaces(
+            &self,
+            ctx: &StoreCtx<'_>,
+        ) -> Result<Vec<SourceNamespaceOwner>, GraphStoreError> {
+            self.0.list_source_namespaces(ctx).await
+        }
+
+        async fn transfer_source_namespace(
+            &self,
+            ctx: &StoreCtx<'_>,
+            namespace: &str,
+            owner_principal: &str,
+        ) -> Result<SourceNamespaceOwner, GraphStoreError> {
+            self.0
+                .transfer_source_namespace(ctx, namespace, owner_principal)
+                .await
+        }
+
+        async fn resolve_type_set(
+            &self,
+            ctx: &StoreCtx<'_>,
+            patterns: &[String],
+        ) -> Result<TypeIdSet, GraphStoreError> {
+            self.0.resolve_type_set(ctx, patterns).await
+        }
+
+        async fn ingest(
+            &self,
+            ctx: &StoreCtx<'_>,
+            req: IngestRequest,
+            embedding: EmbeddingPlan,
+        ) -> Result<IngestOutcome, GraphStoreError> {
+            self.0.ingest(ctx, req, embedding).await
+        }
+
+        async fn soft_delete(
+            &self,
+            ctx: &StoreCtx<'_>,
+            req: DeleteRequest,
+        ) -> Result<DeleteOutcome, GraphStoreError> {
+            self.0.soft_delete(ctx, req).await
+        }
+
+        async fn begin_read(&self, ctx: &StoreCtx<'_>) -> Result<ReadSnapshot, GraphStoreError> {
+            self.0.begin_read(ctx).await
+        }
+
+        async fn end_read(&self, snapshot: ReadSnapshot) -> Result<(), GraphStoreError> {
+            self.0.end_read(snapshot).await
+        }
+
+        async fn revision(&self, ctx: &StoreCtx<'_>) -> Result<GraphRevision, GraphStoreError> {
+            self.0.revision(ctx).await
+        }
+
+        async fn get_node(
+            &self,
+            ctx: &StoreCtx<'_>,
+            key: &NodeKey,
+            adjacency_limit: u32,
+        ) -> Result<NodeView, GraphStoreError> {
+            self.0.get_node(ctx, key, adjacency_limit).await
+        }
+
+        async fn hydrate_nodes(
+            &self,
+            ctx: &StoreCtx<'_>,
+            ids: &[NodeId],
+        ) -> Result<Vec<NodeView>, GraphStoreError> {
+            self.0.hydrate_nodes(ctx, ids).await
+        }
+
+        async fn get_edge(
+            &self,
+            ctx: &StoreCtx<'_>,
+            key: &EdgeKey,
+        ) -> Result<EdgeView, GraphStoreError> {
+            self.0.get_edge(ctx, key).await
+        }
+
+        async fn search(
+            &self,
+            ctx: &StoreCtx<'_>,
+            req: SearchRequest,
+            vector: Option<VectorArm>,
+        ) -> Result<SearchResponse, GraphStoreError> {
+            self.0.search(ctx, req, vector).await
+        }
+
+        async fn project_table(
+            &self,
+            ctx: &StoreCtx<'_>,
+            req: ProjectionRequest,
+        ) -> Result<toolkit_odata::Page<NodeRow>, GraphStoreError> {
+            self.0.project_table(ctx, req).await
+        }
+
+        async fn load_topology(
+            &self,
+            ctx: &StoreCtx<'_>,
+            req: TopologyRequest,
+        ) -> Result<TopologyPage, GraphStoreError> {
+            self.0.load_topology(ctx, req).await
+        }
+
+        async fn resolve_node_ids(
+            &self,
+            ctx: &StoreCtx<'_>,
+            keys: &[NodeKey],
+        ) -> Result<Vec<(NodeKey, NodeId)>, GraphStoreError> {
+            self.0.resolve_node_ids(ctx, keys).await
+        }
+
+        async fn embedding_state(
+            &self,
+            ctx: &StoreCtx<'_>,
+            keys: &[NodeKey],
+        ) -> Result<Vec<Option<EmbeddingState>>, GraphStoreError> {
+            self.0.embedding_state(ctx, keys).await
+        }
     }
 }
