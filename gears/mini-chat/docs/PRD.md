@@ -278,7 +278,7 @@ The system MUST allow users to upload image files (PNG, JPEG/JPG, WebP) to a cha
 - Images are included in the Responses API request input as multimodal content items (file ID references), allowing the assistant to reason about image content for that chat turn.
 - Images are NOT summarized on upload (no background summary task for images at P1).
 - Attachment access remains owner-only and tenant-isolated (same access rules as document attachments).
-- If the effective model (after any quota-driven downgrade) does not support image input, the system MUST reject with HTTP 400 (`invalid_argument`, `VISION_NOT_SUPPORTED`) before any provider call. This applies even when the user's selected model is image-capable but the effective model after downgrade is not. The system MUST NOT silently drop images or auto-upgrade to an image-capable model. **P1 catalog invariant**: all enabled models in the P1 catalog include `VISION_INPUT` capability (see DESIGN.md Model Catalog Configuration), so this rejection path is defensive and not expected to trigger in P1 deployments. It activates automatically if a future catalog introduces a model without `VISION_INPUT`.
+- If the effective model (after any quota-driven downgrade) does not support image input, the system MUST reject with HTTP 400 (`invalid_argument`, `VISION_NOT_SUPPORTED`) before any provider call. This applies even when the user's selected model is image-capable but the effective model after downgrade is not. The system MUST NOT silently drop images or auto-upgrade to an image-capable model. The check uses the capabilities of the effective model after the quota cascade; checking the selected model is not sufficient. The gear does not validate that every enabled catalog model has `VISION_INPUT`, so the rejection is reachable whenever the catalog contains a model without it.
 
 **Rationale**: Users need to share visual content (screenshots, diagrams, photos) with the AI assistant and ask questions about what they see.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -453,7 +453,7 @@ P1 supports retry, edit, and delete for the **last turn only**. Full message his
 
 The system MUST allow users to add a binary like or dislike reaction to assistant messages within their own chats. Each user may have at most one reaction per assistant message. Users MUST be able to change their reaction (from like to dislike or vice versa) and remove their reaction entirely.
 
-Reactions are persisted in backend storage (`message_reactions` table) and accessible via API. Reactions on user messages or system messages MUST NOT be allowed; such requests are rejected with HTTP 400 (`failed_precondition`, `violations[{subject: reaction_target, type: STATE}]`). Endpoints: `PUT` and `DELETE /v1/chats/{id}/messages/{msg_id}/reaction`.
+Reactions are persisted in backend storage (`message_reactions` table) and accessible via API. Reactions on user messages or system messages MUST NOT be allowed; such requests (`PUT` and `DELETE`) are rejected with HTTP 400 (`failed_precondition`, `violations[{subject: reaction_target, type: STATE}]`). `DELETE` on an assistant message is idempotent (204 whether or not a reaction existed). Endpoints: `PUT` and `DELETE /v1/chats/{id}/messages/{msg_id}/reaction`.
 
 **Rationale**: Binary feedback on assistant responses enables quality tracking and provides signal for future model/prompt improvements.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -522,7 +522,7 @@ The system MUST emit structured audit events to the platform's `audit_service` f
 
 - **Transport**: audit events are enqueued in the finalization or mutation transaction to the outbox queue `mini-chat.audit` and delivered to the audit plugin selected through types-registry (`MiniChatAuditPluginClientV1`). The bundled `static_audit` plugin logs them. When no plugin is registered, events are acknowledged and dropped, and a warning is logged once on the first delivery attempt.
 - **Events**: turn finalization and turn mutations (retry, edit, delete) are audited. Chat deletion is **not** audited.
-- **Populated fields**: tenant, user, chat and turn identities, model, token usage, latency, tool-call counts (web search and file search calls) and the quota decision.
+- **Populated fields**: tenant, user, chat and turn identities, model, token usage, latency, tool-call counts (web search calls, and file search calls: provider-native `file_search` plus `search_knowledge`) and the quota decision.
 - **Not populated**: `prompt`, `response`, `attachments`, `license` and `quota_scope` are empty. Because no content is included, the redaction and truncation rules below are **not implemented**; they become mandatory when content is added.
 
 Before emitting events, the mini-chat gear MUST redact obvious secret patterns from any included content. Redaction is best-effort and pattern-based. It is designed to catch common secret formats but does not guarantee detection of all sensitive data (e.g., obfuscated tokens, custom credential formats). Audit payloads containing customer content MUST be treated as sensitive data by `audit_service`. P1 redaction rules MUST include at least:
@@ -915,7 +915,7 @@ The contract has two parts:
 
 ##### Emitted: thread summary health
 
-- `mini_chat_thread_summary_trigger_total{result}`
+- `mini_chat_thread_summary_trigger_total{result}` (`scheduled|not_needed`; recorded after the finalization commit for each turn whose trigger is evaluated, `not_needed` when nothing is scheduled)
 - `mini_chat_thread_summary_execution_total{result}`
 - `mini_chat_thread_summary_cas_conflicts_total`
 - `mini_chat_summary_fallback_total`
@@ -948,7 +948,7 @@ The contract has two parts:
 
 ##### Emitted: audit and finalization
 
-- `mini_chat_audit_emit_total{result}`
+- `mini_chat_audit_emit_total{result}` (`ok|retry|reject`; delivery outcomes of the outbox audit handler only, nothing is recorded at enqueue)
 - `mini_chat_finalization_latency_ms`
 
 ##### Declared, deferred (not recorded in P1)
@@ -1149,13 +1149,13 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 
 | Condition | Category | HTTP | Reason / violation |
 |---|---|---|---|
-| Chat, message, turn, attachment or model not found (including another user's resource) | `not_found` | 404 | resource scoped by `type`. Exception: a repeated `DELETE` of an attachment returns 204 (idempotent) |
+| Chat, message, turn, attachment or model not found (including another user's resource, or a soft-deleted one) | `not_found` | 404 | `context.resource_type` names the missing resource: `gts.cf.core.mini_chat.{chat,message,turn,attachment,model}.v1~`. A missing attachment reports the attachment type; an upload into an unknown chat reports the chat type. Exception: a repeated `DELETE` of an attachment returns 204 (idempotent) |
 | Unknown or disabled model on `POST /chats` | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
 | The chat's model is no longer in the catalog (`messages:stream`, retry, edit) | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
 | Empty or whitespace-only `content` on `messages:stream` or turn edit | `invalid_argument` | 400 | `field_violations[content].reason = EMPTY_CONTENT` |
 | Invalid chat title on `POST /chats` or `PATCH /chats/{id}` (empty or whitespace-only after trim, or longer than 255 characters) | `invalid_argument` | 400 | `detail` |
 | Invalid reaction value (not `like` or `dislike`); checked before authorization. A body that does not match the schema (e.g. no `reaction` field) is 422, see below | `invalid_argument` | 400 | `detail` |
-| Bad OData query on a list endpoint (`$filter`, `$orderby`, `$select`, page size, cursor, unsupported query option) | `invalid_argument` | 400 | `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER`, `INVALID_ORDERBY_FIELD`, `INVALID_LIMIT` (`limit=0`), `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR`; from the platform OData extractor (`toolkit::api::odata`): `FILTER_TOO_LONG`, `FILTER_TOO_COMPLEX` (`$filter`), `INVALID_SELECT` (`$select`), `UNSUPPORTED_QUERY_PARAM` (a `$` option the extractor does not bind, e.g. `$skip`, `$count`), `INVALID_QUERY_PARAMS` (unparsable query string). A `limit` above 100 is clamped to 100, not rejected |
+| Bad OData query on a list endpoint (`GET /chats`, `GET /chats/{id}/messages`: `$filter`, `$orderby`, `$select`, page size, cursor, unsupported query option) | `invalid_argument` | 400 | `context.resource_type = gts.cf.core.odata.query.v1~` (not the chat type, not a `format` violation), for errors raised by the query extractor and by the repository while paginating. `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER` (`$filter`), `INVALID_ORDERBY_FIELD` (`$orderby`), `INVALID_LIMIT` (field `$top`, `limit=0`), `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR` (`cursor` combined with `$orderby`); from the platform OData extractor (`toolkit::api::odata`): `FILTER_TOO_LONG`, `FILTER_TOO_COMPLEX` (`$filter`), `INVALID_SELECT` (`$select`), `UNSUPPORTED_QUERY_PARAM` (a `$` option the extractor does not bind, e.g. `$skip`, `$count`), `INVALID_QUERY_PARAMS` (unparsable query string). A `limit` above 100 is clamped to 100, not rejected |
 | Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | platform JSON extractor (`toolkit::api::rest::extract::Json`) |
 | Malformed JSON body | `invalid_argument` | 400 | `field_violations[body].reason = json_syntax_error` (platform JSON extractor) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` |
@@ -1170,18 +1170,18 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Mandatory context does not fit the budget | `out_of_range` | 400 | `CONTEXT_BUDGET_EXCEEDED` |
 | Kill switch (web search, images) | `failed_precondition` | 400 | `violations[{subject: web_search\|images, type: FEATURE_DISABLED}]` |
 | Retry/edit/delete of a non-terminal turn | `failed_precondition` | 400 | `violations[{subject: turn_state, type: STATE}]` |
-| Reaction on a non-assistant message | `failed_precondition` | 400 | `violations[{subject: reaction_target, type: STATE}]` |
+| Reaction (`PUT` or `DELETE`) on a non-assistant message | `failed_precondition` | 400 | `violations[{subject: reaction_target, type: STATE}]` |
 | Missing, invalid or expired bearer token | `unauthenticated` | 401 | `context.reason`: `MISSING_BEARER` / `AUTHN_FAILED` (api-gateway) |
 | AuthZ denied, or the PDP failed (fail-closed) | `permission_denied` | 403 | `AUTHZ_DENIED` |
 | Tenant lacks the required license feature (`ai_chat`) | `permission_denied` | 403 | `LICENSE_FEATURE_REQUIRED` (api-gateway license middleware) |
-| Another turn is running in the chat (stream) | `aborted` | 409 | `turn_already_running` |
+| Another turn is running in the chat (stream, including the insert race) | `aborted` | 409 | `turn_already_running` |
 | `request_id` reused for a non-completed or deleted turn | `aborted` | 409 | `request_id_conflict` |
 | Mutation of a turn that is not the latest (including an already deleted turn) | `aborted` | 409 | `NOT_LATEST_TURN` |
 | Concurrent mutation lost the running-turn race | `aborted` | 409 | `GENERATION_IN_PROGRESS` |
 | Deleting an attachment referenced by a message | `already_exists` | 409 | `resource_name = attachment_locked` |
 | Upload into a chat whose vector store was created for another provider backend | `already_exists` | 409 | `resource_name = provider_mismatch` |
 | Any other unique-constraint violation that the caller does not handle (`DomainError::Conflict` from the DB layer) | `already_exists` | 409 | `resource_name = unique_violation` |
-| Quota exhausted (credits, web search, code interpreter) | `resource_exhausted` | 429 | `violations[{subject: <quota_scope>}]` |
+| Quota exhausted (tokens, daily web search, daily code interpreter) | `resource_exhausted` | 429 | `violations[{subject: <quota_scope>, description: "quota_exceeded"}]`; `quota_scope` is `tokens`, `web_search` or `code_interpreter` |
 | Per-chat document count or storage limit | `resource_exhausted` | 429 | `document_limit` / `storage_limit` |
 | Provider or storage backend failure before streaming | `service_unavailable` | 503 + `Retry-After` | |
 | Upload concurrency limit | `service_unavailable` | 503 + `Retry-After` | |
@@ -1278,7 +1278,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 
 **Postconditions**:
 - Response incorporates information from uploaded documents in the chat knowledge base
-- File search calls are reported in the turn's usage and audit data (they are not counted against a daily quota in P1)
+- File search calls (provider-native `file_search` tool calls, or `search_knowledge` retrievals; never both in one request) are reported as `file_search_calls` in the turn's usage and audit data (they are not counted against a daily quota in P1)
 
 **Alternative Flows**:
 - **Tool call limit reached**: With the OpenAI Responses adapter (the only one that sends `max_tool_calls`), the provider stops calling tools once the model's `max_tool_calls` is reached; the response is based on the retrieved excerpts so far and the conversation context
@@ -1575,8 +1575,8 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 - [ ] Image attachments do not appear in file_search citations
 - [ ] Quota limits for images are enforced: per-turn image input limit (implemented, 400 `TOO_MANY_IMAGES`) and per-day image input limit (not implemented — [ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)) reject requests that exceed configured caps
 - [ ] Audit events for turns with image input do not include raw image bytes; only attachment metadata (attachment_id, content_type, size_bytes, filename) is included (attachment metadata: not implemented — [ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md); P1 audit events carry no attachment data)
-- [ ] Submitting an image to a model that does not support multimodal input returns HTTP 400 (`invalid_argument`, `VISION_NOT_SUPPORTED`) — defensive check; not expected under the P1 catalog invariant (all enabled models include `VISION_INPUT`)
-- [ ] If a future catalog introduces a non-vision model, the downgrade cascade selecting that model for an image-bearing turn MUST reject with HTTP 400 (`VISION_NOT_SUPPORTED`) before any outbound provider call; images are never silently dropped. Under the P1 catalog invariant this path is unreachable.
+- [ ] Submitting an image to a model that does not support multimodal input returns HTTP 400 (`invalid_argument`, `VISION_NOT_SUPPORTED`)
+- [ ] An image-bearing turn that the quota cascade downgrades to a model without `VISION_INPUT` is rejected with HTTP 400 (`VISION_NOT_SUPPORTED`) before any outbound provider call, even when the selected model supports images; images are never silently dropped
 - [ ] User can delete an attachment via `DELETE /v1/chats/{id}/attachments/{attachment_id}`; after deletion the attachment is immediately excluded from future `file_search` retrieval on subsequent turns (immediate exclusion: not implemented — [ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md))
 - [ ] Deleting an attachment does not modify historical messages that reference it; the `attachments` array on past messages still includes the deleted attachment's metadata (not implemented — [ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md): P1 lists only non-deleted attachments)
 - [ ] Re-deleting an already-deleted attachment is idempotent (returns 204 No Content)
@@ -1678,7 +1678,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 | Vector store data consistency on deletion | Orphaned files at provider | Idempotent cleanup with retry; reconciliation job for detecting orphans |
 | Large number of chats with documents creating many vector stores | Provider API limits on vector store count; increased storage costs | Monitor vector store count per user via metrics; enforce per-chat document limits; plan per-workspace aggregation (P2) |
 | Image spam / abuse driving excessive provider costs | Unexpected cost spikes from high-volume or large image uploads | Per-message image input cap (default: 4); per-file image size limit (default 5 MiB); per-chat storage limit; `disable_images` kill switch. The per-user daily image cap and image quota counters are not implemented ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)) |
-| Provider model does not support multimodal input | Image-bearing requests fail | The domain service checks model capability before outbound call; rejects with HTTP 400 (`VISION_NOT_SUPPORTED`) if effective model lacks image support; operator configures which models support images. P1 catalog invariant: all enabled models include `VISION_INPUT`, so this risk applies only if a future catalog introduces a non-vision model. |
+| Provider model does not support multimodal input | Image-bearing requests fail | The domain service checks model capability before outbound call; rejects with HTTP 400 (`VISION_NOT_SUPPORTED`) if effective model lacks image support; operator configures which models support images. The check uses the effective model after the quota cascade, so a downgrade to a non-vision model also rejects. Not validated at startup: any enabled model without `VISION_INPUT` can trigger it. |
 | MCP server latency adds to stream time | User perceives slow responses | Future (MCP not implemented, ADR-0006): Per-call timeout (default 30s, per-server override), per-server concurrency caps, circuit breaker, SSE `tool` events for UI progress |
 | MCP tool name collisions | Wrong server receives call or provider rejects request | Future (MCP not implemented, ADR-0006): Provider-safe exposed names with hash suffix + routing map; collision detection with diagnostics |
 | MCP server returns large payloads | Token budget blown; memory pressure | Future (MCP not implemented, ADR-0006): Response size limits, output char/token caps (`max_tool_output_chars`, default 8192), runtime budget enforcement |

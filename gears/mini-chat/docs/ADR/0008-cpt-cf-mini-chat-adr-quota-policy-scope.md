@@ -31,7 +31,9 @@ Chosen option: "Record the gaps with status and the conditions for revisiting th
 | Per-user daily image-input quota (default 50) and `image_inputs` / `image_upload_bytes` counters | `cpt-cf-mini-chat-fr-quota-enforcement`, PRD §5.2, §9 | Not implemented | Only `max_images_per_message` (default 4) is enforced. The counter columns exist in `quota_usage` and stay 0. |
 | Per-message image bytes cap (`image_bytes_exceeded`) | PRD §5.4 | Not implemented | The per-file upload size limit applies. |
 | PolicySnapshot in-memory cache, DB persistence, `POST /internal/policy:notify` | DESIGN §5.2.3, §5.2.7, §5.2.8, Appendix B.3 | Future | Every preflight and settlement asks the policy plugin for the version and snapshot. Settlement does so inside the finalization transaction. With the bundled in-process static plugin (fixed version 1) this is cheap and cannot fail. A remote CCM plugin needs the cache and a pre-fetched snapshot first. |
-| Per-model estimation budgets from the policy snapshot | DESIGN §5.2.1, A.1, B.3 | Not implemented | The preflight reserve uses the gear configuration section `estimation_budgets` for every model. `ModelCatalogEntry.estimation_budgets` is parsed from the snapshot but not read, so budget changes need a configuration change and restart, not a policy version bump. |
+| Per-model estimation budgets from the policy snapshot | DESIGN §5.2.1, A.1, B.3 | Implemented | Every estimate uses `ModelCatalogEntry.estimation_budgets`: the selected model's entry for the availability check, the effective model's entry for the booked reserve, the `INPUT_TOO_LONG` check and context assembly. `minimal_generation_floor` comes from the gear configuration (`> 0`, `<= streaming.max_output_tokens`, validated at startup; applied as `min(floor, max_output_tokens_applied)`). The other fields of the gear section `estimation_budgets` are deprecated: parsed, not validated, and `init()` warns for each one set to a non-default value. |
+| Quota check and reserve write in one transaction (TOCTOU) | DESIGN §5.4.2 "TOCTOU" | Accepted limitation | The availability check (`SELECT ... FOR UPDATE` in `QuotaService::preflight_evaluate`) and the reserve write (`reserve_and_create_turn`, or the mutation transaction for retry/edit) are separate transactions. A user with N open chats can start N concurrent turns that all pass the check; the overspend is bounded by (N-1) reserves. SQLite has no `FOR UPDATE`, and `quota_usage` rows for a new period do not exist before the first write of that period, so there is nothing to lock. |
+| Availability checked with the booked reserve | DESIGN §5.4.1, §5.4.2 | Accepted limitation | The cascade checks availability with the reserve computed for the selected model (its catalog budgets and multipliers, output `streaming.max_output_tokens`). The reserve booked on the turn is recomputed for the effective model (its budgets and multipliers, `min(catalog max_output_tokens, streaming.max_output_tokens)`). After a downgrade the booked reserve can be larger or smaller than the one that passed the check. |
 | Billing of agentic knowledge-search iterations | DESIGN §4 "Knowledge Search" | Not implemented | Each `search_knowledge` iteration is a provider call, but only the final iteration's usage is settled. The feature is off by default (`knowledge_search.enabled = false`). |
 | License gate on the `ai_chat` feature | `cpt-cf-mini-chat-fr-license-gate`, `cpt-cf-mini-chat-constraint-license-gate` | Accepted interim | Routes require the platform base license feature (`CORE_GLOBAL_BASE_LICENSE_FEATURE`) until the license plugin exposes `ai_chat` (TODO in `mini-chat/src/api/rest/routes/mod.rs`). |
 | System tasks charged to a tenant operational bucket, audited and subject to kill switches | ADR-0003, DESIGN §3.2 "System Task Attribution Rules" | Future (P2+) | The thread-summary task emits a usage event with `billing_outcome = system_task`, `settlement_method = none`, `actual_credits_micro = 0` and `requester_type = system`. It emits no audit event and does not check kill switches. |
@@ -43,6 +45,7 @@ The daily web-search and code-interpreter quotas **are** implemented. They rejec
 * Good, because billing and support documentation matches enforcement.
 * Bad, because the image quota and the system-task billing remain open product gaps.
 * Bad, because switching to a remote CCM policy plugin requires implementing the snapshot cache first.
+* Bad, because concurrent turns of one user in different chats can overspend the quota by up to (N-1) reserves, and a downgraded turn books a reserve that was not the one checked.
 
 ### Confirmation
 
@@ -53,6 +56,7 @@ The daily web-search and code-interpreter quotas **are** implemented. They rejec
 
 * Revisit the PolicySnapshot items before any non-static policy plugin is deployed.
 * Revisit the license gate when the license plugin exposes `ai_chat`.
+* Revisit the TOCTOU limitation if quota overspend by concurrent turns shows up in billing: move the reserve write into the availability-check transaction and check with the effective model's reserve.
 
 ## Traceability
 

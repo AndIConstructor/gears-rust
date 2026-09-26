@@ -46,13 +46,13 @@ Each catalog model names its `provider_id`, which points at a `providers.<id>` e
 
 * `kind`, `host`, `port`, `use_http`, `api_path` (with a `{model}` placeholder);
 * `auth_plugin_type` and `auth_config` for the OAGW auth plugin;
-* `storage_kind`, `storage_backend`, `api_version`, `supports_file_search_filters`;
+* `storage_kind`, `storage_backend`, `api_version` (required for `storage_kind = azure`; validated at startup), `supports_file_search_filters`;
 * `rag_provider`, the provider used for file and vector-store operations when the LLM provider has none (Anthropic);
 * per-tenant `tenant_overrides`.
 
 **OAGW provisioning.** In `start()` the gear obtains an S2S token via `authn_resolver` client credentials. It then registers an OAGW upstream and route for every provider entry (`mini-chat/src/infra/oagw_provisioning.rs`):
 
-* The OAGW-assigned alias is written back into the entry.
+* `init()` fills `upstream_alias` with the host when it is not configured, so the alias is always passed to OAGW. The upstream is created, or reused when it already exists, under that alias, which is the alias `ProviderResolver` uses. The alias OAGW returns is written back into the entry.
 * A deterministically misconfigured entry fails startup.
 * An entry whose credstore secret is not yet readable is retried by a background reconcile loop.
 
