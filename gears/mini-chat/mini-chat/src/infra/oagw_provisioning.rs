@@ -366,11 +366,7 @@ async fn create_or_reuse_tenant_upstream(
     }
 }
 
-/// Create an OAGW upstream for a single provider entry.
-///
-/// Only passes `upstream_alias` to OAGW when explicitly configured
-/// (required for IP-based hosts). For hostname-based hosts OAGW
-/// auto-derives the alias.
+/// OAGW server endpoint (scheme, host, port) of a provider entry.
 fn endpoint_for(entry: &ProviderEntry) -> oagw_sdk::Endpoint {
     use oagw_sdk::{Endpoint, Scheme};
     let scheme = if entry.use_http {
@@ -464,9 +460,9 @@ async fn create_upstream(
 /// Create an OAGW upstream for a tenant-specific override.
 ///
 /// Uses [`ProviderEntry::effective_host_for_tenant`] and the tenant's auth
-/// config. Only passes `upstream_alias` when the tenant override explicitly
-/// sets one (required for IP-based hosts). For hostname-based hosts OAGW
-/// auto-derives the alias.
+/// config. Passes the override's `upstream_alias`, which `init()` fills with
+/// the override host when the override sets a host; an override without a
+/// host passes no alias and OAGW derives it.
 ///
 /// Returns the OAGW-assigned alias on success.
 async fn create_tenant_upstream(
@@ -490,7 +486,7 @@ async fn create_tenant_upstream(
 
     let mut builder = CreateUpstreamRequest::builder(server, HTTP_PROTOCOL_ID).enabled(true);
 
-    // Only pass alias when the tenant override explicitly sets one (IP-based hosts).
+    // The override alias (configured, or the override host filled in by init).
     if let Some(alias) = entry
         .tenant_overrides
         .get(tenant_id)

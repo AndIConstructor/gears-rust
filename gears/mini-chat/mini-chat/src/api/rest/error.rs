@@ -320,7 +320,7 @@ impl From<StreamError> for CanonicalError {
             StreamError::UnsupportedMedia => MiniChatAttachmentError::invalid_argument()
                 .with_field_violation(
                     "content_type",
-                    "selected model does not support image input",
+                    "the effective model does not support image input",
                     "VISION_NOT_SUPPORTED",
                 )
                 .create(),
