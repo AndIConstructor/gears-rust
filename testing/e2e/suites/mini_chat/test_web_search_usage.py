@@ -9,6 +9,7 @@ Provider-parameterized — runs against both OpenAI and Azure mock endpoints.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import datetime, timezone
 
@@ -20,6 +21,7 @@ from .conftest import (
     assert_no_reserves, expect_done, find_period, get_quota_status, parse_sse, query_db,
     stream_message,
 )
+from .mock_provider.responses import SCENARIOS, Usage
 
 
 def _query_ws_calls(user_id: str = USER_A_ID) -> int:
@@ -37,14 +39,15 @@ def _query_ws_calls(user_id: str = USER_A_ID) -> int:
 
 # ── Expected charges ─────────────────────────────────────────────────────
 #
-# Mock "SEARCH:*" scenario: usage input = max(80, 50 * input items) and
-# output = 15. A first message sends one input item, so input = 80.
+# The test sends the mock's "SEARCH:*" answer with this usage, taken as is
+# (`scale_input=False`: not the mock's per-input-item estimate).
 # credits_micro = ceil(input * in_mult / 1e6) + ceil(output * out_mult / 1e6)
 # with the base.yaml multipliers:
-#   gpt-5.2        (openai): 80 * 1.0 + 15 * 3.0  =  80 +  45 = 125
-#   azure-gpt-4.1  (azure):  80 * 3.0 + 15 * 15.0 = 240 + 225 = 465
-EXPECTED_USAGE = {"input_tokens": 80, "output_tokens": 15}
-EXPECTED_CREDITS = {"openai": 125, "azure": 465}
+#   gpt-5.2        (openai): 400 * 1.0 + 50 * 3.0  =  400 + 150 =  550
+#   azure-gpt-4.1  (azure):  400 * 3.0 + 50 * 15.0 = 1200 + 750 = 1950
+SEARCH_USAGE = Usage(input_tokens=400, output_tokens=50, scale_input=False)
+EXPECTED_USAGE = {"input_tokens": 400, "output_tokens": 50}
+EXPECTED_CREDITS = {"openai": 550, "azure": 1950}
 
 
 @pytest.mark.multi_provider
@@ -52,11 +55,14 @@ EXPECTED_CREDITS = {"openai": 125, "azure": 465}
 class TestWebSearchUsageAccounting:
     """Verify that web search turns produce correct quota and message records.
 
-    Offline only: the literal credit amounts depend on the mock's fixed usage."""
+    Offline only: the test sets the provider usage (SEARCH_USAGE)."""
 
-    def test_web_search_usage_correct(self, provider, server):
+    def test_web_search_usage_correct(self, provider, server, mock_provider):
         """Single web-search turn: verify credits, messages, and turn state."""
         model = PROVIDER_DEFAULT_MODEL[provider]
+        mock_provider.set_next_scenario(
+            dataclasses.replace(SCENARIOS["SEARCH:*"], usage=SEARCH_USAGE),
+        )
 
         # Snapshot quota before via REST
         spent_before = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
