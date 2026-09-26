@@ -76,6 +76,10 @@ pub struct FinalizationInput {
 #[derive(Debug, Clone)]
 pub struct FinalizationOutcome {
     pub won_cas: bool,
+    /// State the turn was committed with. Differs from the requested state
+    /// when a completed turn is downgraded to `Failed` because its message
+    /// could not be persisted.
+    pub persisted_state: TurnState,
     pub billing_outcome: Option<BillingDerivation>,
     pub settlement_outcome: Option<SettlementOutcome>,
 }

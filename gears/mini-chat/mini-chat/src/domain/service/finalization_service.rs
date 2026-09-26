@@ -277,6 +277,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                         return Ok((
                             FinalizationOutcome {
                                 won_cas: false,
+                                persisted_state: input.terminal_state.clone(),
                                 billing_outcome: None,
                                 settlement_outcome: None,
                             },
@@ -475,6 +476,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                     Ok((
                         FinalizationOutcome {
                             won_cas: true,
+                            persisted_state: input.terminal_state.clone(),
                             billing_outcome: Some(billing),
                             settlement_outcome: Some(settlement_outcome),
                         },
@@ -1662,6 +1664,7 @@ mod tests {
             .await
             .expect("finalization should succeed");
         assert!(outcome.won_cas);
+        assert_eq!(outcome.persisted_state, TurnState::Completed);
 
         let conn = db.conn().unwrap();
         let scope = AccessScope::allow_all();

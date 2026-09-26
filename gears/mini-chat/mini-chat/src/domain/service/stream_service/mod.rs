@@ -3547,13 +3547,10 @@ mod tests {
         assert_eq!(done.downgrade_reason.as_deref(), Some("premium_exhausted"));
     }
 
-    /// 8.7: Done fallback on finalization failure preserves quota fields from `fctx`.
-    ///
-    /// When `finalize_turn_cas` returns `Err`, the Done event must use
-    /// `fctx.quota_decision`, `fctx.downgrade_from`, and `fctx.downgrade_reason`
-    /// instead of hardcoding `"allow"` / `None` / `None` (issue #1364).
+    /// 8.7: When `finalize_turn_cas` returns `Err` the turn is not committed,
+    /// so the client gets `error{finalization_failed}` instead of `done`.
     #[tokio::test]
-    async fn done_fallback_preserves_quota_fields_on_finalization_failure() {
+    async fn finalization_failure_emits_error_not_done() {
         use crate::domain::service::finalization_service::FinalizationService;
         use crate::domain::service::quota_settler::QuotaSettler;
 
@@ -3702,37 +3699,20 @@ mod tests {
             }
         }
 
-        let done = events
-            .iter()
-            .find_map(|ev| match ev {
-                StreamEvent::Done(d) => Some(d),
-                _ => None,
-            })
-            .expect("should have a Done event even when finalization fails");
-
-        assert_eq!(
-            done.quota_decision, "downgrade",
-            "fallback Done must use fctx.quota_decision, not hardcoded 'allow'"
+        assert!(
+            !events.iter().any(|ev| matches!(ev, StreamEvent::Done(_))),
+            "no Done may be sent for a turn that was not committed"
         );
-        assert_eq!(
-            done.downgrade_from.as_deref(),
-            Some("gpt-4o"),
-            "fallback Done must use fctx.downgrade_from"
-        );
-        assert_eq!(
-            done.downgrade_reason.as_deref(),
-            Some("premium_exhausted"),
-            "fallback Done must use fctx.downgrade_reason"
-        );
+        match events.last() {
+            Some(StreamEvent::Error(e)) => assert_eq!(e.code, "finalization_failed"),
+            other => panic!("expected terminal error, got: {other:?}"),
+        }
     }
 
-    /// 8.8: Done fallback on finalization failure preserves quota fields for the
-    /// **incomplete** terminal path.
-    ///
-    /// Same invariant as 8.7 but triggered via `MockProvider::incomplete` so the
-    /// `TerminalOutcome::Incomplete` branch is exercised.
+    /// 8.8: Same invariant as 8.7 for the **incomplete** terminal path
+    /// (`MockProvider::incomplete` exercises `TerminalOutcome::Incomplete`).
     #[tokio::test]
-    async fn done_fallback_preserves_quota_fields_on_finalization_failure_incomplete() {
+    async fn finalization_failure_emits_error_not_done_incomplete() {
         use crate::domain::service::finalization_service::FinalizationService;
         use crate::domain::service::quota_settler::QuotaSettler;
 
@@ -3881,28 +3861,14 @@ mod tests {
             }
         }
 
-        let done = events
-            .iter()
-            .find_map(|ev| match ev {
-                StreamEvent::Done(d) => Some(d),
-                _ => None,
-            })
-            .expect("should have a Done event even when finalization fails on incomplete path");
-
-        assert_eq!(
-            done.quota_decision, "downgrade",
-            "incomplete fallback Done must use fctx.quota_decision, not hardcoded 'allow'"
+        assert!(
+            !events.iter().any(|ev| matches!(ev, StreamEvent::Done(_))),
+            "no Done may be sent for a turn that was not committed"
         );
-        assert_eq!(
-            done.downgrade_from.as_deref(),
-            Some("gpt-4o"),
-            "incomplete fallback Done must use fctx.downgrade_from"
-        );
-        assert_eq!(
-            done.downgrade_reason.as_deref(),
-            Some("premium_exhausted"),
-            "incomplete fallback Done must use fctx.downgrade_reason"
-        );
+        match events.last() {
+            Some(StreamEvent::Error(e)) => assert_eq!(e.code, "finalization_failed"),
+            other => panic!("expected terminal error, got: {other:?}"),
+        }
     }
 
     // ── Preflight wiring tests (11.x) ──
