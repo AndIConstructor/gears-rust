@@ -433,9 +433,8 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                             // Timer resets only on success — retry sooner on transient
                             // failures to avoid stale last_progress_at triggering false
                             // orphan detection.
-                            if matches!(client_event, ClientSseEvent::Delta { .. } | ClientSseEvent::Tool { .. })
+                            if progress_update_due(&client_event, last_progress_update.elapsed())
                                 && let Some(ref fctx) = fin_ctx
-                                && last_progress_update.elapsed() >= PROGRESS_UPDATE_INTERVAL
                             {
                                 let ok = match fctx.db.conn() {
                                     Ok(conn) => {
@@ -1428,6 +1427,15 @@ fn format_chunks_as_text(chunks: &[RetrievedChunk]) -> String {
         })
 }
 
+/// Whether `event` should bump `last_progress_at`: text and tool events count
+/// as provider progress, throttled to one update per `PROGRESS_UPDATE_INTERVAL`.
+fn progress_update_due(event: &ClientSseEvent, since_last_update: std::time::Duration) -> bool {
+    matches!(
+        event,
+        ClientSseEvent::Delta { .. } | ClientSseEvent::Tool { .. }
+    ) && since_last_update >= PROGRESS_UPDATE_INTERVAL
+}
+
 /// Terminal error for a completed answer whose message could not be
 /// persisted; the turn was stored as `failed` (`message_persistence_failed`).
 async fn send_unsaved_answer_error(tx: &mpsc::Sender<StreamEvent>) {
@@ -1455,6 +1463,28 @@ async fn send_finalization_failed_error(tx: &mpsc::Sender<StreamEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_event_counts_as_progress() {
+        let tool = ClientSseEvent::Tool {
+            phase: ToolPhase::Start,
+            name: "web_search",
+            details: serde_json::json!({}),
+        };
+        let delta = ClientSseEvent::Delta {
+            r#type: "text",
+            content: "x".to_owned(),
+        };
+        let citations = ClientSseEvent::Citations { items: Vec::new() };
+        let just_under = PROGRESS_UPDATE_INTERVAL
+            .checked_sub(std::time::Duration::from_millis(1))
+            .unwrap();
+
+        assert!(progress_update_due(&tool, PROGRESS_UPDATE_INTERVAL));
+        assert!(progress_update_due(&delta, PROGRESS_UPDATE_INTERVAL));
+        assert!(!progress_update_due(&tool, just_under), "throttled");
+        assert!(!progress_update_due(&citations, PROGRESS_UPDATE_INTERVAL));
+    }
 
     fn chunk(source_uri: &str, title: &str, text: &str) -> RetrievedChunk {
         RetrievedChunk {

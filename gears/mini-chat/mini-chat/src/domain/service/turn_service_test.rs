@@ -1203,3 +1203,13 @@ async fn edit_preserves_web_search_enabled() {
     );
     assert_eq!(result.user_content, "updated content");
 }
+
+#[test]
+fn enforcer_evaluation_failure_maps_to_forbidden() {
+    let e = authz_resolver_sdk::EnforcerError::EvaluationFailed(
+        toolkit_canonical_errors::CanonicalError::service_unavailable()
+            .with_detail("authz-resolver unreachable")
+            .create(),
+    );
+    assert!(matches!(MutationError::from(e), MutationError::Forbidden));
+}

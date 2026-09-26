@@ -328,21 +328,9 @@ impl Gear for MiniChatGear {
             file_impls.insert(provider_id.clone(), file);
             vs_impls.insert(provider_id.clone(), vs);
         }
-        // Cleanup rows carry the storage backend label, not the provider id.
-        // When several providers share a label, the smallest id wins
-        // deterministically; they share the storage account by definition.
-        let mut backend_aliases: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let mut provider_ids: Vec<&String> = file_impls.keys().collect();
-        provider_ids.sort();
-        for provider_id in provider_ids {
-            let backend = provider_resolver.resolve_storage_backend(provider_id);
-            if &backend != provider_id && !file_impls.contains_key(&backend) {
-                backend_aliases
-                    .entry(backend)
-                    .or_insert_with(|| provider_id.clone());
-            }
-        }
+        let backend_aliases = build_backend_aliases(&file_impls, |provider_id| {
+            provider_resolver.resolve_storage_backend(provider_id)
+        });
         let file_storage: Arc<dyn crate::domain::ports::FileStorageProvider> = Arc::new(
             crate::infra::llm::providers::dispatching_storage::DispatchingFileStorage::new(
                 file_impls,
@@ -921,6 +909,29 @@ async fn reconcile_deferred_once(
     }
 }
 
+/// Storage backend label → provider id, for cleanup rows that carry the label
+/// instead of the provider id. A label equal to its own provider id, or equal
+/// to another provider id, gets no alias. When several providers share a
+/// label, the smallest id wins deterministically; they share the storage
+/// account by definition.
+fn build_backend_aliases<V>(
+    impls: &std::collections::HashMap<String, V>,
+    backend_of: impl Fn(&str) -> String,
+) -> std::collections::HashMap<String, String> {
+    let mut backend_aliases = std::collections::HashMap::new();
+    let mut provider_ids: Vec<&String> = impls.keys().collect();
+    provider_ids.sort();
+    for provider_id in provider_ids {
+        let backend = backend_of(provider_id);
+        if &backend != provider_id && !impls.contains_key(&backend) {
+            backend_aliases
+                .entry(backend)
+                .or_insert_with(|| provider_id.clone());
+        }
+    }
+    backend_aliases
+}
+
 /// Exchange `OAuth2` client credentials via the `AuthN` resolver to obtain
 /// a `SecurityContext` for OAGW upstream provisioning.
 async fn exchange_client_credentials(
@@ -939,4 +950,63 @@ async fn exchange_client_credentials(
         .map_err(|e| anyhow::anyhow!("client credentials exchange failed: {e}"))?;
     info!("Security context obtained for OAGW provisioning");
     Ok(result.security_context)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::build_backend_aliases;
+
+    fn impls(ids: &[&str]) -> HashMap<String, u8> {
+        ids.iter().map(|id| ((*id).to_owned(), 0)).collect()
+    }
+
+    fn backends(map: &[(&str, &str)]) -> impl Fn(&str) -> String {
+        let map: HashMap<String, String> = map
+            .iter()
+            .map(|(id, label)| ((*id).to_owned(), (*label).to_owned()))
+            .collect();
+        move |id| map.get(id).cloned().unwrap_or_else(|| id.to_owned())
+    }
+
+    #[test]
+    fn backend_alias_skips_label_equal_to_own_id() {
+        let aliases = build_backend_aliases(
+            &impls(&["openai", "azure_openai"]),
+            backends(&[("azure_openai", "azure")]),
+        );
+        assert_eq!(
+            aliases,
+            HashMap::from([("azure".to_owned(), "azure_openai".to_owned())])
+        );
+    }
+
+    #[test]
+    fn backend_alias_skips_label_that_is_a_provider_id() {
+        // `azure_eu` stores under the `openai` label, which is itself a
+        // provider id: rows labelled `openai` must keep going to `openai`.
+        let aliases = build_backend_aliases(
+            &impls(&["openai", "azure_eu"]),
+            backends(&[("azure_eu", "openai")]),
+        );
+        assert!(aliases.is_empty(), "got: {aliases:?}");
+    }
+
+    #[test]
+    fn backend_alias_shared_label_picks_smallest_id() {
+        let aliases = build_backend_aliases(
+            &impls(&["azure_west", "azure_east", "azure_north"]),
+            backends(&[
+                ("azure_west", "azure"),
+                ("azure_east", "azure"),
+                ("azure_north", "azure"),
+            ]),
+        );
+        assert_eq!(
+            aliases,
+            HashMap::from([("azure".to_owned(), "azure_east".to_owned())])
+        );
+    }
 }

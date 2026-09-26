@@ -639,6 +639,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_orphan_candidates_excludes_recent_turn_without_progress() {
+        let db = mock_db_provider(inmem_db().await);
+        let (_, chat_id, turn_id, request_id) = setup_running_turn(&db).await;
+
+        // NULL progress, but `started_at` is recent (set by create_turn).
+        let conn = db.conn().unwrap();
+        TurnEntity::update_many()
+            .col_expr(
+                Column::LastProgressAt,
+                sea_orm::sea_query::Expr::value(Option::<OffsetDateTime>::None),
+            )
+            .filter(Column::Id.eq(turn_id))
+            .secure()
+            .scope_with(&AccessScope::allow_all())
+            .exec(&conn)
+            .await
+            .expect("clear progress");
+
+        let repo = TurnRepository;
+        let candidates = repo.find_orphan_candidates(&conn, 60, 100).await.unwrap();
+        assert!(
+            candidates.is_empty(),
+            "a recently started turn without progress is not an orphan"
+        );
+        assert_eq!(
+            repo.cas_finalize_orphan(&conn, turn_id, 60).await.unwrap(),
+            0
+        );
+        let turn = repo
+            .find_by_chat_and_request_id(&conn, &AccessScope::allow_all(), chat_id, request_id)
+            .await
+            .unwrap()
+            .expect("turn should exist");
+        assert_eq!(turn.state, TurnState::Running);
+    }
+
+    #[tokio::test]
     async fn find_orphan_candidates_excludes_recent_progress() {
         let db = mock_db_provider(inmem_db().await);
         let _ = setup_running_turn(&db).await;

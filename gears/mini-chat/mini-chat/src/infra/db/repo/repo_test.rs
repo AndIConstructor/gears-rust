@@ -1444,3 +1444,52 @@ async fn touch_activity_is_false_for_soft_deleted_chat() {
     assert!(repo.soft_delete(&conn, &scope(), chat_id).await.unwrap());
     assert!(!repo.touch_activity(&conn, &scope(), chat_id).await.unwrap());
 }
+
+#[tokio::test]
+async fn attachment_ids_for_message_skips_deleted_and_other_chat() {
+    use crate::domain::repos::MessageAttachmentRepository as _;
+    use crate::domain::service::test_helpers::{
+        InsertTestAttachmentParams, insert_test_attachment, insert_test_message,
+        insert_test_message_attachment,
+    };
+    use crate::infra::db::repo::message_attachment_repo::MessageAttachmentRepository;
+
+    let db = test_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let other_chat_id = Uuid::new_v4();
+    let message_id = Uuid::new_v4();
+    insert_chat(&db, tenant_id, chat_id).await;
+    insert_chat(&db, tenant_id, other_chat_id).await;
+    insert_test_message(&db, tenant_id, chat_id, message_id).await;
+
+    let live = insert_test_attachment(
+        &db,
+        InsertTestAttachmentParams::ready_document(tenant_id, chat_id),
+    )
+    .await;
+    let deleted = insert_test_attachment(
+        &db,
+        InsertTestAttachmentParams {
+            deleted_at: Some(time::OffsetDateTime::now_utc()),
+            ..InsertTestAttachmentParams::ready_document(tenant_id, chat_id)
+        },
+    )
+    .await;
+    insert_test_message_attachment(&db, tenant_id, chat_id, message_id, live).await;
+    insert_test_message_attachment(&db, tenant_id, chat_id, message_id, deleted).await;
+
+    let repo = MessageAttachmentRepository;
+    let conn = db.conn().unwrap();
+    let ids = repo
+        .attachment_ids_for_message(&conn, &scope(), chat_id, message_id)
+        .await
+        .unwrap();
+    assert_eq!(ids, vec![live], "soft-deleted attachment must be excluded");
+
+    let ids = repo
+        .attachment_ids_for_message(&conn, &scope(), other_chat_id, message_id)
+        .await
+        .unwrap();
+    assert!(ids.is_empty(), "links of another chat must be excluded");
+}

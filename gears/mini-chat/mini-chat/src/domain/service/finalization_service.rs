@@ -2137,6 +2137,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finalize_orphan_sets_dedupe_key_and_audit_tool_calls() {
+        let db = mock_db_provider(inmem_db().await);
+        let (svc, outbox) = build_finalization_service(Arc::clone(&db));
+
+        let tenant_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+
+        let conn = db.conn().unwrap();
+        backdate_turn_progress(&conn, turn_id).await;
+
+        let input = crate::domain::model::finalization::OrphanFinalizationInput {
+            turn_id,
+            tenant_id,
+            chat_id,
+            request_id,
+            user_id: Some(user_id),
+            requester_type: mini_chat_sdk::RequesterType::User,
+            effective_model: Some("gpt-5.2".to_owned()),
+            reserve_tokens: Some(100),
+            max_output_tokens_applied: Some(4096),
+            reserved_credits_micro: Some(1000),
+            policy_version_applied: Some(1),
+            minimal_generation_floor_applied: Some(10),
+            started_at: time::OffsetDateTime::now_utc(),
+            web_search_completed_count: 3,
+            code_interpreter_completed_count: 0,
+            file_search_completed_count: 5,
+        };
+        assert!(svc.finalize_orphan_turn(input, 60).await.unwrap());
+
+        let usage_events = outbox.usage_events.lock().unwrap();
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(
+            usage_events[0].dedupe_key.as_deref(),
+            Some(
+                format!(
+                    "{}/{}/{}",
+                    tenant_id.as_simple(),
+                    turn_id.as_simple(),
+                    request_id.as_simple()
+                )
+                .as_str()
+            )
+        );
+        drop(usage_events);
+
+        let audit_events = outbox.audit_events();
+        assert_eq!(audit_events.len(), 1);
+        match &audit_events[0] {
+            AuditEnvelope::Turn(evt) => {
+                let tool_calls = evt
+                    .tool_calls
+                    .as_ref()
+                    .expect("orphan audit event must carry tool_calls");
+                assert_eq!(tool_calls.web_search_calls, Some(3));
+                assert_eq!(tool_calls.file_search_calls, Some(5));
+            }
+            other => panic!("expected Turn event, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn finalize_orphan_cas_loser() {
         let db = mock_db_provider(inmem_db().await);
         let (svc, outbox) = build_finalization_service(Arc::clone(&db));

@@ -6150,6 +6150,10 @@ mod tests {
         cancel_requested: AtomicU64,
         cancel_effective: AtomicU64,
         time_to_abort_ms: AtomicU64,
+        /// `f64::to_bits` of the last recorded value.
+        last_time_to_abort_ms: AtomicU64,
+        /// `f64::to_bits` of the last recorded value.
+        last_stream_total_latency_ms: AtomicU64,
     }
 
     impl TestMetrics {
@@ -6174,7 +6178,17 @@ mod tests {
                 cancel_requested: AtomicU64::new(0),
                 cancel_effective: AtomicU64::new(0),
                 time_to_abort_ms: AtomicU64::new(0),
+                last_time_to_abort_ms: AtomicU64::new(0),
+                last_stream_total_latency_ms: AtomicU64::new(0),
             }
+        }
+
+        fn last_time_to_abort_ms(&self) -> f64 {
+            f64::from_bits(self.last_time_to_abort_ms.load(Ordering::Relaxed))
+        }
+
+        fn last_stream_total_latency_ms(&self) -> f64 {
+            f64::from_bits(self.last_stream_total_latency_ms.load(Ordering::Relaxed))
         }
     }
 
@@ -6203,8 +6217,10 @@ mod tests {
         fn record_ttft_overhead_ms(&self, _: &str, _: &str, _: f64) {
             self.ttft_overhead_ms.fetch_add(1, Ordering::Relaxed);
         }
-        fn record_stream_total_latency_ms(&self, _: &str, _: &str, _: f64) {
+        fn record_stream_total_latency_ms(&self, _: &str, _: &str, ms: f64) {
             self.stream_total_latency_ms.fetch_add(1, Ordering::Relaxed);
+            self.last_stream_total_latency_ms
+                .store(ms.to_bits(), Ordering::Relaxed);
         }
         fn record_turn_mutation(&self, _: &str, _: &str) {}
         fn record_turn_mutation_latency_ms(&self, _: &str, _: f64) {}
@@ -6237,8 +6253,10 @@ mod tests {
         fn record_cancel_effective(&self, _: &str) {
             self.cancel_effective.fetch_add(1, Ordering::Relaxed);
         }
-        fn record_time_to_abort_ms(&self, _: &str, _: f64) {
+        fn record_time_to_abort_ms(&self, _: &str, ms: f64) {
             self.time_to_abort_ms.fetch_add(1, Ordering::Relaxed);
+            self.last_time_to_abort_ms
+                .store(ms.to_bits(), Ordering::Relaxed);
         }
         fn record_streams_aborted(&self, _: &str) {}
         fn record_attachment_upload(&self, _: &str, _: &str) {}
@@ -6936,5 +6954,531 @@ mod tests {
             rows.iter().any(|r| r.reserved_credits_micro > 0),
             "quota reserve persisted"
         );
+    }
+
+    // ── Branch review follow-ups ──
+
+    /// Loads a turn by `request_id`, panicking if it does not exist.
+    async fn load_turn(
+        db: &Arc<DbProvider>,
+        chat_id: Uuid,
+        request_id: Uuid,
+    ) -> crate::infra::db::entity::chat_turn::Model {
+        let conn = db.conn().unwrap();
+        TurnRepo
+            .find_by_chat_and_request_id(&conn, &AccessScope::allow_all(), chat_id, request_id)
+            .await
+            .expect("DB query should succeed")
+            .expect("turn must exist")
+    }
+
+    /// Receives events until the provider task drops the sender.
+    async fn collect_events(rx: &mut mpsc::Receiver<StreamEvent>) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            events.push(ev);
+        }
+        events
+    }
+
+    /// Provider resolution runs before `reserve_and_create_turn`, so its
+    /// failure leaves no turn, no user message and no quota reserve.
+    #[tokio::test]
+    async fn run_stream_provider_resolution_failure_persists_nothing() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service(db.clone(), provider);
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, _rx) = mpsc::channel(32);
+
+        let model = ResolvedModel {
+            provider_id: "unknown-provider".to_owned(),
+            ..test_resolved_model()
+        };
+        let err = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                request_id,
+                "hello".into(),
+                model,
+                false,
+                Vec::new(),
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect_err("provider resolution should fail");
+        assert!(
+            matches!(err, StreamError::TurnCreationFailed { .. }),
+            "expected TurnCreationFailed, got: {err:?}"
+        );
+
+        assert_nothing_persisted(&db, tenant_id, user_id, chat_id, request_id).await;
+        let conn = db.conn().unwrap();
+        assert!(
+            TurnRepo
+                .find_by_chat_and_request_id(&conn, &AccessScope::allow_all(), chat_id, request_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "no chat_turns row for the failed request"
+        );
+    }
+
+    /// Context assembly over budget after the mutation committed fails the
+    /// new turn with `context_length_exceeded`, not `turn_setup_failed`.
+    ///
+    /// `context_window = 500`: 1000 bytes estimate to 385 tokens, within
+    /// `max_input_tokens = 500`, but above the assembly budget of
+    /// 500 - 125 (output) - 100 (overhead) = 275.
+    #[tokio::test]
+    async fn run_stream_for_mutation_context_budget_exceeded_marks_turn_failed() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        insert_running_turn(&db, tenant_id, user_id, chat_id, request_id, turn_id).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service_with_context_window(db.clone(), provider, 500);
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, _rx) = mpsc::channel(32);
+
+        let content = "a".repeat(1000);
+        let model = test_resolved_model();
+        let preflight = svc
+            .preflight_mutation(&ctx, chat_id, Uuid::new_v4(), &content, &model, false)
+            .await
+            .expect("content fits max_input_tokens");
+        let err = svc
+            .run_stream_for_mutation(
+                ctx,
+                chat_id,
+                request_id,
+                turn_id,
+                content,
+                model,
+                false,
+                None,
+                preflight,
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect_err("context assembly should exceed the budget");
+        assert!(
+            matches!(err, StreamError::ContextBudgetExceeded { .. }),
+            "expected ContextBudgetExceeded, got: {err:?}"
+        );
+
+        let turn = load_turn(&db, chat_id, request_id).await;
+        assert_eq!(turn.state, TurnState::Failed);
+        assert_eq!(turn.error_code.as_deref(), Some("context_length_exceeded"));
+        assert!(turn.reserve_tokens.is_none(), "no quota reserve written");
+    }
+
+    /// Inserts a ready image attachment linked to `message_id`.
+    async fn insert_linked_image(
+        db: &Arc<DbProvider>,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        chat_id: Uuid,
+        message_id: Uuid,
+        provider_file_id: &str,
+    ) {
+        use crate::domain::service::test_helpers::{
+            insert_test_message, insert_test_message_attachment,
+        };
+        use crate::infra::db::entity::attachment::AttachmentKind;
+
+        insert_test_message(db, tenant_id, chat_id, message_id).await;
+        let image_id = insert_test_attachment(
+            db,
+            InsertTestAttachmentParams {
+                uploaded_by_user_id: user_id,
+                kind: AttachmentKind::Image,
+                filename: "cat.png".to_owned(),
+                content_type: "image/png".to_owned(),
+                provider_file_id: Some(provider_file_id.to_owned()),
+                for_file_search: false,
+                ..InsertTestAttachmentParams::ready_document(tenant_id, chat_id)
+            },
+        )
+        .await;
+        insert_test_message_attachment(db, tenant_id, chat_id, message_id, image_id).await;
+    }
+
+    /// Records the messages of the outgoing provider request.
+    #[domain_model]
+    struct MessageCapturingProvider {
+        captured: std::sync::Mutex<Option<Vec<LlmMessage>>>,
+        inner: MockProvider,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for MessageCapturingProvider {
+        async fn stream(
+            &self,
+            ctx: SecurityContext,
+            request: LlmRequest<Streaming>,
+            upstream_alias: &str,
+            cancel: CancellationToken,
+        ) -> Result<ProviderStream, LlmProviderError> {
+            *self.captured.lock().unwrap() = Some(request.messages().to_vec());
+            self.inner
+                .stream(ctx, request, upstream_alias, cancel)
+                .await
+        }
+
+        async fn complete(
+            &self,
+            _ctx: SecurityContext,
+            _request: LlmRequest<NonStreaming>,
+            _upstream_alias: &str,
+        ) -> Result<ResponseResult, LlmProviderError> {
+            unimplemented!("not needed for streaming tests")
+        }
+    }
+
+    /// Retry/edit sends the source message's images to the provider.
+    #[tokio::test]
+    async fn run_stream_for_mutation_sends_source_images_to_provider() {
+        use crate::domain::llm::ContentPart;
+
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let source_message_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        insert_linked_image(
+            &db,
+            tenant_id,
+            user_id,
+            chat_id,
+            source_message_id,
+            "file-img-retry",
+        )
+        .await;
+        insert_running_turn(&db, tenant_id, user_id, chat_id, request_id, turn_id).await;
+
+        let capturing = Arc::new(MessageCapturingProvider {
+            captured: std::sync::Mutex::new(None),
+            inner: MockProvider::completed(&["a cat"]),
+        });
+        let svc = build_stream_service(db.clone(), Arc::clone(&capturing) as _);
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let model = ResolvedModel {
+            multimodal_capabilities: vec!["VISION_INPUT".to_owned()],
+            ..test_resolved_model()
+        };
+        let content = "what is this?".to_owned();
+        let preflight = svc
+            .preflight_mutation(&ctx, chat_id, source_message_id, &content, &model, false)
+            .await
+            .expect("preflight should allow the mutation");
+
+        let (tx, mut rx) = mpsc::channel(32);
+        let handle = svc
+            .run_stream_for_mutation(
+                ctx,
+                chat_id,
+                request_id,
+                turn_id,
+                content,
+                model,
+                false,
+                None,
+                preflight,
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect("mutation stream should start");
+        collect_events(&mut rx).await;
+        let outcome = handle.await.expect("task should complete");
+        assert_eq!(outcome.terminal, StreamTerminal::Completed);
+
+        let messages = capturing
+            .captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("provider was never called");
+        let user_message = messages.last().expect("request has messages");
+        assert!(
+            user_message.content.iter().any(
+                |part| matches!(part, ContentPart::Image { file_id } if file_id == "file-img-retry")
+            ),
+            "image must reach the provider request, got: {:?}",
+            user_message.content
+        );
+    }
+
+    /// The images kill switch rejects a retry whose source message has images.
+    #[tokio::test]
+    async fn preflight_mutation_rejects_images_when_kill_switch_set() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let source_message_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        insert_linked_image(
+            &db,
+            tenant_id,
+            user_id,
+            chat_id,
+            source_message_id,
+            "file-img-retry",
+        )
+        .await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service_with_policy(
+            db,
+            provider,
+            mini_chat_sdk::KillSwitches {
+                disable_images: true,
+                ..mini_chat_sdk::KillSwitches::default()
+            },
+        );
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let model = ResolvedModel {
+            multimodal_capabilities: vec!["VISION_INPUT".to_owned()],
+            ..test_resolved_model()
+        };
+
+        let Err(err) = svc
+            .preflight_mutation(&ctx, chat_id, source_message_id, "again", &model, false)
+            .await
+        else {
+            panic!("images kill switch should reject the retry");
+        };
+        assert!(
+            matches!(err, StreamError::ImagesDisabled),
+            "expected ImagesDisabled, got: {err:?}"
+        );
+    }
+
+    /// A completed answer whose assistant message cannot be stored ends with
+    /// `error{message_persistence_failed}` and no `done`; the turn is Failed.
+    ///
+    /// The insert fails on `idx_messages_chat_request_role`: an assistant
+    /// message with the same `(chat_id, request_id)` already exists.
+    #[tokio::test]
+    async fn completed_stream_with_unsaved_message_sends_persistence_error() {
+        use crate::domain::repos::{InsertAssistantMessageParams, MessageRepository as _};
+
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        {
+            let conn = db.conn().unwrap();
+            MsgRepo::new(toolkit_db::odata::LimitCfg {
+                default: 20,
+                max: 100,
+            })
+            .insert_assistant_message(
+                &conn,
+                &AccessScope::allow_all(),
+                InsertAssistantMessageParams {
+                    id: Uuid::new_v4(),
+                    tenant_id,
+                    chat_id,
+                    request_id,
+                    content: "occupies the slot".to_owned(),
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_write_input_tokens: None,
+                    reasoning_tokens: None,
+                    model: None,
+                    provider_response_id: None,
+                },
+            )
+            .await
+            .expect("insert blocking assistant message");
+        }
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["Hello"]));
+        let svc = build_stream_service(db.clone(), provider);
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, mut rx) = mpsc::channel(32);
+
+        let handle = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                request_id,
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect("stream should start");
+        let events = collect_events(&mut rx).await;
+        handle.await.expect("task should complete");
+
+        assert!(
+            !events.iter().any(|ev| matches!(ev, StreamEvent::Done(_))),
+            "no done event for an unsaved answer"
+        );
+        let codes: Vec<&str> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                StreamEvent::Error(e) => Some(e.code.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(codes, ["message_persistence_failed"]);
+
+        let turn = load_turn(&db, chat_id, request_id).await;
+        assert_eq!(turn.state, TurnState::Failed);
+        assert_eq!(
+            turn.error_code.as_deref(),
+            Some("message_persistence_failed")
+        );
+    }
+
+    /// The client disconnects while the provider task is blocked sending on
+    /// a full channel: the turn is finalized as Cancelled.
+    #[tokio::test]
+    async fn receiver_dropped_during_blocked_send_finalizes_cancelled() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let provider: Arc<dyn LlmProvider> =
+            Arc::new(MockProvider::completed(&["one", "two", "three"]));
+        let svc = build_stream_service(db.clone(), provider);
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        // `stream_started` takes the only slot, so the first delta send blocks.
+        let (tx, rx) = mpsc::channel(1);
+
+        let handle = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                request_id,
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect("stream should start");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!handle.is_finished(), "task must be blocked on the send");
+        drop(rx);
+
+        let outcome = handle.await.expect("task should complete");
+        assert_eq!(outcome.terminal, StreamTerminal::Cancelled);
+        let turn = load_turn(&db, chat_id, request_id).await;
+        assert_eq!(turn.state, TurnState::Cancelled);
+    }
+
+    /// `time_to_abort_ms` measures from cancel observation, not from the
+    /// stream start.
+    #[tokio::test]
+    async fn time_to_abort_excludes_time_before_cancel() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let metrics = Arc::new(TestMetrics::new());
+        let provider: Arc<dyn LlmProvider> = Arc::new(HangingProvider);
+        let svc = build_stream_service_with_metrics(db, provider, Arc::clone(&metrics) as _);
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, mut rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let handle = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                Uuid::new_v4(),
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                cancel.clone(),
+                tx,
+            )
+            .await
+            .expect("stream should start");
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::StreamStarted(_))
+        ));
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Delta(_))));
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        cancel.cancel();
+        collect_events(&mut rx).await;
+        let outcome = handle.await.expect("task should complete");
+        assert_eq!(outcome.terminal, StreamTerminal::Cancelled);
+
+        assert_eq!(metrics.time_to_abort_ms.load(Ordering::Relaxed), 1);
+        let total = metrics.last_stream_total_latency_ms();
+        let abort = metrics.last_time_to_abort_ms();
+        assert!(total >= 300.0, "total latency {total} covers the wait");
+        assert!(
+            abort < 100.0,
+            "time_to_abort {abort} must not include the {total} ms before cancel"
+        );
+    }
+
+    /// Every enforcer failure, including a PDP outage, is an authorization
+    /// failure (fail closed).
+    #[test]
+    fn enforcer_errors_map_to_authorization_failed() {
+        use authz_resolver_sdk::EnforcerError;
+        use authz_resolver_sdk::pep::ConstraintCompileError;
+
+        let errors = [
+            EnforcerError::Denied { deny_reason: None },
+            EnforcerError::EvaluationFailed(
+                toolkit_canonical_errors::CanonicalError::service_unavailable()
+                    .with_detail("authz-resolver unreachable")
+                    .create(),
+            ),
+            EnforcerError::CompileFailed(ConstraintCompileError::ConstraintsRequiredButAbsent),
+        ];
+        for e in errors {
+            let label = format!("{e:?}");
+            assert!(
+                matches!(
+                    StreamError::from(e),
+                    StreamError::AuthorizationFailed { .. }
+                ),
+                "{label} must map to AuthorizationFailed"
+            );
+        }
     }
 }

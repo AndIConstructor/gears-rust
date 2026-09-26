@@ -178,3 +178,32 @@ fn provider_429_response_is_rate_limited() {
         .into_parts();
     assert!(rate_limited_from_status(&parts).is_none());
 }
+
+#[test]
+fn provider_429_without_numeric_retry_after_has_no_hint() {
+    let (parts, ()) = http::Response::builder()
+        .status(http::StatusCode::TOO_MANY_REQUESTS)
+        .body(())
+        .unwrap()
+        .into_parts();
+    assert!(matches!(
+        rate_limited_from_status(&parts),
+        Some(LlmProviderError::RateLimited {
+            retry_after_secs: None
+        })
+    ));
+
+    // The HTTP-date form of Retry-After is not parsed.
+    let (parts, ()) = http::Response::builder()
+        .status(http::StatusCode::TOO_MANY_REQUESTS)
+        .header(http::header::RETRY_AFTER, "Wed, 21 Oct 2015 07:28:00 GMT")
+        .body(())
+        .unwrap()
+        .into_parts();
+    assert!(matches!(
+        rate_limited_from_status(&parts),
+        Some(LlmProviderError::RateLimited {
+            retry_after_secs: None
+        })
+    ));
+}

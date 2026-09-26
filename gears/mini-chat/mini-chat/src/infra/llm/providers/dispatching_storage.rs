@@ -236,4 +236,74 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, FileStorageError::Configuration { .. }));
     }
+
+    /// Records the provider id each vector store call receives.
+    #[derive(Default)]
+    struct RecordingVectorStore {
+        seen: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl VectorStoreProvider for RecordingVectorStore {
+        async fn create_vector_store(
+            &self,
+            _ctx: SecurityContext,
+            provider_id: &str,
+        ) -> Result<String, FileStorageError> {
+            self.seen.lock().unwrap().push(provider_id.to_owned());
+            Ok("vs-1".to_owned())
+        }
+
+        async fn add_file_to_vector_store(
+            &self,
+            _ctx: SecurityContext,
+            _provider_id: &str,
+            _params: AddFileToVectorStoreParams,
+        ) -> Result<(), FileStorageError> {
+            unreachable!("not used")
+        }
+
+        async fn delete_vector_store(
+            &self,
+            _ctx: SecurityContext,
+            provider_id: &str,
+            _vector_store_id: &str,
+        ) -> Result<(), FileStorageError> {
+            self.seen.lock().unwrap().push(provider_id.to_owned());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn vector_store_backend_label_resolves_to_provider_id() {
+        let azure = Arc::new(RecordingVectorStore::default());
+        let dispatch = DispatchingVectorStore::new(HashMap::from([(
+            "azure_openai".to_owned(),
+            Arc::clone(&azure) as Arc<dyn VectorStoreProvider>,
+        )]))
+        .with_aliases(HashMap::from([(
+            "azure".to_owned(),
+            "azure_openai".to_owned(),
+        )]));
+
+        // `chat_vector_stores.provider` stores the backend label.
+        dispatch
+            .delete_vector_store(ctx(), "azure", "vs-1")
+            .await
+            .unwrap();
+        dispatch
+            .create_vector_store(ctx(), "azure_openai")
+            .await
+            .unwrap();
+        assert_eq!(
+            *azure.seen.lock().unwrap(),
+            ["azure_openai", "azure_openai"]
+        );
+
+        let err = dispatch
+            .delete_vector_store(ctx(), "unknown", "vs-2")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FileStorageError::Configuration { .. }));
+    }
 }
