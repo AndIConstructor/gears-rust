@@ -278,9 +278,17 @@ impl crate::domain::repos::AttachmentRepository for AttachmentRepository {
         .not();
 
         let now = OffsetDateTime::now_utc();
+        // The attachment enters the provider-cleanup state machine here, as
+        // in `mark_attachments_pending_for_chat`: the cleanup handler only
+        // advances rows that are `pending`.
         let result = Entity::update_many()
             .col_expr(Column::DeletedAt, Expr::value(Some(now)))
             .col_expr(Column::UpdatedAt, Expr::value(now))
+            .col_expr(
+                Column::CleanupStatus,
+                Expr::value(Some(CleanupStatus::Pending)),
+            )
+            .col_expr(Column::CleanupUpdatedAt, Expr::value(Some(now)))
             .filter(
                 Condition::all()
                     .add(Column::Id.eq(id))

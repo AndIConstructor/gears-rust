@@ -317,15 +317,32 @@ impl Gear for MiniChatGear {
             file_impls.insert(provider_id.clone(), file);
             vs_impls.insert(provider_id.clone(), vs);
         }
+        // Cleanup rows carry the storage backend label, not the provider id.
+        // When several providers share a label, the smallest id wins
+        // deterministically; they share the storage account by definition.
+        let mut backend_aliases: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut provider_ids: Vec<&String> = file_impls.keys().collect();
+        provider_ids.sort();
+        for provider_id in provider_ids {
+            let backend = provider_resolver.resolve_storage_backend(provider_id);
+            if &backend != provider_id && !file_impls.contains_key(&backend) {
+                backend_aliases
+                    .entry(backend)
+                    .or_insert_with(|| provider_id.clone());
+            }
+        }
         let file_storage: Arc<dyn crate::domain::ports::FileStorageProvider> = Arc::new(
             crate::infra::llm::providers::dispatching_storage::DispatchingFileStorage::new(
                 file_impls,
-            ),
+            )
+            .with_aliases(backend_aliases.clone()),
         );
         let vector_store_prov: Arc<dyn crate::domain::ports::VectorStoreProvider> = Arc::new(
             crate::infra::llm::providers::dispatching_storage::DispatchingVectorStore::new(
                 vs_impls,
-            ),
+            )
+            .with_aliases(backend_aliases),
         );
 
         // ── Metrics ─────────────────────────────────────────────────────────

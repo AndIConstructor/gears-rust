@@ -739,6 +739,10 @@ async fn test_upload_storage_limit_exceeded_chunked() {
 
 #[tokio::test]
 async fn test_upload_provider_failure_sets_failed() {
+    use crate::infra::db::entity::attachment::{AttachmentStatus, Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use toolkit_db::secure::SecureEntityExt;
+
     let db = inmem_db().await;
     let tenant_id = Uuid::new_v4();
     let chat_id = Uuid::new_v4();
@@ -772,6 +776,19 @@ async fn test_upload_provider_failure_sets_failed() {
         ),
         "expected ProviderError"
     );
+
+    // The row inserted as `pending` must end up `failed` with the error code.
+    let conn = db_prov.conn().unwrap();
+    let row = Entity::find()
+        .filter(Column::ChatId.eq(chat_id))
+        .secure()
+        .scope_with(&toolkit_security::AccessScope::allow_all())
+        .one(&conn)
+        .await
+        .unwrap()
+        .expect("attachment row exists");
+    assert_eq!(row.status, AttachmentStatus::Failed);
+    assert_eq!(row.error_code.as_deref(), Some("upload_failed"));
 }
 
 // ── P5-B4: Get attachment returns uploaded attachment ──
@@ -847,6 +864,10 @@ async fn test_get_attachment_soft_deleted_returns_not_found() {
 
 #[tokio::test]
 async fn test_delete_attachment_enqueues_cleanup() {
+    use crate::infra::db::entity::attachment::{CleanupStatus, Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use toolkit_db::secure::SecureEntityExt;
+
     let db = inmem_db().await;
     let tenant_id = Uuid::new_v4();
     let chat_id = Uuid::new_v4();
@@ -877,10 +898,26 @@ async fn test_delete_attachment_enqueues_cleanup() {
     assert!(result.is_ok(), "delete_attachment failed: {result:?}");
 
     // Verify cleanup event was enqueued
-    let events = outbox_ref.cleanup_events.lock().unwrap();
-    assert_eq!(events.len(), 1, "should enqueue 1 cleanup event");
-    assert_eq!(events[0].attachment_id, att_id);
-    assert_eq!(events[0].event_type, "attachment_deleted");
+    {
+        let events = outbox_ref.cleanup_events.lock().unwrap();
+        assert_eq!(events.len(), 1, "should enqueue 1 cleanup event");
+        assert_eq!(events[0].attachment_id, att_id);
+        assert_eq!(events[0].event_type, "attachment_deleted");
+    }
+
+    // The cleanup handler only advances `pending` rows, so the soft delete
+    // must put the attachment into that state.
+    let conn = db_prov.conn().unwrap();
+    let row = Entity::find()
+        .filter(Column::Id.eq(att_id))
+        .secure()
+        .scope_with(&toolkit_security::AccessScope::allow_all())
+        .one(&conn)
+        .await
+        .unwrap()
+        .expect("attachment row exists");
+    assert!(row.deleted_at.is_some());
+    assert_eq!(row.cleanup_status, Some(CleanupStatus::Pending));
 }
 
 // ── P5-F2: Delete idempotent for already-deleted ──
