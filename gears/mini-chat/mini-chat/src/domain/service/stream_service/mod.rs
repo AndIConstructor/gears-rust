@@ -3086,8 +3086,19 @@ mod tests {
             vision_input: true,
         };
 
-        let result = flatten_preflight(decision).expect("Allow should produce Ok");
+        let mut result = flatten_preflight(decision).expect("Allow should produce Ok");
         assert_eq!(result.max_input_tokens, 65_536);
+        // A message far above a small limit is rejected; with 0 (no separate
+        // limit, as in the context budget) it is accepted.
+        let long = "x".repeat(40_000);
+        result.max_input_tokens = 1_000;
+        assert!(matches!(
+            check_input_token_limit(&long, &result),
+            Err(StreamError::InputTooLong { .. })
+        ));
+        result.max_input_tokens = 0;
+        check_input_token_limit(&long, &result).unwrap();
+        result.max_input_tokens = 65_536;
         assert_eq!(result.context_window, 128_000);
         assert_eq!(result.quota_decision, "allow");
         assert!(result.downgrade_from.is_none());

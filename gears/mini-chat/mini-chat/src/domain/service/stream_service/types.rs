@@ -308,7 +308,8 @@ pub(super) fn check_input_token_limit(
         },
         &pf.estimation_budgets,
     );
-    if estimate.estimated_input_tokens > u64::from(pf.max_input_tokens) {
+    // 0 means the catalog sets no separate input limit, as in the context budget.
+    if pf.max_input_tokens > 0 && estimate.estimated_input_tokens > u64::from(pf.max_input_tokens) {
         return Err(StreamError::InputTooLong {
             estimated_tokens: estimate.estimated_input_tokens,
             max_input_tokens: pf.max_input_tokens,
