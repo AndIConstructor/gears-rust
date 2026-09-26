@@ -31,16 +31,17 @@ fn sanitize_removes_credentials() {
 #[test]
 fn sanitize_removes_file_and_vector_store_ids() {
     let msg = "File file-4XkVvZt9pQ2rS8mN not found in vector store vs_67a1b2c3d4e5f6a7 \
-               (assistant-Ab12Cd34Ef56Gh78)";
+               (assistant-Ab12Cd34Ef56Gh78, file_011CNha8iCJcU1wXNR6q4V8w)";
     let sanitized = sanitize_provider_message(msg);
     assert!(!sanitized.contains("file-4XkVvZt9pQ2rS8mN"));
+    assert!(!sanitized.contains("file_011CNha8iCJcU1wXNR6q4V8w"));
     assert!(!sanitized.contains("vs_67a1b2c3d4e5f6a7"));
     assert!(!sanitized.contains("assistant-Ab12Cd34Ef56Gh78"));
 }
 
 #[test]
 fn sanitize_keeps_ordinary_words() {
-    let msg = "file-based upload failed";
+    let msg = "file-based upload failed; file_search disabled";
     assert_eq!(sanitize_provider_message(msg), msg);
 }
 

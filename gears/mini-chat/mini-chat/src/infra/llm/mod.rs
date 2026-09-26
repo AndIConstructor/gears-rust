@@ -128,10 +128,11 @@ impl LlmProviderError {
 static RE_RESP_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(resp_|chatcmpl-|cmpl-|msg_)[A-Za-z0-9]+").unwrap());
 /// Provider file and vector-store IDs (`OpenAI` `file-…`/`vs_…`, Azure
-/// `assistant-…`). The length floor keeps words like "file-based" intact.
+/// `assistant-…`, Anthropic `file_…`). The length floor keeps words like
+/// "file-based" and `file_search` intact.
 #[allow(clippy::unwrap_used)]
 static RE_STORAGE_ID: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(file-|assistant-|vs_)[A-Za-z0-9]{12,}").unwrap());
+    LazyLock::new(|| Regex::new(r"(file-|file_|assistant-|vs_)[A-Za-z0-9]{12,}").unwrap());
 #[allow(clippy::unwrap_used)]
 static RE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s,\])}"']+"#).unwrap());
 #[allow(clippy::unwrap_used)]
