@@ -5,7 +5,6 @@ turn state, quota usage, and that `quota_usage.reserved_credits_micro` of the
 user is back to 0 once the turn is terminal (read directly from the DB).
 """
 
-import json
 import uuid
 
 import httpx
@@ -17,9 +16,11 @@ from .conftest import (
     USER_A_ID,
     assert_no_reserves,
     expect_done,
+    expect_stream_started,
     find_period,
     get_quota_status,
     open_stream,
+    outbox_payloads,
     parse_sse,
     poll_turn,
     query_db,
@@ -35,36 +36,48 @@ def total_daily_used() -> int:
 
 def usage_events(rid: str) -> list[dict]:
     """Usage outbox payloads of the turn with `rid`."""
-    rows = query_db(
-        "SELECT payload FROM toolkit_outbox_body WHERE payload LIKE ?", (f"%{rid}%",),
-    )
     return [
-        p for p in (json.loads(r["payload"]) for r in rows)
+        p for p in outbox_payloads(rid)
         if p.get("request_id") == rid and "settlement_method" in p
     ]
 
 
-def estimated_charge(rid: str) -> int:
-    """Credits of the estimated settlement of an azure-gpt-4.1 turn (DESIGN §5.8):
-    (reserve_tokens - max_output_tokens_applied) input tokens plus
-    minimal_generation_floor_applied output tokens, at 3 and 15 credits_micro
-    per token (base.yaml multipliers)."""
-    rows = query_db(
-        "SELECT reserve_tokens, max_output_tokens_applied, minimal_generation_floor_applied "
-        "FROM chat_turns WHERE request_id = ?", (rid,),
-    )
-    assert len(rows) == 1, rows
-    turn = rows[0]
-    estimated_input = turn["reserve_tokens"] - turn["max_output_tokens_applied"]
-    return estimated_input * 3 + turn["minimal_generation_floor_applied"] * 15
+# ── Preflight estimate of a first message in a fresh azure-gpt-4.1 chat ──
+#
+# The rig does not override the mini-chat estimation budgets or the streaming
+# cap (config.rs defaults: bytes_per_token_conservative 4,
+# fixed_overhead_tokens 100, safety_margin_pct 10, minimal_generation_floor 50;
+# StreamingConfig max_output_tokens 32768). azure-gpt-4.1 (base.yaml):
+# max_output_tokens 8192, 3 credits_micro per input token, 15 per output token.
+# A first message has no prior context and no tools, so for `n` content bytes:
+#   estimated input tokens = ceil((ceil(n / 4) + 100) * 110 / 100)
+#   max_output_tokens_applied = min(8192, 32768) = 8192
+#   reserve_tokens = estimated input tokens + 8192
+#   reserved_credits_micro = estimated input * 3 + 8192 * 15
+# The estimated settlement (DESIGN §5.8) charges the estimated input tokens
+# plus the 50-token generation floor: estimated input * 3 + 50 * 15.
+MAX_OUTPUT_TOKENS_APPLIED = 8192
+MINIMAL_GENERATION_FLOOR = 50
+
+# "Write a long essay." / "This should fail.": 19 / 17 bytes -> ceil(n/4) = 5
+#   -> (5 + 100) * 1.1 = 115.5 -> 116 input tokens; charge 116 * 3 + 750 = 1098
+# "Write slowly.": 13 bytes -> 4 -> (4 + 100) * 1.1 = 114.4 -> 115; 345 + 750 = 1095
+ESTIMATED_CHARGE = {
+    "Write a long essay.": 1098,
+    "Write slowly.": 1095,
+    "This should fail.": 1098,
+}
 
 
-def assert_estimated_settlement(rid: str, used_before: int, billing_outcome: str) -> None:
+def assert_estimated_settlement(
+    rid: str, used_before: int, billing_outcome: str, content: str,
+) -> None:
     """The turn is settled on the estimate, never released (no-free-cancel rule):
     one usage event with `billing_outcome`, `settlement_method: estimated` and
-    the estimated charge, which is added to the total daily usage."""
+    the estimated charge of `content` (ESTIMATED_CHARGE), which is added to
+    the total daily usage."""
     assert_no_reserves(USER_A_ID)
-    expected = estimated_charge(rid)
+    expected = ESTIMATED_CHARGE[content]
     events = usage_events(rid)
     assert len(events) == 1, events
     event = events[0]
@@ -83,6 +96,7 @@ def _require_offline(request):
 class TestSettlement:
     """Quota settlement after various turn outcomes."""
 
+    @pytest.mark.multi_provider
     def test_completed_turn_releases_reserve(self, provider_chat):
         """A completed turn leaves no reserve behind and its turn is done."""
         rid = str(uuid.uuid4())
@@ -93,21 +107,41 @@ class TestSettlement:
         assert poll_turn(provider_chat["id"], rid)["state"] == "done"
         assert_no_reserves(USER_A_ID)
 
-    def test_reservation_snapshot_persisted(self, chat):
-        """The turn row keeps the reservation snapshot taken at preflight."""
-        rid = str(uuid.uuid4())
-        status, events, _ = stream_message(chat["id"], "Say OK.", request_id=rid)
-        assert status == 200
-        expect_done(events)
-        poll_turn(chat["id"], rid, ("done",))
+    @pytest.mark.timeout(30)
+    def test_reservation_snapshot_persisted(self, request, chat, mock_provider):
+        """09-04, 14-01: the preflight reservation snapshot is on the turn row
+        while the turn is still running, and completion leaves it unchanged.
 
-        rows = query_db(
-            "SELECT reserve_tokens, reserved_credits_micro FROM chat_turns WHERE request_id = ?",
-            (rid,),
-        )
-        assert len(rows) == 1, f"No turn row for request_id={rid}"
-        assert rows[0]["reserve_tokens"] > 0
-        assert rows[0]["reserved_credits_micro"] > 0
+        "Say OK." is 7 bytes: ceil(7 / 4) = 2 -> (2 + 100) * 1.1 = 112.2 -> 113
+        estimated input tokens (see the estimate notes above), so
+        reserve_tokens = 113 + 8192 = 8305 and
+        reserved_credits_micro = 113 * 3 + 8192 * 15 = 123219."""
+        _require_offline(request)
+        chat_id = chat["id"]  # azure-gpt-4.1, no prior context
+        rid = str(uuid.uuid4())
+        expected = {
+            "state": "running",
+            "reserve_tokens": 8305,
+            "max_output_tokens_applied": MAX_OUTPUT_TOKENS_APPLIED,
+            "reserved_credits_micro": 123_219,
+            "minimal_generation_floor_applied": MINIMAL_GENERATION_FLOOR,
+            "effective_model": "azure-gpt-4.1",
+        }
+        columns = ", ".join(expected)
+
+        def snapshot() -> dict:
+            rows = query_db(f"SELECT {columns} FROM chat_turns WHERE request_id = ?", (rid,))
+            assert len(rows) == 1, rows
+            return rows[0]
+
+        mock_provider.set_next_scenario(slow_scenario(5, slow=0.3))
+        with open_stream(chat_id, "Say OK.", request_id=rid) as s:
+            s.read_until_started()
+            assert snapshot() == expected
+            expect_done(s.drain())
+
+        assert poll_turn(chat_id, rid, ("done",))["state"] == "done"
+        assert snapshot() == {**expected, "state": "completed"}
         assert_no_reserves(USER_A_ID)
 
     def test_web_search_surcharge_in_reserve(self, request, chat):
@@ -162,7 +196,7 @@ class TestSettlement:
             s.read_until(lambda e: e.event == "delta" and (seen.append(e) or len(seen) == 3))
 
         assert poll_turn(chat["id"], rid)["state"] == "cancelled"
-        assert_estimated_settlement(rid, used_before, "aborted")
+        assert_estimated_settlement(rid, used_before, "aborted", "Write a long essay.")
 
     @pytest.mark.timeout(30)
     def test_cancelled_without_content(self, request, chat, mock_provider):
@@ -179,7 +213,7 @@ class TestSettlement:
             s.read_until_started()
 
         assert poll_turn(chat["id"], rid)["state"] == "cancelled"
-        assert_estimated_settlement(rid, used_before, "aborted")
+        assert_estimated_settlement(rid, used_before, "aborted", "Write slowly.")
 
     def test_provider_http_error_releases_reserve(self, request, chat, mock_provider):
         """A provider HTTP 500 ends the stream with `error` and fails the turn;
@@ -203,16 +237,21 @@ class TestSettlement:
         assert [e.event for e in events] == ["stream_started", "error"]
 
         assert poll_turn(chat["id"], rid)["state"] == "error"
-        assert_estimated_settlement(rid, used_before, "failed")
+        assert_estimated_settlement(rid, used_before, "failed", "This should fail.")
 
     def test_one_usage_outbox_event_per_turn(self, chat):
-        """A completed turn enqueues exactly one usage event, even after replays."""
+        """A completed turn enqueues exactly one usage event, even after a
+        replay (the replay itself succeeds: `done`, `is_new_turn` false)."""
         rid = str(uuid.uuid4())
         status, events, _ = stream_message(chat["id"], "Say hello.", request_id=rid)
         assert status == 200
         expect_done(events)
         poll_turn(chat["id"], rid, ("done",))
-        stream_message(chat["id"], "Say hello.", request_id=rid)
+
+        status, replay, raw = stream_message(chat["id"], "Say hello.", request_id=rid)
+        assert status == 200, raw
+        assert expect_stream_started(replay).data["is_new_turn"] is False
+        expect_done(replay)
 
         events = usage_events(rid)
         assert len(events) == 1, events

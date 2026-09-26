@@ -85,17 +85,19 @@ def find_event(events: list[dict], name: str) -> dict | None:
     return next((e for e in events if e["event"] == name), None)
 
 
-# SSE error codes of a failing or unavailable provider (DESIGN §3.3
-# "Streaming error codes"). `provider_error` also covers a provider rejecting
-# the request; the test then skips instead of failing.
-PROVIDER_UNAVAILABLE_CODES = ("provider_error", "provider_timeout", "rate_limited")
+# SSE error codes of a provider that is temporarily unavailable (DESIGN §3.3
+# "Streaming error codes"): the provider did not answer in time or throttled
+# the request. `provider_error` is not one of them: it also covers a provider
+# rejecting the request the gear built, which must fail the test.
+PROVIDER_UNAVAILABLE_CODES = ("provider_timeout", "rate_limited")
 
 
 def require_done(events: list[dict]) -> dict:
     """Assert stream completed successfully (has 'done' event, no 'error').
 
-    Skips when the SSE error code is one of PROVIDER_UNAVAILABLE_CODES and
-    fails on every other code, so gear errors are not masked.
+    Skips only when the SSE error code is one of PROVIDER_UNAVAILABLE_CODES
+    and fails on every other code (`provider_error` included), so gear errors
+    are not masked.
     """
     err = find_event(events, "error")
     if err:
@@ -116,7 +118,7 @@ def get_response_text(events: list[dict]) -> str:
 
 
 def upload_file(chat_id: str, filename: str, content: bytes, content_type: str = "text/plain") -> str:
-    """Upload a file and return attachment_id. Skips on provider errors."""
+    """Upload a file and return attachment_id."""
     resp = httpx.post(
         f"{API}/chats/{chat_id}/attachments",
         files={"file": (filename, io.BytesIO(content), content_type)},

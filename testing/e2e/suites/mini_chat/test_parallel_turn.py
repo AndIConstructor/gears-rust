@@ -46,8 +46,7 @@ class TestParallelTurn:
         assert [m["role"] for m in messages] == ["user", "assistant"]
         assert messages[0]["content"] == "First turn."
 
-    @pytest.mark.multi_provider
-    def test_new_stream_succeeds_after_terminal(self, chat, mock_provider):
+    def test_new_stream_succeeds_after_terminal(self, chat):
         """A new stream request succeeds after the previous turn completed."""
         chat_id = chat["id"]
 

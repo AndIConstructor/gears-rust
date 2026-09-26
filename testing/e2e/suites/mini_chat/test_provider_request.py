@@ -50,6 +50,22 @@ class TestMaxToolCalls:
 
 
 @pytest.mark.multi_provider
+class TestMaxOutputTokens:
+    """14-08: the max_output_tokens cap reaches the provider."""
+
+    def test_max_output_tokens_in_request(self, provider_chat, mock_provider):
+        """max_output_tokens = min(catalog max_output_tokens 8192 of both
+        default models, StreamingConfig max_output_tokens 32768) = 8192."""
+        status, events, _ = stream_message(provider_chat["id"], "Say hello.")
+        assert status == 200
+        expect_done(events)
+
+        req = mock_provider.get_last_request()
+        assert req is not None, "No request captured by mock provider"
+        assert req["max_output_tokens"] == 8192, req
+
+
+@pytest.mark.multi_provider
 class TestWebSearchToolType:
     """Verify web_search tool serialization in provider request."""
 

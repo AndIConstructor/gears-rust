@@ -11,7 +11,6 @@ Covers:
 - Retry of cancelled turn replaces partial message
 """
 
-import time
 import uuid
 
 import pytest
@@ -24,41 +23,12 @@ from .conftest import (
     expect_stream_started,
     open_stream,
     parse_sse,
+    poll_turn,
     slow_scenario,
     stream_message,
 )
 
 _STREAM_HEADERS = {"Accept": "text/event-stream"}
-
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def poll_turn_status(chat_id: str, request_id: str, target_state: "str | tuple[str, ...]",
-                     timeout: float = 15.0) -> dict:
-    """Poll GET /turns/{request_id} until the target state (or one of the target states) or timeout."""
-    if isinstance(target_state, str):
-        target_states: tuple[str, ...] = (target_state,)
-    else:
-        target_states = target_state
-    deadline = time.monotonic() + timeout
-    body = None
-    while time.monotonic() < deadline:
-        resp = httpx.get(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{request_id}", timeout=5
-        )
-        if resp.status_code == 200:
-            body = resp.json()
-            if body["state"] in target_states:
-                return body
-        time.sleep(0.3)
-    state = body["state"] if body else "no response"
-    raise AssertionError(
-        f"Turn {request_id} did not reach {target_states!r} within {timeout}s "
-        f"(last state: {state})"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -70,40 +40,19 @@ class TestStreamStartedOnSend:
     """stream_started is the first SSE event on POST /messages:stream."""
 
     def test_stream_started_is_first_event(self, provider_chat):
+        """04-02, 05-01, 05-02: without a client request_id, the first event is
+        `stream_started` with a server-generated request_id, the message_id
+        (both UUIDs) and `is_new_turn: true`."""
         url = f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream"
         resp = httpx.post(url, json={"content": "Say OK."}, headers=_STREAM_HEADERS, timeout=90)
-        raw = resp.text
-        events = parse_sse(raw) if resp.status_code == 200 else []
-        assert len(events) >= 2, f"Expected >=2 events, got {len(events)}"
-        assert events[0].event == "stream_started", (
-            f"First event should be stream_started, got {events[0].event}"
-        )
-
-    def test_stream_started_has_request_id(self, provider_chat):
-        url = f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream"
-        resp = httpx.post(url, json={"content": "Say OK."}, headers=_STREAM_HEADERS, timeout=90)
-        events = parse_sse(resp.text) if resp.status_code == 200 else []
-        ss = expect_stream_started(events)
-        rid = ss.data.get("request_id")
-        assert rid is not None, "stream_started should have request_id"
-        uuid.UUID(rid)  # validates it's a UUID
-
-    def test_stream_started_has_message_id(self, provider_chat):
-        url = f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream"
-        resp = httpx.post(url, json={"content": "Say OK."}, headers=_STREAM_HEADERS, timeout=90)
-        events = parse_sse(resp.text) if resp.status_code == 200 else []
-        ss = expect_stream_started(events)
-        mid = ss.data.get("message_id")
-        assert mid is not None, "stream_started should have message_id"
-        uuid.UUID(mid)  # validates it's a UUID
-
-    def test_stream_started_is_new_turn_true_on_send(self, provider_chat):
-        """Live generation should have is_new_turn=true."""
-        url = f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream"
-        resp = httpx.post(url, json={"content": "Say OK."}, headers=_STREAM_HEADERS, timeout=90)
-        events = parse_sse(resp.text) if resp.status_code == 200 else []
-        ss = expect_stream_started(events)
-        assert ss.data.get("is_new_turn") is True
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        assert len(events) >= 2, [e.event for e in events]
+        first = events[0]
+        assert first.event == "stream_started", [e.event for e in events]
+        uuid.UUID(first.data["request_id"])
+        uuid.UUID(first.data["message_id"])
+        assert first.data["is_new_turn"] is True
 
     def test_stream_started_request_id_matches_client_id(self, provider_chat):
         """When client provides request_id, stream_started echoes it back."""
@@ -169,7 +118,7 @@ class TestStreamStartedOnMutation:
         expect_done(events)
 
         # Wait for CAS finalization before mutating
-        poll_turn_status(chat_id, orig_rid, "done")
+        poll_turn(chat_id, orig_rid, ("done",))
 
         # Retry
         resp = httpx.post(
@@ -198,7 +147,7 @@ class TestStreamStartedOnMutation:
         expect_done(events)
 
         # Wait for CAS finalization before mutating
-        poll_turn_status(chat_id, orig_rid, "done")
+        poll_turn(chat_id, orig_rid, ("done",))
 
         # Edit
         resp = httpx.patch(
@@ -296,7 +245,7 @@ class TestCancelledMessagePersistence:
         """D4: the cancelled turn points at the pre-allocated assistant message."""
         rid, message_id, _ = self._cancel_after_three_deltas(chat["id"], mock_provider)
 
-        turn = poll_turn_status(chat["id"], rid, "cancelled")
+        turn = poll_turn(chat["id"], rid, ("cancelled",))
         assert turn["state"] == "cancelled"
         assert turn["assistant_message_id"] == message_id
 
@@ -304,7 +253,7 @@ class TestCancelledMessagePersistence:
     def test_cancelled_message_content_equals_received_deltas(self, chat, mock_provider):
         """GET /messages holds the partial answer: exactly the deltas the client received."""
         rid, message_id, received = self._cancel_after_three_deltas(chat["id"], mock_provider)
-        poll_turn_status(chat["id"], rid, "cancelled")
+        poll_turn(chat["id"], rid, ("cancelled",))
 
         resp = httpx.get(f"{API_PREFIX}/chats/{chat['id']}/messages")
         assert resp.status_code == 200
@@ -316,7 +265,7 @@ class TestCancelledMessagePersistence:
     def test_retry_cancelled_turn_produces_new_message(self, chat, mock_provider):
         """Retrying a cancelled turn completes with a new request_id and message_id."""
         rid, partial_msg_id, _ = self._cancel_after_three_deltas(chat["id"], mock_provider)
-        poll_turn_status(chat["id"], rid, "cancelled")
+        poll_turn(chat["id"], rid, ("cancelled",))
 
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat['id']}/turns/{rid}/retry",
@@ -332,5 +281,5 @@ class TestCancelledMessagePersistence:
         assert new_msg_id != partial_msg_id
         expect_done(retry_events)
 
-        new_turn = poll_turn_status(chat["id"], new_rid, "done")
+        new_turn = poll_turn(chat["id"], new_rid, ("done",))
         assert new_turn["assistant_message_id"] == new_msg_id

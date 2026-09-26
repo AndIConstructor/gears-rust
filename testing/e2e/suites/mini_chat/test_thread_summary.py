@@ -26,6 +26,7 @@ from .conftest import (
     expect_done,
     expect_stream_started,
     list_messages,
+    outbox_payloads,
     poll_turn,
     provider_input,
     query_db,
@@ -59,6 +60,20 @@ def _complete_turn(chat_id: str, content: str):
     return events
 
 
+def _summary_tasks(chat_id: str) -> list[dict]:
+    """Thread-summary task payloads of the chat in the outbox body table.
+
+    The task is enqueued in the transaction that finalizes the turn
+    (finalization_service.rs), so once the turn is `done` it is either
+    there or not enqueued at all."""
+    return [
+        p for p in outbox_payloads(chat_id)
+        if p.get("chat_id") == chat_id
+        and p.get("system_task_type") == "thread_summary_update"
+        and "frozen_target_message_id" in p  # not the summary turn's usage event
+    ]
+
+
 def _summary_rows(chat_id: str) -> list[dict]:
     return query_db(
         "SELECT summary_text, token_estimate, summarized_up_to_message_id "
@@ -89,16 +104,19 @@ class TestThreadSummary:
         chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
 
         _complete_turn(chat_id, "First question.")
-        assert _summary_rows(chat_id) == [], "one turn is below the threshold"
+        assert _summary_tasks(chat_id) == [], "one turn is below the threshold"
 
         _complete_turn(chat_id, "Second question.")
         summary = _wait_for_summary(chat_id)
+        tasks = _summary_tasks(chat_id)
+        assert len(tasks) == 1, tasks
 
         messages = list_messages(chat_id)
         assert [m["role"] for m in messages] == ["user", "assistant"] * 2
         assert summary["summary_text"] == "MOCK-SUMMARY 2 user and 2 assistant messages"
         assert summary["token_estimate"] == SUMMARY_OUTPUT_TOKENS
         assert uuid_from_db(summary["summarized_up_to_message_id"]) == messages[-1]["id"]
+        assert tasks[0]["frozen_target_message_id"] == messages[-1]["id"], tasks
         compressed = query_db(
             "SELECT is_compressed FROM messages WHERE chat_id = ? AND deleted_at IS NULL",
             (chat_id,),

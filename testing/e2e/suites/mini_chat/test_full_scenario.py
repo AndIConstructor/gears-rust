@@ -21,27 +21,17 @@ from .conftest import (
     assert_no_reserves,
     expect_done,
     expect_stream_started,
+    find_period,
+    get_quota_status,
     parse_sse,
     query_db,
     stream_message,
 )
+from .test_quota_status import CREDIT_MULTIPLIERS
 
 
-# ── Quota endpoint helpers ───────────────────────────────────────────────
-
-def _get_quota_status() -> dict:
-    resp = httpx.get(f"{API_PREFIX}/quota/status", timeout=10)
-    assert resp.status_code == 200
-    return resp.json()
-
-
-def _find_period(tiers: list, tier_name: str, period_name: str) -> dict | None:
-    for t in tiers:
-        if t["tier"] == tier_name:
-            for p in t["periods"]:
-                if p["period"] == period_name:
-                    return p
-    return None
+def total_daily_used() -> int:
+    return find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
 
 
 @pytest.mark.multi_provider
@@ -52,6 +42,7 @@ class TestFullConversationScenario:
         # ── 1. Use provider-parameterized chat ───────────────────────────
         chat_id = provider_chat["id"]
         expected_model = provider_chat["model"]
+        used_before = total_daily_used()
 
         # ── 2. Turn 1: simple question ───────────────────────────────────
         rid1 = str(uuid.uuid4())
@@ -84,7 +75,6 @@ class TestFullConversationScenario:
         assert s2 == 200
 
         ss2 = expect_stream_started(ev2)
-        msg_id2 = ss2.data["message_id"]
         assert ss2.data["is_new_turn"] is True
 
         done2 = expect_done(ev2)
@@ -106,7 +96,6 @@ class TestFullConversationScenario:
         assert s3 == 200
 
         ss3 = expect_stream_started(ev3)
-        msg_id3 = ss3.data["message_id"]
         assert ss3.data["is_new_turn"] is True
         done3 = expect_done(ev3)
         assert done3.data["quota_decision"] == "allow"
@@ -153,11 +142,16 @@ class TestFullConversationScenario:
             assert m.get("output_tokens") is not None and m["output_tokens"] > 0
             assert len(m["content"]) > 0
 
-        # ── 9. Verify quota: usage recorded, no reserve left ─────────────
+        # ── 9. Verify quota: each turn charged its cost, no reserve left ─
+        # cost = input_tokens * input multiplier + output_tokens * output
+        # multiplier (credits_micro per token, base.yaml).
         assert_no_reserves(USER_A_ID)
-        total_daily = _find_period(_get_quota_status()["tiers"], "total", "daily")
-        assert total_daily is not None
-        assert total_daily["used_credits_micro"] > 0
+        in_mult, out_mult = CREDIT_MULTIPLIERS[expected_model]
+        cost = sum(
+            u["input_tokens"] * in_mult + u["output_tokens"] * out_mult
+            for u in (usage1, usage2, usage3)
+        )
+        assert total_daily_used() - used_before == cost
 
         # ── 10. Idempotency: replay turn 1 ───────────────────────────────
         _resp_replay = httpx.post(_url, json={"content": "What is 2+2? Reply with just the number.", "request_id": rid1}, headers={"Accept": "text/event-stream"}, timeout=90)
@@ -167,6 +161,10 @@ class TestFullConversationScenario:
         ss_replay = expect_stream_started(ev_replay)
         assert ss_replay.data["message_id"] == msg_id1
         assert ss_replay.data["is_new_turn"] is False
+
+        # The replay charged nothing.
+        assert_no_reserves(USER_A_ID)
+        assert total_daily_used() - used_before == cost
 
         # ── 11. Delete chat ──────────────────────────────────────────────
         resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}")

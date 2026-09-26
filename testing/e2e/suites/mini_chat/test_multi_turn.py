@@ -2,7 +2,15 @@
 
 import httpx
 
-from .conftest import API_PREFIX, parse_sse, expect_done, expect_stream_started, stream_message
+from .conftest import (
+    API_PREFIX,
+    delta_text,
+    expect_done,
+    expect_stream_started,
+    list_messages,
+    parse_sse,
+    stream_message,
+)
 
 import pytest
 
@@ -80,40 +88,24 @@ class TestMultiTurn:
             assert resp.json()["message_count"] == 2 * turn
 
     def test_messages_ordered_chronologically(self, provider_chat):
+        """03-12: two completed turns are listed oldest first: the first
+        question, its answer, the second question, its answer."""
         chat_id = provider_chat["id"]
+        answers = []
+        request_ids = []
+        for content in ("First message.", "Second message."):
+            status, events, raw = stream_message(chat_id, content)
+            assert status == 200, raw
+            expect_done(events)
+            request_ids.append(expect_stream_started(events).data["request_id"])
+            answers.append(delta_text(events))
 
-        sr1 = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "First message."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert sr1.status_code == 200
-        ev1 = parse_sse(sr1.text)
-        ss1 = expect_stream_started(ev1)
-        assert "request_id" in ss1.data
-        assert "message_id" in ss1.data
-        assert ss1.data.get("is_new_turn") is True
-
-        sr2 = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "Second message."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert sr2.status_code == 200
-        ev2 = parse_sse(sr2.text)
-        ss2 = expect_stream_started(ev2)
-        assert "request_id" in ss2.data
-        assert "message_id" in ss2.data
-        assert ss2.data.get("is_new_turn") is True
-
-        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
-        assert resp.status_code == 200
-        msgs = resp.json()["items"]
+        msgs = list_messages(chat_id)
+        assert [(m["role"], m["request_id"], m["content"]) for m in msgs] == [
+            ("user", request_ids[0], "First message."),
+            ("assistant", request_ids[0], answers[0]),
+            ("user", request_ids[1], "Second message."),
+            ("assistant", request_ids[1], answers[1]),
+        ]
         timestamps = [m["created_at"] for m in msgs]
         assert timestamps == sorted(timestamps)
-
-        first_msg = msgs[0]
-        assert first_msg.get("request_id") is not None, "request_id must be non-null"
-        assert isinstance(first_msg.get("attachments"), list), "attachments must be an array"

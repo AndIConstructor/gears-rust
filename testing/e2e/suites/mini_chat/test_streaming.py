@@ -16,6 +16,7 @@ from .conftest import (
     parse_sse,
     query_db,
     slow_scenario,
+    turn_count,
     uuid_from_db,
 )
 from .test_attachments import _upload, _upload_ready
@@ -135,7 +136,6 @@ class TestStreamPing:
         assert types[-1] == "done"
 
 
-@pytest.mark.multi_provider
 class TestStreamPreflightErrors:
     """Pre-stream errors should return JSON, not SSE."""
 
@@ -148,6 +148,16 @@ class TestStreamPreflightErrors:
         )
         assert_problem(resp, 404, "not_found")
 
+    def test_malformed_json_rejected(self, chat):
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat['id']}/messages:stream",
+            content=b"{not json",
+            headers={"Accept": "text/event-stream", "Content-Type": "application/json"},
+            timeout=10,
+        )
+        assert_problem(resp, 400, "invalid_argument", field_reason="json_syntax_error")
+
+    @pytest.mark.multi_provider
     def test_empty_content_rejected(self, provider_chat):
         resp = httpx.post(
             f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
@@ -157,6 +167,7 @@ class TestStreamPreflightErrors:
         )
         assert_problem(resp, 400, "invalid_argument", field_reason="EMPTY_CONTENT")
 
+    @pytest.mark.multi_provider
     def test_missing_content_rejected(self, provider_chat):
         """A body that does not match the schema is 422 invalid_argument
         (platform JSON extractor; malformed JSON would be 400)."""
@@ -168,6 +179,7 @@ class TestStreamPreflightErrors:
         )
         assert_problem(resp, 422, "invalid_argument")
 
+    @pytest.mark.multi_provider
     def test_malformed_attachment_id_rejected(self, provider_chat):
         """04-04: an attachment id that is not a UUID fails body deserialization: 422."""
         resp = httpx.post(
@@ -178,6 +190,8 @@ class TestStreamPreflightErrors:
         )
         assert_problem(resp, 422, "invalid_argument")
 
+    @pytest.mark.multi_provider
+    @pytest.mark.usefixtures("offline_only")
     def test_nonexistent_attachment_id_rejected(self, provider_chat, mock_provider):
         """04-05: an unknown attachment id is 400 invalid_attachment; the provider is not called."""
         resp = httpx.post(
@@ -190,12 +204,6 @@ class TestStreamPreflightErrors:
         assert mock_provider.get_last_request() is None
 
 
-def _chat_turn_count(chat_id: str) -> int:
-    return query_db(
-        "SELECT COUNT(*) AS n FROM chat_turns WHERE chat_id = ?", (chat_id,),
-    )[0]["n"]
-
-
 def _post_stream(chat_id: str, body: dict) -> httpx.Response:
     return httpx.post(
         f"{API_PREFIX}/chats/{chat_id}/messages:stream", json=body,
@@ -203,27 +211,26 @@ def _post_stream(chat_id: str, body: dict) -> httpx.Response:
     )
 
 
+@pytest.mark.usefixtures("offline_only")
 class TestStreamInvalidAttachments:
     """`attachment_ids` that exist but cannot be used: 400 invalid_attachment,
     no turn row, the provider is not called (ADR-0004: invalid, foreign or
-    not-ready attachment_ids)."""
+    not-ready attachment_ids). Offline only: checks the mock's traffic."""
 
     def _assert_rejected(self, chat_id: str, attachment_ids: list[str], mock_provider) -> None:
         mock_provider.clear_captured_requests()
         resp = _post_stream(chat_id, {"content": "Use the file.", "attachment_ids": attachment_ids})
         assert_problem(resp, 400, "invalid_argument", field_reason="invalid_attachment")
         assert mock_provider.get_captured_requests() == []
-        assert _chat_turn_count(chat_id) == 0
+        assert turn_count(chat_id) == 0
 
     def test_attachment_of_other_chat_rejected(self, chat, chat_with_model, mock_provider):
         other_chat = chat_with_model(DEFAULT_MODEL)["id"]
         att_id = _upload_ready(other_chat, "other.txt", b"other chat document", "text/plain")
         self._assert_rejected(chat["id"], [att_id], mock_provider)
 
-    def test_failed_attachment_rejected(self, request, chat, mock_provider):
+    def test_failed_attachment_rejected(self, chat, mock_provider):
         """An attachment whose provider upload failed (status `failed`) is not ready."""
-        if request.config.getoption("mode") == "online":
-            pytest.skip("injects a provider upload fault (offline mode)")
         chat_id = chat["id"]
         mock_provider.set_fault("POST", "/files", 500)
         assert _upload(chat_id, "fail.txt", b"upload fails", "text/plain").status_code == 503
@@ -237,6 +244,7 @@ class TestStreamInvalidAttachments:
         self._assert_rejected(chat_id, [att_id, att_id], mock_provider)
 
 
+@pytest.mark.usefixtures("offline_only")
 class TestStreamInputLimits:
     """Token limits checked before the turn is created, on the small-context
     model gpt-4.1-mini-tiny-ctx (base.yaml: context_window 4096,
@@ -248,7 +256,7 @@ class TestStreamInputLimits:
         resp = _post_stream(chat_id, {"content": content})
         assert_problem(resp, 400, "out_of_range", field_reason=reason)
         assert mock_provider.get_captured_requests() == []
-        assert _chat_turn_count(chat_id) == 0
+        assert turn_count(chat_id) == 0
 
     def test_message_over_max_input_tokens_400(self, chat_with_model, mock_provider):
         """01-08: 12000 bytes are estimated at (3000 + 500) * 1.1 = 3850 tokens

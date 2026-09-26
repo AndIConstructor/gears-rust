@@ -16,25 +16,8 @@ import httpx
 
 from .conftest import (
     API_PREFIX, PROVIDER_DEFAULT_MODEL, USER_A_ID,
-    assert_no_reserves, expect_done, parse_sse,
+    assert_no_reserves, expect_done, find_period, get_quota_status, parse_sse,
 )
-
-
-# ── Quota endpoint helpers ───────────────────────────────────────────────
-
-def _get_quota_status() -> dict:
-    resp = httpx.get(f"{API_PREFIX}/quota/status", timeout=10)
-    assert resp.status_code == 200
-    return resp.json()
-
-
-def _find_period(tiers: list, tier_name: str, period_name: str) -> dict | None:
-    for t in tiers:
-        if t["tier"] == tier_name:
-            for p in t["periods"]:
-                if p["period"] == period_name:
-                    return p
-    return None
 
 
 # ── Expected charges ─────────────────────────────────────────────────────
@@ -50,22 +33,18 @@ EXPECTED_CREDITS = {"openai": 125, "azure": 465}
 
 
 @pytest.mark.multi_provider
+@pytest.mark.usefixtures("offline_only")
 class TestWebSearchUsageAccounting:
-    """Verify that web search turns produce correct quota and message records."""
+    """Verify that web search turns produce correct quota and message records.
 
-    @pytest.fixture(autouse=True)
-    def _offline_only(self, request):
-        if request.config.getoption("mode") == "online":
-            pytest.skip("literal credit amounts depend on the mock's fixed usage")
+    Offline only: the literal credit amounts depend on the mock's fixed usage."""
 
     def test_web_search_usage_correct(self, provider, server):
         """Single web-search turn: verify credits, messages, and turn state."""
         model = PROVIDER_DEFAULT_MODEL[provider]
 
         # Snapshot quota before via REST
-        before = _get_quota_status()
-        before_td = _find_period(before["tiers"], "total", "daily")
-        spent_before = before_td["used_credits_micro"]
+        spent_before = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
 
         resp = httpx.post(f"{API_PREFIX}/chats", json={"model": model})
         assert resp.status_code == 201
@@ -84,13 +63,7 @@ class TestWebSearchUsageAccounting:
         sse_input = sse_usage["input_tokens"]
         sse_output = sse_usage["output_tokens"]
 
-        tool_events = [e for e in events if e.event == "tool"]
-        ws_tool_dones = [
-            e for e in tool_events
-            if isinstance(e.data, dict)
-            and e.data.get("phase") == "done"
-            and e.data.get("name") in ("web_search", "web_search_preview")
-        ]
+        tools = [(e.data["name"], e.data["phase"]) for e in events if e.event == "tool"]
 
         # ── Verify turn state via REST ──
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/turns/{rid}")
@@ -116,8 +89,7 @@ class TestWebSearchUsageAccounting:
         # ── Verify credits via quota endpoint ──
         assert sse_usage == EXPECTED_USAGE
         assert_no_reserves(USER_A_ID)
-        after = _get_quota_status()
-        spent_after = _find_period(after["tiers"], "total", "daily")["used_credits_micro"]
+        spent_after = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
         assert spent_after - spent_before == EXPECTED_CREDITS[provider]
 
-        assert len(ws_tool_dones) > 0, "Expected web_search tool done events"
+        assert tools == [("web_search", "start"), ("web_search", "done")], tools
