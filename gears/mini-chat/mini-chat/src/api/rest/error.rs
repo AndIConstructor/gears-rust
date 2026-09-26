@@ -153,12 +153,6 @@ impl From<DomainError> for CanonicalError {
                 )
                 .create(),
 
-            DomainError::WebSearchCallsExceeded => {
-                MiniChatChatError::resource_exhausted("web search calls exceeded for this message")
-                    .with_quota_violation("web_search_calls", "max calls exceeded")
-                    .create()
-            }
-
             DomainError::UnsupportedFileType { mime } => {
                 MiniChatAttachmentError::invalid_argument()
                     .with_field_violation(
@@ -649,19 +643,6 @@ mod tests {
             "expected format string to carry the validation message, got {:?}",
             p.context,
         );
-    }
-
-    #[test]
-    fn web_search_calls_exceeded_emits_quota_violation() {
-        let p: Problem = DomainError::WebSearchCallsExceeded.into_test_problem();
-        assert_eq!(p.status, Some(429));
-        assert_eq!(p.problem_type, RESOURCE_EXHAUSTED_TYPE);
-        let v = p
-            .context
-            .get("violations")
-            .and_then(|v| v.as_array())
-            .expect("violations must be present");
-        assert_eq!(v[0]["subject"], "web_search_calls");
     }
 
     #[test]

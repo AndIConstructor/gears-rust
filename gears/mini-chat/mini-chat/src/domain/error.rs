@@ -55,9 +55,6 @@ pub enum DomainError {
     #[error("Image input is currently disabled")]
     ImagesDisabled,
 
-    #[error("Web search calls exceeded for this message")]
-    WebSearchCallsExceeded,
-
     #[error("Unsupported file type: {mime}")]
     UnsupportedFileType { mime: String },
 
