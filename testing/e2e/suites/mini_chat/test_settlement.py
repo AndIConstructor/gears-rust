@@ -44,13 +44,14 @@ def usage_events(rid: str) -> list[dict]:
 
 # ── Preflight estimate of a first message in a fresh azure-gpt-4.1 chat ──
 #
-# The rig does not override the mini-chat estimation budgets or the streaming
-# cap (config.rs defaults: bytes_per_token_conservative 4,
-# fixed_overhead_tokens 100, safety_margin_pct 10, minimal_generation_floor 50;
-# StreamingConfig max_output_tokens 32768). azure-gpt-4.1 (base.yaml):
-# max_output_tokens 8192, 3 credits_micro per input token, 15 per output token.
+# Estimation budgets come from the model's catalog entry. azure-gpt-4.1
+# (base.yaml): bytes_per_token_conservative 4, fixed_overhead_tokens 500,
+# safety_margin_pct 10, max_output_tokens 8192, 3 credits_micro per input token,
+# 15 per output token. The generation floor is gear configuration
+# (config.rs default minimal_generation_floor 50; the catalog value is not
+# used), and the streaming cap is the default 32768.
 # A first message has no prior context and no tools, so for `n` content bytes:
-#   estimated input tokens = ceil((ceil(n / 4) + 100) * 110 / 100)
+#   estimated input tokens = ceil((ceil(n / 4) + 500) * 110 / 100)
 #   max_output_tokens_applied = min(8192, 32768) = 8192
 #   reserve_tokens = estimated input tokens + 8192
 #   reserved_credits_micro = estimated input * 3 + 8192 * 15
@@ -60,12 +61,12 @@ MAX_OUTPUT_TOKENS_APPLIED = 8192
 MINIMAL_GENERATION_FLOOR = 50
 
 # "Write a long essay." / "This should fail.": 19 / 17 bytes -> ceil(n/4) = 5
-#   -> (5 + 100) * 1.1 = 115.5 -> 116 input tokens; charge 116 * 3 + 750 = 1098
-# "Write slowly.": 13 bytes -> 4 -> (4 + 100) * 1.1 = 114.4 -> 115; 345 + 750 = 1095
+#   -> (5 + 500) * 1.1 = 555.5 -> 556 input tokens; charge 556 * 3 + 750 = 2418
+# "Write slowly.": 13 bytes -> 4 -> (4 + 500) * 1.1 = 554.4 -> 555; 1665 + 750 = 2415
 ESTIMATED_CHARGE = {
-    "Write a long essay.": 1098,
-    "Write slowly.": 1095,
-    "This should fail.": 1098,
+    "Write a long essay.": 2418,
+    "Write slowly.": 2415,
+    "This should fail.": 2418,
 }
 
 
@@ -112,18 +113,18 @@ class TestSettlement:
         """09-04, 14-01: the preflight reservation snapshot is on the turn row
         while the turn is still running, and completion leaves it unchanged.
 
-        "Say OK." is 7 bytes: ceil(7 / 4) = 2 -> (2 + 100) * 1.1 = 112.2 -> 113
+        "Say OK." is 7 bytes: ceil(7 / 4) = 2 -> (2 + 500) * 1.1 = 552.2 -> 553
         estimated input tokens (see the estimate notes above), so
-        reserve_tokens = 113 + 8192 = 8305 and
-        reserved_credits_micro = 113 * 3 + 8192 * 15 = 123219."""
+        reserve_tokens = 553 + 8192 = 8745 and
+        reserved_credits_micro = 553 * 3 + 8192 * 15 = 124539."""
         _require_offline(request)
         chat_id = chat["id"]  # azure-gpt-4.1, no prior context
         rid = str(uuid.uuid4())
         expected = {
             "state": "running",
-            "reserve_tokens": 8305,
+            "reserve_tokens": 8745,
             "max_output_tokens_applied": MAX_OUTPUT_TOKENS_APPLIED,
-            "reserved_credits_micro": 123_219,
+            "reserved_credits_micro": 124_539,
             "minimal_generation_floor_applied": MINIMAL_GENERATION_FLOOR,
             "effective_model": "azure-gpt-4.1",
         }
