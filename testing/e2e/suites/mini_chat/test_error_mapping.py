@@ -77,6 +77,31 @@ class TestErrorMapping:
         assert data["message"] == "Mock error event", data
         assert poll_turn(chat["id"], rid)["state"] == "error"
 
+    def test_function_call_without_knowledge_search_is_unexpected_tool_use(
+        self, chat, mock_provider,
+    ):
+        """The provider answers with a `function_call` output item while no
+        function tool was offered (knowledge search is not configured on the
+        rig): SSE error `unexpected_tool_use`, the turn fails with that code."""
+        mock_provider.set_next_scenario(Scenario(
+            events=[MockEvent("response.output_text.delta", {"delta": "Let me look"})],
+            output_items=[{
+                "type": "function_call",
+                "id": "fc_mock_1",
+                "call_id": "call_mock_1",
+                "name": "search_knowledge",
+                "arguments": "{\"query\": \"anything\"}",
+                "status": "completed",
+            }],
+        ))
+        data, rid = _stream_error(chat["id"])
+        assert data == {
+            "code": "unexpected_tool_use",
+            "message": "Provider requested an unsupported function tool",
+        }, data
+        turn = poll_turn(chat["id"], rid)
+        assert (turn["state"], turn["error_code"]) == ("error", "unexpected_tool_use"), turn
+
     def test_provider_504_is_provider_error(self, chat, mock_provider):
         """An HTTP 504 returned by the provider is a non-429 provider error: `provider_error`.
 

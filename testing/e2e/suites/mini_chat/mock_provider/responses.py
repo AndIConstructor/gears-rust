@@ -25,6 +25,10 @@ class Scenario:
     events: list[MockEvent] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     citations: list[dict] = field(default_factory=list)
+    # Extra `response.completed` output items placed before the message item,
+    # e.g. a `function_call` item (the Responses API reports function calls
+    # only there).
+    output_items: list[dict] = field(default_factory=list)
     # Terminal type: "completed" (default), "failed", "incomplete"
     terminal: str = "completed"
     error: dict | None = None

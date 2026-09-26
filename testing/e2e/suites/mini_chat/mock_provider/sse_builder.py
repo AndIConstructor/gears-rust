@@ -55,6 +55,7 @@ def _build_completed_data(
             "status": "completed",
             "model": model,
             "output": [
+                *scenario.output_items,
                 {
                     "type": "message",
                     "role": "assistant",

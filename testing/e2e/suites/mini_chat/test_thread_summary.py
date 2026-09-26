@@ -25,6 +25,7 @@ import pytest
 from .conftest import (
     API_PREFIX,
     CATALOG_SYSTEM_PROMPT,
+    TENANT_A_ID,
     TINY_CTX_MODEL,
     expect_done,
     expect_stream_started,
@@ -40,6 +41,10 @@ from .conftest import (
 from .mock_provider.responses import SUMMARY_OUTPUT_TOKENS
 
 SUMMARY_MODEL_PROVIDER_ID = "gpt-5-mini"  # provider_model_id of summary_model_id
+
+# Subject of the summary request: the platform default subject
+# (toolkit_security::constants::DEFAULT_SUBJECT_ID, libs/toolkit-security/src/constants.rs).
+DEFAULT_SUBJECT_ID = "11111111-6a88-4768-9dfc-6bcd5187d9ed"
 
 # Prefix of the summary message in the provider input
 # (SUMMARY_PREAMBLE, domain/service/context_assembly.rs).
@@ -138,6 +143,15 @@ class TestThreadSummary:
         ]
         assert len(summary_requests) == 1, summary_requests
         assert summary_requests[0]["model"] == SUMMARY_MODEL_PROVIDER_ID
+        # A system task: the tenant with the default subject, request_type summary.
+        assert summary_requests[0]["user"] == f"{TENANT_A_ID}:{DEFAULT_SUBJECT_ID}"
+        assert summary_requests[0]["metadata"] == {
+            "tenant_id": TENANT_A_ID,
+            "user_id": DEFAULT_SUBJECT_ID,
+            "chat_id": chat_id,
+            "request_type": "summary",
+            "feature": "none",
+        }, summary_requests[0]["metadata"]
         prompt = provider_input(summary_requests[0])[0][1]
         for line in ("User: First question.", f"Assistant: {messages[1]['content']}"):
             assert line in prompt, (line, prompt)

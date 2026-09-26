@@ -9,6 +9,7 @@ Verifies:
 """
 
 import io
+import uuid
 
 import httpx
 import pytest
@@ -20,9 +21,11 @@ from .conftest import (
     expect_done,
     expect_stream_started,
     parse_sse,
+    poll_turn,
     query_db,
     stream_message,
 )
+from .mock_provider.responses import MockEvent, Scenario
 from .test_attachments import _upload_ready
 
 
@@ -491,6 +494,57 @@ class TestCodeInterpreterEventOrdering:
         assert len(tool_idx) == 2, [e.event for e in events]
         assert events[-1].event == "done", [e.event for e in events]
         assert max(tool_idx) < len(events) - 1, [e.event for e in events]
+
+
+class TestCodeInterpreterPerMessageLimit:
+    """At most `quota.code_interpreter_max_calls_per_message` (10, QuotaConfig
+    default in config.rs, not overridden in base.yaml) code interpreter calls
+    per message. Mock only: the limit is defence in depth, a real provider
+    stops at the model's `max_tool_calls` (2, base.yaml) first."""
+
+    @pytest.mark.usefixtures("offline_only")
+    def test_eleventh_code_interpreter_call_fails_the_turn(self, openai_chat, mock_provider):
+        """The provider starts an eleventh code interpreter call in one answer:
+        the client gets the tool events of the ten allowed calls (the eleventh
+        `start` is not forwarded), then SSE `error`
+        `code_interpreter_calls_exceeded`; the turn fails with that code."""
+        chat_id = openai_chat["id"]
+        att_id = _upload_ready(chat_id, "data.xlsx", _make_minimal_xlsx(), XLSX_CONTENT_TYPE)
+
+        def call(i: int) -> list[MockEvent]:
+            item_id = f"ci_mock_{i}"
+            return [
+                MockEvent("response.code_interpreter_call.in_progress", {
+                    "item_id": item_id, "output_index": i,
+                }),
+                MockEvent("response.output_item.done", {
+                    "output_index": i,
+                    "item": {
+                        "type": "code_interpreter_call", "id": item_id,
+                        "status": "completed", "code": "print(1)",
+                        "outputs": [{"type": "logs", "logs": "1"}],
+                    },
+                }),
+            ]
+
+        mock_provider.set_next_scenario(Scenario(events=[
+            *(ev for i in range(11) for ev in call(i)),
+            MockEvent("response.output_text.delta", {"delta": "Too many runs"}),
+            MockEvent("response.output_text.done", {"text": "Too many runs"}),
+        ]))
+        rid = str(uuid.uuid4())
+        status, events, raw = stream_message(
+            chat_id, "Analyze the data.", attachment_ids=[att_id], request_id=rid,
+        )
+        assert status == 200, raw
+        phases = [(e.data["name"], e.data["phase"]) for e in events if e.event == "tool"]
+        assert phases == [("code_interpreter", "start"), ("code_interpreter", "done")] * 10, phases
+        assert events[-1].event == "error", [e.event for e in events]
+        assert events[-1].data["code"] == "code_interpreter_calls_exceeded", events[-1].data
+        turn = poll_turn(chat_id, rid)
+        assert (turn["state"], turn["error_code"]) == (
+            "error", "code_interpreter_calls_exceeded",
+        ), turn
 
 
 # ---------------------------------------------------------------------------

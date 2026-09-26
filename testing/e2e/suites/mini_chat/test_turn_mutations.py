@@ -241,6 +241,39 @@ class TestTurnEdit:
         assert list_messages(chat_id) == before
         assert poll_turn(chat_id, rid)["state"] == "done"
 
+    @pytest.mark.usefixtures("offline_only")
+    def test_edit_content_over_context_budget_400(self, chat_with_model, mock_provider):
+        """Edit content of 6000 bytes on gpt-4.1-mini-tiny-ctx passes
+        max_input_tokens but, with the system prompt, exceeds the context
+        budget (see test_streaming.py TestStreamInputLimits). Context assembly
+        runs after the edit committed (DESIGN §3.9, preflight-before-mutation
+        order): 400 out_of_range CONTEXT_BUDGET_EXCEEDED, the provider is not
+        called, the old turn is replaced and the new turn fails with
+        `context_length_exceeded` and no answer."""
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        rid = complete_turn(chat_id, "Question.")
+        content = "x" * 6_000
+
+        mock_provider.clear_captured_requests()
+        resp = edit(chat_id, rid, content)
+        assert_problem(resp, 400, "out_of_range", field_reason="CONTEXT_BUDGET_EXCEEDED")
+        assert mock_provider.get_captured_requests() == []
+
+        live = query_db(
+            "SELECT request_id FROM chat_turns WHERE chat_id = ? AND deleted_at IS NULL",
+            (chat_id,),
+        )
+        assert len(live) == 1, live
+        new_rid = uuid_from_db(live[0]["request_id"])
+        assert new_rid != rid
+        assert httpx.get(turn_url(chat_id, rid)).status_code == 404
+        turn = poll_turn(chat_id, new_rid)
+        assert (turn["state"], turn["error_code"]) == ("error", "context_length_exceeded"), turn
+        assert "assistant_message_id" not in turn, turn
+        assert [(m["role"], m["content"], m["request_id"]) for m in list_messages(chat_id)] == [
+            ("user", content, new_rid),
+        ]
+
     def test_edit_non_latest_turn_409(self, chat):
         chat_id = chat["id"]
         rid1 = complete_turn(chat_id, "First turn.")

@@ -11,7 +11,14 @@ Provider-parameterized — runs against both OpenAI and Azure mock endpoints.
 import httpx
 import pytest
 
-from .conftest import API_PREFIX, expect_done, poll_until, stream_message
+from .conftest import (
+    API_PREFIX,
+    TENANT_A_ID,
+    USER_A_ID,
+    expect_done,
+    poll_until,
+    stream_message,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +125,45 @@ class TestWebSearchToolType:
         ws_tools = [t for t in tools if t.get("type", "").startswith("web_search")]
         assert len(ws_tools) == 0, (
             f"Unexpected web_search tool without flag: {ws_tools}"
+        )
+
+
+@pytest.mark.multi_provider
+class TestProviderIdentity:
+    """The provider request names the end user and the request context
+    (openai_responses.rs: `user` is "{tenant_id}:{user_id}", `metadata` is
+    RequestMetadata of infra/llm/request.rs)."""
+
+    def test_chat_request_carries_user_and_metadata(self, provider_chat, mock_provider):
+        """A chat turn of user A: `user` is A's tenant and user id; `metadata`
+        has request_type `chat`, the chat id and the enabled tool features
+        (`none` without tools, `web_search` with web search)."""
+        chat_id = provider_chat["id"]
+        expected_metadata = {
+            "tenant_id": TENANT_A_ID,
+            "user_id": USER_A_ID,
+            "chat_id": chat_id,
+            "request_type": "chat",
+        }
+
+        status, events, _ = stream_message(chat_id, "Say hello.")
+        assert status == 200
+        expect_done(events)
+        (plain,) = mock_provider.get_captured_requests()
+
+        mock_provider.clear_captured_requests()
+        status, events, _ = stream_message(
+            chat_id, "SEARCH: identity", web_search={"enabled": True},
+        )
+        assert status == 200
+        expect_done(events)
+        (search,) = mock_provider.get_captured_requests()
+
+        assert plain["user"] == f"{TENANT_A_ID}:{USER_A_ID}", plain.get("user")
+        assert search["user"] == f"{TENANT_A_ID}:{USER_A_ID}", search.get("user")
+        assert plain["metadata"] == {**expected_metadata, "feature": "none"}, plain["metadata"]
+        assert search["metadata"] == {**expected_metadata, "feature": "web_search"}, (
+            search["metadata"]
         )
 
 

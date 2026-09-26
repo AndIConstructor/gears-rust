@@ -22,6 +22,7 @@ from .conftest import (
     exec_db,
     expect_done,
     expect_stream_started,
+    outbox_payloads,
     parse_sse,
     provider_file_id,
     query_db,
@@ -1140,3 +1141,98 @@ class TestDeleteMissingAttachment:
         assert httpx.delete(url).status_code == 204
         assert httpx.delete(url).status_code == 204
         assert httpx.get(url).status_code == 404
+
+
+def _raw_upload(chat_id: str, body: bytes, content_type: str | None) -> httpx.Response:
+    """POST /attachments with a hand-built body (httpx `files=` always adds a
+    part Content-Type)."""
+    headers = {} if content_type is None else {"Content-Type": content_type}
+    return httpx.post(
+        f"{API_PREFIX}/chats/{chat_id}/attachments",
+        content=body, headers=headers, timeout=30,
+    )
+
+
+def _multipart(*parts: tuple[str, str | None, str | None, bytes]) -> bytes:
+    """A multipart/form-data body with boundary `e2e-boundary` from
+    (field name, filename, part Content-Type, data) tuples."""
+    out = b""
+    for name, filename, ctype, data in parts:
+        disposition = f'form-data; name="{name}"'
+        if filename is not None:
+            disposition += f'; filename="{filename}"'
+        out += b"--e2e-boundary\r\n"
+        out += f"Content-Disposition: {disposition}\r\n".encode()
+        if ctype is not None:
+            out += f"Content-Type: {ctype}\r\n".encode()
+        out += b"\r\n" + data + b"\r\n"
+    return out + b"--e2e-boundary--\r\n"
+
+
+MULTIPART_CT = "multipart/form-data; boundary=e2e-boundary"
+
+
+@pytest.mark.usefixtures("offline_only")
+class TestUploadMultipartErrors:
+    """Malformed upload requests (handlers/attachments.rs, `upload_attachment`):
+    400 invalid_argument of the attachment resource with the field violation
+    reason, nothing stored, nothing sent to the provider. Offline only: checks
+    the mock's traffic."""
+
+    @pytest.mark.parametrize(("body", "content_type", "reason"), [
+        pytest.param(
+            _multipart(("file", "a.txt", "text/plain", b"x")), "multipart/form-data",
+            "BOUNDARY_REQUIRED", id="no_boundary",
+        ),
+        pytest.param(b"not a multipart body", MULTIPART_CT, "MULTIPART_ERROR", id="no_parts"),
+        pytest.param(
+            _multipart(("other", None, None, b"value")), MULTIPART_CT, "MISSING_FILE",
+            id="no_file_field",
+        ),
+        pytest.param(
+            _multipart(("file", "a.txt", None, b"no part type")), MULTIPART_CT,
+            "MISSING_CONTENT_TYPE", id="file_without_content_type",
+        ),
+    ])
+    def test_malformed_upload_400(self, chat, mock_provider, body, content_type, reason):
+        chat_id = chat["id"]
+        mock_provider.clear_captured_requests()
+        resp = _raw_upload(chat_id, body, content_type)
+        assert_problem(
+            resp, 400, "invalid_argument", field_reason=reason,
+            resource_type=RESOURCE_ATTACHMENT,
+        )
+        assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
+        assert mock_provider.get_request_paths() == []
+
+
+@pytest.mark.usefixtures("offline_only")
+class TestFileSearchToolEvents:
+    """Provider-native file_search calls are sent as tool events and counted."""
+
+    def test_file_search_tool_events_and_counter(self, chat):
+        """With a ready document the mock `FILESEARCH:*` answer runs one
+        file_search: `file_search` tool events `start` then `done`, the turn
+        counts one completed file search and its usage event reports
+        `file_search_calls` 1."""
+        chat_id = chat["id"]
+        _upload_ready(chat_id, "notes.txt", b"Searchable notes.", "text/plain")
+        rid = str(uuid.uuid4())
+        status, events, raw = stream_message(
+            chat_id, "FILESEARCH: what do the notes say?", request_id=rid,
+        )
+        assert status == 200, raw
+        expect_done(events)
+
+        tools = [(e.data["name"], e.data["phase"]) for e in events if e.event == "tool"]
+        assert tools == [("file_search", "start"), ("file_search", "done")], tools
+        rows = query_db(
+            "SELECT file_search_completed_count FROM chat_turns WHERE request_id = ?", (rid,),
+        )
+        assert rows == [{"file_search_completed_count": 1}], rows
+        usage = [
+            p for p in outbox_payloads(rid)
+            if p.get("request_id") == rid and "settlement_method" in p
+        ]
+        assert [u["file_search_calls"] for u in usage] == [1], usage
+

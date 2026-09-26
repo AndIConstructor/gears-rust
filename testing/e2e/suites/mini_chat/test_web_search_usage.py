@@ -10,14 +10,29 @@ Provider-parameterized — runs against both OpenAI and Azure mock endpoints.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 import httpx
 
 from .conftest import (
     API_PREFIX, PROVIDER_DEFAULT_MODEL, USER_A_ID,
-    assert_no_reserves, expect_done, find_period, get_quota_status, parse_sse,
+    assert_no_reserves, expect_done, find_period, get_quota_status, parse_sse, query_db,
+    stream_message,
 )
+
+
+def _query_ws_calls(user_id: str = USER_A_ID) -> int:
+    """web_search_calls of today's daily `total` quota_usage row (not exposed
+    over REST)."""
+    rows = query_db(
+        "SELECT web_search_calls FROM quota_usage "
+        "WHERE user_id = ? AND period_type = 'daily' "
+        "AND period_start = ? AND bucket = 'total'",
+        (user_id, datetime.now(timezone.utc).date().isoformat()),
+    )
+    assert len(rows) == 1, rows
+    return rows[0]["web_search_calls"]
 
 
 # ── Expected charges ─────────────────────────────────────────────────────
@@ -93,3 +108,22 @@ class TestWebSearchUsageAccounting:
         assert spent_after - spent_before == EXPECTED_CREDITS[provider]
 
         assert tools == [("web_search", "start"), ("web_search", "done")], tools
+
+    def test_web_search_calls_counted(self, provider, chat_with_model):
+        """The daily `total` usage row counts the completed web searches of a
+        turn: the mock `SEARCH:*` answer has one."""
+        chat_id = chat_with_model(PROVIDER_DEFAULT_MODEL[provider])["id"]
+        # A turn creates today's row if it is missing.
+        status, events, _ = stream_message(chat_id, "Say OK.")
+        assert status == 200
+        expect_done(events)
+        assert_no_reserves(USER_A_ID)
+        before = _query_ws_calls()
+
+        status, events, _ = stream_message(
+            chat_id, "SEARCH: population of Oslo", web_search={"enabled": True},
+        )
+        assert status == 200
+        expect_done(events)
+        assert_no_reserves(USER_A_ID)
+        assert _query_ws_calls() == before + 1
