@@ -1253,7 +1253,7 @@ Codes sent in the SSE `event: error` payload (`{code, message}`) after the strea
 | Code | Emitted when | Turn state |
 |---|---|---|
 | `provider_error` | Provider returned a non-429 error, an invalid response, is unavailable, or the provider stream failed. For a provider error (`response.failed`, SSE `error` event, error body) `message` is the sanitized provider message | `failed` |
-| `provider_timeout` | Provider request timed out | `failed` |
+| `provider_timeout` | Provider request timed out: a gateway timeout, or the gateway's own HTTP 504 `deadline_exceeded` Problem. A provider's own HTTP 504 with its JSON error body is `provider_error` | `failed` |
 | `rate_limited` | Provider returned 429 | `failed` |
 | `web_search_calls_exceeded` | The model started more `web_search` calls than `quota.web_search_max_calls_per_message` in one turn | `failed` |
 | `code_interpreter_calls_exceeded` | The model started more `code_interpreter` calls than `quota.code_interpreter_max_calls_per_message` in one turn | `failed` |

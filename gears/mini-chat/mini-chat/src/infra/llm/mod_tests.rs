@@ -166,7 +166,7 @@ fn provider_429_response_is_rate_limited() {
         .unwrap()
         .into_parts();
     assert!(matches!(
-        rate_limited_from_status(&parts),
+        error_from_status(&parts),
         Some(LlmProviderError::RateLimited {
             retry_after_secs: Some(7)
         })
@@ -177,7 +177,7 @@ fn provider_429_response_is_rate_limited() {
         .body(())
         .unwrap()
         .into_parts();
-    assert!(rate_limited_from_status(&parts).is_none());
+    assert!(error_from_status(&parts).is_none());
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn provider_429_without_numeric_retry_after_has_no_hint() {
         .unwrap()
         .into_parts();
     assert!(matches!(
-        rate_limited_from_status(&parts),
+        error_from_status(&parts),
         Some(LlmProviderError::RateLimited {
             retry_after_secs: None
         })
@@ -202,9 +202,32 @@ fn provider_429_without_numeric_retry_after_has_no_hint() {
         .unwrap()
         .into_parts();
     assert!(matches!(
-        rate_limited_from_status(&parts),
+        error_from_status(&parts),
         Some(LlmProviderError::RateLimited {
             retry_after_secs: None
         })
     ));
+}
+
+#[test]
+fn gateway_504_problem_is_a_timeout_provider_504_is_not() {
+    let (parts, ()) = http::Response::builder()
+        .status(http::StatusCode::GATEWAY_TIMEOUT)
+        .header(http::header::CONTENT_TYPE, "application/problem+json")
+        .body(())
+        .unwrap()
+        .into_parts();
+    assert!(matches!(
+        error_from_status(&parts),
+        Some(LlmProviderError::Timeout)
+    ));
+
+    // The provider's own 504 with a JSON error body is parsed as a provider error.
+    let (parts, ()) = http::Response::builder()
+        .status(http::StatusCode::GATEWAY_TIMEOUT)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(())
+        .unwrap()
+        .into_parts();
+    assert!(error_from_status(&parts).is_none());
 }

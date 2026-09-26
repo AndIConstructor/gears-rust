@@ -433,7 +433,7 @@ impl crate::infra::llm::LlmProvider for VllmResponsesProvider {
             }
             ServerEventsResponse::Response(resp) => {
                 let (parts, body) = resp.into_parts();
-                if let Some(e) = crate::infra::llm::rate_limited_from_status(&parts) {
+                if let Some(e) = crate::infra::llm::error_from_status(&parts) {
                     return Err(e);
                 }
                 tracing::warn!(status = %parts.status, "provider returned non-SSE response");

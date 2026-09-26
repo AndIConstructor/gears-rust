@@ -139,10 +139,23 @@ static RE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s,\]
 static RE_CRED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(sk-[A-Za-z0-9]{10,}|Bearer\s+[A-Za-z0-9._\-]+)").unwrap());
 
-/// A provider's own HTTP 429 (passed through by OAGW as a non-SSE response)
-/// is a rate limit, not a generic provider error. `Retry-After` in seconds is
-/// forwarded when present.
-pub(crate) fn rate_limited_from_status(parts: &http::response::Parts) -> Option<LlmProviderError> {
+/// Classifies a non-SSE response by status before its body is parsed:
+/// the gateway's own HTTP 504 Problem (deadline) is a timeout, and a
+/// provider's own HTTP 429
+/// (passed through by OAGW) is a rate limit, not a generic provider error.
+/// `Retry-After` in seconds is forwarded when present.
+pub(crate) fn error_from_status(parts: &http::response::Parts) -> Option<LlmProviderError> {
+    // A 504 with a Problem body is the gateway's own deadline
+    // (`deadline_exceeded`): a timeout. A provider's own 504 keeps its JSON
+    // error body and stays a provider error.
+    let is_problem = parts
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/problem+json"));
+    if parts.status == http::StatusCode::GATEWAY_TIMEOUT && is_problem {
+        return Some(LlmProviderError::Timeout);
+    }
     if parts.status != http::StatusCode::TOO_MANY_REQUESTS {
         return None;
     }
