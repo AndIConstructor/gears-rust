@@ -1639,6 +1639,15 @@ async fn a_property_graph_lost_after_boot_is_reported_and_not_substituted_on_dem
         matches!(refused, graph_storage_sdk::plugin_api::GraphEngineError::Unavailable { ref reason } if reason.contains("traversal_hop")),
         "the refusal names the setting, got {refused:?}"
     );
+    // The server's own words stay in the log: the reason carries a fixed
+    // sentence and a pointer, not the statement's diagnostic.
+    if let graph_storage_sdk::plugin_api::GraphEngineError::Unavailable { reason } = &refused {
+        assert!(
+            reason.contains("the reason is in the gear's log")
+                && !reason.contains("does not exist"),
+            "the refusal does not carry the server's diagnostic: {reason}"
+        );
+    }
     let row = sqlpgq_row(stand.store.as_ref()).await;
     assert_eq!(
         row.state,

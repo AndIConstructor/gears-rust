@@ -89,6 +89,14 @@ pub async fn probe_pgq(db: &toolkit_db::secure::Db) -> bool {
     }
 }
 
+/// What a hop says when a dependency failed it. The dependency's own text is
+/// logged where it failed and does not travel: an error message is read by
+/// the caller and logged again at the edge, and a server's diagnostic is
+/// neither bounded nor free of control characters.
+const NO_CONNECTION: &str = "the database gave no connection; the reason is in the gear's log";
+const PATTERN_DID_NOT_EXECUTE: &str =
+    "the pattern statement did not execute; the reason is in the gear's log";
+
 /// What one attempt at the pattern hop produced.
 enum PatternOutcome {
     Answered(ExpandResponse),
@@ -321,12 +329,12 @@ async fn expand_pgq(
     ctx: &StoreCtx<'_>,
     req: &ExpandRequest,
 ) -> Result<PatternOutcome, GraphEngineError> {
-    let conn = store
-        .db()
-        .conn()
-        .map_err(|e| GraphEngineError::Unavailable {
-            reason: e.to_string(),
-        })?;
+    let conn = store.db().conn().map_err(|error| {
+        warn!(%error, "the database gave the hop no connection");
+        GraphEngineError::Unavailable {
+            reason: NO_CONNECTION.to_owned(),
+        }
+    })?;
 
     let anchor_correlation = |variable: &'static str| {
         Condition::all()
@@ -397,7 +405,15 @@ async fn expand_pgq(
             // server has no property graph at all, because the conditional
             // migration skipped the DDL on a major below 19 — means the
             // pattern cannot serve the request here.
-            Err(error) => return Ok(PatternOutcome::Unavailable(error.to_string())),
+            // The server's own text is logged here, once, and does not
+            // travel: it is a dependency's words, and they used to reach the
+            // refusal's reason and be logged again unescaped at the REST edge.
+            Err(error) => {
+                warn!(%error, "the pattern statement did not execute");
+                return Ok(PatternOutcome::Unavailable(
+                    PATTERN_DID_NOT_EXECUTE.to_owned(),
+                ));
+            }
         };
         reached.extend(rows.into_iter().map(|r| r.neighbour));
     }
@@ -669,12 +685,12 @@ async fn expand_two_query(
     ctx: &StoreCtx<'_>,
     req: &ExpandRequest,
 ) -> Result<ExpandResponse, GraphEngineError> {
-    let conn = store
-        .db()
-        .conn()
-        .map_err(|e| GraphEngineError::Unavailable {
-            reason: e.to_string(),
-        })?;
+    let conn = store.db().conn().map_err(|error| {
+        warn!(%error, "the database gave the hop no connection");
+        GraphEngineError::Unavailable {
+            reason: NO_CONNECTION.to_owned(),
+        }
+    })?;
 
     let incidence = live_edges(ctx, &conn, req, None).await?;
 

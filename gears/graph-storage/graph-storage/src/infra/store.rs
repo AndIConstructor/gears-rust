@@ -196,10 +196,15 @@ pub fn map_db_err(error: &sea_orm::DbErr) -> GraphStoreError {
     GraphStoreError::Internal(text)
 }
 
+/// A database failure outside a scoped statement. The driver's text is logged
+/// here, once, and does not travel in the error: it reaches the caller and is
+/// logged again at the REST edge, and a driver's diagnostic is neither
+/// bounded nor free of control characters.
 #[must_use]
 pub fn map_db_error(error: &toolkit_db::DbError) -> GraphStoreError {
+    tracing::warn!(%error, "the database did not answer");
     GraphStoreError::Unavailable {
-        reason: error.to_string(),
+        reason: "the database did not answer; the reason is in the gear's log".to_owned(),
     }
 }
 
