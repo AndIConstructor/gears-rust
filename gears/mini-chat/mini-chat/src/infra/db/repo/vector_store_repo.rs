@@ -100,6 +100,28 @@ impl crate::domain::repos::VectorStoreRepository for VectorStoreRepository {
         Ok(result.rows_affected)
     }
 
+    async fn delete_stale_placeholder<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+        cutoff: OffsetDateTime,
+    ) -> Result<u64, DomainError> {
+        let result = Entity::delete_many()
+            .filter(
+                Condition::all()
+                    .add(Column::Id.eq(id))
+                    .add(Column::VectorStoreId.is_null())
+                    .add(Column::CreatedAt.lte(cutoff)),
+            )
+            .secure()
+            .scope_with(scope)
+            .exec(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(result.rows_affected)
+    }
+
     // ── System-scoped methods (background workers, no user session) ────
 
     async fn find_by_chat_system<C: DBRunner>(

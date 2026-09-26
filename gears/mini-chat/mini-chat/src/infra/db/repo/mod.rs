@@ -13,10 +13,24 @@ use crate::domain::error::DomainError;
 /// Maps an `OData` pagination error: a bad `$filter`, `$orderby`, `limit` or
 /// cursor is the client's fault (400); only DB/config failures are internal.
 pub(crate) fn odata_err(e: toolkit_odata::Error) -> DomainError {
+    use toolkit_odata::Error as E;
+    // Exhaustive on purpose: a new variant must be classified here.
     match e {
-        toolkit_odata::Error::Db(msg) => DomainError::database(msg),
-        toolkit_odata::Error::ParsingUnavailable(msg) => DomainError::database(msg),
-        client => DomainError::validation(client.to_string()),
+        E::Db(msg) => DomainError::database(msg),
+        E::ParsingUnavailable(msg) => DomainError::database(msg),
+        client @ (E::InvalidFilter(_)
+        | E::InvalidOrderByField(_)
+        | E::OrderMismatch
+        | E::FilterMismatch
+        | E::InvalidCursor
+        | E::InvalidLimit
+        | E::OrderWithCursor
+        | E::CursorInvalidBase64
+        | E::CursorInvalidJson
+        | E::CursorInvalidVersion
+        | E::CursorInvalidKeys
+        | E::CursorInvalidFields
+        | E::CursorInvalidDirection) => DomainError::validation(client.to_string()),
     }
 }
 

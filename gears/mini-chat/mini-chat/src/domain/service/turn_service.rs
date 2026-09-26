@@ -555,10 +555,14 @@ impl<
                         .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
 
                     // Insert user message for the new turn
-                    chat_repo
+                    // `false`: the chat was deleted after the checks above.
+                    let touched = chat_repo
                         .touch_activity(tx, &scope, chat_id)
                         .await
                         .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
+                    if !touched {
+                        return Err(mutation_to_db_err(MutationError::ChatNotFound { chat_id }));
+                    }
                     let new_msg_id = Uuid::new_v4();
                     message_repo
                         .insert_user_message(

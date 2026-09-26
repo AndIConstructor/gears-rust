@@ -50,6 +50,16 @@ pub trait VectorStoreRepository: Send + Sync {
         scope: &AccessScope,
         id: Uuid,
     ) -> Result<u64, DomainError>;
+    /// Delete a placeholder row only if it still has no `vector_store_id`
+    /// and was created at or before `cutoff`. Returns the rows deleted;
+    /// 0 means the creator finished or the row is not stale.
+    async fn delete_stale_placeholder<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+        cutoff: time::OffsetDateTime,
+    ) -> Result<u64, DomainError>;
 
     // ── System-scoped methods (no AccessScope — background workers) ─────
 

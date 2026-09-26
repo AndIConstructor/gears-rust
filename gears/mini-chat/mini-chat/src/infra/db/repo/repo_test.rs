@@ -1364,3 +1364,83 @@ async fn touch_activity_bumps_chat_updated_at() {
     let after = repo.get(&conn, &scope(), chat_id).await.unwrap().unwrap();
     assert!(after.updated_at > before.updated_at);
 }
+
+#[tokio::test]
+async fn delete_stale_placeholder_keeps_fresh_and_populated_rows() {
+    use crate::domain::repos::{InsertVectorStoreParams, VectorStoreRepository as _};
+    use crate::infra::db::repo::vector_store_repo::VectorStoreRepository;
+    use time::{Duration, OffsetDateTime};
+
+    let db = test_db().await;
+    let conn = db.conn().unwrap();
+    let repo = VectorStoreRepository;
+    let tenant_id = Uuid::new_v4();
+
+    let mut rows = Vec::new();
+    for _ in 0..2 {
+        let chat_id = Uuid::new_v4();
+        insert_chat(&db, tenant_id, chat_id).await;
+        let row = repo
+            .insert(
+                &conn,
+                &scope(),
+                InsertVectorStoreParams {
+                    id: Uuid::new_v4(),
+                    tenant_id,
+                    chat_id,
+                    provider: "openai".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        rows.push(row);
+    }
+    let (placeholder, populated) = (&rows[0], &rows[1]);
+    repo.cas_set_vector_store_id(&conn, &scope(), populated.id, "vs_populated")
+        .await
+        .unwrap();
+
+    let past = OffsetDateTime::now_utc() - Duration::seconds(120);
+    let future = OffsetDateTime::now_utc() + Duration::seconds(1);
+
+    // Created after the cutoff: not stale yet.
+    let n = repo
+        .delete_stale_placeholder(&conn, &scope(), placeholder.id, past)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    // The creator set the ID: the row stays even though it is old enough.
+    let n = repo
+        .delete_stale_placeholder(&conn, &scope(), populated.id, future)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    assert!(
+        repo.find_by_chat(&conn, &scope(), populated.chat_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // NULL and old enough: reclaimed.
+    let n = repo
+        .delete_stale_placeholder(&conn, &scope(), placeholder.id, future)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[tokio::test]
+async fn touch_activity_is_false_for_soft_deleted_chat() {
+    use crate::domain::repos::ChatRepository as _;
+    use crate::infra::db::repo::chat_repo::ChatRepository;
+
+    let db = test_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    insert_chat(&db, tenant_id, chat_id).await;
+
+    let repo = ChatRepository::new(limit_cfg());
+    let conn = db.conn().unwrap();
+    assert!(repo.soft_delete(&conn, &scope(), chat_id).await.unwrap());
+    assert!(!repo.touch_activity(&conn, &scope(), chat_id).await.unwrap());
+}

@@ -1730,7 +1730,7 @@ Such heuristics MUST NOT be used as the sole correctness criterion for summary g
 3. **Asynchronous execution**
 
 - The shared outbox framework is responsible for delivery, partitioned ordering, lease/reclaim, retries with backoff, dead-letter handling, and reconciliation.
-- The thread-summary queue lease is `thread_summary_worker.claim_timeout_secs` (default 300 s, minimum 5 s), so the non-streaming LLM call is not cancelled and redelivered mid-flight. A handler attempt that would return `Retry` on its `thread_summary_worker.max_attempts`-th delivery (default 3) returns `Reject` instead and the message is dead-lettered, so a persistent failure does not block other chats in the partition.
+- The thread-summary queue lease is `thread_summary_worker.claim_timeout_secs` (default 300 s, range 5–3600 s), so the non-streaming LLM call is not cancelled and redelivered mid-flight. A handler attempt that would return `Retry` on its `thread_summary_worker.max_attempts`-th delivery (default 3) returns `Reject` instead and the message is dead-lettered, so a persistent failure does not block other chats in the partition.
 - The trigger is evaluated only when `thread_summary_worker.enabled = true` (default). The summary model is `thread_summary_worker.summary_model_id` (empty = `gpt-4.1-mini`); message content in the prompt is truncated to `thread_summary_worker.message_content_limit` characters.
 - The thread-summary handler MAY run under either the transactional or decoupled outbox execution mode allowed by the shared infrastructure contract. Mini Chat MUST rely only on the shared outbox guarantees and MUST NOT define a second dedicated summary worker state machine.
 - A handler attempt MUST bind itself to the frozen target frontier carried by the durable outbox message.
@@ -6997,11 +6997,11 @@ Orphan cleanup is asynchronous and MUST NOT block any user-visible request path.
 | Parameter | Type | Default | Validation | Notes |
 |-----------|------|---------|------------|-------|
 | `cleanup_worker.max_attempts` | `u32` | `5` | > 0 | Provider delete attempts per attachment before terminal `failed` (`MessageResult::Reject`) |
-| `cleanup_worker.enabled` | `bool` | `true` | — | Deprecated, no effect ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)) |
-| `cleanup_worker.poll_interval_secs` | `u64` | `60` | > 0 | Deprecated, no effect |
-| `cleanup_worker.reconcile_interval_secs` | `u64` | `300` | > 0 | Deprecated, no effect |
-| `cleanup_worker.stale_in_progress_timeout_secs` | `u64` | `900` | > 0 | Deprecated, no effect |
-| `cleanup_worker.batch_size` | `u32` | `32` | > 0 | Deprecated, no effect |
+| `cleanup_worker.enabled` | `bool` | `true` | — | Deprecated, no effect; warning at startup if `false` ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)) |
+| `cleanup_worker.poll_interval_secs` | `u64` | `60` | — | Deprecated, no effect; warning at startup if set |
+| `cleanup_worker.reconcile_interval_secs` | `u64` | `300` | — | Deprecated, no effect; warning at startup if set |
+| `cleanup_worker.stale_in_progress_timeout_secs` | `u64` | `900` | — | Deprecated, no effect; warning at startup if set |
+| `cleanup_worker.batch_size` | `u32` | `32` | — | Deprecated, no effect; warning at startup if set |
 
 Queues: `outbox.cleanup_queue_name` (attachment deletion) and `outbox.chat_cleanup_queue_name` (chat deletion); see B.9.3.
 
@@ -7034,13 +7034,13 @@ Lease durations: thread summary = `thread_summary_worker.claim_timeout_secs` (de
 | Parameter | Type | Default | Validation | Notes |
 |-----------|------|---------|------------|-------|
 | `thread_summary_worker.enabled` | `bool` | `true` | — | Gates the trigger in finalization |
-| `thread_summary_worker.claim_timeout_secs` | `u64` | `300` | ≥ 5 | Outbox lease of the thread-summary queue |
+| `thread_summary_worker.claim_timeout_secs` | `u64` | `300` | 5–3600 | Outbox lease of the thread-summary queue |
 | `thread_summary_worker.max_attempts` | `u32` | `3` | > 0 | Deliveries before the task is dead-lettered |
 | `thread_summary_worker.compression_threshold_pct` | `u32` | `80` | `1..=99` | Proactive trigger threshold |
 | `thread_summary_worker.summary_model_id` | `string` | `""` (= `gpt-4.1-mini`) | — | Catalog model used for summaries |
 | `thread_summary_worker.summary_system_prompt` | `string` | built-in text | — | Fallback when the catalog `thread_summary_prompt` is empty |
 | `thread_summary_worker.message_content_limit` | `usize` | `4000` | — | Max characters per message in the prompt; 0 = no truncation |
-| `thread_summary_worker.reconcile_interval_secs` | `u64` | `60` | > 0 | Deprecated, no effect ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)) |
+| `thread_summary_worker.reconcile_interval_secs` | `u64` | `60` | — | Deprecated, no effect; warning at startup if set ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)) |
 | User turn interval trigger, `summary_quality.*` | — | — | — | Not implemented; no config keys |
 
 ## B.10 API & OpenAPI defaults

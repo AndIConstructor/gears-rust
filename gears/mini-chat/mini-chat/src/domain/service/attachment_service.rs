@@ -781,19 +781,27 @@ impl<
         if let Some(vs_id) = row.vector_store_id {
             return Ok(Some(vs_id));
         }
-        if time::OffsetDateTime::now_utc() - row.created_at < STALE_VECTOR_STORE_PLACEHOLDER {
+        let cutoff = time::OffsetDateTime::now_utc() - STALE_VECTOR_STORE_PLACEHOLDER;
+        if row.created_at > cutoff {
             // Row exists but vector_store_id is NULL → creation in progress.
             return self.poll_vector_store(scope, chat_id).await.map(Some);
         }
         // A NULL placeholder this old means its creator died between the
         // insert and the CAS. Reclaim it, otherwise every later upload to
-        // this chat would poll and fail with 503.
+        // this chat would poll and fail with 503. The delete is conditional:
+        // a slow creator may still set the ID, and then its row must stay.
+        let deleted = self
+            .vector_store_repo
+            .delete_stale_placeholder(conn, scope, row.id, cutoff)
+            .await?;
+        if deleted == 0 {
+            return self.poll_vector_store(scope, chat_id).await.map(Some);
+        }
         tracing::warn!(
             chat_id = %chat_id,
             row_id = %row.id,
-            "reclaiming stale vector store placeholder"
+            "reclaimed stale vector store placeholder"
         );
-        self.vector_store_repo.delete(conn, scope, row.id).await?;
         Ok(None)
     }
 

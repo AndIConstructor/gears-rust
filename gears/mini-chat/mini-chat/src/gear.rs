@@ -12,7 +12,7 @@ use oagw_sdk::ServiceGatewayClientV1;
 use sea_orm_migration::MigrationTrait;
 use tokio_util::sync::CancellationToken;
 use toolkit_db::outbox::{LeaseConfig, Outbox, OutboxHandle, Partitions};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::api::rest::routes;
 use crate::background_workers::{self, WORKER_STOP_TIMEOUT, WorkerConfigs};
@@ -157,6 +157,17 @@ impl Gear for MiniChatGear {
         cfg.cleanup_worker
             .validate()
             .map_err(|e| anyhow::anyhow!("cleanup_worker config: {e}"))?;
+        for field in cfg
+            .cleanup_worker
+            .deprecated_fields_set()
+            .into_iter()
+            .chain(cfg.thread_summary_worker.deprecated_fields_set())
+        {
+            warn!(
+                field,
+                "deprecated config field is set and has no effect (ADR-0010)"
+            );
+        }
         cfg.thumbnail
             .validate()
             .map_err(|e| anyhow::anyhow!("thumbnail config: {e}"))?;

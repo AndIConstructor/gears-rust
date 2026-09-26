@@ -46,11 +46,16 @@ impl LeasedMessageHandler for ThreadSummaryHandler {
     async fn handle(&self, msg: &OutboxMessage) -> MessageResult {
         let result = self.process(msg).await;
         let bounded = bound_retries(result, msg.attempts, self.deps.config.max_attempts);
-        if matches!(bounded, MessageResult::Reject(_)) {
+        if let MessageResult::Reject(reason) = &bounded {
+            let chat_id = serde_json::from_slice::<ThreadSummaryTaskPayload>(&msg.payload)
+                .ok()
+                .map(|p| p.chat_id);
             warn!(
                 partition_id = msg.partition_id,
                 seq = msg.seq,
                 attempts = msg.attempts,
+                chat_id = ?chat_id,
+                reason = %reason,
                 "thread summary: task rejected"
             );
         }

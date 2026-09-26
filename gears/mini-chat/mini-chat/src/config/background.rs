@@ -67,7 +67,7 @@ pub struct ThreadSummaryWorkerConfig {
     #[serde(default = "default_ts_reconcile_interval")]
     pub reconcile_interval_secs: u64,
     /// Outbox lease for one summary task: the handler is cancelled and the
-    /// task redelivered after this. Must be at least 5s. Default: 300s.
+    /// task redelivered after this. Must be 5-3600s. Default: 300s.
     #[serde(default = "default_ts_claim_timeout")]
     pub claim_timeout_secs: u64,
     /// Attempts per task before it is dead-lettered. Default: 3.
@@ -107,12 +107,21 @@ impl Default for ThreadSummaryWorkerConfig {
 }
 
 impl ThreadSummaryWorkerConfig {
+    /// Bounds of `claim_timeout_secs`. The upper bound keeps a hung summary
+    /// call from holding the outbox partition lease indefinitely.
+    pub const MIN_CLAIM_TIMEOUT_SECS: u64 = 5;
+    pub const MAX_CLAIM_TIMEOUT_SECS: u64 = 3600;
+
     pub fn validate(&self) -> Result<(), String> {
-        if self.reconcile_interval_secs == 0 {
-            return Err("thread_summary_worker.reconcile_interval_secs must be > 0".to_owned());
-        }
-        if self.claim_timeout_secs < 5 {
-            return Err("thread_summary_worker.claim_timeout_secs must be >= 5".to_owned());
+        if !(Self::MIN_CLAIM_TIMEOUT_SECS..=Self::MAX_CLAIM_TIMEOUT_SECS)
+            .contains(&self.claim_timeout_secs)
+        {
+            return Err(format!(
+                "thread_summary_worker.claim_timeout_secs must be {}-{}, got {}",
+                Self::MIN_CLAIM_TIMEOUT_SECS,
+                Self::MAX_CLAIM_TIMEOUT_SECS,
+                self.claim_timeout_secs
+            ));
         }
         if self.max_attempts == 0 {
             return Err("thread_summary_worker.max_attempts must be > 0".to_owned());
@@ -124,6 +133,16 @@ impl ThreadSummaryWorkerConfig {
             ));
         }
         Ok(())
+    }
+
+    /// Deprecated fields set to a non-default value. They have no effect.
+    #[must_use]
+    pub fn deprecated_fields_set(&self) -> Vec<&'static str> {
+        let mut set = Vec::new();
+        if self.reconcile_interval_secs != default_ts_reconcile_interval() {
+            set.push("thread_summary_worker.reconcile_interval_secs");
+        }
+        set
     }
 }
 
@@ -194,22 +213,32 @@ impl Default for CleanupWorkerConfig {
 
 impl CleanupWorkerConfig {
     pub fn validate(&self) -> Result<(), String> {
-        if self.poll_interval_secs == 0 {
-            return Err("cleanup_worker.poll_interval_secs must be > 0".to_owned());
-        }
-        if self.reconcile_interval_secs == 0 {
-            return Err("cleanup_worker.reconcile_interval_secs must be > 0".to_owned());
-        }
-        if self.batch_size == 0 {
-            return Err("cleanup_worker.batch_size must be > 0".to_owned());
-        }
         if self.max_attempts == 0 {
             return Err("cleanup_worker.max_attempts must be > 0".to_owned());
         }
-        if self.stale_in_progress_timeout_secs == 0 {
-            return Err("cleanup_worker.stale_in_progress_timeout_secs must be > 0".to_owned());
-        }
         Ok(())
+    }
+
+    /// Deprecated fields set to a non-default value. They have no effect.
+    #[must_use]
+    pub fn deprecated_fields_set(&self) -> Vec<&'static str> {
+        let mut set = Vec::new();
+        if !self.enabled {
+            set.push("cleanup_worker.enabled");
+        }
+        if self.poll_interval_secs != default_cleanup_poll_interval() {
+            set.push("cleanup_worker.poll_interval_secs");
+        }
+        if self.reconcile_interval_secs != default_cleanup_reconcile_interval() {
+            set.push("cleanup_worker.reconcile_interval_secs");
+        }
+        if self.stale_in_progress_timeout_secs != default_cleanup_stale_timeout() {
+            set.push("cleanup_worker.stale_in_progress_timeout_secs");
+        }
+        if self.batch_size != default_cleanup_batch_size() {
+            set.push("cleanup_worker.batch_size");
+        }
+        set
     }
 }
 
@@ -238,5 +267,49 @@ mod tests {
         OrphanWatchdogConfig::default().validate().unwrap();
         ThreadSummaryWorkerConfig::default().validate().unwrap();
         CleanupWorkerConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn claim_timeout_bounds() {
+        let with = |secs| ThreadSummaryWorkerConfig {
+            claim_timeout_secs: secs,
+            ..ThreadSummaryWorkerConfig::default()
+        };
+        for secs in [4, 3601] {
+            let err = with(secs).validate().unwrap_err();
+            assert!(err.contains("claim_timeout_secs"), "{err}");
+        }
+        for secs in [5, 3600] {
+            with(secs).validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn deprecated_fields_do_not_fail_validation_and_are_reported() {
+        let cleanup = CleanupWorkerConfig {
+            enabled: false,
+            poll_interval_secs: 0,
+            reconcile_interval_secs: 0,
+            stale_in_progress_timeout_secs: 0,
+            batch_size: 0,
+            ..CleanupWorkerConfig::default()
+        };
+        cleanup.validate().unwrap();
+        assert_eq!(cleanup.deprecated_fields_set().len(), 5);
+        assert!(
+            CleanupWorkerConfig::default()
+                .deprecated_fields_set()
+                .is_empty()
+        );
+
+        let summary = ThreadSummaryWorkerConfig {
+            reconcile_interval_secs: 0,
+            ..ThreadSummaryWorkerConfig::default()
+        };
+        summary.validate().unwrap();
+        assert_eq!(
+            summary.deprecated_fields_set(),
+            ["thread_summary_worker.reconcile_interval_secs"]
+        );
     }
 }

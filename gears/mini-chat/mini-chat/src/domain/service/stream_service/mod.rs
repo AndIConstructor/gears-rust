@@ -739,10 +739,11 @@ impl<
 
                     // 2. Insert user message; the chat moves to the top of
                     //    the activity-ordered chat list.
-                    chat_repo
-                        .touch_activity(tx, &scope_tx, chat_id)
-                        .await
-                        .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
+                    //    `false`: the chat was deleted after the checks above.
+                    require_live_chat(
+                        chat_repo.touch_activity(tx, &scope_tx, chat_id).await,
+                        chat_id,
+                    )?;
                     message_repo
                         .insert_user_message(
                             tx,
@@ -929,13 +930,21 @@ impl<
         if code != "turn_already_running" {
             return StreamError::Conflict { code, message };
         }
-        let request_id_taken = match self.db.conn() {
-            Ok(conn) => self
-                .turn_repo
-                .find_by_chat_and_request_id(&conn, scope, chat_id, request_id)
-                .await
-                .is_ok_and(|turn| turn.is_some()),
-            Err(_) => false,
+        // A lookup failure keeps the original code; it is logged, not returned.
+        let lookup = match self.db.conn() {
+            Ok(conn) => {
+                self.turn_repo
+                    .find_by_chat_and_request_id(&conn, scope, chat_id, request_id)
+                    .await
+            }
+            Err(e) => Err(DomainError::from(e)),
+        };
+        let request_id_taken = match lookup {
+            Ok(turn) => turn.is_some(),
+            Err(e) => {
+                warn!(%chat_id, %request_id, error = %e, "request_id lookup after turn conflict failed");
+                false
+            }
         };
         StreamError::Conflict {
             code: if request_id_taken {
@@ -1487,7 +1496,12 @@ impl<
             })
             .await
             .map_err(|e| StreamError::TurnCreationFailed {
-                source: DomainError::database(e.to_string()),
+                source: match e {
+                    toolkit_db::DbError::Other(err) => err
+                        .downcast::<DomainError>()
+                        .unwrap_or_else(|err| DomainError::from(toolkit_db::DbError::Other(err))),
+                    other => DomainError::from(other),
+                },
             })?;
 
         // Metrics: quota reserve committed (one per period, only when reserves exist)
@@ -1566,6 +1580,7 @@ impl<
             StreamError::ContextBudgetExceeded { .. } => "context_length_exceeded",
             _ => "turn_setup_failed",
         };
+        warn!(%turn_id, error_code, error = ?err, "turn setup failed after the mutation committed");
         let result = match self.db.conn() {
             Ok(conn) => self
                 .turn_repo
@@ -1633,6 +1648,21 @@ async fn emit_stream_started(
         .is_err()
     {
         warn!(%request_id, "stream_started send failed (client disconnected before first event)");
+    }
+}
+
+/// Maps the `touch_activity` result inside a transaction: `false` means the
+/// chat row is gone, and the transaction must abort with 404.
+fn require_live_chat(
+    touched: Result<bool, DomainError>,
+    chat_id: Uuid,
+) -> Result<(), toolkit_db::DbError> {
+    match touched {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(toolkit_db::DbError::Other(anyhow::Error::new(
+            DomainError::chat_not_found(chat_id),
+        ))),
+        Err(e) => Err(toolkit_db::DbError::Other(anyhow::Error::new(e))),
     }
 }
 
