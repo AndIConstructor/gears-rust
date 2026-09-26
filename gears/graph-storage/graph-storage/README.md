@@ -120,6 +120,11 @@ independently developed implementation can reach the service yet; #4873).
 - *Traversal takes explicit seed keys only*, not search hits. Retention under
   a neighborhood budget *is* degree-ordered, and a traversal *does* echo the
   seeds it admitted.
+- *Traversal has two hop backends*, the SQL/PGQ pattern and the two-query hop
+  (`traversal_hop: auto | pgq | two_query`); the iterative-CTE hop of ADR-0001 was
+  built on the development stand and is not shipped.
+- *Four specified tables are not created*: `chunk`, `label`, `label_assignment`
+  and `ingest_audit` (chunking, labels and the audit record are deferred).
 - *Hybrid search fails, rather than degrading to its lexical arm,* when the
   embedding provider is unavailable; lexical hits carry no snippets.
 - *Compound reads on the built-in store are not one snapshot* (the platform

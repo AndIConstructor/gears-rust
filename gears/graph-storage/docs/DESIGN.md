@@ -855,7 +855,7 @@ convention.
 
 #### Ontology Registry
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-component-ontology-registry`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-component-ontology-registry`
 
 ##### Why this component exists
 
@@ -876,7 +876,7 @@ Does not validate instance payloads at query time (ingest does), does not own pe
 
 #### Ingest Pipeline
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-component-ingest-pipeline`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-component-ingest-pipeline`
 
 ##### Why this component exists
 
@@ -901,6 +901,8 @@ Does not compute embeddings (delegates to the Embedding Coordinator), does not c
 
 - [ ] `p2` - **ID**: `cpt-cf-graph-storage-component-chunker`
 
+**Status, found while building the prototype: not built.** Chunking is deferred (`fr-content-chunking`); no `chunk` table is created and the search text is the node's composed text only.
+
 ##### Why this component exists
 
 Passage-level retrieval requires deterministic, offset-faithful splitting of long content; chunk identity must encode location so re-ingest is idempotent.
@@ -919,7 +921,7 @@ Does not embed, index, or persist — it is a pure function from content to chun
 
 #### Embedding Coordinator
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-component-embedding-coordinator`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-component-embedding-coordinator`
 
 ##### Why this component exists
 
@@ -940,7 +942,7 @@ Does not implement any model — providers are plugins behind the embedding cont
 
 #### Search Service
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-component-search-service`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-component-search-service`
 
 ##### Why this component exists
 
@@ -962,7 +964,7 @@ Does not traverse edges and does not paginate tables (Traversal and Projection d
 
 #### Traversal Service
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-component-traversal-service`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-component-traversal-service`
 
 ##### Why this component exists
 
@@ -970,7 +972,7 @@ Depth-limited expansion is the graph-native query shape; it needs dedicated, ben
 
 ##### Responsibility scope
 
-Owns the `GraphQueryPort` — the gear's graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`). Engines behind the port declare capabilities (neighborhood, bounded traversal, shortest path, pattern queries, in-engine analytics) and answer undeclared operations with a typed not-implemented error. The default plugin is the built-in PostgreSQL engine, and it is bound to the built-in store rather than to any `GraphStoreV1`: it walks by issuing SQL against that store's own node and edge tables — the property graph is defined over them, and a hop joins them in one statement, which is what ADR-0001's single store buys — so it cannot serve a store whose rows live elsewhere. A store plugin that keeps its rows elsewhere brings its own engine, or declares traversal unsupported; the two ports are separate so that either can be replaced, not so that any engine composes with any store. It has three execution paths, all shipped in v1 and selected by configuration: SQL/PGQ (`CREATE PROPERTY GRAPH` over node/edge tables, direction-explicit `GRAPH_TABLE` hop patterns; serves fixed-depth shapes from the first release), iterative CTE (depth-bounded expansion over the indexed edge table, one scoped statement per hop with the frontier deduplicated between hops; serves bounded variable-depth shapes until PG20-class quantifiers), and the two-query scoped hop that needs no platform capability beyond entity queries. The three return identical results for the same seeds and scope, which is what makes the selection a configuration detail; when the configured path cannot serve a request — a `GRAPH_TABLE` pattern must be bounded to an enumerable set of tenants, and `allow_all` and tenant-subtree scopes are not — the port serves it on the two-query hop and logs the reason rather than substituting quietly. Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status. The port accepts the caller's compiled `AccessScope` as a mandatory input and expands only the caller-authorized induced subgraph — seeds authorized before expansion, unauthorized nodes never entering frontiers or visited sets, budgets and truncation computed on authorized rows, hydration under the same scope and snapshot (Authorization Model, Read Consistency Contract); unsupported scope properties fail closed rather than degrading to tenant-only filtering.
+Owns the `GraphQueryPort` — the gear's graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`). Engines behind the port declare capabilities (neighborhood, bounded traversal, shortest path, pattern queries, in-engine analytics) and answer undeclared operations with a typed not-implemented error. The default plugin is the built-in PostgreSQL engine, and it is bound to the built-in store rather than to any `GraphStoreV1`: it walks by issuing SQL against that store's own node and edge tables — the property graph is defined over them, and a hop joins them in one statement, which is what ADR-0001's single store buys — so it cannot serve a store whose rows live elsewhere. A store plugin that keeps its rows elsewhere brings its own engine, or declares traversal unsupported; the two ports are separate so that either can be replaced, not so that any engine composes with any store. It has three execution paths, selected by configuration, of which the shipped gear carries two (`traversal_hop: auto | pgq | two_query`; the iterative-CTE hop was built on the development stand, ADR-0001, and is not in this gear): SQL/PGQ (`CREATE PROPERTY GRAPH` over node/edge tables, direction-explicit `GRAPH_TABLE` hop patterns; serves fixed-depth shapes from the first release), iterative CTE (depth-bounded expansion over the indexed edge table, one scoped statement per hop with the frontier deduplicated between hops; serves bounded variable-depth shapes until PG20-class quantifiers), and the two-query scoped hop that needs no platform capability beyond entity queries. The paths return identical results for the same seeds and scope, which is what makes the selection a configuration detail; when the configured path cannot serve a request — a `GRAPH_TABLE` pattern must be bounded to an enumerable set of tenants, and `allow_all` and tenant-subtree scopes are not — the port serves it on the two-query hop and logs the reason rather than substituting quietly. Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status. The port accepts the caller's compiled `AccessScope` as a mandatory input and expands only the caller-authorized induced subgraph — seeds authorized before expansion, unauthorized nodes never entering frontiers or visited sets, budgets and truncation computed on authorized rows, hydration under the same scope and snapshot (Authorization Model, Read Consistency Contract); unsupported scope properties fail closed rather than degrading to tenant-only filtering.
 
 ##### Responsibility boundaries
 
@@ -984,7 +986,7 @@ Does not rank results (search does), does not order by degree for UI budgets (pr
 
 #### Projection Service
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-component-projection-service`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-component-projection-service`
 
 ##### Why this component exists
 
@@ -1035,7 +1037,7 @@ What stays here is the boundary:
 
 #### Storage Layer
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-component-storage-layer`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-component-storage-layer`
 
 ##### Why this component exists
 
@@ -1059,7 +1061,7 @@ No domain service reaches an entity or a statement except through `GraphStoreV1`
 
 #### REST API
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-component-rest-api`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-component-rest-api`
 
 ##### Why this component exists
 
@@ -1080,7 +1082,7 @@ No business logic; handlers delegate to domain services and map results.
 
 #### Local Client
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-component-local-client`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-component-local-client`
 
 ##### Why this component exists
 
@@ -1296,7 +1298,8 @@ producer authors it.
 writer of each verb, not a chain of them. Change history is not stored per row:
 mutations emit events through the transactional outbox (`emit_events`, per type)
 and are recorded in `ingest_audit`, and reconstructing a timeline is a query over
-those rather than a column here. Designing per-element versioning into this gear
+those rather than a column here (neither is built in this iteration:
+`fr-change-events` is deferred and `ingest_audit` is not created). Designing per-element versioning into this gear
 would duplicate a platform concern and is out of scope for v1 (PRD § 4.2,
 bitemporal versioning).
 
@@ -1942,11 +1945,13 @@ back off) instead of parsing prose.
 
 ### 3.7 Database schemas & tables
 
-- [ ] `p1` - **ID**: `cpt-cf-graph-storage-db-schema`
+- [x] `p1` - **ID**: `cpt-cf-graph-storage-db-schema`
 
 Single PostgreSQL schema; all tables tenant-scoped; vector dimension fixed by migration and verified at readiness. Index plan: composite edge indexes (tenant, src) / (tenant, dst) / (tenant, gts_edge_type_id); GIN over generated tsvectors; expression/GIN indexes over the payload paths a type declares in its `index` trait; HNSW cosine indexes over embeddings. Every read-path index is partial on `deleted_at IS NULL` (Soft Delete).
 
 The SQL/PGQ property graph is created by a gear migration alongside the tables, so a fresh database on a server that supports it can serve `GRAPH_TABLE` queries without manual setup; the platform migration runner executes that DDL without special handling. *Found while building the prototype:* the migration is conditional — below server major 19 it records that the graph was not created and the runtime probe (§ 2.2) routes every hop to the two-query backend. The graph itself (`kb`) has one vertex label (`node`) and one edge label (`edge`), each carrying the key and scope columns; typing is done by the interned type id as a property, not by one label per GTS type.
+
+**Found while building the prototype: which tables the migrations create.** `gts_type`, `node`, `edge`, `source_namespace_owner`, `graph_meta`, `ingest_idempotency`, `scope_registry` and `embedding_space`. `chunk`, `label`, `label_assignment` and `ingest_audit` are specified below and not created: chunking, labels and the audit record are deferred (README § Known limitations).
 
 `tenant_id` is the designated partition key and participates in every primary, unique, and foreign-key contract from day one (e.g., nodes are unique on `(tenant_id, node_key)` and edges reference `(tenant_id, node_id)`), so adopting PostgreSQL partitioning at scale is a physical reorganization, not an identity migration (ADR-0001 § scale envelope). `metrics_cache` is written by the analytics gear and its growth is bounded by that gear's retention limits (graph-analytics ADR-0002); this gear reads it for annotation only.
 
@@ -2382,6 +2387,8 @@ in this document with no way to say what the new value means.
 
 ### Label Contract
 
+**Status, found while building the prototype: specified, not built.** Labels are deferred (`fr-labels`): no label tables are created, the SDK's label methods answer `Unsupported`, and the contract below is the target.
+
 Labels are per-tenant, N:N, and independent of the type system: attaching one
 neither re-ingests the object nor changes its GTS type.
 
@@ -2552,6 +2559,8 @@ topology it did not see. The cache identity additionally carries the immutable
 output-affecting semantics can never serve an old result under new semantics.
 
 ### Tenant Offboarding and Deletion Monotonicity
+
+**Status, found while building the prototype: not built.** No deletion generation is accepted or fenced; readiness reports `TENANT_RECONCILIATION` as `NotImplemented`, and the protocol below is the target (`fr-tenant-offboarding`).
 
 Every byte this gear owns lives inside its PostgreSQL database, which makes
 deletion the one operation a restore can undo. Offboard a tenant at epoch `E2`,
@@ -2746,7 +2755,7 @@ log instead.
 | Component | State | Blocked operations (canonical rejection) | Operations that remain available | Recovery transition |
 |---|---|---|---|---|
 | Database, migrations | `Unhealthy` — unreachable or migrations unapplied | Everything; gear not ready, no traffic admitted | None | Connectivity restored and migrations applied; probe re-runs on an interval and flips to `Healthy` without restart |
-| Server major / SQL/PGQ | `Degraded` — the declared property graph does not answer | SQL/PGQ backend reported unavailable; nothing rejected | All traversal via the iterative-CTE and entity-query backends; everything else | The capability is probed at startup by attempting a pattern (§ 2.2), so an in-place server upgrade is picked up on the next start once the migration has created the property graph; a loss after startup is learned from the first request that meets it and reported from then on. The *major* is not reported: the attempt says the pattern did not run, not why |
+| Server major / SQL/PGQ | `Degraded` — the declared property graph does not answer | SQL/PGQ backend reported unavailable; nothing rejected | All traversal via the two-query backend; everything else | The capability is probed at startup by attempting a pattern (§ 2.2), so an in-place server upgrade is picked up on the next start once the migration has created the property graph; a loss after startup is learned from the first request that meets it and reported from then on. The *major* is not reported: the attempt says the pattern did not run, not why |
 | Server major / SQL/PGQ | `Unhealthy` — SQL/PGQ explicitly configured, server cannot provide it | Everything; gear not ready, naming the required major | None | Operator upgrades the server or removes the explicit selector; deliberate, because silently substituting backend semantics would hide a deployment error |
 | AuthZ resolver | `Degraded` — elevated latency | Nothing; requests consume more of their deadline | All | Automatic when latency returns below threshold |
 | AuthZ resolver | `Unhealthy` — unreachable | Every authenticated data path fails closed, `unavailable` / `DEPENDENCY_UNAVAILABLE`; gear not ready | Unauthenticated health/readiness endpoints only | Automatic on reconnect; no local state to rebuild |
@@ -2789,6 +2798,8 @@ row prescribes — a hybrid search whose query cannot be embedded fails
 (`unavailable`), which is honest but not the documented behaviour.
 
 ### Telemetry and Audit Contract
+
+**Status, found while building the prototype.** The audit record and its `ingest_audit` table are not built, and the counters of `fr-observability` are not emitted; the content prohibition below is the rule the shipped logging is written to.
 
 Telemetry is deny-by-default for content. Prohibited in logs, spans, metrics, and error attributes — raw or truncated: search/query text, node and edge payloads, chunk and snippet text, composed embedding input, embedding vectors, schema instances, provider request/response bodies, credentials and authorization headers. Permitted: counts, byte sizes, durations, bounded backend/stage/outcome enums, graph revision, and opaque correlation identifiers. Tenant, node, type, scope, and idempotency identifiers never appear in metric labels; they may appear in access-controlled logs and traces only as digests.
 
@@ -2850,7 +2861,7 @@ Four properties of the implementation are load-bearing rather than incidental, e
 
 Element keys are composite — `(tenant_id, id)` — which SQL/PGQ accepts. The consequence is stronger than compatibility: because an edge's source and destination keys carry `tenant_id`, an edge cannot join a node of another tenant, so **no pattern crosses a tenant boundary even before a scope predicate is applied**. That removes the class of error where a walk silently follows a foreign edge; it does not remove the need for the caller's scope, since a query without a tenant predicate still returns rows from every tenant. Measured cost on the stand: p95 0.65 ms per hop, roughly 1.7x the plain-SQL shape — acceptable, and not the reason to prefer one backend over the other.
 
-**Iterative-CTE backend**: frontier expansion driven from the gear, one scoped statement per hop: frontier(depth 0) = seeds; each hop joins the edge table on both directions with the tenant predicate and the optional edge-type set, taking the endpoint **opposite** the frontier one, the visited set is applied between hops on the caller side, and expansion stops at the depth bound or node budget. Selecting both endpoint columns unconditionally returns the frontier alongside its neighbours, which is a defect the API cannot expose — the traversal service filters already-visited ids — and which a cross-backend parity suite found by comparing the hop implementations directly. Serves bounded variable-depth requests until SQL/PGQ gains variable-length paths (expected PG20+) and remains the configuration-selected fallback; the port hides the split.
+**Iterative-CTE backend (built on the development stand, not shipped in this gear)**: frontier expansion driven from the gear, one scoped statement per hop: frontier(depth 0) = seeds; each hop joins the edge table on both directions with the tenant predicate and the optional edge-type set, taking the endpoint **opposite** the frontier one, the visited set is applied between hops on the caller side, and expansion stops at the depth bound or node budget. Selecting both endpoint columns unconditionally returns the frontier alongside its neighbours, which is a defect the API cannot expose — the traversal service filters already-visited ids — and which a cross-backend parity suite found by comparing the hop implementations directly. Serves bounded variable-depth requests until SQL/PGQ gains variable-length paths (expected PG20+) and remains the configuration-selected fallback; the port hides the split.
 
 This backend is deliberately **not** a single `WITH RECURSIVE` statement, even though recursive CTEs are now legal for gear code and the platform primitive has shipped (secure-orm ADR-0001). The reason is authorization, not performance.
 
