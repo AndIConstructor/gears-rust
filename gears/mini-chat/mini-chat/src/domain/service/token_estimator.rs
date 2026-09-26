@@ -29,7 +29,8 @@ pub struct EstimationResult {
 #[allow(dead_code)]
 pub fn estimate_tokens(input: &EstimationInput, budgets: &EstimationBudgets) -> EstimationResult {
     // Step 1: text tokens from byte count
-    let bpt = u64::from(budgets.bytes_per_token_conservative);
+    // Catalog values are not validated at startup; guard against a zero ratio.
+    let bpt = u64::from(budgets.bytes_per_token_conservative.max(1));
     let base_text_tokens = if input.utf8_bytes == 0 {
         u64::from(budgets.fixed_overhead_tokens)
     } else {

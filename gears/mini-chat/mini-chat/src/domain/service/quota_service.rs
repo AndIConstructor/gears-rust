@@ -457,19 +457,41 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
         //    plus the current message. `prior_context_tokens` is the actual
         //    input_tokens + output_tokens from the last completed turn, i.e.
         //    the context that will be re-sent to the LLM on this request.
-        let mut estimation = token_estimator::estimate_tokens(
-            &EstimationInput {
-                utf8_bytes: input.utf8_bytes,
-                num_images: input.num_images,
-                tools_enabled: input.tools_enabled,
-                web_search_enabled: input.web_search_enabled,
-                code_interpreter_enabled: input.code_interpreter_enabled,
-            },
-            &self.estimation_budgets,
+        //    Budgets come from the selected model's catalog entry; the
+        //    effective model's entry is used again after the cascade.
+        let floor = self.estimation_budgets.minimal_generation_floor;
+        let estimate_input_tokens = {
+            let (utf8_bytes, num_images, tools_enabled, web, ci, prior) = (
+                input.utf8_bytes,
+                input.num_images,
+                input.tools_enabled,
+                input.web_search_enabled,
+                input.code_interpreter_enabled,
+                input.prior_context_tokens,
+            );
+            move |budgets: &EstimationBudgets| {
+                token_estimator::estimate_tokens(
+                    &EstimationInput {
+                        utf8_bytes,
+                        num_images,
+                        tools_enabled,
+                        web_search_enabled: web,
+                        code_interpreter_enabled: ci,
+                    },
+                    budgets,
+                )
+                .estimated_input_tokens
+                .saturating_add(prior)
+            }
+        };
+        let selected_budgets = catalog_budgets(
+            snapshot
+                .model_catalog
+                .iter()
+                .find(|m| m.id == input.selected_model),
+            floor,
         );
-        estimation.estimated_input_tokens = estimation
-            .estimated_input_tokens
-            .saturating_add(input.prior_context_tokens);
+        let selected_estimated_input = estimate_input_tokens(&selected_budgets);
 
         // 3. Find selected model's multipliers for conservative initial reserve
         let catalog_entry = snapshot
@@ -497,7 +519,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
 
         // 4. Conservative initial reserve using config cap (pre-cascade)
         let initial_reserved = credits_micro_checked(
-            estimation.estimated_input_tokens,
+            selected_estimated_input,
             u64::from(input.max_output_tokens_cap),
             in_mult,
             out_mult,
@@ -517,7 +539,6 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
         let user_id = input.user_id;
         let selected_model = input.selected_model.clone();
         let max_output_tokens_cap = input.max_output_tokens_cap;
-        let estimation_budgets = self.estimation_budgets;
         let web_search_daily_quota = self.quota_config.web_search_daily_quota;
         let code_interpreter_daily_quota = self.quota_config.code_interpreter_daily_quota;
         let web_search_enabled = input.web_search_enabled;
@@ -661,9 +682,12 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                             let max_output_tokens_applied =
                                 std::cmp::min(eff_entry.max_output_tokens, max_output_tokens_cap);
 
-                            // Recompute credits with effective model's multipliers and resolved max_output
+                            // Recompute the estimate with the effective model's
+                            // budgets, and credits with its multipliers and max_output.
+                            let model_estimation_budgets = catalog_budgets(Some(eff_entry), floor);
+                            let estimated_input = estimate_input_tokens(&model_estimation_budgets);
                             let final_reserved = credits_micro_checked(
-                                estimation.estimated_input_tokens,
+                                estimated_input,
                                 max_output_tokens_applied as u64,
                                 eff_entry.input_tokens_credit_multiplier_micro,
                                 eff_entry.output_tokens_credit_multiplier_micro,
@@ -677,39 +701,17 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                 ModelTier::Standard => vec!["total".to_owned()],
                             };
 
-                            let reserve_tokens = estimation
-                                .estimated_input_tokens
+                            let reserve_tokens = estimated_input
                                 .saturating_add(max_output_tokens_applied as u64)
                                 as i64;
                             let max_output_tokens_applied = max_output_tokens_applied as i32;
                             let policy_version_applied = policy_version as i64;
+                            // The floor never exceeds the output reservation, so an
+                            // estimated settlement cannot charge above the reserve.
                             let minimal_generation_floor_applied =
-                                estimation_budgets.minimal_generation_floor as i32;
+                                std::cmp::min(floor as i32, max_output_tokens_applied);
 
                             let system_prompt = eff_entry.system_prompt.clone();
-
-                            let model_estimation_budgets = EstimationBudgets {
-                                bytes_per_token_conservative: eff_entry
-                                    .estimation_budgets
-                                    .bytes_per_token_conservative,
-                                fixed_overhead_tokens: eff_entry
-                                    .estimation_budgets
-                                    .fixed_overhead_tokens,
-                                safety_margin_pct: eff_entry.estimation_budgets.safety_margin_pct,
-                                image_token_budget: eff_entry.estimation_budgets.image_token_budget,
-                                tool_surcharge_tokens: eff_entry
-                                    .estimation_budgets
-                                    .tool_surcharge_tokens,
-                                web_search_surcharge_tokens: eff_entry
-                                    .estimation_budgets
-                                    .web_search_surcharge_tokens,
-                                code_interpreter_surcharge_tokens: eff_entry
-                                    .estimation_budgets
-                                    .code_interpreter_surcharge_tokens,
-                                minimal_generation_floor: eff_entry
-                                    .estimation_budgets
-                                    .minimal_generation_floor,
-                            };
 
                             let preflight_decision = match decision {
                                 CascadeDecision::Allow { .. } => PreflightDecision::Allow {
@@ -1140,6 +1142,29 @@ impl<QR: QuotaUsageRepository> QuotaService<QR> {
             charged_tokens: 0,
             overshoot_capped: false,
         })
+    }
+}
+
+/// Estimation budgets of a catalog entry, with the deployment-level
+/// `minimal_generation_floor`. A model missing from the catalog uses the
+/// default budgets.
+fn catalog_budgets(entry: Option<&ModelCatalogEntry>, floor: u32) -> EstimationBudgets {
+    let Some(entry) = entry else {
+        return EstimationBudgets {
+            minimal_generation_floor: floor,
+            ..EstimationBudgets::default()
+        };
+    };
+    let b = &entry.estimation_budgets;
+    EstimationBudgets {
+        bytes_per_token_conservative: b.bytes_per_token_conservative,
+        fixed_overhead_tokens: b.fixed_overhead_tokens,
+        safety_margin_pct: b.safety_margin_pct,
+        image_token_budget: b.image_token_budget,
+        tool_surcharge_tokens: b.tool_surcharge_tokens,
+        web_search_surcharge_tokens: b.web_search_surcharge_tokens,
+        code_interpreter_surcharge_tokens: b.code_interpreter_surcharge_tokens,
+        minimal_generation_floor: floor,
     }
 }
 
@@ -2065,10 +2090,38 @@ mod tests {
                 assert_eq!(estimation_budgets.tool_surcharge_tokens, 1000);
                 assert_eq!(estimation_budgets.web_search_surcharge_tokens, 800);
                 assert_eq!(estimation_budgets.code_interpreter_surcharge_tokens, 1000);
-                assert_eq!(estimation_budgets.minimal_generation_floor, 256);
+                // The floor is deployment configuration, not per model.
+                assert_eq!(
+                    estimation_budgets.minimal_generation_floor,
+                    crate::config::EstimationBudgets::default().minimal_generation_floor
+                );
             }
             other => panic!("expected Allow, got {other:?}"),
         }
+    }
+
+    // The reserve estimate uses the catalog budgets of the model.
+    #[tokio::test]
+    async fn reserve_uses_catalog_estimation_budgets() {
+        async fn reserve_tokens_with(fixed_overhead_tokens: u32) -> i64 {
+            let db = mock_db_provider(inmem_db().await);
+            let mut snapshot = default_snapshot();
+            snapshot.model_catalog[0]
+                .estimation_budgets
+                .fixed_overhead_tokens = fixed_overhead_tokens;
+            let svc = make_test_service(Arc::clone(&db), snapshot, 1.10);
+            match svc
+                .preflight_reserve(preflight_input("gpt-5"))
+                .await
+                .unwrap()
+            {
+                PreflightDecision::Allow { reserve_tokens, .. } => reserve_tokens,
+                other => panic!("expected Allow, got {other:?}"),
+            }
+        }
+        let base = reserve_tokens_with(100).await;
+        let more = reserve_tokens_with(1_100).await;
+        assert!(more > base + 900, "base {base}, more {more}");
     }
 
     #[tokio::test]

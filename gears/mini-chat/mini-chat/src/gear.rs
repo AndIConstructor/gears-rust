@@ -127,7 +127,7 @@ impl Gear for MiniChatGear {
             .validate()
             .map_err(|e| anyhow::anyhow!("streaming config: {e}"))?;
         cfg.estimation_budgets
-            .validate()
+            .validate(cfg.streaming.max_output_tokens)
             .map_err(|e| anyhow::anyhow!("estimation_budgets config: {e}"))?;
         cfg.quota
             .validate()
@@ -162,6 +162,7 @@ impl Gear for MiniChatGear {
             .deprecated_fields_set()
             .into_iter()
             .chain(cfg.thread_summary_worker.deprecated_fields_set())
+            .chain(cfg.estimation_budgets.deprecated_fields_set())
         {
             warn!(
                 field,

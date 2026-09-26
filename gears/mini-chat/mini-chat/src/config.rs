@@ -478,7 +478,12 @@ impl ClientCredentialsConfig {
     }
 }
 
-/// Token estimation parameters sourced from `ConfigMap` (P1).
+/// Token estimation parameters.
+///
+/// As a gear configuration section only `minimal_generation_floor` is used.
+/// The other fields are deprecated there: estimation uses the
+/// `estimation_budgets` of the model's catalog entry. The same type carries
+/// those catalog values inside the gear.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EstimationBudgets {
@@ -516,14 +521,70 @@ impl Default for EstimationBudgets {
 }
 
 impl EstimationBudgets {
-    pub fn validate(self) -> Result<(), String> {
-        if self.bytes_per_token_conservative == 0 {
-            return Err("bytes_per_token_conservative must be > 0".to_owned());
-        }
+    /// Validates the gear configuration section: only
+    /// `minimal_generation_floor` is used, and it must not exceed the
+    /// output token cap (`streaming.max_output_tokens`).
+    pub fn validate(self, max_output_tokens: u32) -> Result<(), String> {
         if self.minimal_generation_floor == 0 {
             return Err("minimal_generation_floor must be > 0".to_owned());
         }
+        if self.minimal_generation_floor > max_output_tokens {
+            return Err(format!(
+                "minimal_generation_floor ({}) must not exceed streaming.max_output_tokens ({max_output_tokens})",
+                self.minimal_generation_floor
+            ));
+        }
         Ok(())
+    }
+
+    /// Deprecated gear configuration fields set to a non-default value.
+    /// Estimation reads these from the model catalog instead.
+    #[must_use]
+    pub fn deprecated_fields_set(&self) -> Vec<&'static str> {
+        let d = Self::default();
+        let mut set = Vec::new();
+        for (name, value, default) in [
+            (
+                "estimation_budgets.bytes_per_token_conservative",
+                self.bytes_per_token_conservative,
+                d.bytes_per_token_conservative,
+            ),
+            (
+                "estimation_budgets.fixed_overhead_tokens",
+                self.fixed_overhead_tokens,
+                d.fixed_overhead_tokens,
+            ),
+            (
+                "estimation_budgets.safety_margin_pct",
+                self.safety_margin_pct,
+                d.safety_margin_pct,
+            ),
+            (
+                "estimation_budgets.image_token_budget",
+                self.image_token_budget,
+                d.image_token_budget,
+            ),
+            (
+                "estimation_budgets.tool_surcharge_tokens",
+                self.tool_surcharge_tokens,
+                d.tool_surcharge_tokens,
+            ),
+            (
+                "estimation_budgets.web_search_surcharge_tokens",
+                self.web_search_surcharge_tokens,
+                d.web_search_surcharge_tokens,
+            ),
+            (
+                "estimation_budgets.code_interpreter_surcharge_tokens",
+                self.code_interpreter_surcharge_tokens,
+                d.code_interpreter_surcharge_tokens,
+            ),
+        ] {
+            if value != default {
+                set.push(name);
+            }
+        }
+        set
     }
 }
 
@@ -1128,7 +1189,7 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         StreamingConfig::default().validate().unwrap();
-        EstimationBudgets::default().validate().unwrap();
+        EstimationBudgets::default().validate(32_768).unwrap();
         QuotaConfig::default().validate().unwrap();
         OutboxConfig::default().validate().unwrap();
         ContextConfig::default().validate().unwrap();
@@ -1139,22 +1200,29 @@ mod tests {
     #[test]
     fn estimation_budgets_validation() {
         let valid = EstimationBudgets::default();
-
-        assert!(
-            (EstimationBudgets {
-                bytes_per_token_conservative: 0,
-                ..valid
-            })
-            .validate()
-            .is_err()
-        );
+        valid.validate(32_768).unwrap();
         assert!(
             (EstimationBudgets {
                 minimal_generation_floor: 0,
                 ..valid
             })
-            .validate()
+            .validate(32_768)
             .is_err()
+        );
+        // The floor must not exceed the output cap.
+        let err = valid
+            .validate(valid.minimal_generation_floor - 1)
+            .unwrap_err();
+        assert!(err.contains("minimal_generation_floor"), "{err}");
+        // Deprecated fields are not validated, only reported.
+        let deprecated = EstimationBudgets {
+            bytes_per_token_conservative: 0,
+            ..valid
+        };
+        deprecated.validate(32_768).unwrap();
+        assert_eq!(
+            deprecated.deprecated_fields_set(),
+            ["estimation_budgets.bytes_per_token_conservative"]
         );
     }
 
