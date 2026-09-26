@@ -34,6 +34,24 @@ PROVIDER_DEFAULT_MODEL = {
     "openai": STANDARD_MODEL,
 }
 
+# Static bearer tokens (config/base.yaml, static-authn-plugin `static_tokens`).
+# User A is the default identity of every request; B shares A's tenant; C is
+# in another tenant.
+TOKEN_USER_A = "mini-chat-e2e"
+TOKEN_USER_B = "mini-chat-e2e-user-b"
+TOKEN_TENANT_B = "mini-chat-e2e-tenant-b"
+USER_A_ID = "11111111-6a88-4768-9dfc-6bcd5187d9ed"
+
+# Marker header: a request carrying it is sent without any Authorization
+# header (see _default_auth_header).
+NO_AUTH = {"X-E2E-No-Auth": "1"}
+
+
+def auth_headers(token: str) -> dict[str, str]:
+    """Authorization header for one of the static tokens."""
+    return {"Authorization": f"Bearer {token}"}
+
+
 _TEMP_HOME = tempfile.mkdtemp(prefix="cf-gears-test-")
 DB_PATH = os.path.join(_TEMP_HOME, "mini-chat", "mini_chat.db")
 
@@ -133,13 +151,15 @@ def poll_until(call, *, until, timeout: int = 60):
     )
 
 
-def stream_message(chat_id: str, content: str, **kwargs) -> tuple[int, list[SSEEvent], str]:
+def stream_message(
+    chat_id: str, content: str, *, token: str = TOKEN_USER_A, **kwargs,
+) -> tuple[int, list[SSEEvent], str]:
     """Send a streaming message and return (status_code, events, raw_body)."""
     body = {"content": content, **kwargs}
     url = f"{API_PREFIX}/chats/{chat_id}/messages:stream"
     resp = httpx.post(
         url, json=body,
-        headers={"Accept": "text/event-stream"},
+        headers={"Accept": "text/event-stream", **auth_headers(token)},
         timeout=90,
     )
     raw = resp.text
@@ -415,6 +435,31 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             terminalreporter.write_line(line)
 
 
+# ── Authentication ──────────────────────────────────────────────────────
+
+@pytest.fixture(scope="session", autouse=True)
+def _default_auth_header():
+    """Send every request as user A unless it sets its own Authorization.
+
+    The rig runs with authentication enabled. Patching ``httpx.Client.send``
+    covers ``httpx.get/post/...``, ``httpx.stream`` and explicit clients, so
+    existing tests keep working unchanged. A request with the ``NO_AUTH``
+    marker header is sent without credentials.
+    """
+    original_send = httpx.Client.send
+
+    def send(self, request, *args, **kwargs):
+        if request.headers.pop("X-E2E-No-Auth", None) is None and (
+            "authorization" not in request.headers
+        ):
+            request.headers["Authorization"] = f"Bearer {TOKEN_USER_A}"
+        return original_send(self, request, *args, **kwargs)
+
+    httpx.Client.send = send
+    yield
+    httpx.Client.send = original_send
+
+
 # ── GearTestEnv (orchestrator integration) ──────────────────────────────
 
 @pytest.fixture(scope="session")
@@ -467,9 +512,9 @@ def _provision_credstore_secrets(request, server):
     through its API — pre-seeding the static plugin config alone is no longer
     reachable.
 
-    The mini-chat rig is single-tenant (``single-tenant-tr-plugin``) with
-    ``accept_all`` authn, so a ``tenant``-scoped secret resolves for the S2S
-    context OAGW uses when proxying. Offline mode (default) uses mock values
+    The secrets are created as user A in the default tenant, which is also the
+    tenant of mini-chat's S2S identity, so a ``tenant``-scoped secret resolves
+    for the S2S context OAGW uses when proxying. Offline mode (default) uses mock values
     (the mock provider ignores them); online mode uses the real env keys, the
     same ones ``_patch_mini_chat_config`` would otherwise inject.
 

@@ -53,7 +53,7 @@ gears:
         description: "Mini-Chat development server"
       defaults:
         body_limit_bytes: 64000000
-      auth_disabled: true
+      auth_disabled: false
       # Throttling zones referenced by the mini-chat create_chat route
       # (ThrottlingSpec in gears/mini-chat/.../api/rest/routes/chats.rs).
       # These must be defined or gateway startup fails validation.
@@ -101,7 +101,29 @@ gears:
     config:
       vendor: "constructorfabric"
       priority: 100
-      mode: accept_all
+      # Three identities for authorization/isolation tests: user A and user B
+      # share the default tenant, user C lives in another tenant. The
+      # single-tenant resolver treats each tenant as its own root.
+      mode: static_tokens
+      tokens:
+        - token: "mini-chat-e2e"
+          identity:
+            subject_id: "11111111-6a88-4768-9dfc-6bcd5187d9ed"
+            subject_tenant_id: "00000000-df51-5b42-9538-d2b56b7ee953"
+            subject_type: "gts.cf.core.security.subject_user.v1~"
+            token_scopes: ["*"]
+        - token: "mini-chat-e2e-user-b"
+          identity:
+            subject_id: "44444444-6a88-4768-9dfc-6bcd5187d9ed"
+            subject_tenant_id: "00000000-df51-5b42-9538-d2b56b7ee953"
+            subject_type: "gts.cf.core.security.subject_user.v1~"
+            token_scopes: ["*"]
+        - token: "mini-chat-e2e-tenant-b"
+          identity:
+            subject_id: "22222222-6a88-4768-9dfc-6bcd5187d9ed"
+            subject_tenant_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+            subject_type: "gts.cf.core.security.subject_user.v1~"
+            token_scopes: ["*"]
       s2s_credentials:
         - client_id: "mini-chat"
           client_secret: "mini-chat-dev-secret"

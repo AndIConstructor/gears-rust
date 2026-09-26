@@ -195,16 +195,3 @@ class TestErrorMapping:
         assert "batch_456" not in error_message, (
             f"Provider batch ID leaked to client: {error_message}"
         )
-
-    def test_404_masking_authz_denial(self, server):
-        """Accessing a nonexistent chat returns 404 (not 403) — verifies masking pattern."""
-        # TODO: Full multi-user authz test requires multi-user e2e setup.
-        # For now, verify the basic masking: nonexistent resources -> 404, never 403.
-        fake_chat_id = str(uuid4())
-
-        resp = httpx.get(f"{API_PREFIX}/chats/{fake_chat_id}")
-        assert resp.status_code == 404, (
-            f"Expected 404 for nonexistent chat, got {resp.status_code}: {resp.text}"
-        )
-        # Must not be 403
-        assert resp.status_code != 403, "Must not expose 403 for nonexistent resources"

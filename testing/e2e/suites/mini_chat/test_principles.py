@@ -1,13 +1,8 @@
-"""Tests for architectural principles — tenant isolation, access control, kill switches, no buffering.
+"""Tests for architectural principles — model lock, kill switches, no buffering.
 
-Most of these require multi-tenant or multi-user e2e infrastructure that is not yet
-available. Tests are written with the best approximation using the current single-tenant
-setup, with TODO notes for the full implementation.
+Tenant and owner isolation are covered in test_isolation.py.
 
 Covers:
-- Tenant isolation (single-tenant proxy)
-- Owner-only access (single-user proxy)
-- License gate (licensed-by-default proxy)
 - Model locked per chat
 - Kill switch: disable premium, force standard, disable file_search, disable web_search, disable images
 - No buffering (streaming proxy)
@@ -50,35 +45,6 @@ def create_chat(model: str | None = None) -> dict:
 
 class TestPrinciples:
     """Architectural principles — isolation, access control, kill switches."""
-
-    def test_tenant_owns_created_chat(self, server):
-        # TODO: Requires multi-tenant e2e setup. Current infra is single-tenant.
-        # For now: verify that a chat is accessible to the creating tenant
-        # (proves tenant scoping works for the happy path).
-        chat = create_chat()
-        chat_id = chat["id"]
-
-        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}", timeout=10)
-        assert resp.status_code == 200
-        assert resp.json()["id"] == chat_id
-
-    def test_owner_can_read_own_chat(self, server):
-        # TODO: Requires multi-user e2e setup. Current infra uses a single
-        # user identity for all requests.
-        # For now: verify the creating user can read their own chat.
-        chat = create_chat()
-        chat_id = chat["id"]
-
-        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}", timeout=10)
-        assert resp.status_code == 200
-        assert resp.json()["id"] == chat_id
-
-    def test_licensed_user_can_create_chat(self, server):
-        # TODO: Requires unlicensed tenant. License is always present in
-        # test infrastructure.
-        # For now: verify that a licensed user can create a chat.
-        resp = httpx.post(f"{API_PREFIX}/chats", json={}, timeout=10)
-        assert resp.status_code == 201
 
     def test_model_locked_per_chat(self, server):
         """Model is locked at chat creation time and cannot be changed via PATCH."""
