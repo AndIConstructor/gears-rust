@@ -706,7 +706,8 @@ impl<
         let policy_version_applied = pf.policy_version_applied;
         let minimal_generation_floor_applied = pf.minimal_generation_floor_applied;
 
-        self.db
+        let result = self
+            .db
             .transaction(|tx| {
                 use crate::domain::repos::IncrementReserveParams;
                 Box::pin(async move {
@@ -902,9 +903,48 @@ impl<
                 other => StreamError::TurnCreationFailed {
                     source: DomainError::from(other),
                 },
-            })?;
+            });
 
-        Ok(turn_id)
+        match result {
+            Ok(()) => Ok(turn_id),
+            Err(e) => Err(self
+                .classify_turn_conflict(scope, chat_id, request_id, e)
+                .await),
+        }
+    }
+
+    /// The unique violation behind `turn_already_running` is either the
+    /// running-turn index or `UNIQUE(chat_id, request_id)`. Report the latter
+    /// as `request_id_conflict`, like the idempotency pre-check does.
+    async fn classify_turn_conflict(
+        &self,
+        scope: &AccessScope,
+        chat_id: Uuid,
+        request_id: Uuid,
+        err: StreamError,
+    ) -> StreamError {
+        let StreamError::Conflict { code, message } = err else {
+            return err;
+        };
+        if code != "turn_already_running" {
+            return StreamError::Conflict { code, message };
+        }
+        let request_id_taken = match self.db.conn() {
+            Ok(conn) => self
+                .turn_repo
+                .find_by_chat_and_request_id(&conn, scope, chat_id, request_id)
+                .await
+                .is_ok_and(|turn| turn.is_some()),
+            Err(_) => false,
+        };
+        StreamError::Conflict {
+            code: if request_id_taken {
+                "request_id_conflict".to_owned()
+            } else {
+                code
+            },
+            message,
+        }
     }
 
     /// Shared context assembly: thread summary lookup, recent-message fetch
@@ -6806,8 +6846,8 @@ mod tests {
                 .await
                 .expect_err("turn insert must hit UNIQUE(chat_id, request_id)");
         assert!(
-            matches!(err, StreamError::Conflict { .. }),
-            "expected Conflict, got: {err:?}"
+            matches!(&err, StreamError::Conflict { code, .. } if code == "request_id_conflict"),
+            "expected request_id_conflict, got: {err:?}"
         );
 
         assert_nothing_persisted(&db, tenant_id, user_id, chat_id, request_id).await;
