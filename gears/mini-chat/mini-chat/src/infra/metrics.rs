@@ -14,9 +14,9 @@ use crate::domain::ports::metric_labels::key;
 ///
 /// ## `_total` suffix
 ///
-/// Counter instrument names intentionally omit the `_total` suffix from
-/// Prometheus metric names. The `opentelemetry-prometheus`
-/// exporter appends `_total` automatically for counters, so including it
+/// Counter instrument names intentionally omit the `_total` suffix.
+/// Metrics are exported over OTLP; the OTLP-to-Prometheus conversion
+/// downstream conventionally appends `_total` to counters, so including it
 /// here would produce a doubled `_total_total` suffix.
 pub struct MiniChatMetricsMeter {
     // ── P0: Streaming & UX Health ──────────────────────────────────────

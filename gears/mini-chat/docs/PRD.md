@@ -320,7 +320,7 @@ The system MUST support the `code_interpreter` LLM tool for data analysis of upl
 
 **Tool assembly**: When a chat contains ready `code_interpreter` attachments, the `disable_code_interpreter` kill switch is `false`, and the effective model supports code interpreter (`tool_support.code_interpreter = true`), the backend includes the `code_interpreter` tool in the Responses API request with the corresponding provider file IDs (via `tools[].container.file_ids`). The provider decides whether to invoke the tool.
 
-**Usage tracking and rate limits**: Code interpreter tool call counts are persisted in `quota_usage.code_interpreter_calls` and included in the `UsageEvent` outbox payload for downstream billing/analytics. The system MUST enforce a per-user daily rate limit via `code_interpreter_daily_quota` (default: 50 calls per day). When the daily code interpreter quota is exhausted, the system MUST reject with HTTP 429 (`resource_exhausted`, quota scope `code_interpreter`) at preflight (before any provider call). The daily quota applies only to requests that use the tool (the chat has ready `code_interpreter` attachments); other messages are not affected. Per-turn calls are limited by `quota.code_interpreter_max_calls_per_message` (default 10); exceeding it mid-stream ends the stream with SSE `error{code: "code_interpreter_calls_exceeded"}`.
+**Usage tracking and rate limits**: Code interpreter tool call counts are persisted in `quota_usage.code_interpreter_calls` and included in the `UsageEvent` outbox payload for downstream billing/analytics. The system MUST enforce a per-user daily rate limit via `code_interpreter_daily_quota` (default: 50 calls per day). When the daily code interpreter quota is exhausted, the system MUST reject with HTTP 429 (`resource_exhausted`, quota scope `code_interpreter`) at preflight (before any provider call). The daily quota is checked only when all of the following hold: the chat has ready `code_interpreter` attachments, the effective model (after any quota downgrade) supports code interpreter (`tool_support.code_interpreter = true`), and `disable_code_interpreter` is off. Other messages are not affected. Per-turn calls are limited by `quota.code_interpreter_max_calls_per_message` (default 10); exceeding it mid-stream ends the stream with SSE `error{code: "code_interpreter_calls_exceeded"}`.
 
 **Rationale**: Users need to analyze spreadsheet data (pivot tables, charts, statistical analysis) through conversational interaction with the AI assistant.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -331,7 +331,7 @@ The system MUST support the `code_interpreter` LLM tool for data analysis of upl
 
 The system MUST support web search as an LLM tool, explicitly enabled per request via an API parameter (`web_search.enabled`). When enabled, the backend includes the `web_search` tool in the provider request (Azure Foundry API tooling). The provider decides whether to invoke the tool based on the query; explicit enablement means "tool is available and allowed", not "force a call every time". Web search MUST be disabled by default (safe default for backward compatibility).
 
-**Rate limits**: The system MUST enforce configurable per-turn web search call limits (default: 2 calls per turn) and per-user daily web search quota (default: 75 calls per day), tracked in `quota_usage.web_search_calls`. When the daily web search quota is exhausted, the system MUST reject with HTTP 429 (`resource_exhausted`, quota scope `web_search`) at preflight (before any provider call). This is part of cost control / quotas and MUST NOT be reported as the token quota scope. The daily quota applies only to requests with `web_search.enabled=true`; other messages are not affected. Exceeding the per-turn limit mid-stream ends the stream with SSE `error{code: "web_search_calls_exceeded"}`.
+**Rate limits**: The system MUST enforce configurable per-turn web search call limits (default: 2 calls per turn) and per-user daily web search quota (default: 75 calls per day), tracked in `quota_usage.web_search_calls`. When the daily web search quota is exhausted, the system MUST reject with HTTP 429 (`resource_exhausted`, quota scope `web_search`) at preflight (before any provider call). This is part of cost control / quotas and MUST NOT be reported as the token quota scope. The daily quota is checked only when the request has `web_search.enabled=true` and the effective model (after any quota downgrade) supports web search (`tool_support.web_search = true`); other messages are not affected. With `disable_web_search` on, a request with `web_search.enabled=true` is rejected before the quota check. Exceeding the per-turn limit mid-stream ends the stream with SSE `error{code: "web_search_calls_exceeded"}`.
 
 **Kill switch**: A global `disable_web_search` flag MUST allow operators to disable web search at runtime. When the kill switch is active and a request includes `web_search.enabled=true`, the system MUST reject with HTTP 400 (`failed_precondition`, `violations[{subject: web_search, type: FEATURE_DISABLED}]`) before opening an SSE stream. The system MUST NOT silently ignore the parameter.
 
@@ -869,7 +869,7 @@ Mini Chat MUST provide an explicit operational contract to support on-call, SRE,
 
 #### Prometheus metrics contract (P1)
 
-The service MUST expose Prometheus metrics with the series names below. The instruments are defined in `mini-chat/src/infra/metrics.rs`; names use the configurable prefix (default `mini_chat`), and the Prometheus exporter appends `_total` to counters. Label sets below are the ones recorded by the code.
+The service MUST expose Prometheus metrics with the series names below. The instruments are defined in `mini-chat/src/infra/metrics.rs`; names use the configurable prefix (default `mini_chat`). Metrics are exported over OTLP; counter instrument names carry no `_total` suffix, and whether `_total` is appended depends on the OTLP-to-Prometheus conversion downstream (usually it is), not on this gear; the counters below are written with `_total` on that assumption. Label sets below are the ones recorded by the code.
 
 Prometheus labels MUST NOT include high-cardinality identifiers such as `tenant_id`, `user_id`, `chat_id`, `request_id`, or `provider_response_id`.
 
@@ -936,7 +936,7 @@ The contract has two parts:
 
 - `mini_chat_cleanup_completed_total{resource_type}`
 - `mini_chat_cleanup_failed_total{resource_type}`
-- `mini_chat_cleanup_retry_total{resource_type,reason}`
+- `mini_chat_cleanup_retry_total{resource_type,reason}` (`reason`: `provider_error` when a provider file delete failed, `vector_store_delete_failed` when a vector store delete failed)
 - `mini_chat_cleanup_vector_store_with_failed_attachments_total`
 - `mini_chat_secondary_cleanup_skipped_total{provider_kind}`
 
@@ -986,7 +986,7 @@ Specified but not declared:
 
 RAG retrieval costs and quality MUST remain bounded as document volume grows within a chat. The system MUST enforce per-chat document count, total file size, and indexed chunk limits (see `cpt-cf-mini-chat-fr-per-chat-doc-limits`). Retrieval parameters (top-k, max retrieved tokens per turn) MUST be configurable. Each chat with documents MUST use a dedicated per-chat vector store to ensure isolation and predictable retrieval latency.
 
-**P1 status**: partially implemented ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). The per-chat document count and total size limits and the per-chat vector store are implemented; `file_search` top-k comes from the model catalog `max_num_results`. The indexed chunk limit is **not implemented**. `mini_chat_file_search_latency_ms` is registered but never recorded, so the latency threshold below cannot be measured in P1.
+**P1 status**: partially implemented ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). The per-chat document count and total size limits and the per-chat vector store are implemented; `file_search` top-k comes from the model catalog `max_num_results`. The indexed chunk limit and a configurable "max retrieved tokens per turn" are **not implemented** (there is no such setting in `RagConfig` or the model catalog). `mini_chat_file_search_latency_ms` is registered but never recorded, so the latency threshold below cannot be measured in P1.
 
 **Threshold**: Per-chat limit enforcement with zero breaches; `mini_chat_file_search_latency_ms` p95 within configured threshold
 **Rationale**: Unbounded document ingestion degrades retrieval relevance and inflates per-turn costs via excessive chunk processing.
@@ -1151,11 +1151,14 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 |---|---|---|---|
 | Chat, message, turn, attachment or model not found (including another user's resource) | `not_found` | 404 | resource scoped by `type`. Exception: a repeated `DELETE` of an attachment returns 204 (idempotent) |
 | Unknown or disabled model on `POST /chats` | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
-| Validation error (empty title, empty content, bad OData `$filter`/`$orderby`/cursor) | `invalid_argument` | 400 | `detail` |
+| Validation error (empty title, empty content) | `invalid_argument` | 400 | `detail` |
+| Bad OData query on a list endpoint (`$filter`, `$orderby`, page size, cursor) | `invalid_argument` | 400 | `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER`, `INVALID_ORDERBY_FIELD`, `INVALID_LIMIT`, `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR` |
 | Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | platform JSON extractor (`toolkit::api::rest::extract::Json`) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` |
+| Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
+| Outbox payload built for the request exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` |
-| Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment]` |
+| Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
 | Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` |
 | Too many images in one message | `out_of_range` | 400 | `TOO_MANY_IMAGES` |
 | Message exceeds `max_input_tokens` | `out_of_range` | 400 | `INPUT_TOO_LONG` |
@@ -1169,11 +1172,15 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Mutation of a turn that is not the latest (including an already deleted turn) | `aborted` | 409 | `NOT_LATEST_TURN` |
 | Concurrent mutation lost the running-turn race | `aborted` | 409 | `GENERATION_IN_PROGRESS` |
 | Deleting an attachment referenced by a message | `already_exists` | 409 | `resource_name = attachment_locked` |
+| Upload into a chat whose vector store was created for another provider backend | `already_exists` | 409 | `resource_name = provider_mismatch` |
+| Any other unique-constraint violation that the caller does not handle (`DomainError::Conflict` from the DB layer) | `already_exists` | 409 | `resource_name = unique_violation` |
 | Quota exhausted (credits, web search, code interpreter) | `resource_exhausted` | 429 | `violations[{subject: <quota_scope>}]` |
 | Per-chat document count or storage limit | `resource_exhausted` | 429 | `document_limit` / `storage_limit` |
 | Provider or storage backend failure before streaming | `service_unavailable` | 503 + `Retry-After` | |
 | Upload concurrency limit | `service_unavailable` | 503 + `Retry-After` | |
 | Internal / database error | `internal` | 500 | |
+
+`StreamError::Replay` maps to 409 `aborted` with reason `REPLAY` in `api/rest/error.rs`. The arm is defensive: the `messages:stream` handler intercepts `Replay` and serves the buffered SSE replay of the completed turn (`api/rest/handlers/messages.rs`), so clients do not receive this error.
 
 Superseded statuses: 413 `file_too_large`, 415 `unsupported_file_type` / `unsupported_media`, 502 `provider_error` and 504 `provider_timeout` are no longer returned by REST endpoints; the per-chat document limit changed from 400 to 429. `image_bytes_exceeded` and the `uploads` / `image_inputs` quota scopes are not implemented. MCP error codes (`mcp_server_unavailable`, `mcp_server_not_found`, `mcp_assign_denied`) belong to the Future MCP scope ([ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)).
 

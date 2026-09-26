@@ -41,11 +41,14 @@ Chosen option: "Adopt the canonical `Problem` for REST, and keep `{code, message
 |---|---|---|---|
 | Chat, message, turn, attachment or model not found (including another user's resource) | `not_found` | 404 | resource scoped by `type`. Exception: a repeated `DELETE` of an attachment returns 204 (idempotent) |
 | Unknown or disabled model on `POST /chats` | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
-| Validation error (empty title, empty content, bad OData `$filter`/`$orderby`/cursor) | `invalid_argument` | 400 | `detail` |
+| Validation error (empty title, empty content) | `invalid_argument` | 400 | `detail` |
+| Bad OData query on a list endpoint (`$filter`, `$orderby`, page size, cursor) | `invalid_argument` | 400 | `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER`, `INVALID_ORDERBY_FIELD`, `INVALID_LIMIT`, `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR` |
 | Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | platform JSON extractor (`toolkit::api::rest::extract::Json`) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` (was 415) |
+| Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
+| Outbox payload built for the request exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` (was 415) |
-| Invalid, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment]` |
+| Invalid, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
 | Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` (was 413) |
 | Too many images in one message | `out_of_range` | 400 | `TOO_MANY_IMAGES` |
 | Message exceeds `max_input_tokens` | `out_of_range` | 400 | `INPUT_TOO_LONG` |
@@ -59,11 +62,15 @@ Chosen option: "Adopt the canonical `Problem` for REST, and keep `{code, message
 | Mutation of a turn that is not the latest (including an already deleted turn) | `aborted` | 409 | `NOT_LATEST_TURN` |
 | Concurrent mutation lost the running-turn race | `aborted` | 409 | `GENERATION_IN_PROGRESS` |
 | Deleting an attachment referenced by a message | `already_exists` | 409 | `resource_name = attachment_locked` |
+| Upload into a chat whose vector store was created for another provider backend | `already_exists` | 409 | `resource_name = provider_mismatch` |
+| Any other unique-constraint violation that the caller does not handle (`DomainError::Conflict` from the DB layer) | `already_exists` | 409 | `resource_name = unique_violation` |
 | Quota exhausted | `resource_exhausted` | 429 | `violations[{subject: <quota_scope>}]` |
 | Per-chat document count or storage limit | `resource_exhausted` | 429 | `document_limit` / `storage_limit` (was 400) |
 | Provider or storage backend failure before streaming | `service_unavailable` | 503 + `Retry-After` | (was 502/504) |
 | Upload concurrency limit | `service_unavailable` | 503 + `Retry-After` | |
 | Internal / database error | `internal` | 500 | |
+
+`StreamError::Replay` maps to 409 `aborted` with reason `REPLAY` in `api/rest/error.rs`. The arm is defensive: the `messages:stream` handler intercepts `Replay` and serves the buffered SSE replay of the completed turn (`api/rest/handlers/messages.rs`), so clients do not receive this error.
 
 **SSE `error` event.** Once the stream is open, a terminal failure is sent as `event: error` with `data: {code, message}`. This envelope is independent of `Problem`. The codes are listed in DESIGN §3.3 "Streaming error codes".
 

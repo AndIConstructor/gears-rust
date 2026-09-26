@@ -270,7 +270,7 @@ Internal mpsc channels between `llm_provider` → domain service → SSE writer 
 
 - [ ] `p1` - **ID**: `cpt-cf-mini-chat-constraint-model-locked-per-chat`
 
-Once a chat is created with a model (user-selected or resolved via the `is_default` premium model algorithm), that model becomes the **selected_model** (`chats.model`) and is locked for the lifetime of the conversation. The user MUST NOT be able to change the selected_model within an existing chat.
+Once a chat is created with a model (user-selected, or the default model: the first enabled catalog entry with `preference.is_default = true`, else the first enabled entry; tier is not considered), that model becomes the **selected_model** (`chats.model`) and is locked for the lifetime of the conversation. The user MUST NOT be able to change the selected_model within an existing chat.
 
 The **effective_model** is the model actually used for a specific turn. Invariants:
 
@@ -634,7 +634,7 @@ Request body:
 ```json
 {
   "title": "string (optional)",
-  "model": "string (optional, defaults to is_default premium model)"
+  "model": "string (optional, defaults to the first enabled is_default model, else the first enabled model)"
 }
 ```
 
@@ -1166,6 +1166,9 @@ Provider-specific streaming events are internal to `llm_provider` and the domain
 | `response.file_search_call.completed` | `event: tool` (`phase: "done"`, `name: "file_search"`) | `details` populated from search results metadata. |
 | `response.web_search_call.searching` | `event: tool` (`phase: "start"`, `name: "web_search"`) | Emitted when web_search tool is invoked by the provider. |
 | `response.web_search_call.completed` | `event: tool` (`phase: "done"`, `name: "web_search"`) | `details` populated from search results metadata. |
+| `response.code_interpreter_call.in_progress` | `event: tool` (`phase: "start"`, `name: "code_interpreter"`) | `details: {}`. `response.code_interpreter_call.interpreting` is dropped (no client event). |
+| `response.code_interpreter_call.completed` | `event: tool` (`phase: "done"`, `name: "code_interpreter"`) | `details: {output}` — the `logs` outputs joined with newlines, truncated to 8192 characters with a `...[truncated]` suffix. |
+| Anthropic `code_execution` server tool (`content_block_start` / `content_block_stop`) | `event: tool` (`phase: "start"` / `"done"`, `name: "code_interpreter"`) | Mapped to the shared name so call limits and counters apply; `details: {}` (no `output`). |
 | Web search annotations in response | `event: citations` | Extracted from provider annotations, mapped to `items[]` with `source: "web"`, `url`, `title`, `snippet`. |
 | File search annotations in response | `event: citations` | Extracted from provider annotations, mapped to `items[]` schema. When provider annotations include ranges, `items[].span` SHOULD be populated as character offsets into the final assistant text. |
 | `response.completed` | `event: done` | `usage` from `response.usage`. Provider `response.id` is persisted internally (`chat_turns.provider_response_id`) but MUST NOT be included in the SSE payload. |
@@ -1192,11 +1195,14 @@ The mapping is implemented in `api/rest/error.rs`:
 |---|---|---|---|
 | Chat, message, turn, attachment or model not found (including another user's resource, or a soft-deleted one) | `not_found` | 404 | resource scoped by `type`. Exception: a repeated `DELETE` of an attachment returns 204 (idempotent) |
 | Unknown or disabled model on `POST /chats` | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
-| Validation error (empty title, empty content, bad OData `$filter`/`$orderby`/cursor) | `invalid_argument` | 400 | `detail` (edit with empty content: `EMPTY_CONTENT`) |
+| Validation error (empty title, empty content) | `invalid_argument` | 400 | `detail` (edit with empty content: `EMPTY_CONTENT`) |
+| Bad OData query on a list endpoint (`$filter`, `$orderby`, page size, cursor) | `invalid_argument` | 400 | `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER`, `INVALID_ORDERBY_FIELD`, `INVALID_LIMIT`, `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR` |
 | Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | platform JSON extractor (`toolkit::api::rest::extract::Json`) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` |
+| Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
+| Outbox payload built for the request exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` |
-| Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment]` |
+| Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
 | Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` |
 | Too many images in one message | `out_of_range` | 400 | `TOO_MANY_IMAGES` |
 | Message exceeds `max_input_tokens` | `out_of_range` | 400 | `INPUT_TOO_LONG` |
@@ -1211,11 +1217,15 @@ The mapping is implemented in `api/rest/error.rs`:
 | Mutation of a turn that is not the latest (including an already deleted turn) | `aborted` | 409 | `NOT_LATEST_TURN` |
 | Concurrent mutation lost the running-turn race | `aborted` | 409 | `GENERATION_IN_PROGRESS` |
 | Deleting an attachment referenced by a message | `already_exists` | 409 | `resource_name = attachment_locked` |
+| Upload into a chat whose vector store was created for another provider backend | `already_exists` | 409 | `resource_name = provider_mismatch` |
+| Any other unique-constraint violation that the caller does not handle (`DomainError::Conflict` from the DB layer) | `already_exists` | 409 | `resource_name = unique_violation` |
 | Quota exhausted (tokens, daily web search, daily code interpreter) | `resource_exhausted` | 429 | `violations[{subject: <quota_scope>, description: "quota_exceeded"}]`; `quota_scope` is `tokens`, `web_search` or `code_interpreter` |
 | Per-chat document count or storage limit | `resource_exhausted` | 429 | `document_limit` / `storage_limit` |
 | Provider or storage backend failure before streaming | `service_unavailable` | 503 + `Retry-After` | — |
 | Upload concurrency limit | `service_unavailable` | 503 + `Retry-After` | — |
 | Internal / database error | `internal` | 500 | — |
+
+`StreamError::Replay` maps to 409 `aborted` with reason `REPLAY` in `api/rest/error.rs`. The arm is defensive: the `messages:stream` handler intercepts `Replay` and serves the buffered SSE replay of the completed turn (`api/rest/handlers/messages.rs`), so clients do not receive this error.
 
 The quota scope is machine-readable in `context.violations[0].subject`; clients MUST NOT parse `detail`. Where this document says "reject with `quota_exceeded`", it means this 429 response. Not implemented and therefore never returned: the per-user daily image quota and the per-message image byte cap (`image_bytes_exceeded`), see [ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md).
 
@@ -1960,7 +1970,7 @@ The other `cleanup_worker.*` fields (`enabled`, `poll_interval_secs`, `reconcile
 
 - `mini_chat_cleanup_completed_total{resource_type="file|vector_store"}` (counter) — successful cleanup operations
 - `mini_chat_cleanup_failed_total{resource_type="file"}` (counter) — attachment cleanup rows that transition to terminal `failed`
-- `mini_chat_cleanup_retry_total{resource_type="file|vector_store",reason}` (counter) — handler retries delegated to the shared outbox after retryable cleanup attempts
+- `mini_chat_cleanup_retry_total{resource_type="file|vector_store",reason="provider_error|vector_store_delete_failed"}` (counter) — handler retries delegated to the shared outbox after retryable cleanup attempts. `reason` is bounded: `provider_error` when a provider file delete failed (`resource_type=file`), `vector_store_delete_failed` when a provider vector store delete failed (`resource_type=vector_store`)
 - `mini_chat_cleanup_backlog{state,resource_type="file"}` (gauge) — declared but not recorded (deferred)
 - `mini_chat_secondary_cleanup_skipped{provider_kind}` (counter) — secondary (Anthropic) file deletions skipped
 - `mini_chat_cleanup_vector_store_with_failed_attachments_total` (counter) — vector-store deletions executed after attachment cleanup reached terminal outcomes that included at least one `failed` attachment row
@@ -2307,7 +2317,7 @@ The upload handler loads the chat via a scoped query before entering the creatio
 
 **Bucket model**: each `(tenant_id, user_id, period_type, period_start)` combination has **one row per bucket**. The `total` bucket is the overall cap (all tiers). The `tier:premium` bucket tracks premium-only spend. Enforcement reads at most two rows per period; see section 5.4.2 for the availability algorithm.
 
-**Credit vs. token/call columns**: `spent_credits_micro` and `reserved_credits_micro` are the enforcement counters used by `quota_service` for tier availability checks and period limit enforcement (section 5.4.2). All other counters (`input_tokens`, `output_tokens`, `calls`, `file_search_calls`, `web_search_calls`, `code_interpreter_calls`, `image_inputs`, `image_upload_bytes`) are aggregate telemetry; they are NOT used for quota enforcement decisions.
+**Credit vs. token/call columns**: `spent_credits_micro` and `reserved_credits_micro` are the enforcement counters used by `quota_service` for tier availability checks and period limit enforcement (section 5.4.2). `web_search_calls` and `code_interpreter_calls` of the daily `total` row are read at preflight by the daily web-search and code-interpreter quota checks (`quota.web_search_daily_quota`, `quota.code_interpreter_daily_quota`). All other counters (`input_tokens`, `output_tokens`, `calls`, `file_search_calls`, `image_inputs`, `image_upload_bytes`) are aggregate telemetry; they are NOT used for quota enforcement decisions.
 
 **Commit semantics**: quota updates MUST be atomic per bucket row. Implementations SHOULD use a transaction with row locking or a single UPDATE statement to avoid race conditions under parallel streams.
 
@@ -2915,8 +2925,7 @@ On each user message, the domain service assembles a `ContextPlan` in this norma
 | 2 (never truncated) | User message + image attachments (current turn) |
 | 3 (droppable) | Thread summary — dropped if it doesn't fit after mandatory items |
 | 4 | Recent messages (oldest dropped first) |
-| 5 | Document summaries (not implemented) |
-| 6 (truncated first) | Retrieval excerpts |
+| 5 (truncated first) | Retrieval excerpts |
 
 Image attachments on the current turn are not truncated (they are subject to per-turn count limits enforced at upload/preflight, not at context assembly).
 
@@ -2938,7 +2947,7 @@ token_budget = min(configured_max_input_tokens, effective_model.context_window -
 |----------|-------|------|
 | Never truncated | System prompt + tool guard instructions, user message + image attachments | Always included. If these alone exceed the budget, the turn is rejected at preflight. |
 | Droppable | Thread summary | Dropped if it doesn't fit after mandatory items. |
-| Truncatable | Recent messages, document summaries, retrieval excerpts | Removed in reverse priority order (lowest priority first, per the table above). |
+| Truncatable | Recent messages, retrieval excerpts | Removed in reverse priority order (lowest priority first, per the table above). There is no document-summary tier. |
 
 **Algorithm** (step by step):
 
@@ -2946,11 +2955,10 @@ token_budget = min(configured_max_input_tokens, effective_model.context_window -
 2. Estimate total tokens using the provider's tokenizer (or a conservative approximation).
 3. If total <= `token_budget`, accept the plan as-is.
 4. Otherwise, reduce in this order until the plan fits within `token_budget`:
-   a. **Retrieval excerpts**: drop lowest-ranked chunks first, then reduce `retrieval_k` until retrieval is empty or budget is met.
-   b. **Document summaries**: not applicable (not implemented).
-   c. **Recent messages**: drop oldest conversation turns first, preserving the most recent turns.
-   d. **Thread summary**: dropped entirely if it doesn't fit after steps a-c.
-   e. **User message**: never truncated. If the plan still exceeds the budget after steps a-d, reject at preflight with an oversize error.
+   a. **Retrieval excerpts**: not truncated by Mini Chat in P1. `file_search` runs on the provider side with the catalog `max_num_results`, and its excerpts are not part of the assembled context; `retrieval_k` is not implemented (ADR-0007).
+   b. **Recent messages**: drop oldest conversation turns first, preserving the most recent turns.
+   c. **Thread summary**: dropped entirely if it doesn't fit after steps a-b.
+   d. **User message**: never truncated. If the plan still exceeds the budget after steps a-c, reject at preflight with an oversize error.
 
 **Determinism note**: given identical inputs (same message history, same retrieval results, same model context window), the truncation algorithm MUST produce the same `ContextPlan`. This property is important for debugging and idempotent retry scenarios. Determinism applies to truncation and ordering logic given identical retrieval inputs. Retrieval results themselves may vary depending on provider behavior.
 
@@ -2974,7 +2982,7 @@ If another message is persisted to the chat while the current request is process
 
 **Deterministic truncation**:
 
-Given the same snapshot boundary and the same retrieval results, the truncation algorithm (see above) MUST produce the same ContextPlan. The truncation priority order (retrieval excerpts first, then document summaries, then oldest messages) is stable and deterministic.
+Given the same snapshot boundary and the same retrieval results, the truncation algorithm (see above) MUST produce the same ContextPlan. The truncation priority order (retrieval excerpts first, then oldest messages, then thread summary) is stable and deterministic.
 
 **Recent messages query**:
 
@@ -3347,7 +3355,7 @@ Each entry specifies the model identifier, provider, tier, capability flags, lim
 | `max_output_tokens` | integer | Model output cap; the applied value is `min(max_output_tokens, streaming.max_output_tokens)`. |
 | `max_input_tokens` | integer | Maximum input tokens per request (`INPUT_TOO_LONG` above it; part of `token_budget`). |
 | `input_tokens_credit_multiplier_micro`, `output_tokens_credit_multiplier_micro` | integer | Credit multipliers (section 5.3). Not exposed via the Models API. |
-| `estimation_budgets` | object | Per-model token estimation budgets for the preflight reserve (same fields as the `estimation_budgets` config section). |
+| `estimation_budgets` | object | Per-model token estimation budgets (same fields as the `estimation_budgets` config section). Parsed but not read in P1; the gear configuration applies to all models ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)). |
 | `max_num_results` | integer | Top-k chunks per `file_search` call. |
 | `web_search_context_size` | `low` \| `medium` \| `high` | Search context size hint for web search. |
 | `max_tool_calls` | integer | Maximum built-in tool calls the provider may make per request (default 2). |
@@ -3628,7 +3636,7 @@ Mini Chat MUST instrument Prometheus metrics on all critical paths so that suppo
 
 #### Metric series (as implemented)
 
-Instruments are defined in `infra/metrics.rs` (OpenTelemetry meter, exported to Prometheus). The prefix is `metrics.prefix` (default: the gear name in snake case, `mini_chat`). The names below are the instrument names; counters are listed without the `_total` suffix that the Prometheus exporter may append (not verified here). Gauges carry no `{instance}` label.
+Instruments are defined in `infra/metrics.rs` (OpenTelemetry meter). The toolkit exports metrics over OTLP (`libs/toolkit/src/telemetry/init.rs`); there is no Prometheus exporter in the process. The prefix is `metrics.prefix` (default: the gear name in snake case, `mini_chat`). The names below are the instrument names; counters are listed without the `_total` suffix. Whether `_total` is appended depends on the OTLP-to-Prometheus conversion downstream (the OpenTelemetry Collector and Prometheus OTLP ingestion usually append it) and is not controlled by this gear. Gauges carry no `{instance}` label.
 
 ##### Emitted
 
@@ -3661,7 +3669,7 @@ Instruments are defined in `infra/metrics.rs` (OpenTelemetry meter, exported to 
 | Uploads | `mini_chat_attachments_pending` | up-down counter | — |
 | Images | `mini_chat_image_inputs_per_turn` | histogram | — |
 | Cleanup | `mini_chat_cleanup_completed`, `mini_chat_cleanup_failed` | counter | `resource_type` |
-| Cleanup | `mini_chat_cleanup_retry` | counter | `resource_type`, `reason` |
+| Cleanup | `mini_chat_cleanup_retry` | counter | `resource_type`; `reason`: `provider_error` (file delete failed) \| `vector_store_delete_failed` |
 | Cleanup | `mini_chat_cleanup_vector_store_with_failed_attachments` | counter | — |
 | Cleanup | `mini_chat_secondary_cleanup_skipped` | counter | `provider_kind` |
 | Audit | `mini_chat_audit_emit` | counter | `result`: `ok` \| `retry` \| `reject` |
@@ -4147,8 +4155,9 @@ Contents (logically):
 - `estimation_budgets` (fixed surcharge token budgets for preflight reserve estimation):
 
   - `image_token_budget` (integer; tokens per image for vision surcharge; > 0 always; see section 5.5.5)
-  - `tool_surcharge_tokens` (integer; fixed token overhead when `file_search` tool is included; see section 5.5.6)
-  - `web_search_surcharge_tokens` (integer; fixed token overhead when `web_search` tool is included; see section 5.5.6)
+  - `tool_surcharge_tokens` (integer; fixed token overhead added when the chat has at least one ready document; see section 5.5.6)
+  - `web_search_surcharge_tokens` (integer; fixed token overhead added when the request sets `web_search.enabled = true`; see section 5.5.6)
+  - `code_interpreter_surcharge_tokens` (integer; fixed token overhead added when the chat has at least one ready code-interpreter (XLSX) attachment; see section 5.5.6)
   - `bytes_per_token_conservative` (integer; conservative bytes-per-token ratio for text estimation; see section 5.5.4; e.g. 3)
   - `fixed_overhead_tokens` (integer; constant overhead for protocol/framing tokens; see section 5.5.4)
   - `safety_margin_pct` (integer; percentage safety margin applied to text estimation; see section 5.5.4; e.g. 20 for 20%)
@@ -4156,9 +4165,9 @@ Contents (logically):
 
 **Estimation Budgets Source (P1)**:
 
-In P1, `estimation_budgets` (image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, bytes_per_token_conservative, fixed_overhead_tokens, safety_margin_pct, minimal_generation_floor) are embedded **per-model** in the policy snapshot catalog (each `ModelCatalogEntry` carries its own `estimation_budgets`). This allows per-model tuning of estimation parameters.
+In P1, `estimation_budgets` (image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, code_interpreter_surcharge_tokens, bytes_per_token_conservative, fixed_overhead_tokens, safety_margin_pct, minimal_generation_floor) come from the gear configuration section `estimation_budgets` (Appendix B) and apply to every model. `ModelCatalogEntry.estimation_budgets` exists in the SDK and is parsed from the policy snapshot, but Mini Chat does not read it; per-model estimation budgets are **not implemented** ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)).
 
-These budgets are used ONLY for preflight reserve estimation and admission control. Values are delivered as part of the policy plugin configuration and are validated at startup (non-negative values, sane bounds, `minimal_generation_floor <= max_output_tokens`). Because they are part of the model catalog entry, changes to `estimation_budgets` for a model constitute a catalog change and trigger a policy version bump.
+These budgets are used ONLY for preflight reserve estimation and admission control. They are validated at startup (`EstimationBudgets::validate`). They are not versioned by `policy_version`; a change takes effect after a restart with the new configuration and does not affect settlement of started turns, which uses persisted per-turn fields.
 
 - `user_limits` (per user allocation; delivered/derived per-user, but tied to `policy_version`):
 
@@ -4225,7 +4234,7 @@ A PolicySnapshot is a versioned, immutable configuration object published by CCM
 
 - `policy_version` (monotonic identifier)
 - `model_catalog` (model entries with credit multipliers, capabilities, tier, display metadata)
-- `estimation_budgets` (fixed surcharge token budgets for preflight reserve estimation). **Source split (normative)**: the fields `bytes_per_token_conservative`, `fixed_overhead_tokens`, `safety_margin_pct`, `image_token_budget`, `tool_surcharge_tokens`, and `web_search_surcharge_tokens` are part of this PolicySnapshot and versioned by `policy_version`. The field `minimal_generation_floor` is sourced from the MiniChat ConfigMap (NOT from this PolicySnapshot) and is captured per-turn into `chat_turns.minimal_generation_floor_applied` at preflight. PolicySnapshot-sourced values take effect when CCM publishes a new `policy_version`. ConfigMap-sourced values take effect on the next preflight after the ConfigMap is reloaded.
+- `estimation_budgets`: **not part of the P1 PolicySnapshot as used by Mini Chat.** All fields, including `minimal_generation_floor`, come from the gear configuration (see "Estimation Budgets Source (P1)" above; [ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)). `minimal_generation_floor` is captured per turn into `chat_turns.minimal_generation_floor_applied` at preflight.
 - global kill switches (`disable_premium_tier`, `force_standard_tier`, `disable_web_search`, `disable_code_interpreter`, `disable_file_search`, `disable_images`)
 
 PolicySnapshot rules:
@@ -4344,10 +4353,10 @@ Quota settlement MUST be deterministic and reproducible from persisted data alon
 
 **Config change isolation (P1)**:
 
-- Changes to MiniChat ConfigMap `estimation_budgets` (bytes_per_token_conservative, safety_margin_pct, image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, minimal_generation_floor) MUST NOT affect settlement of already-started turns.
+- Changes to MiniChat ConfigMap `estimation_budgets` (bytes_per_token_conservative, safety_margin_pct, image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, code_interpreter_surcharge_tokens, minimal_generation_floor) MUST NOT affect settlement of already-started turns.
 - Estimated settlement (sections 5.8, 5.9) reads ONLY persisted per-turn fields (`reserve_tokens`, `max_output_tokens_applied`, `minimal_generation_floor_applied`) and policy snapshot multipliers (via `policy_version_applied`).
 - `minimal_generation_floor_applied` is captured at preflight and persisted on `chat_turns` to ensure deterministic settlement independent of future ConfigMap changes.
-- All other estimation budget parameters (bytes_per_token_conservative, safety_margin_pct, image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens) are preflight-only and MUST NOT be persisted or used by settlement logic.
+- All other estimation budget parameters (bytes_per_token_conservative, safety_margin_pct, image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, code_interpreter_surcharge_tokens) are preflight-only and MUST NOT be persisted or used by settlement logic.
 
 ### 5.3 Credit Arithmetic
 
@@ -4495,7 +4504,7 @@ All variable names below are normative. All sections in this document MUST use t
 
 | Variable | Persisted on | Definition |
 |----------|-------------|------------|
-| `estimated_input_tokens` | derived: `reserve_tokens - max_output_tokens_applied` | Total estimated input tokens (text + image/tool/web_search surcharges). At settlement, re-derived from persisted columns. |
+| `estimated_input_tokens` | derived: `reserve_tokens - max_output_tokens_applied` | Total estimated input tokens (text + image/tool/web_search/code_interpreter surcharges). At settlement, re-derived from persisted columns. |
 | `max_output_tokens_applied` | `chat_turns.max_output_tokens_applied` | The `max_output_tokens` value used for this turn. Hard cap sent to the provider. |
 | `reserve_tokens` | `chat_turns.reserve_tokens` | `estimated_input_tokens + max_output_tokens_applied` (token-denominated total). |
 | `reserved_credits_micro` | `chat_turns.reserved_credits_micro` | `credits_micro(estimated_input_tokens, max_output_tokens_applied, in_mult, out_mult)` (section 5.3). |
@@ -4582,10 +4591,11 @@ mini-chat selects `effective_model` (with downgrade if needed) based on the curr
 
 Then it computes:
 
-- `estimated_text_tokens` — sum of text content, metadata, and retrieved chunks (see `estimation_budgets` from the selected model's catalog entry, section 5.2.1)
-- `image_surcharge_tokens` — if images present, apply `estimation_budgets.image_token_budget` per image (per-model conservative estimate from catalog entry, section 5.2.1)
-- `tool_surcharge_tokens` — apply `estimation_budgets.tool_surcharge_tokens` if tool use enabled (line 3196)
-- `web_search_surcharge_tokens` — apply `estimation_budgets.web_search_surcharge_tokens` if web search enabled (line 3197)
+- `estimated_text_tokens` — sum of text content, metadata, and retrieved chunks (see `estimation_budgets` in the gear configuration, section 5.2.1)
+- `image_surcharge_tokens` — if images present, apply `estimation_budgets.image_token_budget` per image (conservative estimate from the gear configuration, section 5.2.1)
+- `tool_surcharge_tokens` — apply `estimation_budgets.tool_surcharge_tokens` if the chat has at least one ready document (section 5.5.6)
+- `web_search_surcharge_tokens` — apply `estimation_budgets.web_search_surcharge_tokens` if web search enabled (section 5.5.6)
+- `code_interpreter_surcharge_tokens` — apply `estimation_budgets.code_interpreter_surcharge_tokens` if the chat has at least one ready code-interpreter (XLSX) attachment (section 5.5.6)
 - `max_output_tokens_applied` — the `max_output_tokens` value used for this turn; persisted on `chat_turns.max_output_tokens_applied` (immutable after insert)
 - model credit multipliers (`in_mult`, `out_mult`) for the chosen model from the policy snapshot
 
@@ -4597,6 +4607,7 @@ estimated_input_tokens =
   + image_surcharge_tokens
   + tool_surcharge_tokens
   + web_search_surcharge_tokens
+  + code_interpreter_surcharge_tokens
 
 reserve_tokens = estimated_input_tokens + max_output_tokens_applied
 
@@ -4894,7 +4905,7 @@ In the normal scheme you should not exceed limits, because:
    - If `mini_chat_quota_overshoot_total` (incremented once per period, `daily` and `monthly`, for each completed turn with actual tokens > reserve) exceeds 5% of completed turns, operators SHOULD review estimation budgets (image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, safety_margin_pct) and consider increasing conservative margins.
    - Overshoot beyond tolerance (billing capped at reserve) indicates a severe estimation failure. P1 has no series that isolates it; `mini_chat_quota_overshoot_exceeded_total` is not defined.
 
-   **Invariant (P1 normative)**: A COMPLETED turn MUST remain COMPLETED regardless of overshoot magnitude. The "never retroactively cancel a completed response" principle is absolute. Overshoot beyond tolerance caps billing at reserve_tokens, logs the anomaly, but does NOT change turn state to FAILED or prevent response delivery.
+   **Invariant (P1 normative)**: A COMPLETED turn MUST remain COMPLETED regardless of overshoot magnitude. The "never retroactively cancel a completed response" principle is absolute. Overshoot beyond tolerance caps billing at reserve_tokens but does NOT change turn state to FAILED or prevent response delivery. In P1 the cap is silent: no log line or dedicated metric is emitted (the `overshoot_capped` flag on the settlement outcome is not read by any caller).
 
    #### Actual vs Committed Usage (Normative)
 
@@ -5054,11 +5065,11 @@ estimated_text_tokens =
   + safety_margin
 ```
 
-Where (all values from `estimation_budgets` in the policy snapshot, section 5.2.1):
+Where (all values from the gear configuration `estimation_budgets`, section 5.2.1):
 
-- `BYTES_PER_TOKEN_CONSERVATIVE` — `estimation_budgets.bytes_per_token_conservative` (integer; e.g. 3). Policy-snapshot-versioned.
-- `fixed_overhead_tokens` — `estimation_budgets.fixed_overhead_tokens` (integer). Policy-snapshot-versioned.
-- `safety_margin` — `estimation_budgets.safety_margin_pct / 100.0` (integer percentage stored in snapshot; e.g. stored as `20` meaning 20%). Applied as: `estimated_text_tokens = ceil(base_estimate * (1 + safety_margin_pct / 100.0))`. The division MUST use floating-point arithmetic — integer division (e.g. `20 / 100 = 0` in Rust/Java/Go) MUST NOT be used. Type: `safety_margin_pct` is stored as integer; the division result is f64/double. Policy-snapshot-versioned.
+- `BYTES_PER_TOKEN_CONSERVATIVE` — `estimation_budgets.bytes_per_token_conservative` (integer; e.g. 3).
+- `fixed_overhead_tokens` — `estimation_budgets.fixed_overhead_tokens` (integer).
+- `safety_margin` — `estimation_budgets.safety_margin_pct / 100.0` (integer percentage; e.g. stored as `20` meaning 20%). Applied as: `estimated_text_tokens = ceil(base_estimate * (1 + safety_margin_pct / 100.0))`. The division MUST use floating-point arithmetic — integer division (e.g. `20 / 100 = 0` in Rust/Java/Go) MUST NOT be used. Type: `safety_margin_pct` is stored as integer; the division result is f64/double.
 
 Underestimation is unacceptable.
 Overestimation is acceptable.
@@ -5077,7 +5088,7 @@ In P1 we use a fixed surcharge:
 image_surcharge_tokens = num_images * image_token_budget
 ```
 
-`image_token_budget` — `estimation_budgets.image_token_budget` from the policy snapshot (section 5.2.1). Policy-snapshot-versioned. Must be conservative (e.g., p95/p99 of historical usage).
+`image_token_budget` — `estimation_budgets.image_token_budget` from the gear configuration (section 5.2.1). Must be conservative (e.g., p95/p99 of historical usage).
 
 Important:
 
@@ -5091,20 +5102,24 @@ Because the provider may add hidden prompt content for tool wiring and web searc
 In P1 we use a fixed per-turn surcharge (applied once per request, not per invocation):
 
 ```
-tool_surcharge_tokens = estimation_budgets.tool_surcharge_tokens   # if tool use enabled for this turn
+tool_surcharge_tokens = estimation_budgets.tool_surcharge_tokens   # if the chat has >= 1 ready document
 web_search_surcharge_tokens = estimation_budgets.web_search_surcharge_tokens  # if web_search enabled for this turn
+code_interpreter_surcharge_tokens = estimation_budgets.code_interpreter_surcharge_tokens  # if the chat has >= 1 ready code-interpreter (XLSX) attachment
 ```
 
 > Where:
 >
-> - `tool_surcharge_tokens` — direct lookup of `estimation_budgets.tool_surcharge_tokens` from the PolicySnapshot identified by `policy_version_applied` for this turn. Non-negative integer. Applied once per turn when `file_search` or any tool is enabled, regardless of the number of internal tool invocations the provider performs. Policy-snapshot-versioned.
-> - `web_search_surcharge_tokens` — direct lookup of `estimation_budgets.web_search_surcharge_tokens` from the same PolicySnapshot. Non-negative integer. Applied once per turn when `web_search.enabled = true`. Policy-snapshot-versioned.
+> - `tool_surcharge_tokens` — value of `estimation_budgets.tool_surcharge_tokens` from the gear configuration. Non-negative integer. Applied once per turn when the chat has at least one ready document, regardless of the number of internal tool invocations the provider performs.
+> - `web_search_surcharge_tokens` — value of `estimation_budgets.web_search_surcharge_tokens` from the gear configuration. Non-negative integer. Applied once per turn when `web_search.enabled = true`.
+> - `code_interpreter_surcharge_tokens` — value of `estimation_budgets.code_interpreter_surcharge_tokens` from the gear configuration. Non-negative integer (default 1000). Applied once per turn when the chat has at least one ready code-interpreter (XLSX) attachment.
 > - If a feature is not enabled for this turn, its surcharge contribution is `0`.
-> - Both values are preflight-only: they contribute to `estimated_input_tokens` and `reserve_tokens` but are NOT persisted per-turn and are NOT used at settlement time.
+> - All three values are preflight-only: they contribute to `estimated_input_tokens` and `reserve_tokens` but are NOT persisted per-turn and are NOT used at settlement time.
 
 ##### Tool and Web Search Cost Model (P1 Scope Clarification)
 
-In P1, `tool_surcharge_tokens` and `web_search_surcharge_tokens` are **fixed per-turn budget additions**. They are applied once per request when the corresponding feature is enabled in the turn request. They DO NOT scale with the number of internal tool invocations, search calls, retrieval passes, reranks, or provider sub-requests. The number of backend search calls or tool iterations the provider performs internally is considered an implementation detail and MUST NOT influence credit computation in P1.
+In P1, `tool_surcharge_tokens`, `web_search_surcharge_tokens` and `code_interpreter_surcharge_tokens` are **fixed per-turn budget additions**. They are applied once per request when the corresponding feature is enabled for the turn. They DO NOT scale with the number of internal tool invocations, search calls, retrieval passes, reranks, or provider sub-requests. The number of backend search calls or tool iterations the provider performs internally is considered an implementation detail and MUST NOT influence credit computation in P1.
+
+**Surcharge inputs (current behaviour)**: the file_search and code_interpreter surcharges are decided from the chat's attachments before preflight: `tool_surcharge_tokens` is added whenever the chat has at least one ready document, and `code_interpreter_surcharge_tokens` whenever it has at least one ready code-interpreter (XLSX) attachment. The kill switches (`disable_file_search`, `disable_code_interpreter`) and the effective model's `tool_support` are applied only after preflight, when the tool list is built. The reserve can therefore include a surcharge for a tool that is then left out of the provider request. This is a conservative over-reservation. Actual settlement charges provider-reported usage and releases the extra reserve; estimated settlement (section 5.8) derives `estimated_input_tokens` from the persisted `reserve_tokens`, so on that path the unused surcharge is charged. `web_search_surcharge_tokens` follows `web_search.enabled`; a request with `web_search.enabled = true` under `disable_web_search` is rejected before estimation.
 
 The surcharge model is **deterministic and independent of provider runtime behavior**: given the same policy snapshot and the same set of enabled features, the surcharge contribution to reserve is identical regardless of what the provider does internally during execution.
 
@@ -5121,6 +5136,7 @@ After estimation (canonical form — identical to section 5.4.1):
 ```
 estimated_input_tokens =
   estimated_text_tokens + image_surcharge_tokens + tool_surcharge_tokens + web_search_surcharge_tokens
+  + code_interpreter_surcharge_tokens
 
 reserve_tokens = estimated_input_tokens + max_output_tokens_applied
 
@@ -5284,6 +5300,7 @@ The following `estimation_budgets` parameters are used ONLY for preflight reserv
 - `image_token_budget` — preflight vision surcharge only
 - `tool_surcharge_tokens` — preflight tool surcharge only
 - `web_search_surcharge_tokens` — preflight web search surcharge only
+- `code_interpreter_surcharge_tokens` — preflight code interpreter surcharge only
 
 **Exception**: `minimal_generation_floor` is the ONLY estimation budget parameter that influences estimated settlement. It is captured at preflight from MiniChat ConfigMap and persisted as `chat_turns.minimal_generation_floor_applied` to ensure deterministic settlement independent of future ConfigMap changes.
 
@@ -5965,7 +5982,7 @@ This eliminates the ambiguity between "reserve taken, provider not called" and "
 
 #### Operational Metric
 
-- `mini_chat_streams_aborted_total` (counter) — incremented each time a turn transitions to `ABORTED` billing state. Labels: `{trigger}` where `trigger` is one of: `client_disconnect`, `pod_crash`, `orphan_timeout`, `internal_abort`.
+- `mini_chat_streams_aborted_total` (counter) — incremented each time a turn transitions to `ABORTED` billing state. Labels: `{trigger}` where `trigger` is one of: `client_disconnect`, `orphan_timeout`, `internal_abort`. There is no `pod_crash` value: a turn left by a crashed pod is finalized by the orphan watchdog and counted as `orphan_timeout`.
 
 ### 5.9 Terminal Error Reconciliation Rule
 
@@ -6378,12 +6395,11 @@ A monotonic, strictly increasing integer that identifies a specific immutable po
 - User allocation logic changes affecting `GetUserLimits` output
 - User entitlements/plan changes
 
-**Note (P1)**: Estimation budgets (image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, etc.) are embedded **per-model in the policy snapshot catalog** (each `ModelCatalogEntry` carries its own `estimation_budgets`). Changes to `estimation_budgets` for a model constitute a catalog change and MUST trigger a policy version bump. See section 5.2.1 "Estimation Budgets Source (P1)" for details.
+**Note (P1)**: Estimation budgets come from the gear configuration, not from the policy snapshot catalog; per-model budgets are not implemented ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)). See section 5.2.1 "Estimation Budgets Source (P1)".
 
 **MiniChat Integration**:
-- MiniChat caches snapshots keyed by `(user_id, policy_version)`.
-- MiniChat caches user limits keyed by `(user_id, policy_version)`.
-- CCM is NOT on the per-turn hot path.
+- Future ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)): MiniChat caches snapshots and user limits keyed by `(user_id, policy_version)`, so CCM is not on the per-turn hot path.
+- Current behaviour (P1): there is no cache. Every model resolution, preflight and settlement calls the policy plugin for the current version, the snapshot and the user limits; settlement does so inside the finalization transaction. With the bundled in-process static plugin (fixed version 1) these calls are cheap and cannot fail. A remote CCM plugin would be on the per-turn hot path until the cache is implemented.
 
 ### GetCurrentPolicyVersion
 
@@ -6465,10 +6481,10 @@ A monotonic, strictly increasing integer that identifies a specific immutable po
 - `provider_display_name` is UI-only and MUST NOT be a routing key, deployment handle, or internal provider identifier.
 
 **P1 Note — Estimation Budgets**:
-- In P1, `estimation_budgets` (image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, bytes_per_token_conservative, fixed_overhead_tokens, safety_margin_pct, minimal_generation_floor) are embedded **per-model** in each `ModelCatalogEntry` within the PolicySnapshot.
+- `ModelCatalogEntry.estimation_budgets` is carried in the PolicySnapshot, but P1 Mini Chat does not read it; the gear configuration `estimation_budgets` applies to all models ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)).
 - This enables per-model tuning of estimation parameters (e.g. different `bytes_per_token_conservative` for different model families).
 - MiniChat persists `minimal_generation_floor_applied` per turn (on `chat_turns` table) for deterministic estimated settlement independent of future policy changes.
-- CCM PolicySnapshot MUST include `estimation_budgets` on each model catalog entry.
+- (Future) CCM PolicySnapshot includes `estimation_budgets` on each model catalog entry once per-model budgets are implemented.
 
 **Multimodal Capability Flags**: Enumerated values include:
 - `VISION_INPUT`
@@ -6701,7 +6717,7 @@ All fields below are per-model entries inside the catalog.
 | `max_input_tokens` | `integer` | **CCM API**: `GET /policies/{v}` | `snapshot.model_catalog[].max_input_tokens` |
 | `max_tool_calls` | `integer` | **CCM API**: `GET /policies/{v}` | `snapshot.model_catalog[].max_tool_calls` (default 2) |
 | `max_num_results` | `integer` | **CCM API**: `GET /policies/{v}` | `snapshot.model_catalog[].max_num_results` (file_search top-k) |
-| `estimation_budgets.*` | object | **CCM API**: `GET /policies/{v}` | `snapshot.model_catalog[].estimation_budgets` |
+| `estimation_budgets.*` | object | Gear configuration (P1); CCM `snapshot.model_catalog[].estimation_budgets` is Future | not read in P1 |
 | `is_default` | `bool` | **CCM API**: `GET /policies/{v}` | `snapshot.model_catalog[].preference.is_default` |
 | `input_tokens_credit_multiplier` | `number` | **CCM API**: `GET /policies/{v}` | `snapshot.model_catalog[].input_tokens_credit_multiplier_micro` |
 | `output_tokens_credit_multiplier` | `number` | **CCM API**: `GET /policies/{v}` | `snapshot.model_catalog[].output_tokens_credit_multiplier_micro` |
@@ -6867,7 +6883,7 @@ The handler resolves the effective limit before streaming body bytes. If the CCM
 
 **Streaming upload**: The upload endpoint uses streaming multipart ingestion (`field.chunk()` loop) with incremental byte counting. Oversize files are rejected mid-stream with HTTP 400 `out_of_range` (`FILE_TOO_LARGE`) without buffering the full body. An Axum `DefaultBodyLimit` layer (25 MiB + 64 KiB overhead) acts as a coarse outer guard on the upload route, overriding the API gateway's default 16 MiB limit.
 
-| `disable_code_interpreter` (kill switch) | `bool` | — | **CCM API**: `GET /policies/{v}` | `snapshot.kill_switches.disable_code_interpreter` |
+The `disable_code_interpreter` kill switch is listed in B.2.3.
 
 Note: per-model `max_file_size_mb` is available from **CCM API**: `GET /policies/{v}` → `snapshot.model_catalog[].general_config.max_file_size_mb`. Per-model `tool_support.code_interpreter` is available from `snapshot.model_catalog[].general_config.tool_support.code_interpreter`.
 
