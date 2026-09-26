@@ -2631,4 +2631,244 @@ mod tests {
             "tier:premium should NOT have rows for standard"
         );
     }
+
+    // ── Quota status: configured warning threshold (E2E 14-13) ──
+
+    fn make_status_service(db: Arc<DbProvider>, warning_threshold_pct: u8) -> TestQuotaService {
+        TestQuotaService::new(
+            db,
+            Arc::new(QuotaUsageRepo),
+            Arc::new(MockPolicySnapshotProvider::new(default_snapshot())),
+            Arc::new(MockUserLimitsProvider::new(default_limits())),
+            crate::config::EstimationBudgets::default(),
+            QuotaConfig {
+                warning_threshold_pct,
+                ..QuotaConfig::default()
+            },
+        )
+    }
+
+    /// Reserve `amount_micro` in the daily `total` bucket for today.
+    async fn seed_daily_total_usage(db: &DbProvider, amount_micro: i64, today: time::Date) {
+        use crate::domain::repos::IncrementReserveParams;
+        use crate::domain::repos::QuotaUsageRepository as QURepo;
+
+        let conn = db.conn().unwrap();
+        QuotaUsageRepo
+            .increment_reserve(
+                &conn,
+                &AccessScope::for_tenant(Uuid::nil()),
+                IncrementReserveParams {
+                    tenant_id: Uuid::nil(),
+                    user_id: Uuid::nil(),
+                    period_type: PeriodType::Daily,
+                    period_start: today,
+                    bucket: "total".to_owned(),
+                    amount_micro,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn daily_total_status(
+        svc: &TestQuotaService,
+    ) -> (u8, crate::domain::model::quota::PeriodResult) {
+        use crate::domain::stream_events::{QuotaPeriod, QuotaTier};
+
+        let status = svc
+            .get_quota_status(
+                &AccessScope::for_tenant(Uuid::nil()),
+                Uuid::nil(),
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        let period = status
+            .tiers
+            .into_iter()
+            .find(|t| t.tier == QuotaTier::Total)
+            .expect("total tier")
+            .periods
+            .into_iter()
+            .find(|p| p.period == QuotaPeriod::Daily)
+            .expect("daily period");
+        (status.warning_threshold_pct, period)
+    }
+
+    #[tokio::test]
+    async fn quota_status_warning_uses_configured_threshold() {
+        // Daily total limit is 100_000_000; threshold 60 => warning at remaining <= 40%.
+        assert_eq!(
+            default_limits().standard.limit_daily_credits_micro,
+            100_000_000
+        );
+        let today = OffsetDateTime::now_utc().date();
+
+        // 59% used => remaining 41%: below the configured boundary.
+        let db = mock_db_provider(inmem_db().await);
+        seed_daily_total_usage(&db, 59_000_000, today).await;
+        let (threshold, period) =
+            daily_total_status(&make_status_service(Arc::clone(&db), 60)).await;
+        assert_eq!(threshold, 60, "status must echo the configured threshold");
+        assert_eq!(period.remaining_percentage, 41);
+        assert!(
+            !period.warning,
+            "remaining 41% must not warn at threshold 60"
+        );
+        assert!(!period.exhausted);
+
+        // 60% used => remaining 40%: exactly at the configured boundary.
+        let db = mock_db_provider(inmem_db().await);
+        seed_daily_total_usage(&db, 60_000_000, today).await;
+        let (_, period) = daily_total_status(&make_status_service(Arc::clone(&db), 60)).await;
+        assert_eq!(period.remaining_percentage, 40);
+        assert!(period.warning, "remaining 40% must warn at threshold 60");
+        assert!(!period.exhausted);
+
+        // Same usage with the default threshold (80) must not warn: the flag
+        // is driven by config, not by a hardcoded 80.
+        let (threshold, period) = daily_total_status(&make_status_service(db, 80)).await;
+        assert_eq!(threshold, 80);
+        assert!(
+            !period.warning,
+            "remaining 40% must not warn at threshold 80"
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_warnings_follow_configured_threshold() {
+        use crate::domain::stream_events::{QuotaPeriod, QuotaTier};
+
+        assert_eq!(
+            default_limits().standard.limit_daily_credits_micro,
+            100_000_000
+        );
+        let today = OffsetDateTime::now_utc().date();
+        let db = mock_db_provider(inmem_db().await);
+        seed_daily_total_usage(&db, 60_000_000, today).await;
+
+        let warnings = make_status_service(db, 60)
+            .compute_quota_warnings(
+                &AccessScope::for_tenant(Uuid::nil()),
+                Uuid::nil(),
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        let daily = warnings
+            .iter()
+            .find(|w| w.tier == QuotaTier::Total && w.period == QuotaPeriod::Daily)
+            .expect("daily total warning entry");
+        assert!(daily.warning);
+        assert!(daily.next_reset.is_some(), "next_reset is set when warning");
+    }
+
+    // ── Settlement uses the snapshot of policy_version_applied (E2E 14-10) ──
+
+    /// Policy provider holding one snapshot per version; records requested versions.
+    struct VersionedPolicyProvider {
+        current: u64,
+        snapshots: std::collections::HashMap<u64, PolicySnapshot>,
+        requested: std::sync::Mutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PolicySnapshotProvider for VersionedPolicyProvider {
+        async fn get_snapshot(
+            &self,
+            _user_id: Uuid,
+            policy_version: u64,
+        ) -> Result<PolicySnapshot, DomainError> {
+            self.requested.lock().unwrap().push(policy_version);
+            self.snapshots
+                .get(&policy_version)
+                .cloned()
+                .ok_or_else(|| DomainError::internal(format!("no snapshot v{policy_version}")))
+        }
+
+        async fn get_current_version(&self, _user_id: Uuid) -> Result<u64, DomainError> {
+            Ok(self.current)
+        }
+    }
+
+    #[tokio::test]
+    async fn settle_uses_snapshot_of_policy_version_applied_not_current() {
+        let mut v1_model = make_model("gpt-5", ModelTier::Premium, true, true);
+        v1_model.input_tokens_credit_multiplier_micro = 1_000_000;
+        v1_model.output_tokens_credit_multiplier_micro = 1_000_000;
+        let v1 = PolicySnapshot {
+            policy_version: 1,
+            model_catalog: vec![v1_model],
+            ..default_snapshot()
+        };
+        // v2 reprices the model and moves it to the standard tier.
+        let mut v2_model = make_model("gpt-5", ModelTier::Standard, true, true);
+        v2_model.input_tokens_credit_multiplier_micro = 3_000_000;
+        v2_model.output_tokens_credit_multiplier_micro = 3_000_000;
+        let v2 = PolicySnapshot {
+            policy_version: 2,
+            model_catalog: vec![v2_model],
+            ..default_snapshot()
+        };
+        let provider = Arc::new(VersionedPolicyProvider {
+            current: 2,
+            snapshots: [(1, v1), (2, v2)].into_iter().collect(),
+            requested: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let db = mock_db_provider(inmem_db().await);
+        let svc = TestQuotaService::new(
+            Arc::clone(&db),
+            Arc::new(QuotaUsageRepo),
+            Arc::clone(&provider) as Arc<dyn PolicySnapshotProvider>,
+            Arc::new(MockUserLimitsProvider::new(default_limits())),
+            crate::config::EstimationBudgets::default(),
+            QuotaConfig::default(),
+        );
+        let today = OffsetDateTime::now_utc().date();
+        seed_reserve(&db, ModelTier::Premium, 10_000, today).await;
+
+        let conn = db.conn().unwrap();
+        let scope = AccessScope::for_tenant(Uuid::nil());
+        let input = settlement_input(
+            "gpt-5",
+            ModelTier::Premium,
+            2000,
+            10_000,
+            SettlementPath::Actual {
+                input_tokens: 800,
+                output_tokens: 200,
+            },
+            today,
+        );
+        assert_eq!(input.policy_version_applied, 1);
+
+        let outcome = svc.settle(&conn, &scope, input).await.unwrap();
+
+        assert_eq!(*provider.requested.lock().unwrap(), vec![1]);
+        // v1 multipliers (1x): 800 + 200. v2 (3x) would give 3000.
+        assert_eq!(outcome.actual_credits_micro, 1000);
+
+        // v1 tier is premium, so both buckets are settled (v2 would touch total only).
+        use crate::domain::repos::QuotaUsageRepository as QURepo;
+        let rows = QuotaUsageRepo
+            .find_bucket_rows(&conn, &scope, Uuid::nil(), Uuid::nil())
+            .await
+            .unwrap();
+        for bucket in ["total", "tier:premium"] {
+            for (period_type, period_start) in default_periods(today) {
+                let row = rows
+                    .iter()
+                    .find(|r| {
+                        r.bucket == bucket
+                            && r.period_type == period_type
+                            && r.period_start == period_start
+                    })
+                    .unwrap_or_else(|| panic!("missing {bucket} row"));
+                assert_eq!(row.spent_credits_micro, 1000, "{bucket} spent");
+                assert_eq!(row.reserved_credits_micro, 0, "{bucket} reserve released");
+            }
+        }
+    }
 }

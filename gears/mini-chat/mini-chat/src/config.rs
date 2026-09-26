@@ -1227,6 +1227,34 @@ mod tests {
     }
 
     #[test]
+    fn quota_config_warning_threshold_boundaries() {
+        for (pct, ok) in [
+            (0, false),
+            (1, true),
+            (99, true),
+            (100, false),
+            (255, false),
+        ] {
+            let result = QuotaConfig {
+                warning_threshold_pct: pct,
+                ..QuotaConfig::default()
+            }
+            .validate();
+            assert_eq!(
+                result.is_ok(),
+                ok,
+                "warning_threshold_pct={pct}: {result:?}"
+            );
+            if !ok {
+                assert!(
+                    result.unwrap_err().contains("warning_threshold_pct"),
+                    "error must name the field for pct={pct}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn channel_capacity_boundaries() {
         let valid = StreamingConfig::default();
 

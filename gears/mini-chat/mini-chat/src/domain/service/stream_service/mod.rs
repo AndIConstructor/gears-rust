@@ -6614,4 +6614,257 @@ mod tests {
             "no quota reserve may be written for a turn that never started"
         );
     }
+
+    // ── Atomic reserve + user message + turn (E2E 09-03) ──
+
+    /// Runs the real preflight and then `reserve_and_create_turn` directly,
+    /// skipping the pre-stream guards so the failure comes from the turn
+    /// INSERT inside the transaction (the race the guards cannot close).
+    async fn reserve_and_create_turn_after_preflight(
+        svc: &StreamService<
+            TurnRepo,
+            MsgRepo,
+            OrmQuotaUsageRepo,
+            OrmChatRepo,
+            MockThreadSummaryRepo,
+            OrmAttachmentRepo,
+            OrmVectorStoreRepo,
+            OrmMessageAttachmentRepo,
+        >,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        chat_id: Uuid,
+        request_id: Uuid,
+    ) -> Result<Uuid, StreamError> {
+        let content = "hello".to_owned();
+        let computed = svc
+            .quota
+            .preflight_evaluate(crate::domain::model::quota::PreflightInput {
+                tenant_id,
+                user_id,
+                selected_model: "gpt-5.2".to_owned(),
+                utf8_bytes: content.len() as u64,
+                num_images: 0,
+                tools_enabled: false,
+                web_search_enabled: false,
+                code_interpreter_enabled: false,
+                max_output_tokens_cap: svc.streaming_config.max_output_tokens,
+                prior_context_tokens: 0,
+            })
+            .await
+            .expect("preflight evaluate");
+        assert!(
+            !computed.buckets.is_empty() && computed.reserved_credits_micro > 0,
+            "preflight must produce a reserve for the test to be meaningful"
+        );
+        let pf = super::types::flatten_preflight(computed.decision.clone()).expect("allow");
+        svc.reserve_and_create_turn(
+            &AccessScope::for_tenant(tenant_id),
+            &pf,
+            computed,
+            tenant_id,
+            user_id,
+            chat_id,
+            request_id,
+            "user".to_owned(),
+            content,
+            Vec::new(),
+            false,
+        )
+        .await
+    }
+
+    /// Asserts the failed transaction left no user message and no quota reserve.
+    async fn assert_nothing_persisted(
+        db: &Arc<DbProvider>,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        chat_id: Uuid,
+        request_id: Uuid,
+    ) {
+        use crate::domain::repos::{
+            ChatRepository as _, MessageRepository as _, QuotaUsageRepository as _,
+        };
+
+        let conn = db.conn().unwrap();
+        let scope = AccessScope::allow_all();
+        let chat_repo = OrmChatRepo::new(toolkit_db::odata::LimitCfg {
+            default: 20,
+            max: 100,
+        });
+        assert_eq!(
+            chat_repo
+                .count_messages(&conn, &scope, chat_id)
+                .await
+                .unwrap(),
+            0,
+            "user message must be rolled back"
+        );
+        let msg_repo = MsgRepo::new(toolkit_db::odata::LimitCfg {
+            default: 20,
+            max: 100,
+        });
+        assert!(
+            msg_repo
+                .find_user_message_by_request_id(&conn, &scope, chat_id, request_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "no user message for the failed request_id"
+        );
+        let rows = OrmQuotaUsageRepo
+            .find_bucket_rows(&conn, &scope, tenant_id, user_id)
+            .await
+            .unwrap();
+        assert!(
+            rows.iter().all(|r| r.reserved_credits_micro == 0),
+            "quota reserve must be rolled back, got: {:?}",
+            rows.iter()
+                .map(|r| (&r.bucket, r.reserved_credits_micro))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn reserve_and_create_turn_rolls_back_on_running_turn_conflict() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        // A concurrent request already holds the one running turn for the chat.
+        let other_turn = Uuid::new_v4();
+        insert_running_turn(&db, tenant_id, user_id, chat_id, Uuid::new_v4(), other_turn).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service(db.clone(), provider);
+
+        let err =
+            reserve_and_create_turn_after_preflight(&svc, tenant_id, user_id, chat_id, request_id)
+                .await
+                .expect_err("turn insert must hit the running-turn unique index");
+        match err {
+            StreamError::Conflict { code, .. } => assert_eq!(code, "turn_already_running"),
+            other => panic!("expected Conflict, got: {other:?}"),
+        }
+
+        assert_nothing_persisted(&db, tenant_id, user_id, chat_id, request_id).await;
+        let conn = db.conn().unwrap();
+        let running = TurnRepo
+            .find_running_by_chat_id(&conn, &AccessScope::allow_all(), chat_id)
+            .await
+            .unwrap()
+            .expect("pre-existing running turn stays");
+        assert_eq!(running.id, other_turn);
+        assert!(
+            TurnRepo
+                .find_by_chat_and_request_id(&conn, &AccessScope::allow_all(), chat_id, request_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "no turn for the failed request_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserve_and_create_turn_rolls_back_on_duplicate_request_id() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        // A finished turn with the same request_id and no user message, so the
+        // message INSERT succeeds and only UNIQUE(chat_id, request_id) on the
+        // turn INSERT fails.
+        let existing_turn = Uuid::new_v4();
+        insert_running_turn(&db, tenant_id, user_id, chat_id, request_id, existing_turn).await;
+        let conn = db.conn().unwrap();
+        let affected = TurnRepo
+            .cas_update_state(
+                &conn,
+                &AccessScope::allow_all(),
+                CasTerminalParams {
+                    turn_id: existing_turn,
+                    state: TurnState::Failed,
+                    error_code: Some("test".to_owned()),
+                    error_detail: None,
+                    assistant_message_id: None,
+                    provider_response_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected, 1);
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service(db.clone(), provider);
+
+        let err =
+            reserve_and_create_turn_after_preflight(&svc, tenant_id, user_id, chat_id, request_id)
+                .await
+                .expect_err("turn insert must hit UNIQUE(chat_id, request_id)");
+        assert!(
+            matches!(err, StreamError::Conflict { .. }),
+            "expected Conflict, got: {err:?}"
+        );
+
+        assert_nothing_persisted(&db, tenant_id, user_id, chat_id, request_id).await;
+        let turn = TurnRepo
+            .find_by_chat_and_request_id(&conn, &AccessScope::allow_all(), chat_id, request_id)
+            .await
+            .unwrap()
+            .expect("original turn stays");
+        assert_eq!(turn.id, existing_turn);
+        assert_eq!(turn.state, TurnState::Failed);
+    }
+
+    /// Control for the rollback tests: without a conflict the same call
+    /// persists the message, the turn and the reserve.
+    #[tokio::test]
+    async fn reserve_and_create_turn_commits_all_rows_on_success() {
+        use crate::domain::repos::QuotaUsageRepository as _;
+
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service(db.clone(), provider);
+
+        let turn_id =
+            reserve_and_create_turn_after_preflight(&svc, tenant_id, user_id, chat_id, request_id)
+                .await
+                .expect("turn created");
+
+        let conn = db.conn().unwrap();
+        let scope = AccessScope::allow_all();
+        let turn = TurnRepo
+            .find_by_chat_and_request_id(&conn, &scope, chat_id, request_id)
+            .await
+            .unwrap()
+            .expect("turn persisted");
+        assert_eq!(turn.id, turn_id);
+        assert_eq!(turn.state, TurnState::Running);
+        let msgs = MsgRepo::new(toolkit_db::odata::LimitCfg {
+            default: 20,
+            max: 100,
+        })
+        .find_user_message_by_request_id(&conn, &scope, chat_id, request_id)
+        .await
+        .unwrap();
+        assert!(msgs.is_some(), "user message persisted");
+        let rows = OrmQuotaUsageRepo
+            .find_bucket_rows(&conn, &scope, tenant_id, user_id)
+            .await
+            .unwrap();
+        assert!(
+            rows.iter().any(|r| r.reserved_credits_micro > 0),
+            "quota reserve persisted"
+        );
+    }
 }
