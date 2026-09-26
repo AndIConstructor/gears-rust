@@ -11,12 +11,17 @@ import httpx
 
 from .conftest import (
     API_PREFIX,
+    DEFAULT_MODEL,
+    TINY_CTX_MODEL,
     assert_problem,
     expect_done,
     expect_stream_started,
     parse_sse,
+    query_db,
     slow_scenario,
+    uuid_from_db,
 )
+from .test_attachments import _upload, _upload_ready
 
 # A request body that fails JSON deserialization (missing required field,
 # wrong type) is rejected by axum's `Json` extractor before the handler runs.
@@ -232,6 +237,80 @@ class TestStreamPreflightErrors:
         )
         assert_problem(resp, 400, "invalid_argument", field_reason="invalid_attachment")
         assert mock_provider.get_last_request() is None
+
+
+def _chat_turn_count(chat_id: str) -> int:
+    return query_db(
+        "SELECT COUNT(*) AS n FROM chat_turns WHERE chat_id = ?", (chat_id,),
+    )[0]["n"]
+
+
+def _post_stream(chat_id: str, body: dict) -> httpx.Response:
+    return httpx.post(
+        f"{API_PREFIX}/chats/{chat_id}/messages:stream", json=body,
+        headers={"Accept": "text/event-stream"}, timeout=30,
+    )
+
+
+class TestStreamInvalidAttachments:
+    """`attachment_ids` that exist but cannot be used: 400 invalid_attachment,
+    no turn row, the provider is not called (ADR-0004: invalid, foreign or
+    not-ready attachment_ids)."""
+
+    def _assert_rejected(self, chat_id: str, attachment_ids: list[str], mock_provider) -> None:
+        mock_provider.clear_captured_requests()
+        resp = _post_stream(chat_id, {"content": "Use the file.", "attachment_ids": attachment_ids})
+        assert_problem(resp, 400, "invalid_argument", field_reason="invalid_attachment")
+        assert mock_provider.get_captured_requests() == []
+        assert _chat_turn_count(chat_id) == 0
+
+    def test_attachment_of_other_chat_rejected(self, chat, chat_with_model, mock_provider):
+        other_chat = chat_with_model(DEFAULT_MODEL)["id"]
+        att_id = _upload_ready(other_chat, "other.txt", b"other chat document", "text/plain")
+        self._assert_rejected(chat["id"], [att_id], mock_provider)
+
+    def test_failed_attachment_rejected(self, request, chat, mock_provider):
+        """An attachment whose provider upload failed (status `failed`) is not ready."""
+        if request.config.getoption("mode") == "online":
+            pytest.skip("injects a provider upload fault (offline mode)")
+        chat_id = chat["id"]
+        mock_provider.set_fault("POST", "/files", 500)
+        assert _upload(chat_id, "fail.txt", b"upload fails", "text/plain").status_code == 503
+        rows = query_db("SELECT id, status FROM attachments WHERE chat_id = ?", (chat_id,))
+        assert [r["status"] for r in rows] == ["failed"], rows
+        self._assert_rejected(chat_id, [uuid_from_db(rows[0]["id"])], mock_provider)
+
+    def test_duplicate_attachment_ids_rejected(self, chat, mock_provider):
+        chat_id = chat["id"]
+        att_id = _upload_ready(chat_id, "dup.txt", b"one document", "text/plain")
+        self._assert_rejected(chat_id, [att_id, att_id], mock_provider)
+
+
+class TestStreamInputLimits:
+    """Token limits checked before the turn is created, on the small-context
+    model gpt-4.1-mini-tiny-ctx (base.yaml: context_window 4096,
+    max_output_tokens 1024, max_input_tokens 3000; 4 bytes per token,
+    500 fixed overhead tokens per item, 10% safety margin)."""
+
+    def _assert_rejected(self, chat_id: str, content: str, reason: str, mock_provider) -> None:
+        mock_provider.clear_captured_requests()
+        resp = _post_stream(chat_id, {"content": content})
+        assert_problem(resp, 400, "out_of_range", field_reason=reason)
+        assert mock_provider.get_captured_requests() == []
+        assert _chat_turn_count(chat_id) == 0
+
+    def test_message_over_max_input_tokens_400(self, chat_with_model, mock_provider):
+        """01-08: 12000 bytes are estimated at (3000 + 500) * 1.1 = 3850 tokens
+        > max_input_tokens 3000: 400 out_of_range INPUT_TOO_LONG."""
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        self._assert_rejected(chat_id, "x" * 12_000, "INPUT_TOO_LONG", mock_provider)
+
+    def test_mandatory_context_over_budget_400(self, chat_with_model, mock_provider):
+        """01-08: 6000 bytes (2200 tokens) pass max_input_tokens, but with the
+        system prompt (587 tokens) they exceed the context budget
+        4096 - 1024 - 500 = 2572: 400 out_of_range CONTEXT_BUDGET_EXCEEDED."""
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        self._assert_rejected(chat_id, "x" * 6_000, "CONTEXT_BUDGET_EXCEEDED", mock_provider)
 
 
 @pytest.mark.multi_provider

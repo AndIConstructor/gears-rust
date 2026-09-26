@@ -17,10 +17,15 @@ from .conftest import (
     API_PREFIX,
     NO_AUTH,
     TOKEN_TENANT_B,
+    TOKEN_USER_A,
     TOKEN_USER_B,
+    USER_A_ID,
+    assert_no_reserves,
     auth_headers,
     expect_done,
     expect_stream_started,
+    find_period,
+    get_quota_status,
     stream_message,
 )
 
@@ -164,6 +169,8 @@ class TestQuotaIsolation:
     """Usage is accounted per user."""
 
     def test_other_user_usage_is_not_charged(self, owned):
+        """A's turn is charged to A (total daily grows by the turn's cost) and
+        leaves B's usage unchanged."""
         def used(token: str) -> int:
             resp = httpx.get(f"{API_PREFIX}/quota/status", headers=auth_headers(token))
             assert resp.status_code == 200, resp.text
@@ -171,8 +178,18 @@ class TestQuotaIsolation:
                 p["used_credits_micro"] for t in resp.json()["tiers"] for p in t["periods"]
             )
 
+        def used_total_daily(token: str) -> int:
+            return find_period(get_quota_status(token=token), "total", "daily")["used_credits_micro"]
+
+        before_a = used_total_daily(TOKEN_USER_A)
         before_b = used(TOKEN_USER_B)
         status, events, _ = stream_message(owned["chat_id"], "Say OK again.")
         assert status == 200
-        expect_done(events)
+        usage = expect_done(events).data["usage"]
+        assert_no_reserves(USER_A_ID)
+
+        # azure-gpt-4.1 multipliers (base.yaml): 3 credits_micro per input
+        # token, 15 per output token.
+        cost = usage["input_tokens"] * 3 + usage["output_tokens"] * 15
+        assert used_total_daily(TOKEN_USER_A) - before_a == cost
         assert used(TOKEN_USER_B) == before_b

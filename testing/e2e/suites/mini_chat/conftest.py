@@ -61,6 +61,10 @@ DISABLED_MODEL = "gpt-4o-retired"
 # (config/base.yaml).
 BARE_MODEL = "gpt-5-bare"
 
+# Catalog entry with a 4096-token context window (config/base.yaml):
+# thread summary and input-limit tests.
+TINY_CTX_MODEL = "gpt-4.1-mini-tiny-ctx"
+
 # System prompt of every catalog model (config/base.yaml).
 CATALOG_SYSTEM_PROMPT = (
     "You are a helpful assistant. IMPORTANT RULE: When the user says exactly "

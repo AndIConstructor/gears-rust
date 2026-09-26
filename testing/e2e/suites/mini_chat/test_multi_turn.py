@@ -2,7 +2,7 @@
 
 import httpx
 
-from .conftest import API_PREFIX, parse_sse, expect_done, expect_stream_started
+from .conftest import API_PREFIX, parse_sse, expect_done, expect_stream_started, stream_message
 
 import pytest
 
@@ -66,24 +66,18 @@ class TestMultiTurn:
         assert isinstance(first_msg.get("attachments"), list), "attachments must be an array"
 
     def test_message_count_increments(self, provider_chat):
+        """`message_count` is 0 for a new chat and grows by 2 (user + assistant) per turn."""
         chat_id = provider_chat["id"]
+        assert provider_chat["message_count"] == 0
 
-        stream_resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "Hello."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert stream_resp.status_code == 200
-        events = parse_sse(stream_resp.text)
-        ss = expect_stream_started(events)
-        assert "request_id" in ss.data
-        assert "message_id" in ss.data
-        assert ss.data.get("is_new_turn") is True
+        for turn, content in enumerate(("Hello.", "Hello again."), start=1):
+            status, events, raw = stream_message(chat_id, content)
+            assert status == 200, raw
+            expect_done(events)
 
-        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}")
-        assert resp.status_code == 200
-        assert resp.json()["message_count"] == 2  # user + assistant
+            resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}")
+            assert resp.status_code == 200
+            assert resp.json()["message_count"] == 2 * turn
 
     def test_messages_ordered_chronologically(self, provider_chat):
         chat_id = provider_chat["id"]

@@ -22,6 +22,7 @@ import pytest
 
 from .conftest import (
     CATALOG_SYSTEM_PROMPT,
+    TINY_CTX_MODEL,
     expect_done,
     expect_stream_started,
     list_messages,
@@ -33,7 +34,6 @@ from .conftest import (
 )
 from .mock_provider.responses import SUMMARY_OUTPUT_TOKENS
 
-TINY_CTX_MODEL = "gpt-4.1-mini-tiny-ctx"
 SUMMARY_MODEL_PROVIDER_ID = "gpt-5-mini"  # provider_model_id of summary_model_id
 
 # Prefix of the summary message in the provider input

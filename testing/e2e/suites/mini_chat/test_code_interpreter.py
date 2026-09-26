@@ -14,7 +14,17 @@ import time
 import httpx
 import pytest
 
-from .conftest import API_PREFIX, STANDARD_MODEL, expect_done, expect_stream_started, parse_sse, poll_until, stream_message
+from .conftest import (
+    API_PREFIX,
+    STANDARD_MODEL,
+    assert_problem,
+    expect_done,
+    expect_stream_started,
+    parse_sse,
+    poll_until,
+    query_db,
+    stream_message,
+)
 
 
 @pytest.fixture
@@ -113,6 +123,23 @@ class TestXlsxUploadAccepted:
         assert body["filename"] == "data.xlsx"
         assert body["content_type"] == XLSX_CONTENT_TYPE
         assert body["kind"] == "document"
+
+    def test_xlsx_rejected_without_code_interpreter(self, chat_with_model, mock_provider):
+        """An XLSX is only usable by code_interpreter: on a model without it
+        (gpt-5-nano) the upload is 400 invalid_argument and nothing is stored
+        or sent to the provider."""
+        chat_id = chat_with_model("gpt-5-nano")["id"]
+        mock_provider.clear_captured_requests()
+
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/attachments",
+            files={"file": ("data.xlsx", io.BytesIO(_make_minimal_xlsx()), XLSX_CONTENT_TYPE)},
+            timeout=60,
+        )
+        body = assert_problem(resp, 400, "invalid_argument")
+        assert body["detail"] == "Code interpreter is currently unavailable", body
+        assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
+        assert mock_provider.get_request_paths() == []
 
     def test_xlsx_reaches_ready(self, openai_chat):
         chat_id = openai_chat["id"]

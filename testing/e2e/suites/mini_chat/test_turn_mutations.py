@@ -216,6 +216,44 @@ class TestTurnEdit:
         assert_problem(edit(chat_id, rid1, "Changed."), 409, "aborted", reason="NOT_LATEST_TURN")
         assert list_messages(chat_id) == before
 
+    @pytest.mark.timeout(30)
+    def test_edit_running_turn_400(self, request, chat, mock_provider):
+        """Editing a running turn is 400 failed_precondition (turn_state/STATE);
+        the turn keeps streaming."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        rid = str(uuid.uuid4())
+        mock_provider.set_next_scenario(slow_scenario(10, slow=0.3))
+
+        with open_stream(chat_id, "Slow turn.", request_id=rid) as s:
+            s.read_until_started()
+            assert_problem(
+                edit(chat_id, rid, "Changed."), 400, "failed_precondition",
+                violation_subject="turn_state", violation_type="STATE",
+            )
+            assert httpx.get(turn_url(chat_id, rid)).json()["state"] == "running"
+            expect_done(s.drain())
+        assert [m["content"] for m in list_messages(chat_id) if m["role"] == "user"] == [
+            "Slow turn.",
+        ]
+
+
+class TestUnknownTurn:
+    """Retry, edit and delete of a request_id that has no turn in the chat: 404 not_found."""
+
+    def test_retry_unknown_turn_404(self, chat):
+        complete_turn(chat["id"])
+        assert_problem(retry(chat["id"], str(uuid.uuid4())), 404, "not_found")
+
+    def test_edit_unknown_turn_404(self, chat):
+        complete_turn(chat["id"])
+        assert_problem(edit(chat["id"], str(uuid.uuid4()), "Changed."), 404, "not_found")
+
+    def test_delete_unknown_turn_404(self, chat):
+        complete_turn(chat["id"])
+        resp = httpx.delete(turn_url(chat["id"], str(uuid.uuid4())), timeout=10)
+        assert_problem(resp, 404, "not_found")
+
 
 # ---------------------------------------------------------------------------
 # Tests: delete
@@ -315,10 +353,20 @@ class TestConcurrentRetries:
     """Two retries of the same turn — exactly one wins."""
 
     @pytest.mark.timeout(30)
-    def test_concurrent_retries_one_wins(self, chat):
-        """Two simultaneous retries: one 200, the other 409 aborted."""
+    def test_concurrent_retries_one_wins(self, request, chat, mock_provider):
+        """Two simultaneous retries of the same turn: one streams (200), the
+        other is 409 NOT_LATEST_TURN.
+
+        The winner streams a slow answer, so it is still running when the
+        loser is checked. The mutation transactions are serialized (SQLite,
+        one connection): the loser sees the winner's new turn as the latest
+        one. GENERATION_IN_PROGRESS needs two mutation transactions in flight
+        at once; only its error mapping is unit-tested (api/rest/error.rs).
+        """
+        _require_offline(request)
         chat_id = chat["id"]
         rid = complete_turn(chat_id, "Retryable turn.")
+        mock_provider.set_next_scenario(slow_scenario(10, slow=0.3))
 
         results = [None, None]
 
@@ -335,9 +383,13 @@ class TestConcurrentRetries:
         assert [r.status_code for r in by_status] == [200, 409], (
             f"expected one 200 and one 409, got {[r.status_code for r in results]}"
         )
-        assert_problem(by_status[1], 409, "aborted")
-        assistant = [m for m in list_messages(chat_id) if m["role"] == "assistant"]
-        assert len(assistant) == 1
+        assert_problem(by_status[1], 409, "aborted", reason="NOT_LATEST_TURN")
+        winner = parse_sse(by_status[0].text)
+        new_rid = expect_stream_started(winner).data["request_id"]
+        expect_done(winner)
+        assert [(m["role"], m["request_id"]) for m in list_messages(chat_id)] == [
+            ("user", new_rid), ("assistant", new_rid),
+        ]
 
     @pytest.mark.timeout(30)
     def test_retry_while_retry_running_409_not_latest(self, request, chat, mock_provider):

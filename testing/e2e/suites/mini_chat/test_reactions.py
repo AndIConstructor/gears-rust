@@ -93,6 +93,19 @@ class TestReactions:
             violation_subject="reaction_target", violation_type="STATE",
         )
 
+    def test_invalid_reaction_value_400(self, server):
+        """A reaction other than `like` / `dislike` is a validation error:
+        400 invalid_argument; nothing is stored."""
+        chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
+
+        resp = httpx.put(reaction_url(chat_id, assistant_msg_id), json={"reaction": "love"})
+        body = assert_problem(resp, 400, "invalid_argument")
+        assert body["detail"] == "Reaction must be 'like' or 'dislike'", body
+        assert query_db(
+            "SELECT reaction FROM message_reactions WHERE message_id = ?", (assistant_msg_id,),
+        ) == []
+        assert my_reaction(chat_id, assistant_msg_id) is None
+
     def test_reaction_on_nonexistent_message_404(self, chat):
         url = reaction_url(chat["id"], str(uuid.uuid4()))
         assert_problem(httpx.put(url, json={"reaction": "like"}), 404, "not_found")

@@ -629,7 +629,7 @@ gears:
         # (compression_threshold_pct of context_window - max_output_tokens) is
         # reached after two short turns and INPUT_TOO_LONG /
         # CONTEXT_BUDGET_EXCEEDED are reachable with small messages
-        # (test_thread_summary.py, test_preflight_limits.py). Last in the
+        # (test_thread_summary.py, test_streaming.py). Last in the
         # catalog for the same reason as gpt-5-bare.
         - id: "gpt-4.1-mini-tiny-ctx"
           provider_model_id: "gpt-4.1-mini"

@@ -14,6 +14,7 @@ import httpx
 
 from .conftest import (
     API_PREFIX,
+    BARE_MODEL,
     DEFAULT_MODEL,
     STANDARD_MODEL,
     SSEEvent,
@@ -27,6 +28,7 @@ from .conftest import (
     stream_message,
     uuid_from_db,
 )
+from .mock_provider.responses import SCENARIOS, Scenario
 
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 
@@ -1107,3 +1109,114 @@ class TestPerChatLimits:
         resp = _upload(chat_id, "one-more.txt", b"over the limit", "text/plain")
         assert_problem(resp, 429, "resource_exhausted", violation_subject="storage_limit")
         assert _file_upload_calls(mock_provider) == []
+
+
+# ---------------------------------------------------------------------------
+# 05-07, 10-34, 01-06: citations and images in the provider exchange
+# ---------------------------------------------------------------------------
+
+def _provider_file_id(attachment_id: str) -> str:
+    rows = query_db("SELECT provider_file_id FROM attachments WHERE id = ?", (attachment_id,))
+    assert len(rows) == 1 and rows[0]["provider_file_id"], rows
+    return rows[0]["provider_file_id"]
+
+
+def _file_search_scenario(citations: list[dict]) -> Scenario:
+    """The mock `FILESEARCH:*` scenario with the given file citations."""
+    base = SCENARIOS["FILESEARCH:*"]
+    return Scenario(events=list(base.events), usage=base.usage, citations=citations)
+
+
+class TestFileCitationMapping:
+    """File citations reach the client with the attachment id, not the provider file id."""
+
+    def test_file_citation_maps_to_attachment_id(self, request, chat, mock_provider):
+        """05-07: a `file_citation` for the provider file of an attachment is sent
+        as `{source: file, attachment_id: <attachment UUID>, title: <filename>}`;
+        a citation of an unknown provider file is dropped; no provider file id
+        appears in the stream."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        att_id = _upload_ready(chat_id, "zembla.txt", b"Zembla notes.", "text/plain")
+        file_id = _provider_file_id(att_id)
+        mock_provider.set_next_scenario(_file_search_scenario([
+            {"type": "file_citation", "file_id": file_id, "title": "provider-name.txt",
+             "start_index": 0, "end_index": 13, "text": "Based on docs"},
+            {"type": "file_citation", "file_id": "file-unknown-0123456789",
+             "title": "other.txt", "start_index": 0, "end_index": 5, "text": "Based"},
+        ]))
+
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
+            json={"content": "FILESEARCH: what is in the notes?"},
+            headers={"Accept": "text/event-stream"}, timeout=30,
+        )
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        expect_done(events)
+        citations = [e.data for e in events if e.event == "citations"]
+        assert citations == [{"items": [{
+            "source": "file",
+            "title": "zembla.txt",
+            "attachment_id": att_id,
+            "snippet": "Based on docs",
+            "span": {"start": 0, "end": 13},
+        }]}]
+        assert file_id not in resp.text
+
+
+class TestImageInProviderRequest:
+    """Image attachments in the provider request, and on a model without vision."""
+
+    def test_image_sent_as_input_image(self, request, chat, mock_provider):
+        """10-34 (offline part): the user message of the provider request carries
+        the text followed by `input_image` with the image's provider file id."""
+        _require_offline(request)
+        chat_id = chat["id"]  # vision-capable default model
+        att_id = _upload_ready(chat_id, "red.png", make_minimal_png(color=(255, 0, 0)), "image/png")
+        file_id = _provider_file_id(att_id)
+
+        mock_provider.clear_captured_requests()
+        status, events, raw = stream_message(
+            chat_id, "What color is the image?", attachment_ids=[att_id],
+        )
+        assert status == 200, raw
+        expect_done(events)
+
+        captured = mock_provider.get_captured_requests()
+        assert len(captured) == 1, captured
+        user_items = [i for i in captured[0]["input"] if i.get("role") == "user"]
+        assert user_items[-1]["content"] == [
+            {"type": "input_text", "text": "What color is the image?"},
+            {"type": "input_image", "file_id": file_id},
+        ]
+
+    def test_image_on_model_without_vision_400(self, request, chat_with_model, mock_provider):
+        """01-06: an image attachment in a chat whose model has no VISION_INPUT
+        (gpt-5-bare) is 400 invalid_argument VISION_NOT_SUPPORTED; no turn is
+        created and the provider is not called."""
+        _require_offline(request)
+        chat_id = chat_with_model(BARE_MODEL)["id"]
+        att_id = _upload_ready(chat_id, "red.png", make_minimal_png(), "image/png")
+
+        mock_provider.clear_captured_requests()
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
+            json={"content": "Describe the image.", "attachment_ids": [att_id]},
+            headers={"Accept": "text/event-stream"}, timeout=30,
+        )
+        assert_problem(resp, 400, "invalid_argument", field_reason="VISION_NOT_SUPPORTED")
+        assert mock_provider.get_captured_requests() == []
+        assert query_db("SELECT id FROM chat_turns WHERE chat_id = ?", (chat_id,)) == []
+
+
+# ---------------------------------------------------------------------------
+# DELETE of an unknown attachment
+# ---------------------------------------------------------------------------
+
+class TestDeleteMissingAttachment:
+    """DELETE /attachments/{id} for an attachment that does not exist."""
+
+    def test_delete_unknown_attachment_404(self, chat):
+        resp = httpx.delete(f"{API_PREFIX}/chats/{chat['id']}/attachments/{uuid.uuid4()}")
+        assert_problem(resp, 404, "not_found")
