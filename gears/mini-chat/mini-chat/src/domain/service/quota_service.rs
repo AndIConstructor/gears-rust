@@ -626,9 +626,11 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                 }
                             }
 
-                            // 6b. Daily code interpreter quota check (post-cascade)
+                            // 6b. Daily code interpreter quota check (post-cascade).
+                            // Skipped when the kill switch leaves the tool out.
                             if code_interpreter_enabled
                                 && eff_entry.general_config.tool_support.code_interpreter
+                                && !snapshot.kill_switches.disable_code_interpreter
                             {
                                 let today = period_starts[0];
                                 let daily_ci_calls = repo
@@ -2330,9 +2332,16 @@ mod tests {
     /// Service whose catalog models support both tools, with both daily
     /// tool quotas already exhausted.
     async fn service_with_exhausted_tool_quotas() -> TestQuotaService {
+        service_with_exhausted_tool_quotas_and(|_| {}).await
+    }
+
+    async fn service_with_exhausted_tool_quotas_and(
+        adjust: impl FnOnce(&mut PolicySnapshot),
+    ) -> TestQuotaService {
         let db_raw = inmem_db().await;
         let db = mock_db_provider(db_raw);
         let mut snapshot = default_snapshot();
+        adjust(&mut snapshot);
         for entry in &mut snapshot.model_catalog {
             entry.general_config.tool_support.web_search = true;
             entry.general_config.tool_support.code_interpreter = true;
@@ -2386,6 +2395,23 @@ mod tests {
             }
             other => panic!("expected Reject with code_interpreter scope, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn preflight_code_interpreter_quota_skipped_when_kill_switch_set() {
+        let svc = service_with_exhausted_tool_quotas_and(|snapshot| {
+            snapshot.kill_switches.disable_code_interpreter = true;
+        })
+        .await;
+        let mut input = preflight_input("gpt-5");
+        input.code_interpreter_enabled = true;
+
+        let computed = svc.preflight_evaluate(input).await.unwrap();
+        assert!(
+            !matches!(computed.decision, PreflightDecision::Reject { .. }),
+            "the kill switch leaves the tool out, so its quota must not apply, got {:?}",
+            computed.decision
+        );
     }
 
     #[tokio::test]
