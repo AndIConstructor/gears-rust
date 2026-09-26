@@ -272,10 +272,11 @@ mod tests {
             Ok(None)
         }
 
-        async fn find_latest_message<C: DBRunner>(
+        async fn find_latest_message_before_turn<C: DBRunner>(
             &self,
             _: &C,
             _: &AccessScope,
+            _: Uuid,
             _: Uuid,
         ) -> Result<Option<crate::domain::repos::SummaryFrontier>, DomainError> {
             Ok(None)

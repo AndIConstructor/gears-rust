@@ -1493,3 +1493,74 @@ async fn attachment_ids_for_message_skips_deleted_and_other_chat() {
         .unwrap();
     assert!(ids.is_empty(), "links of another chat must be excluded");
 }
+
+#[tokio::test]
+async fn summary_frontier_excludes_the_finalized_turn() {
+    use crate::domain::repos::MessageRepository as _;
+
+    let db = test_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    insert_chat(&db, tenant_id, chat_id).await;
+    let repo = MessageRepository::new(limit_cfg());
+    let conn = db.conn().unwrap();
+
+    let mut last_assistant_ids = Vec::new();
+    let request_ids = [Uuid::new_v4(), Uuid::new_v4()];
+    for request_id in request_ids {
+        repo.insert_user_message(
+            &conn,
+            &scope(),
+            InsertUserMessageParams {
+                id: Uuid::new_v4(),
+                tenant_id,
+                chat_id,
+                request_id,
+                content: "question".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let assistant = repo
+            .insert_assistant_message(
+                &conn,
+                &scope(),
+                InsertAssistantMessageParams {
+                    id: Uuid::new_v4(),
+                    tenant_id,
+                    chat_id,
+                    request_id,
+                    content: "answer".to_owned(),
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_write_input_tokens: None,
+                    reasoning_tokens: None,
+                    model: None,
+                    provider_response_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        last_assistant_ids.push(assistant.id);
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    // Finalizing the second turn: the frontier is the first turn's answer.
+    let frontier = repo
+        .find_latest_message_before_turn(&conn, &scope(), chat_id, request_ids[1])
+        .await
+        .unwrap()
+        .expect("first turn is summarizable");
+    assert_eq!(frontier.message_id, last_assistant_ids[0]);
+
+    // Finalizing the first (and only earlier) turn: nothing to summarize.
+    let only_turn_chat = Uuid::new_v4();
+    insert_chat(&db, tenant_id, only_turn_chat).await;
+    let none = repo
+        .find_latest_message_before_turn(&conn, &scope(), only_turn_chat, request_ids[0])
+        .await
+        .unwrap();
+    assert!(none.is_none());
+}

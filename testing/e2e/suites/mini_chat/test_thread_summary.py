@@ -18,14 +18,17 @@ from __future__ import annotations
 import time
 import uuid
 
+import httpx
 import pytest
 
 from .conftest import (
+    API_PREFIX,
     CATALOG_SYSTEM_PROMPT,
     TINY_CTX_MODEL,
     expect_done,
     expect_stream_started,
     list_messages,
+    parse_sse,
     outbox_payloads,
     poll_turn,
     provider_input,
@@ -51,8 +54,8 @@ def _require_offline(request):
         pytest.skip("inspects the mock provider's captured requests")
 
 
-def _complete_turn(chat_id: str, content: str):
-    rid = str(uuid.uuid4())
+def _complete_turn(chat_id: str, content: str, request_id: str | None = None):
+    rid = request_id or str(uuid.uuid4())
     status, events, raw = stream_message(chat_id, content, request_id=rid)
     assert status == 200, raw
     expect_done(events)
@@ -97,9 +100,11 @@ class TestThreadSummary:
 
     @pytest.mark.timeout(60)
     def test_summary_replaces_summarized_messages(self, request, chat_with_model, mock_provider):
-        """The turn that reaches the threshold schedules a summary of every
-        message up to its answer; the worker stores it and marks the messages
-        compressed; the next turn sends the summary instead of those messages."""
+        """The turn that reaches the threshold schedules a summary of the
+        messages before it (the finalized turn stays out: retry, edit and
+        delete may still replace it); the worker stores the summary and marks
+        those messages compressed; the next turn sends the summary instead of
+        them, followed by the unsummarized turn."""
         _require_offline(request)
         chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
 
@@ -113,39 +118,75 @@ class TestThreadSummary:
 
         messages = list_messages(chat_id)
         assert [m["role"] for m in messages] == ["user", "assistant"] * 2
-        assert summary["summary_text"] == "MOCK-SUMMARY 2 user and 2 assistant messages"
+        assert summary["summary_text"] == "MOCK-SUMMARY 1 user and 1 assistant messages"
         assert summary["token_estimate"] == SUMMARY_OUTPUT_TOKENS
-        assert uuid_from_db(summary["summarized_up_to_message_id"]) == messages[-1]["id"]
-        assert tasks[0]["frozen_target_message_id"] == messages[-1]["id"], tasks
+        # The frontier is the first turn's answer, not the finalized second turn.
+        assert uuid_from_db(summary["summarized_up_to_message_id"]) == messages[1]["id"]
+        assert tasks[0]["frozen_target_message_id"] == messages[1]["id"], tasks
         compressed = query_db(
-            "SELECT is_compressed FROM messages WHERE chat_id = ? AND deleted_at IS NULL",
+            "SELECT is_compressed FROM messages WHERE chat_id = ? AND deleted_at IS NULL "
+            "ORDER BY created_at, id",
             (chat_id,),
         )
-        assert [r["is_compressed"] for r in compressed] == [1, 1, 1, 1]
+        assert [r["is_compressed"] for r in compressed] == [1, 1, 0, 0]
 
         # The summary request: non-streaming, on the summary model, with the
-        # four messages in the prompt.
+        # first turn in the prompt and without the second.
         summary_requests = [
             r for r in mock_provider.get_captured_requests() if r.get("stream") is False
         ]
         assert len(summary_requests) == 1, summary_requests
         assert summary_requests[0]["model"] == SUMMARY_MODEL_PROVIDER_ID
         prompt = provider_input(summary_requests[0])[0][1]
-        for line in (
-            "User: First question.", "User: Second question.",
-            f"Assistant: {messages[1]['content']}",
-        ):
+        for line in ("User: First question.", f"Assistant: {messages[1]['content']}"):
             assert line in prompt, (line, prompt)
+        assert "Second question." not in prompt, prompt
 
         mock_provider.clear_captured_requests()
         events = _complete_turn(chat_id, "Third question.")
         assert expect_stream_started(events).data["thread_summary_applied"] == {
             "token_estimate": SUMMARY_OUTPUT_TOKENS,
         }
-        captured = mock_provider.get_captured_requests()
+        # A later summary run may add a non-streaming request; keep the turn's.
+        captured = [r for r in mock_provider.get_captured_requests() if r.get("stream") is not False]
         assert len(captured) == 1, captured
         assert captured[0]["instructions"] == CATALOG_SYSTEM_PROMPT
+        sent = provider_input(captured[0])
+        # Summary first, the new question last. The second turn is not
+        # summarized; what of it fits is decided by context truncation on this
+        # small-context model. The first turn is only in the summary.
+        assert sent[0] == ("user", SUMMARY_PREAMBLE + summary["summary_text"])
+        assert sent[-1] == ("user", "Third question.")
+        assert ("user", "First question.") not in sent
+        assert ("assistant", messages[3]["content"]) in sent
+
+    @pytest.mark.timeout(60)
+    def test_retry_after_summary_does_not_resend_replaced_answer(
+        self, request, chat_with_model, mock_provider,
+    ):
+        """Retrying the turn that triggered the summary: the summary does not
+        contain that turn, so the retried request carries the summary, the
+        original question and nothing of the replaced answer."""
+        _require_offline(request)
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        _complete_turn(chat_id, "First question.")
+        second_rid = str(uuid.uuid4())
+        _complete_turn(chat_id, "Second question.", request_id=second_rid)
+        summary = _wait_for_summary(chat_id)
+        replaced_answer = list_messages(chat_id)[3]["content"]
+
+        mock_provider.clear_captured_requests()
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/turns/{second_rid}/retry",
+            headers={"Accept": "text/event-stream"}, timeout=90,
+        )
+        assert resp.status_code == 200, resp.text
+        expect_done(parse_sse(resp.text))
+
+        captured = [r for r in mock_provider.get_captured_requests() if r.get("stream") is not False]
+        assert len(captured) == 1, captured
         assert provider_input(captured[0]) == [
             ("user", SUMMARY_PREAMBLE + summary["summary_text"]),
-            ("user", "Third question."),
+            ("user", "Second question."),
         ]
+        assert replaced_answer not in str(captured[0]), "replaced answer resent"

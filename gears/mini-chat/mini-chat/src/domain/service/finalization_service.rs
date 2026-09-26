@@ -436,12 +436,16 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                     if summary_triggered {
                         let base_frontier = current_summary.as_ref().map(|s| &s.frontier);
 
+                        // The finalized turn stays out of the summary: it is
+                        // the latest turn, which retry, edit and delete may
+                        // still replace.
                         let frozen_target =
-                            crate::domain::repos::MessageRepository::find_latest_message(
+                            crate::domain::repos::MessageRepository::find_latest_message_before_turn(
                                 message_repo.as_ref(),
                                 tx,
                                 &scope,
                                 input.chat_id,
+                                input.request_id,
                             )
                             .await
                             .map_err(to_db)?;

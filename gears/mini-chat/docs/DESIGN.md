@@ -1660,7 +1660,7 @@ sequenceDiagram
 
     CS->>CS: Check summary trigger (assembled request token estimate exceeds compression threshold)
     CS->>DB: Load current summary frontier (base_frontier)
-    CS->>DB: Determine frozen_target_frontier relative to base_frontier using message order (created_at, id)
+    CS->>DB: Determine frozen_target_frontier: latest non-deleted message that does not belong to the causing turn (the causing turn is never summarized)
     CS->>DB: Commit causing turn and enqueue durable thread-summary outbox message in the same transaction
     OB->>CS: Deliver thread-summary work asynchronously
     CS->>DB: Load current frontier and fetch non-deleted, non-compressed messages in (base_frontier, frozen_target_frontier] ordered by created_at ASC, id ASC
@@ -1744,6 +1744,7 @@ Such heuristics MUST NOT be used as the sole correctness criterion for summary g
 - The thread-summary queue lease is `thread_summary_worker.claim_timeout_secs` (default 300 s, range 5–3600 s), so the non-streaming LLM call is not cancelled and redelivered mid-flight. A handler attempt that would return `Retry` on its `thread_summary_worker.max_attempts`-th delivery (default 3) returns `Reject` instead and the message is dead-lettered, so a persistent failure does not block other chats in the partition.
 - The trigger is evaluated only when `thread_summary_worker.enabled = true` (default). The summary model is `thread_summary_worker.summary_model_id` (empty = `gpt-4.1-mini`); message content in the prompt is truncated to `thread_summary_worker.message_content_limit` characters.
 - The thread-summary handler MAY run under either the transactional or decoupled outbox execution mode allowed by the shared infrastructure contract. Mini Chat MUST rely only on the shared outbox guarantees and MUST NOT define a second dedicated summary worker state machine.
+- The frozen target frontier is the latest non-deleted message of the chat that does not belong to the turn being finalized (`find_latest_message_before_turn`). The finalized turn is the latest turn, which retry, edit and delete may still replace, so it is never summarized; it stays in the recent messages of the next turn. If no earlier message exists, no work item is enqueued.
 - A handler attempt MUST bind itself to the frozen target frontier carried by the durable outbox message.
 - The handler MUST load exactly the non-deleted, non-compressed messages whose order key is in `(base_frontier, frozen_target_frontier]`.
 - Messages appended after `frozen_target_frontier` MUST be excluded from the current run. They MUST NOT cancel, widen, or invalidate the in-flight run and are eligible only for a future summary cycle.
@@ -2815,7 +2816,7 @@ PATCH MUST NOT introduce a separate execution path for settlement or outbox emis
 
 #### Summary Interaction on Turn Mutation
 
-Since only the last turn can be retried, edited, or deleted, existing thread summaries typically remain valid (summaries cover older messages, not the latest turn). In the uncommon case where a `thread_summary` exists whose `summarized_up_to` references a message within the mutated turn, the summary is considered stale. The domain service MUST mark the summary for lazy recomputation on the next turn that triggers the summary threshold. The system MUST NOT proactively regenerate the summary on mutation alone.
+Only the latest turn can be retried, edited or deleted, and a summary never covers the latest turn: its frozen target frontier excludes the turn that triggered it (see "Thread Summary"). A mutation therefore never touches summarized messages, and the summary stays valid without invalidation or recomputation. After a retry or edit, the next context is the existing summary followed by the replacement turn.
 
 #### Audit Events for Turn Mutations
 

@@ -435,17 +435,23 @@ impl crate::domain::repos::MessageRepository for MessageRepository {
     // `recent_after_boundary`) which filter `RequestId.is_not_null()` to only include
     // committed messages, this method intentionally includes ALL non-deleted messages
     // to reflect the full frontier for thread summary tracking.
-    async fn find_latest_message<C: DBRunner>(
+    async fn find_latest_message_before_turn<C: DBRunner>(
         &self,
         runner: &C,
         scope: &AccessScope,
         chat_id: Uuid,
+        exclude_request_id: Uuid,
     ) -> Result<Option<crate::domain::repos::SummaryFrontier>, DomainError> {
         let row = MessageEntity::find()
             .filter(
                 Condition::all()
                     .add(Column::ChatId.eq(chat_id))
-                    .add(Column::DeletedAt.is_null()),
+                    .add(Column::DeletedAt.is_null())
+                    .add(
+                        Condition::any()
+                            .add(Column::RequestId.is_null())
+                            .add(Column::RequestId.ne(exclude_request_id)),
+                    ),
             )
             .secure()
             .scope_with(scope)
