@@ -688,7 +688,7 @@ Implemented. When an attachment with `secondary_status = uploaded` is deleted, `
 
 ### 9.1 Token Billing
 
-Sum ALL fields across tool loop iterations (§6.1). Credit calculation unchanged — same formula with per-model multipliers.
+**Not implemented.** The adapter has no tool loop (§6.1), so there are no adapter iterations to sum. In the `search_knowledge` loop in `provider_task.rs`, `TerminalOutcome::ToolUse` carries no usage, so only the usage of the final provider response is settled. Credit calculation unchanged — same formula with per-model multipliers.
 
 ### 9.2 Tool Call Tracking
 
@@ -715,7 +715,7 @@ Prompt caching mitigates tool loop re-send cost (~10% for cached content).
 ### Phase 1: Core Adapter
 - `ProviderKind::AnthropicMessages` + factory
 - `anthropic_messages.rs`: SSE parsing, event translation, request building
-- Both `stream()` and `complete()` implementations (`complete()` used for thread/doc summaries)
+- Both `stream()` and `complete()` implementations (`complete()` used for thread summaries; document summaries do not exist, [ADR-0007](../ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md))
 - Native tools: `web_search_20260209`, `code_execution_20250825`
 - `anthropic-version` header, `rag_provider` config field
 - OAGW provisioning verification
@@ -742,15 +742,15 @@ Prompt caching mitigates tool loop re-send cost (~10% for cached content).
 - `file_search_calls` in `UsageEvent`
 - Tracking in `stream_service` + finalization pass-through
 
-### Phase 6: Testing
-- Unit: request building, event translation, tool loops, image handling
-- Tool loops: search_files, load_files (mock OAGW + Files API)
-- Integration: provider resolver, config deserialization
+### Phase 6: Testing — partly implemented
+- Unit: request building, event translation, image handling — implemented (tests in `anthropic_messages.rs`). Tool-loop unit tests — not implemented (there is no adapter tool loop).
+- Tool loops: search_files, load_files (mock OAGW + Files API) — not implemented
+- Integration: provider resolver, config deserialization — covered by the `provider_resolver.rs` and `config.rs` tests
 
-### Phase 7: Observability
-- Metrics: `provider_id` labels, `file_search_tool_loop_latency_ms`, `load_files_latency_ms`
-- Logging: tool loop iterations at `debug!` (query, result count, latency)
-- Error sanitization: Anthropic `msg_` response IDs
+### Phase 7: Observability — partly implemented
+- Metrics: per-provider labels exist (`provider` label on stream metrics). `file_search_tool_loop_latency_ms` and `load_files_latency_ms` — not implemented
+- Logging: tool loop iterations at `debug!` (query, result count, latency) — not implemented (no adapter tool loop)
+- Error sanitization: Anthropic `msg_` response IDs — implemented (`infra/llm/mod.rs` redacts `msg_` IDs)
 
 ---
 

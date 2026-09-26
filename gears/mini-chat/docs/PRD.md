@@ -55,10 +55,10 @@ Current gaps: no native chat experience within the platform; no way to query upl
 | Image Attachment | An image file (PNG, JPEG, WebP) uploaded to a chat via the provider Files API, included in LLM requests as multimodal input; not indexed in vector stores and not eligible for file_search |
 | MCP (Model Context Protocol) | A standardized JSON-RPC 2.0 protocol for exposing external tools (functions) to LLMs. MCP servers expose tools via `tools/list` and execute them via `tools/call`. |
 | MCP Server | An external service that exposes one or more tools via the MCP protocol, accessed over HTTP Streamable transport. |
-| MCP Tool | A function exposed by an MCP server, persisted in `mcp_server_tools` DB table via background `tools/list` sync, resolved at stream time from cache/DB, mapped to `LlmTool::Function`, and executed via `tools/call` during the agentic loop. |
-| MCP Hub | An optional centralized service for discovering MCP servers. Hub-discovered servers MUST land with `status='pending_approval'` and `enabled=false`; no tools are exposed until an admin explicitly approves and enables the server. |
-| Effective MCP Server Set | The resolved set of MCP servers and tools for a request at stream time, computed by merging config-defined, hub-discovered, and role-granted servers after applying tenant/role/model/tool policy. |
-| Tool Routing Map | A per-request `HashMap` mapping provider-safe exposed tool names to MCP server routes, enabling dispatch of LLM tool calls to the correct MCP server. |
+| MCP Tool | A function exposed by an MCP server. Planned design (Future, not implemented — [ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)): persisted in an `mcp_server_tools` table via background `tools/list` sync, resolved at stream time from cache/DB, mapped to `LlmTool::Function`, and executed via `tools/call` during the agentic loop. |
+| MCP Hub | An optional centralized service for discovering MCP servers (Future, not implemented — ADR-0006). Hub-discovered servers would land with `status='pending_approval'` and `enabled=false`; no tools would be exposed until an admin explicitly approves and enables the server. |
+| Effective MCP Server Set | (Future, not implemented — ADR-0006.) The resolved set of MCP servers and tools for a request at stream time, computed by merging config-defined, hub-discovered, and role-granted servers after applying tenant/role/model/tool policy. |
+| Tool Routing Map | (Future, not implemented — ADR-0006.) A per-request `HashMap` mapping provider-safe exposed tool names to MCP server routes, enabling dispatch of LLM tool calls to the correct MCP server. |
 | Model Catalog | Deployment-configured list of available LLM models with tier labels, capabilities, and UI metadata (display_name, description). Stored in config file or ConfigMap. |
 | Model Tier | One of two cost/capability levels: premium or standard. Determines downgrade cascade order |
 | Web Search | An LLM tool call that retrieves information from the public web during a chat turn; explicitly enabled per request via API parameter |
@@ -117,7 +117,7 @@ This PRD uses **P1/P2** to describe phased scope. The `p1`/`p2` tags on requirem
 - Per-user credit-based rate limits across multiple periods (daily, monthly) tracked in real-time; credits are computed from provider-reported tokens using model credit multipliers from the active policy snapshot; premium models have stricter limits, standard-tier models have separate, higher limits; two-tier downgrade cascade (premium → standard); when all tiers are exhausted, the system rejects with HTTP 429 (`resource_exhausted`)
 - Model selection per chat at creation time (locked for conversation lifetime)
 - Binary like/dislike reactions on assistant messages (persisted, API-accessible)
-- File search calls per turn bounded by the model's `max_tool_calls` (shared by all built-in tools). A per-user daily file search limit is not implemented ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md))
+- File search calls per turn bounded by the model's `max_tool_calls` (shared by all built-in tools; sent only by the OpenAI Responses adapter — the vLLM, Chat Completions and Anthropic adapters do not send it). A per-user daily file search limit is not implemented ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md))
 - Web search via provider tooling (Azure Foundry), explicitly enabled per request via API parameter, with per-turn and per-day call limits and a global kill switch
 - Token budget enforcement and context truncation
 - License feature gate (`ai_chat`); in P1 the routes check the platform base license feature as an interim gate ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md))
@@ -150,7 +150,7 @@ MCP server support was originally planned for P1 and is now deferred; see §4.3.
 - Web search auto-triggering (P1 requires explicit API parameter; implicit query-based triggering is deferred)
 - Automatic filename or document-reference resolution from free-form user text (P1 requires explicit `attachment_ids` resolved by the UI)
 - URL content extraction
-- MCP resources (`resources/list`, `resources/read`) and MCP prompts (`prompts/list`, `prompts/get`) — only `tools/*` methods are implemented
+- MCP resources (`resources/list`, `resources/read`) and MCP prompts (`prompts/list`, `prompts/get`) — the planned MCP support (Future, ADR-0006) covers only `tools/*` methods; no MCP method is implemented in P1
 - MCP stdio transport — spawning child processes inside a production server introduces supply-chain risks (allowlist drift), K8s sandboxing complexity, and resource exhaustion under pod-restart scenarios; no major cloud-hosted LLM product supports server-side stdio MCP; HTTP Streamable covers every valid production use case; if stdio ever becomes a requirement, it needs its own ADR and security review before any code is written
 - MCP mTLS for internal servers (future enhancement; may be added via per-server `reqwest::Client` with client certificates)
 - Per-message MCP server configuration — MCP servers are granted per role, not per message or per chat
@@ -217,7 +217,7 @@ The system MUST deliver AI responses as a real-time SSE stream. Every stream sta
 
 **Error model (Option A)**: If request validation, authorization, or quota preflight fails before any streaming begins, the system MUST return a canonical JSON `Problem` error response with the HTTP status of its category and MUST NOT open an SSE stream ([ADR-0004](./ADR/0004-cpt-cf-mini-chat-adr-canonical-error-contract.md)). If a failure occurs after streaming has started, the system MUST terminate the stream with a terminal `event: error`.
 
-The request body MAY include a client-generated `request_id` used as an idempotency key (if omitted, the server MUST generate a UUID v4); MAY include `attachment_ids` for attachments (documents or images) explicitly associated with the current message; and MAY include `web_search` to explicitly enable web search for the turn (see `cpt-cf-mini-chat-fr-web-search`). In every Message response DTO, `request_id` is always present and non-null (a required UUID). Within a normal turn, the user message and assistant response share the same `request_id` (the turn correlation key). System/background messages carry an independently server-generated UUID v4. P1 enforces **at most one running turn per chat**: if any turn in the chat is currently `running`, the system MUST reject the new request with `409 Conflict` (`aborted`, reason `turn_already_running`), regardless of the `request_id` value. Additionally, if a `chat_turns` record exists for the same `(chat_id, request_id)` in a non-completed state, or the turn was soft-deleted by retry, edit or delete, the system MUST reject with `409 Conflict` (reason `request_id_conflict`). If a completed, non-deleted generation exists for the same `(chat_id, request_id)`, the system MUST replay the completed assistant response rather than starting a new provider request. Replay MUST be side-effect-free: no new quota reserve, no quota settlement, no billing/outbox event emission. Replay sends `stream_started`, `delta` and `done`; citations and `downgrade_reason` are not persisted and are not replayed ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)).
+The request body MAY include a client-generated `request_id` used as an idempotency key (any UUID version is accepted; if omitted, the server MUST generate a UUID v4); MAY include `attachment_ids` for attachments (documents or images) explicitly associated with the current message; and MAY include `web_search` to explicitly enable web search for the turn (see `cpt-cf-mini-chat-fr-web-search`). In every Message response DTO, `request_id` is always present and non-null (a required UUID). Within a normal turn, the user message and assistant response share the same `request_id` (the turn correlation key). System/background messages carry an independently server-generated UUID v4. P1 enforces **at most one running turn per chat**: if any turn in the chat is currently `running`, the system MUST reject the new request with `409 Conflict` (`aborted`, reason `turn_already_running`), regardless of the `request_id` value. Additionally, if a `chat_turns` record exists for the same `(chat_id, request_id)` in a non-completed state, or the turn was soft-deleted by retry, edit or delete, the system MUST reject with `409 Conflict` (reason `request_id_conflict`). If a completed, non-deleted generation exists for the same `(chat_id, request_id)`, the system MUST replay the completed assistant response rather than starting a new provider request. Replay MUST be side-effect-free: no new quota reserve, no quota settlement, no billing/outbox event emission. Replay sends `stream_started`, `delta` and `done`; citations and `downgrade_reason` are not persisted and are not replayed ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)).
 
 Clients must not auto-retry with the same `request_id` after disconnect; recovery is via the Turn Status API (`GET /v1/chats/{chat_id}/turns/{request_id}`). Retry and edit operations both create a new turn and therefore require a new `request_id`. A completed `(chat_id, request_id)` pair is replay-only — reusing it will return the previously generated result instead of starting a new generation.
 
@@ -230,7 +230,7 @@ Clients must not auto-retry with the same `request_id` after disconnect; recover
 
 The system MUST persist all user and assistant messages. Conversation history access MUST be limited to the owning user within their tenant. On each new user message, the system MUST include relevant conversation history in the LLM context to maintain conversational coherence.
 
-The system MUST expose conversation history via `GET /v1/chats/{id}/messages` with cursor-based pagination (Page + PageInfo pattern) and OData v4 query support: `$filter` and `$orderby` on `created_at`, `id` and `role`. `$select` is not supported. An unknown field or a malformed cursor returns 400. Each message MUST include: a required `request_id` (UUID, always present and non-null — within a normal turn, user and assistant messages share the same value; system/background messages use an independently server-generated UUID v4) and a required `attachments` field (always-present array of associated attachment summaries, empty array when none). The `attachments` array MUST be derived only from `message_attachments` (populated from `attachment_ids` at send time); in P1 it lists only attachments that are not deleted ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). Attachment details are not embedded; the UI fetches them individually via `GET /v1/chats/{id}/attachments/{attachment_id}` if needed.
+The system MUST expose conversation history via `GET /v1/chats/{id}/messages` with cursor-based pagination (Page + PageInfo pattern) and OData v4 query support: `$filter` and `$orderby` on `created_at`, `id` and `role`. `$select` is accepted and ignored (its syntax is validated). `limit` defaults to 20; a value above 100 is clamped to 100. An unknown field or a malformed cursor returns 400. Each message MUST include: a required `request_id` (UUID, always present and non-null — within a normal turn, user and assistant messages share the same value; system/background messages use an independently server-generated UUID v4) and a required `attachments` field (always-present array of associated attachment summaries, empty array when none). The `attachments` array MUST be derived only from `message_attachments` (populated from `attachment_ids` at send time); in P1 it lists only attachments that are not deleted ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). Attachment details are not embedded; the UI fetches them individually via `GET /v1/chats/{id}/attachments/{attachment_id}` if needed. Each message also carries `my_reaction` (always present, `"like"`, `"dislike"` or `null`) and, when available, `model`, `input_tokens` and `output_tokens` (omitted otherwise; token counts are omitted when 0).
 
 **Rationale**: Multi-turn conversations require the AI to remember prior context within the same chat. Cursor pagination ensures efficient history loading for long conversations.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -265,7 +265,7 @@ Maximum document size: configurable (`rag.uploaded_file_max_size_kb`, default 25
 
 - [ ] `p1` - **ID**: `cpt-cf-mini-chat-fr-image-upload`
 
-The system MUST allow users to upload image files (PNG, JPEG/JPG, WebP) to a chat as image attachments. Image attachments are stored via the provider Files API and referenced in Responses API calls as multimodal input. Image attachments are NOT indexed in vector stores and do NOT participate in file_search tool calls. Upload is synchronous, as for documents: the response is `201 Created` with the attachment identifier and `status: ready`, or an HTTP error with the row kept as `status: failed` ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). For image attachments, the server MAY return `img_thumbnail` (a server-generated preview thumbnail sized to configured WxH); null otherwise. `img_thumbnail` is server-generated only (never provided by the client); maximum decoded size (raw bytes) is 128 KiB by default (configurable via `thumbnail_max_bytes`); stored internally in Mini Chat database only (never uploaded to provider); contains no provider identifiers. `doc_summary` remains always null for images.
+The system MUST allow users to upload image files (PNG, JPEG/JPG, WebP) to a chat as image attachments. Image attachments are stored via the provider Files API and referenced in Responses API calls as multimodal input. Image attachments are NOT indexed in vector stores and do NOT participate in file_search tool calls. Upload is synchronous, as for documents: the response is `201 Created` with the attachment identifier and `status: ready`, or an HTTP error with the row kept as `status: failed` ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). For image attachments, the server MAY return `img_thumbnail` (a server-generated preview thumbnail sized to configured WxH); null otherwise. `img_thumbnail` is server-generated only (never provided by the client); maximum decoded size (raw bytes) is 128 KiB by default (configurable via `thumbnail.max_bytes`); stored internally in Mini Chat database only (never uploaded to provider); contains no provider identifiers. `doc_summary` remains always null for images.
 
 **Image upload rules**:
 
@@ -274,7 +274,7 @@ The system MUST allow users to upload image files (PNG, JPEG/JPG, WebP) to a cha
 - Maximum image inputs per message: configurable (`rag.max_images_per_message`, default 4). A message with more images is rejected with 400 (`out_of_range`, `TOO_MANY_IMAGES`).
 - Maximum image inputs per user per day: **Not implemented** ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)). The planned default was 50.
 - The `disable_images` kill switch rejects image uploads and messages with image inputs with 400 (`failed_precondition`, `violations[{subject: images, type: FEATURE_DISABLED}]`).
-- Images are uploaded to the provider via Files API. Upload fields (including `purpose`) are controlled by a static per-provider mapping shipped with deployment configuration and applied by OAGW (documents: `assistants`; images: OpenAI `vision` when required by the configured endpoint/model, Azure OpenAI `assistants`).
+- Images are uploaded to the provider via Files API with `purpose="assistants"`, the same value used for documents, on every provider.
 - Images are included in the Responses API request input as multimodal content items (file ID references), allowing the assistant to reason about image content for that chat turn.
 - Images are NOT summarized on upload (no background summary task for images at P1).
 - Attachment access remains owner-only and tenant-isolated (same access rules as document attachments).
@@ -283,13 +283,13 @@ The system MUST allow users to upload image files (PNG, JPEG/JPG, WebP) to a cha
 **Rationale**: Users need to share visual content (screenshots, diagrams, photos) with the AI assistant and ask questions about what they see.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
 
-All `attachment_ids` submitted with a message are strictly scoped to `(tenant_id, user_id, chat_id)` and validated before LLM invocation. Each array MUST contain unique attachment IDs; duplicate IDs within `attachment_ids` MUST be rejected with HTTP 400 before quota reserve and before any provider call. No attachment validation may rely on provider-side failure; all checks MUST complete before any quota reserve or provider request is issued.
+All `attachment_ids` submitted with a message are strictly scoped to `(tenant_id, user_id, chat_id)` and validated before LLM invocation. Each array MUST contain unique attachment IDs; duplicate IDs within `attachment_ids` MUST be rejected with HTTP 400 before any provider call. No attachment validation may rely on provider-side failure. The checks run inside the reserve transaction, after the quota reserve is written; a failed check rolls the transaction back, so the reserve does not survive a rejected request, and no provider request is issued.
 
 #### Document Question Answering (File Search)
 
 - [ ] `p1` - **ID**: `cpt-cf-mini-chat-fr-file-search`
 
-The system MUST support answering questions about uploaded documents by retrieving relevant excerpts during chat. In P1, retrieval always covers all documents currently present in the chat vector store — `attachment_ids` does not scope or filter retrieval. The system MUST NOT inject full file contents into the prompt; only top-k retrieved chunks are included. File search MUST be scoped to the user's tenant. Retrieved excerpts and citations MUST be returned only to the owning user within their tenant. Per-turn file search calls are bounded by the model's `max_tool_calls` catalog setting (default 2), which is shared by all built-in tools in the request; there is no separate `file_search` counter or error code ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). The number of results per call is the model's `max_num_results` catalog setting. A per-user daily file search limit is **not implemented**; `quota_usage.file_search_calls` is not counted.
+The system MUST support answering questions about uploaded documents by retrieving relevant excerpts during chat. In P1, retrieval always covers all documents currently present in the chat vector store — `attachment_ids` does not scope or filter retrieval. The system MUST NOT inject full file contents into the prompt; only top-k retrieved chunks are included. File search MUST be scoped to the user's tenant. Retrieved excerpts and citations MUST be returned only to the owning user within their tenant. Per-turn file search calls are bounded by the model's `max_tool_calls` catalog setting (default 2), which is shared by all built-in tools in the request and is sent only by the OpenAI Responses adapter (the vLLM, Chat Completions and Anthropic adapters do not send it); there is no separate `file_search` counter or error code ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). The number of results per call is the model's `max_num_results` catalog setting. A per-user daily file search limit is **not implemented**; `quota_usage.file_search_calls` is not counted.
 
 The backend MUST NOT include the `file_search` tool before the first document attachment reaches `ready` status in the chat (no vector store exists). Once document attachments exist, the backend includes `file_search` on every model request with the chat vector store ID in the `file_search` tool's `vector_store_ids` field, without metadata filtering (P1). The backend MUST resolve the provider vector store internally from `(tenant_id, chat_id)` and MUST NOT require or accept provider vector store identifiers from clients. Attachment-scoped retrieval (narrowing to documents referenced in `attachment_ids`) is deferred to P2.
 
@@ -316,7 +316,7 @@ The system MUST support the `code_interpreter` LLM tool for data analysis of upl
 
 **Kill switch**: The `disable_code_interpreter` kill switch MUST prevent code interpreter usage at runtime. When active, uploads where `for_code_interpreter` would be the only purpose (currently: XLSX) MUST be rejected with a validation error. If the attachment also has `for_file_search = true`, `for_code_interpreter` is set to `false` and the upload proceeds.
 
-**Model capability gating**: If the effective model does not support code interpreter (`tool_support.code_interpreter = false` in the model catalog), the same filtering logic applies: `for_code_interpreter` is set to `false`, and if no purposes remain, the upload is rejected.
+**Model capability gating**: At upload time the check uses the chat's model (`chats.model`, resolved in the model catalog), not a per-turn effective model. If that model does not support code interpreter (`tool_support.code_interpreter = false`), the same filtering logic applies: `for_code_interpreter` is set to `false`, and if no purposes remain, the upload is rejected with HTTP 400 `invalid_argument`. If the model cannot be resolved, a code-interpreter upload gets HTTP 503 so the client can retry.
 
 **Tool assembly**: When a chat contains ready `code_interpreter` attachments, the `disable_code_interpreter` kill switch is `false`, and the effective model supports code interpreter (`tool_support.code_interpreter = true`), the backend includes the `code_interpreter` tool in the Responses API request with the corresponding provider file IDs (via `tools[].container.file_ids`). The provider decides whether to invoke the tool.
 
@@ -476,7 +476,7 @@ The provider-reported token usage (`usage.input_tokens`, `usage.output_tokens`) 
 
 **Period reset rules**: Daily and monthly periods are calendar-based in UTC, resetting at midnight UTC (daily) and 1st-of-month midnight UTC (monthly). Additional periods (4-hourly, weekly) and per-tenant timezone configuration are deferred to P2+.
 
-**Warning thresholds**: implemented. `quota.warning_threshold_pct` (default 80, range 1–99) defines the warning level. The SSE `done` event carries `quota_warnings` (per tier and period: `tier`, `period`, `remaining_percentage`, `warning`, `exhausted`), and `GET /v1/quota/status` returns the same `warning` / `exhausted` flags per tier and period.
+**Warning thresholds**: implemented. `quota.warning_threshold_pct` (default 80, range 1–99) defines the warning level. The SSE `done` event carries `quota_warnings` (per tier and period: `tier`, `period`, `remaining_percentage`, `warning`, `exhausted`, and `next_reset` when `warning` or `exhausted` is `true`), and `GET /v1/quota/status` returns the same `warning` / `exhausted` flags per tier and period. `exhausted` is `true` when `remaining_percentage` is 0, that is, below 1% of the limit (integer percentage). Periods with a limit `<= 0` are left out of both.
 
 Operational configuration of rate limits, quota allocations, and model catalog is managed by Product Operations. See **#CON-001** for configuration management details.
 
@@ -1039,14 +1039,14 @@ Turns stuck in `running` state beyond a configurable timeout (e.g. pod crash wit
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/v1/chats` | Create a chat |
+| POST | `/v1/chats` | Create a chat (201 with a `Location` header; optional `title` is trimmed and must be 1–255 characters, a whitespace-only title is 400) |
 | GET | `/v1/chats` | List chats (cursor pagination, `$filter`/`$orderby` on `updated_at`, `id`, `title`) |
 | GET | `/v1/chats/{id}` | Get chat metadata and `message_count` |
 | PATCH | `/v1/chats/{id}` | Rename a chat |
 | DELETE | `/v1/chats/{id}` | Delete a chat (204) |
 | GET | `/v1/chats/{id}/messages` | List messages (cursor pagination, `$filter`/`$orderby` on `created_at`, `id`, `role`) |
 | POST | `/v1/chats/{id}/messages:stream` | Send a message; SSE response |
-| POST | `/v1/chats/{id}/attachments` | Upload an attachment (201, synchronous) |
+| POST | `/v1/chats/{id}/attachments` | Upload an attachment (201, synchronous). A missing filename defaults to `upload`; filenames longer than 255 characters are truncated, keeping the extension; an `application/octet-stream` part gets its MIME type inferred from the extension |
 | GET | `/v1/chats/{id}/attachments/{attachment_id}` | Get attachment status and metadata |
 | DELETE | `/v1/chats/{id}/attachments/{attachment_id}` | Delete an attachment (204) |
 | GET | `/v1/chats/{id}/turns/{request_id}` | Turn status |
@@ -1065,7 +1065,7 @@ Turns stuck in `running` state beyond a configurable timeout (e.g. pod crash wit
 
 #### Quota Status API (read-only)
 
-`GET /v1/quota/status` returns the calling user's credit quota state: `{ tiers: [{ tier, periods: [{ period, limit_credits_micro, used_credits_micro, remaining_credits_micro, remaining_percentage, next_reset, warning, exhausted }] }], warning_threshold_pct }`. `tier` is `premium` or `total` (see `cpt-cf-mini-chat-fr-quota-enforcement`); `period` is `daily` or `monthly`; `next_reset` is RFC 3339. `warning` is `true` when `remaining_percentage` is at or below `100 - warning_threshold_pct`; `exhausted` is `true` when nothing remains. Tool quotas (web search, code interpreter) are not included.
+`GET /v1/quota/status` returns the calling user's credit quota state: `{ tiers: [{ tier, periods: [{ period, limit_credits_micro, used_credits_micro, remaining_credits_micro, remaining_percentage, next_reset, warning, exhausted }] }], warning_threshold_pct }`. `tier` is `premium` or `total` (see `cpt-cf-mini-chat-fr-quota-enforcement`); `period` is `daily` or `monthly`; `next_reset` is RFC 3339. `warning` is `true` when `remaining_percentage` is at or below `100 - warning_threshold_pct`; `exhausted` is `true` when `remaining_percentage` is 0 (floored integer percentage, so less than 1% of the limit remains). Periods whose limit is `<= 0` are omitted. Tool quotas (web search, code interpreter) are not included.
 
 #### Turn Status (read-only) API
 
@@ -1138,7 +1138,7 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | `delta` | `type`, `content` |
 | `tool` | `phase` (`start`/`done`), `name`, `details` |
 | `citations` | `items` |
-| `done` | `usage` (token counts only; optional), `effective_model`, `selected_model`, `quota_decision`, optional `downgrade_from`, `downgrade_reason`, `quota_warnings`. The message ID is not repeated; it is in `stream_started`. |
+| `done` | `usage` (token counts only; optional), `effective_model`, `selected_model`, `quota_decision`, optional `downgrade_from`, `downgrade_reason`, `quota_warnings` (entries carry `next_reset` only when `warning` or `exhausted` is `true`). The message ID and `request_id` are not repeated; they are in `stream_started`. |
 | `error` | `code`, `message` |
 
 **Stream close**: the server MUST close the SSE connection immediately after emitting the terminal event. No further events are permitted after the terminal `done` or `error`. After a client disconnect nothing is sent.
@@ -1151,11 +1151,15 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 |---|---|---|---|
 | Chat, message, turn, attachment or model not found (including another user's resource) | `not_found` | 404 | resource scoped by `type`. Exception: a repeated `DELETE` of an attachment returns 204 (idempotent) |
 | Unknown or disabled model on `POST /chats` | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
-| Validation error (empty title, empty content) | `invalid_argument` | 400 | `detail` |
-| Bad OData query on a list endpoint (`$filter`, `$orderby`, page size, cursor) | `invalid_argument` | 400 | `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER`, `INVALID_ORDERBY_FIELD`, `INVALID_LIMIT`, `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR` |
+| The chat's model is no longer in the catalog (`messages:stream`, retry, edit) | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
+| Empty or whitespace-only `content` on `messages:stream` or turn edit | `invalid_argument` | 400 | `field_violations[content].reason = EMPTY_CONTENT` |
+| Invalid chat title on `POST /chats` or `PATCH /chats/{id}` (empty or whitespace-only after trim, or longer than 255 characters) | `invalid_argument` | 400 | `detail` |
+| Invalid reaction value (not `like` or `dislike`); checked before authorization. A body that does not match the schema (e.g. no `reaction` field) is 422, see below | `invalid_argument` | 400 | `detail` |
+| Bad OData query on a list endpoint (`$filter`, `$orderby`, `$select`, page size, cursor, unsupported query option) | `invalid_argument` | 400 | `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER`, `INVALID_ORDERBY_FIELD`, `INVALID_LIMIT` (`limit=0`), `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR`; from the platform OData extractor (`toolkit::api::odata`): `FILTER_TOO_LONG`, `FILTER_TOO_COMPLEX` (`$filter`), `INVALID_SELECT` (`$select`), `UNSUPPORTED_QUERY_PARAM` (a `$` option the extractor does not bind, e.g. `$skip`, `$count`), `INVALID_QUERY_PARAMS` (unparsable query string). A `limit` above 100 is clamped to 100, not rejected |
 | Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | platform JSON extractor (`toolkit::api::rest::extract::Json`) |
 | Malformed JSON body | `invalid_argument` | 400 | `field_violations[body].reason = json_syntax_error` (platform JSON extractor) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` |
+| Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `detail` |
 | Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
 | Outbox payload built for the request exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` |
@@ -1167,7 +1171,9 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Kill switch (web search, images) | `failed_precondition` | 400 | `violations[{subject: web_search\|images, type: FEATURE_DISABLED}]` |
 | Retry/edit/delete of a non-terminal turn | `failed_precondition` | 400 | `violations[{subject: turn_state, type: STATE}]` |
 | Reaction on a non-assistant message | `failed_precondition` | 400 | `violations[{subject: reaction_target, type: STATE}]` |
+| Missing, invalid or expired bearer token | `unauthenticated` | 401 | `context.reason`: `MISSING_BEARER` / `AUTHN_FAILED` (api-gateway) |
 | AuthZ denied, or the PDP failed (fail-closed) | `permission_denied` | 403 | `AUTHZ_DENIED` |
+| Tenant lacks the required license feature (`ai_chat`) | `permission_denied` | 403 | `LICENSE_FEATURE_REQUIRED` (api-gateway license middleware) |
 | Another turn is running in the chat (stream) | `aborted` | 409 | `turn_already_running` |
 | `request_id` reused for a non-completed or deleted turn | `aborted` | 409 | `request_id_conflict` |
 | Mutation of a turn that is not the latest (including an already deleted turn) | `aborted` | 409 | `NOT_LATEST_TURN` |
@@ -1275,7 +1281,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 - File search calls are reported in the turn's usage and audit data (they are not counted against a daily quota in P1)
 
 **Alternative Flows**:
-- **Tool call limit reached**: The provider stops calling tools once the model's `max_tool_calls` is reached; the response is based on the retrieved excerpts so far and the conversation context
+- **Tool call limit reached**: With the OpenAI Responses adapter (the only one that sends `max_tool_calls`), the provider stops calling tools once the model's `max_tool_calls` is reached; the response is based on the retrieved excerpts so far and the conversation context
 
 #### UC-003: Upload Document
 
@@ -1644,22 +1650,22 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 - The configured provider APIs remain stable and available; a storage-capable provider (OpenAI or Azure OpenAI Files API and File Search) is configured for file and vector-store operations, including for Anthropic chats (`rag_provider`, [ADR-0005](./ADR/0005-cpt-cf-mini-chat-adr-multi-provider-adapters.md))
 - OAGW supports streaming SSE relay and credential injection for OpenAI and Azure OpenAI endpoints
 - OAGW owns Azure OpenAI endpoint details including required `api-version` parameters and path variants
-- OAGW's `ServiceGatewayClientV1` SDK is available in-process for upstream CRUD and proxy requests; MCP server registration creates OAGW upstreams programmatically
-- OAGW's `OAuth2ClientCredAuthPlugin` supports per-user token caching via `SecurityContext` (cache key includes `subject_tenant_id` and `subject_id`)
-- OAGW's auth plugins (`apikey`, `oauth2_client_cred`) resolve secrets from credstore scoped to the calling user's `SecurityContext`
-- OAGW supports header passthrough configuration for the MCP session headers `Mcp-Protocol-Version` and `Mcp-Session-Id` (forwarded to the upstream MCP server via the upstream's passthrough allowlist)
-- **OAGW endpoint pinning via `X-OAGW-Target-Host` is a confirmed, pre-existing OAGW capability — not a new requirement introduced by mini-chat.** For a multi-endpoint upstream, a proxied request carrying `X-OAGW-Target-Host: <host>` is routed to the matching endpoint instead of the default round-robin selection; the header value is validated against the upstream's registered endpoint list and rejected with typed errors on failure (`MISSING_TARGET_HOST`, `INVALID_TARGET_HOST`, `UNKNOWN_TARGET_HOST`). Unlike the MCP session headers above, `X-OAGW-Target-Host` is an **OAGW-internal routing directive**: it is consumed by OAGW's endpoint selector and stripped before the request reaches the upstream (and stripped from upstream responses), so it is NOT part of the upstream passthrough allowlist. mini-chat relies on this capability only to keep an MCP session pinned to the backend replica that served `initialize`; single-endpoint upstreams (the common case) never send it. **OAGW spec reference**: two-tier endpoint selection in the `oagw` gear (`infra/proxy/service.rs::select_endpoint`, Tier 1 = explicit `X-OAGW-Target-Host` selection), the SDK error contract in `oagw-sdk` (`field::{MISSING,INVALID,UNKNOWN}_TARGET_HOST`, `ServiceGatewayError::InvalidTargetHost`), and the conformance scenarios under `scenarios/proxy-api/custom-header-routing/` (e.g. `positive-2.2-multi-endpoint-explicit-alias-with-header`, `positive-3.2-case-insensitive-matching`, `negative-2.1-unknown-host`)
+- OAGW's `ServiceGatewayClientV1` SDK is available in-process for upstream CRUD and proxy requests (the planned MCP server registration would create OAGW upstreams programmatically; Future, [ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md))
+- (Future MCP support, ADR-0006) OAGW's `OAuth2ClientCredAuthPlugin` supports per-user token caching via `SecurityContext` (cache key includes `subject_tenant_id` and `subject_id`)
+- (Future MCP support, ADR-0006) OAGW's auth plugins (`apikey`, `oauth2_client_cred`) resolve secrets from credstore scoped to the calling user's `SecurityContext`
+- (Future MCP support, ADR-0006) OAGW supports header passthrough configuration for the MCP session headers `Mcp-Protocol-Version` and `Mcp-Session-Id` (forwarded to the upstream MCP server via the upstream's passthrough allowlist)
+- (Future MCP support, ADR-0006) **OAGW endpoint pinning via `X-OAGW-Target-Host` is a confirmed, pre-existing OAGW capability — not a new requirement introduced by mini-chat.** For a multi-endpoint upstream, a proxied request carrying `X-OAGW-Target-Host: <host>` is routed to the matching endpoint instead of the default round-robin selection; the header value is validated against the upstream's registered endpoint list and rejected with typed errors on failure (`MISSING_TARGET_HOST`, `INVALID_TARGET_HOST`, `UNKNOWN_TARGET_HOST`). Unlike the MCP session headers above, `X-OAGW-Target-Host` is an **OAGW-internal routing directive**: it is consumed by OAGW's endpoint selector and stripped before the request reaches the upstream (and stripped from upstream responses), so it is NOT part of the upstream passthrough allowlist. mini-chat relies on this capability only to keep an MCP session pinned to the backend replica that served `initialize`; single-endpoint upstreams (the common case) never send it. **OAGW spec reference**: two-tier endpoint selection in the `oagw` gear (`infra/proxy/service.rs::select_endpoint`, Tier 1 = explicit `X-OAGW-Target-Host` selection), the SDK error contract in `oagw-sdk` (`field::{MISSING,INVALID,UNKNOWN}_TARGET_HOST`, `ServiceGatewayError::InvalidTargetHost`), and the conformance scenarios under `scenarios/proxy-api/custom-header-routing/` (e.g. `positive-2.2-multi-endpoint-explicit-alias-with-header`, `positive-3.2-case-insensitive-matching`, `negative-2.1-unknown-host`)
 - Platform AuthN provides `user_id` and `tenant_id` in the security context for every request
 - Platform `license_manager` can resolve the `ai_chat` feature flag synchronously
 - An audit plugin is registered in types-registry to receive audit events (without one, events are dropped with a warning — [ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md))
 - One provider vector store per chat is sufficient for P1 document volumes
 - Files (documents and images) are stored in the LLM provider's storage (OpenAI / Azure OpenAI via Files API); Mini Chat does not operate first-party object storage (no S3 or equivalent)
 - Thread summary quality is adequate for maintaining conversational coherence over long chats
-- MCP servers conform to the MCP specification (JSON-RPC 2.0, `initialize`, `tools/list`, `tools/call`)
-- MCP servers return tool definitions with valid JSON Schema `inputSchema`
-- Credstore is available to resolve MCP server auth credentials at startup and runtime
-- MCP tool calls may mutate external systems and therefore MUST NOT be retried automatically
-- MCP tool output is untrusted and may contain adversarial content (prompt injection attempts)
+- (Future MCP support, ADR-0006) MCP servers conform to the MCP specification (JSON-RPC 2.0, `initialize`, `tools/list`, `tools/call`)
+- (Future MCP support, ADR-0006) MCP servers return tool definitions with valid JSON Schema `inputSchema`
+- (Future MCP support, ADR-0006) Credstore is available to resolve MCP server auth credentials at startup and runtime
+- (Future MCP support, ADR-0006) MCP tool calls may mutate external systems and therefore MUST NOT be retried automatically
+- (Future MCP support, ADR-0006) MCP tool output is untrusted and may contain adversarial content (prompt injection attempts)
 
 ## 12. Risks
 
@@ -1673,19 +1679,19 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 | Large number of chats with documents creating many vector stores | Provider API limits on vector store count; increased storage costs | Monitor vector store count per user via metrics; enforce per-chat document limits; plan per-workspace aggregation (P2) |
 | Image spam / abuse driving excessive provider costs | Unexpected cost spikes from high-volume or large image uploads | Per-message image input cap (default: 4); per-file image size limit (default 5 MiB); per-chat storage limit; `disable_images` kill switch. The per-user daily image cap and image quota counters are not implemented ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)) |
 | Provider model does not support multimodal input | Image-bearing requests fail | The domain service checks model capability before outbound call; rejects with HTTP 400 (`VISION_NOT_SUPPORTED`) if effective model lacks image support; operator configures which models support images. P1 catalog invariant: all enabled models include `VISION_INPUT`, so this risk applies only if a future catalog introduces a non-vision model. |
-| MCP server latency adds to stream time | User perceives slow responses | Per-call timeout (default 30s, per-server override), per-server concurrency caps, circuit breaker, SSE `tool` events for UI progress |
-| MCP tool name collisions | Wrong server receives call or provider rejects request | Provider-safe exposed names with hash suffix + routing map; collision detection with diagnostics |
-| MCP server returns large payloads | Token budget blown; memory pressure | Response size limits, output char/token caps (`max_tool_output_chars`, default 8192), runtime budget enforcement |
-| Runaway MCP tool calls (model loops) | Excessive cost and latency | Soft per-message limit, remove MCP tools after limit, hard iteration cap, runtime budget enforcement |
-| MCP server down during stream | Lost tools mid-conversation | Optional/required server policy, fail-open/fail-closed, diagnostics, health counters |
-| Hub discovery returns stale/untrusted servers | Unauthorized tool exposure | Hub-synced servers always land with `status='pending_approval'` and `enabled=false`; `auto_attach` forced to `false` for hub sources; admin explicit approval required before tool exposure; persisted tool metadata; policy refresh |
-| MCP auth credential leakage | Security breach | Credstore-resolved secrets, redaction in logs/audit/API, no secrets in SSE events |
-| MCP tool schemas consume excessive input tokens | High per-message cost even without tool calls | Actual schema token estimation, schema size caps (`max_tool_schema_bytes`, default 16384), deterministic tool ranking |
-| HTTP SSRF / DNS rebinding via MCP transport | Internal network exposure | HTTPS by default, private IP blocking, DNS rebinding checks, redirect policy |
+| MCP server latency adds to stream time | User perceives slow responses | Future (MCP not implemented, ADR-0006): Per-call timeout (default 30s, per-server override), per-server concurrency caps, circuit breaker, SSE `tool` events for UI progress |
+| MCP tool name collisions | Wrong server receives call or provider rejects request | Future (MCP not implemented, ADR-0006): Provider-safe exposed names with hash suffix + routing map; collision detection with diagnostics |
+| MCP server returns large payloads | Token budget blown; memory pressure | Future (MCP not implemented, ADR-0006): Response size limits, output char/token caps (`max_tool_output_chars`, default 8192), runtime budget enforcement |
+| Runaway MCP tool calls (model loops) | Excessive cost and latency | Future (MCP not implemented, ADR-0006): Soft per-message limit, remove MCP tools after limit, hard iteration cap, runtime budget enforcement |
+| MCP server down during stream | Lost tools mid-conversation | Future (MCP not implemented, ADR-0006): Optional/required server policy, fail-open/fail-closed, diagnostics, health counters |
+| Hub discovery returns stale/untrusted servers | Unauthorized tool exposure | Future (MCP not implemented, ADR-0006): Hub-synced servers always land with `status='pending_approval'` and `enabled=false`; `auto_attach` forced to `false` for hub sources; admin explicit approval required before tool exposure; persisted tool metadata; policy refresh |
+| MCP auth credential leakage | Security breach | Future (MCP not implemented, ADR-0006): Credstore-resolved secrets, redaction in logs/audit/API, no secrets in SSE events |
+| MCP tool schemas consume excessive input tokens | High per-message cost even without tool calls | Future (MCP not implemented, ADR-0006): Actual schema token estimation, schema size caps (`max_tool_schema_bytes`, default 16384), deterministic tool ranking |
+| HTTP SSRF / DNS rebinding via MCP transport | Internal network exposure | Future (MCP not implemented, ADR-0006): HTTPS by default, private IP blocking, DNS rebinding checks, redirect policy |
 | ~~Stdio process compromise~~ | ~~Host compromise or resource exhaustion~~ | Eliminated — stdio transport is not supported (see §4.2 Out of Scope) |
-| Prompt injection in MCP tool output | Model follows malicious instructions | System prompt guard, output treated as untrusted data, sanitization/redaction |
-| OAuth 2.0 token expiry for MCP server | MCP server auth breaks mid-stream | OAGW caches OAuth2 tokens per user with 30s safety margin before expiry; if token expires, OAGW re-fetches on next request; server marked degraded if refresh fails; fail-open for optional servers |
-| Config-seeded MCP server removed from config | Orphaned role assignments | Soft-delete: server marked disabled, tools omitted at stream time, role assignments preserved |
+| Prompt injection in MCP tool output | Model follows malicious instructions | Future (MCP not implemented, ADR-0006): System prompt guard, output treated as untrusted data, sanitization/redaction |
+| OAuth 2.0 token expiry for MCP server | MCP server auth breaks mid-stream | Future (MCP not implemented, ADR-0006): OAGW caches OAuth2 tokens per user with 30s safety margin before expiry; if token expires, OAGW re-fetches on next request; server marked degraded if refresh fails; fail-open for optional servers |
+| Config-seeded MCP server removed from config | Orphaned role assignments | Future (MCP not implemented, ADR-0006): Soft-delete: server marked disabled, tools omitted at stream time, role assignments preserved |
 
 ## 13. Open Questions
 

@@ -67,9 +67,9 @@ pub struct ModelCatalogEntry {
     pub max_output_tokens: u32,
     /// Maximum input tokens per request.
     pub max_input_tokens: u32,
-    /// Credit multiplier for input tokens (micro-credits per 1000 tokens).
+    /// Credit multiplier for input tokens (micro-credits per 1,000,000 tokens).
     pub input_tokens_credit_multiplier_micro: u64,
-    /// Credit multiplier for output tokens (micro-credits per 1000 tokens).
+    /// Credit multiplier for output tokens (micro-credits per 1,000,000 tokens).
     pub output_tokens_credit_multiplier_micro: u64,
     /// Human-readable multiplier display string (e.g. "1x", "3x").
     #[serde(default)]

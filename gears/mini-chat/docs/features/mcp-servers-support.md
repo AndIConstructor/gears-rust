@@ -376,7 +376,7 @@ Consequently, enabling only `mcp.enabled: true` results in a subsystem that is g
 
 ## MCP Scope Exclusions
 
-- MCP resources (`resources/list`, `resources/read`) and prompts (`prompts/list`, `prompts/get`) are out of scope. Only `tools/*` methods are implemented.
+- MCP resources (`resources/list`, `resources/read`) and prompts (`prompts/list`, `prompts/get`) are out of scope. The planned support covers only `tools/*` methods (none is implemented yet).
 - mTLS for internal MCP servers is a known gap; tracked as a future enhancement.
 - Per-message MCP configuration overrides are deferred.
 - MCP tool result caching within a single turn is out of scope (per PRD §4.2).
@@ -471,7 +471,7 @@ The following parts of DESIGN.md described MCP outside §4 and were replaced the
 | `cpt-cf-mini-chat-fr-mcp-tool-discovery` | `p1` | MCP tool discovery via `tools/list`; schemas persisted in `mcp_server_tools` DB table; cached in-memory with TTL; injected as `LlmTool::Function` into context assembly. See **MCP Servers Support** (section 4). |
 | `cpt-cf-mini-chat-fr-mcp-tool-execution` | `p1` | MCP tool execution via `tools/call` in the agentic loop; sequential one-tool-per-iteration dispatch; argument validation; rate limiting; output sanitization. See **MCP Servers Support** (section 4). |
 | `cpt-cf-mini-chat-fr-mcp-server-registry` | `p1` | MCP server registry (config + manual); `mcp_servers` and `mcp_server_tools` DB tables; admin REST API. See **MCP Servers Support** (section 4). |
-| `cpt-cf-mini-chat-fr-mcp-hub-discovery` | `p2` | Optional MCP hub discovery (`source='hub'`); periodic sync; hub servers land `pending_approval`/`enabled=false`, `auto_attach` forced false; admin approval required. Implemented in Phase 4. See **MCP Servers Support** (section 4). |
+| `cpt-cf-mini-chat-fr-mcp-hub-discovery` | `p2` | Optional MCP hub discovery (`source='hub'`); periodic sync; hub servers land `pending_approval`/`enabled=false`, `auto_attach` forced false; admin approval required. Planned for Phase 4 (not implemented). See **MCP Servers Support** (section 4). |
 | `cpt-cf-mini-chat-fr-mcp-role-access` | `p1` | Role-level MCP server access via `role_mcp_servers` join table; admin assign/revoke; effective server resolution. See **MCP Servers Support** (section 4). |
 
 ### Architecture layer (DESIGN §1.3)
