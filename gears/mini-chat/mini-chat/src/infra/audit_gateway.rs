@@ -121,8 +121,15 @@ impl AuditGateway {
         ) {
             Ok(gts_id) => Ok(gts_id),
             // No matching instances — audit is optional; cache a sentinel so we
-            // don't re-query the registry on every delivery attempt.
-            Err(ChoosePluginError::PluginNotFound { .. }) => Ok(String::new()),
+            // don't re-query the registry on every delivery attempt. Logged
+            // once (the sentinel is cached) so dropped audit is visible.
+            Err(ChoosePluginError::PluginNotFound { .. }) => {
+                warn!(
+                    vendor = %self.vendor,
+                    "no mini-chat audit plugin registered; audit events will be dropped"
+                );
+                Ok(String::new())
+            }
             Err(e) => Err(anyhow::Error::new(e)),
         }
     }

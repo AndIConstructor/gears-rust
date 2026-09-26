@@ -145,6 +145,14 @@ impl From<DomainError> for CanonicalError {
                 )
                 .create(),
 
+            DomainError::ImagesDisabled => MiniChatChatError::failed_precondition()
+                .with_precondition_violation(
+                    "images",
+                    "disabled via kill switch",
+                    "FEATURE_DISABLED",
+                )
+                .create(),
+
             DomainError::WebSearchCallsExceeded => {
                 MiniChatChatError::resource_exhausted("web search calls exceeded for this message")
                     .with_quota_violation("web_search_calls", "max calls exceeded")

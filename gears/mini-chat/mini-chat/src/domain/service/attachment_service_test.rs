@@ -122,6 +122,7 @@ fn build_service_with_metrics(
     outbox: Arc<dyn crate::domain::repos::OutboxEnqueuer>,
     rag_config: RagConfig,
     metrics: Arc<dyn crate::domain::ports::MiniChatMetricsPort>,
+    model_resolver: Arc<dyn crate::domain::repos::ModelResolver>,
 ) -> TestAttachmentService {
     let db = mock_db_provider(db);
     let chat_repo = Arc::new(OrmChatRepository::new(toolkit_db::odata::LimitCfg {
@@ -156,7 +157,7 @@ fn build_service_with_metrics(
         file_storage,
         vector_store_prov,
         provider_resolver,
-        mock_model_resolver(),
+        model_resolver,
         rag_config,
         crate::config::ThumbnailConfig::default(),
         metrics,
@@ -347,6 +348,52 @@ async fn test_upload_document_full_lifecycle() {
 }
 
 // ── P5-B2: Upload image lifecycle (skips vector store) ──
+
+#[tokio::test]
+async fn test_upload_image_rejected_when_images_disabled() {
+    use crate::domain::service::test_helpers::MockModelResolver;
+
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    // No provider response queued: the upload must be rejected before any call.
+    let oagw = MockOagwGateway::with_responses(vec![]);
+    let resolver = MockModelResolver::default().with_kill_switches(mini_chat_sdk::KillSwitches {
+        disable_images: true,
+        ..Default::default()
+    });
+    let svc = build_service_with_metrics(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+        Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        Arc::new(resolver),
+    );
+
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "photo.png",
+        "image/png",
+        Bytes::from(vec![0u8; 2048]),
+    )
+    .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(crate::domain::error::DomainError::ImagesDisabled)
+        ),
+        "expected ImagesDisabled, got {result:?}"
+    );
+}
 
 #[tokio::test]
 async fn test_upload_image_skips_vector_store() {
@@ -1527,6 +1574,75 @@ async fn test_vector_store_preexisting_row_reused() {
             .contains("/v1/vector_stores/vs-preexisting/files"),
         "should use preexisting VS ID, got: {}",
         requests[1].uri
+    );
+}
+
+// ── Stale NULL placeholder (creator crashed before the CAS) is reclaimed ──
+
+#[tokio::test]
+async fn test_stale_vector_store_placeholder_is_reclaimed() {
+    use crate::infra::db::entity::chat_vector_store::{Column, Entity as VectorStoreEntity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use toolkit_db::secure::SecureUpdateExt;
+
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+
+    let row_id = crate::domain::service::test_helpers::insert_test_vector_store(
+        &db_prov, tenant_id, chat_id, None,
+    )
+    .await;
+    let conn = db_prov.conn().unwrap();
+    VectorStoreEntity::update_many()
+        .col_expr(
+            Column::CreatedAt,
+            sea_orm::sea_query::Expr::value(
+                time::OffsetDateTime::now_utc() - time::Duration::minutes(10),
+            ),
+        )
+        .filter(Column::Id.eq(row_id))
+        .secure()
+        .scope_with(&toolkit_security::AccessScope::allow_all())
+        .exec(&conn)
+        .await
+        .expect("backdate placeholder");
+
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+    let oagw = MockOagwGateway::with_responses(vec![
+        Ok(file_upload_response("file-stale-001")),
+        Ok(vector_store_create_response("vs-fresh")),
+        Ok(vector_store_add_file_response()),
+    ]);
+    let svc = build_service(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+    );
+
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "doc.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "upload after stale placeholder failed: {result:?}"
+    );
+
+    let requests = oagw.captured_requests.lock().unwrap();
+    assert!(
+        requests[2].uri.contains("/v1/vector_stores/vs-fresh/files"),
+        "a new vector store must be created, got: {}",
+        requests[2].uri
     );
 }
 
@@ -2828,6 +2944,7 @@ async fn upload_image_emits_metrics_and_gauge_balanced() {
         outbox,
         RagConfig::default(),
         Arc::clone(&metrics) as _,
+        crate::domain::service::test_helpers::mock_model_resolver(),
     );
 
     let result = test_upload_file(

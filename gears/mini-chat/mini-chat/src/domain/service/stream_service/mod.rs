@@ -41,6 +41,7 @@ pub struct MutationPreflight {
     pf: PreflightResult,
     ready_doc_count: i64,
     ci_file_ids: Vec<String>,
+    image_file_ids: Vec<String>,
 }
 
 /// Everything needed to start the provider task for a mutation turn.
@@ -66,7 +67,7 @@ pub struct StreamService<
     TR: TurnRepository + 'static,
     MR: MessageRepository + 'static,
     QR: QuotaUsageRepository + 'static,
-    CR: ChatRepository,
+    CR: ChatRepository + 'static,
     TSR: ThreadSummaryRepository + 'static,
     AR: AttachmentRepository + 'static,
     VSR: VectorStoreRepository + 'static,
@@ -96,7 +97,7 @@ impl<
     TR: TurnRepository + 'static,
     MR: MessageRepository + 'static,
     QR: QuotaUsageRepository + 'static,
-    CR: ChatRepository,
+    CR: ChatRepository + 'static,
     TSR: ThreadSummaryRepository + 'static,
     AR: AttachmentRepository + 'static,
     VSR: VectorStoreRepository + 'static,
@@ -399,37 +400,10 @@ impl<
             .map_err(|e| StreamError::TurnCreationFailed { source: e })?;
 
         // ── Pre-fetch image attachment count for guards + token estimation ──
-        // Validates chat_id to prevent cross-chat attachment references.
-        let image_file_ids: Vec<String> = if attachment_ids.is_empty() {
-            Vec::new()
-        } else {
-            let rows = self
-                .attachment_repo
-                .get_batch(&conn, &scope, &attachment_ids)
-                .await
-                .map_err(|e| StreamError::TurnCreationFailed { source: e })?;
-            rows.iter()
-                .filter(|r| {
-                    r.chat_id == chat_id
-                        && r.attachment_kind
-                            == crate::infra::db::entity::attachment::AttachmentKind::Image
-                        && r.status == crate::infra::db::entity::attachment::AttachmentStatus::Ready
-                })
-                .filter_map(|r| r.provider_file_id.clone())
-                .collect()
-        };
-        let num_images = u32::try_from(image_file_ids.len()).unwrap_or(u32::MAX);
-
-        // ── Image count guard (before preflight, before TX) ──
-        if num_images > 0 {
-            let max = self.rag_config.max_images_per_message;
-            if num_images > max {
-                return Err(StreamError::TooManyImages {
-                    count: num_images,
-                    max,
-                });
-            }
-        }
+        let image_file_ids = self
+            .image_file_ids(&conn, &scope, chat_id, &attachment_ids)
+            .await?;
+        let num_images = self.check_image_count(&image_file_ids)?;
 
         // ── Preflight quota evaluate (external I/O, no DB writes) ──
         let selected_model = model.clone();
@@ -462,20 +436,7 @@ impl<
         check_input_token_limit(&content, &pf)?;
 
         // ── Post-preflight image guards (kill switches + vision capability) ──
-        if num_images > 0 {
-            if computed.kill_switches.disable_images {
-                return Err(StreamError::ImagesDisabled);
-            }
-            // DESIGN.md line 181: check VISION_INPUT on the effective_model.
-            // DESIGN.md line 3206: P1 catalog invariant — ALL enabled models
-            // MUST include VISION_INPUT (enforced at startup). Under a valid
-            // P1 config, quota downgrade cannot demote to a non-vision model,
-            // so checking the selected_model is sufficient. This guard is
-            // defensive for future non-vision models or catalog misconfiguration.
-            if !has_vision_input {
-                return Err(StreamError::UnsupportedMedia);
-            }
-        }
+        check_image_support(num_images, &computed.kill_switches, has_vision_input)?;
 
         // Metrics: estimated tokens (only on allow/downgrade)
         #[allow(clippy::cast_precision_loss)]
@@ -735,6 +696,7 @@ impl<
         let quota_repo = Arc::clone(&self.quota.repo);
         let attachment_repo = Arc::clone(&self.attachment_repo);
         let message_attachment_repo = Arc::clone(&self.message_attachment_repo);
+        let chat_repo = Arc::clone(&self.chat_repo);
         let scope_tx = scope.clone();
         let effective_model_tx = pf.effective_model.clone();
         let reserve_tokens = pf.reserve_tokens;
@@ -773,7 +735,12 @@ impl<
                         }
                     }
 
-                    // 2. Insert user message
+                    // 2. Insert user message; the chat moves to the top of
+                    //    the activity-ordered chat list.
+                    chat_repo
+                        .touch_activity(tx, &scope_tx, chat_id)
+                        .await
+                        .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
                     message_repo
                         .insert_user_message(
                             tx,
@@ -1069,15 +1036,62 @@ impl<
         Ok((assembled, summary_info))
     }
 
+    /// Provider file IDs of the ready image attachments among `attachment_ids`.
+    /// Rows from another chat are ignored (no cross-chat references).
+    async fn image_file_ids<C: toolkit_db::secure::DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        chat_id: Uuid,
+        attachment_ids: &[Uuid],
+    ) -> Result<Vec<String>, StreamError> {
+        if attachment_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .attachment_repo
+            .get_batch(conn, scope, attachment_ids)
+            .await
+            .map_err(|e| StreamError::TurnCreationFailed { source: e })?;
+        Ok(rows
+            .iter()
+            .filter(|r| {
+                r.chat_id == chat_id
+                    && r.attachment_kind
+                        == crate::infra::db::entity::attachment::AttachmentKind::Image
+                    && r.status == crate::infra::db::entity::attachment::AttachmentStatus::Ready
+            })
+            .filter_map(|r| r.provider_file_id.clone())
+            .collect())
+    }
+
+    /// Image count guard (before preflight, before any write).
+    fn check_image_count(&self, image_file_ids: &[String]) -> Result<u32, StreamError> {
+        let num_images = u32::try_from(image_file_ids.len()).unwrap_or(u32::MAX);
+        let max = self.rag_config.max_images_per_message;
+        if num_images > max {
+            return Err(StreamError::TooManyImages {
+                count: num_images,
+                max,
+            });
+        }
+        Ok(num_images)
+    }
+
     /// Quota preflight for a retry/edit, run **before** the mutation commits.
     ///
     /// Read-only: a rejection (quota, kill switch, input too long) returns
     /// before the previous turn is soft-deleted, so the user keeps their last
     /// answer and the chat is not blocked by a running turn.
+    ///
+    /// Image attachments of `source_message_id` (the turn's original user
+    /// message, copied to the new turn) are re-sent to the model and go
+    /// through the same image guards as a new message.
     pub(crate) async fn preflight_mutation(
         &self,
         ctx: &SecurityContext,
         chat_id: Uuid,
+        source_message_id: Uuid,
         content: &str,
         resolved_model: &ResolvedModel,
         web_search_enabled: bool,
@@ -1112,6 +1126,15 @@ impl<
                     .unwrap_or(0)
                     .saturating_add(u64::try_from(out.max(0)).unwrap_or(0))
             });
+        let attachment_ids = self
+            .message_attachment_repo
+            .attachment_ids_for_message(&conn, &scope, chat_id, source_message_id)
+            .await
+            .map_err(|e| StreamError::TurnCreationFailed { source: e })?;
+        let image_file_ids = self
+            .image_file_ids(&conn, &scope, chat_id, &attachment_ids)
+            .await?;
+        let num_images = self.check_image_count(&image_file_ids)?;
 
         let selected_model = resolved_model.model_id.clone();
         let computed = self
@@ -1121,7 +1144,7 @@ impl<
                 user_id,
                 selected_model: selected_model.clone(),
                 utf8_bytes: content.len() as u64,
-                num_images: 0,
+                num_images,
                 tools_enabled: ready_doc_count > 0,
                 web_search_enabled,
                 code_interpreter_enabled: !ci_file_ids.is_empty(),
@@ -1139,12 +1162,18 @@ impl<
 
         let pf = flatten_preflight(computed.decision.clone())?;
         check_input_token_limit(content, &pf)?;
+        let has_vision_input = resolved_model
+            .multimodal_capabilities
+            .iter()
+            .any(|c| c == "VISION_INPUT");
+        check_image_support(num_images, &computed.kill_switches, has_vision_input)?;
 
         Ok(MutationPreflight {
             computed,
             pf,
             ready_doc_count,
             ci_file_ids,
+            image_file_ids,
         })
     }
 
@@ -1234,6 +1263,7 @@ impl<
             pf,
             ready_doc_count,
             ci_file_ids: pre_ci_file_ids,
+            image_file_ids,
         } = preflight;
 
         let conn = self
@@ -1346,7 +1376,7 @@ impl<
                 pf.file_search_max_num_results,
                 ci_file_ids,
                 token_budget,
-                &[], // retry/edit: no new image attachments
+                &image_file_ids,
             )
             .await?;
 
@@ -1518,6 +1548,30 @@ impl<
             warn!(%turn_id, error = %e, "failed to mark unstarted turn as Failed");
         }
     }
+}
+
+/// Post-preflight image guards: the images kill switch and the model's
+/// vision capability.
+///
+/// DESIGN §2.2: P1 requires every enabled model to support `VISION_INPUT`,
+/// so a quota downgrade cannot land on a non-vision model and checking the
+/// selected model is sufficient; the check is defensive against catalog
+/// misconfiguration.
+fn check_image_support(
+    num_images: u32,
+    kill_switches: &mini_chat_sdk::KillSwitches,
+    has_vision_input: bool,
+) -> Result<(), StreamError> {
+    if num_images == 0 {
+        return Ok(());
+    }
+    if kill_switches.disable_images {
+        return Err(StreamError::ImagesDisabled);
+    }
+    if !has_vision_input {
+        return Err(StreamError::UnsupportedMedia);
+    }
+    Ok(())
 }
 
 /// Emit `stream_started` before handing `tx` to the provider task (D3).
@@ -5767,7 +5821,14 @@ mod tests {
 
         let content: String = "retry question".into();
         let preflight = svc
-            .preflight_mutation(&ctx, chat_id, &content, &test_resolved_model(), false)
+            .preflight_mutation(
+                &ctx,
+                chat_id,
+                Uuid::new_v4(),
+                &content,
+                &test_resolved_model(),
+                false,
+            )
             .await
             .expect("preflight should allow the mutation");
         let result = svc
@@ -5820,7 +5881,14 @@ mod tests {
 
         let content: String = "retry without docs".into();
         let preflight = svc
-            .preflight_mutation(&ctx, chat_id, &content, &test_resolved_model(), false)
+            .preflight_mutation(
+                &ctx,
+                chat_id,
+                Uuid::new_v4(),
+                &content,
+                &test_resolved_model(),
+                false,
+            )
             .await
             .expect("preflight should allow the mutation");
         let result = svc
@@ -5894,7 +5962,14 @@ mod tests {
 
         let content: String = "retry with kill switch".into();
         let preflight = svc
-            .preflight_mutation(&ctx, chat_id, &content, &test_resolved_model(), false)
+            .preflight_mutation(
+                &ctx,
+                chat_id,
+                Uuid::new_v4(),
+                &content,
+                &test_resolved_model(),
+                false,
+            )
             .await
             .expect("preflight should allow the mutation");
         let result = svc
@@ -6361,6 +6436,7 @@ mod tests {
             .preflight_mutation(
                 &ctx,
                 chat_id,
+                Uuid::new_v4(),
                 &"a".repeat(1500),
                 &test_resolved_model(),
                 false,
@@ -6383,6 +6459,51 @@ mod tests {
             }
             other => panic!("expected InputTooLong, got: {other:?}"),
         }
+    }
+
+    /// Retry/edit re-sends the original message's image attachments.
+    #[tokio::test]
+    async fn preflight_mutation_carries_source_message_images() {
+        use crate::domain::service::test_helpers::{
+            insert_test_message, insert_test_message_attachment,
+        };
+        use crate::infra::db::entity::attachment::AttachmentKind;
+
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        insert_test_message(&db, tenant_id, chat_id, message_id).await;
+        let image_id = insert_test_attachment(
+            &db,
+            InsertTestAttachmentParams {
+                uploaded_by_user_id: user_id,
+                kind: AttachmentKind::Image,
+                filename: "cat.png".to_owned(),
+                content_type: "image/png".to_owned(),
+                provider_file_id: Some("file-img-retry".to_owned()),
+                for_file_search: false,
+                ..InsertTestAttachmentParams::ready_document(tenant_id, chat_id)
+            },
+        )
+        .await;
+        insert_test_message_attachment(&db, tenant_id, chat_id, message_id, image_id).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service(db, provider);
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let model = ResolvedModel {
+            multimodal_capabilities: vec!["VISION_INPUT".to_owned()],
+            ..test_resolved_model()
+        };
+
+        let preflight = svc
+            .preflight_mutation(&ctx, chat_id, message_id, "what is this?", &model, false)
+            .await
+            .expect("preflight should allow the mutation");
+        assert_eq!(preflight.image_file_ids, vec!["file-img-retry".to_owned()]);
     }
 
     /// A setup failure after the mutation committed marks the new turn
@@ -6410,7 +6531,7 @@ mod tests {
         };
         let content = "retry question".to_owned();
         let preflight = svc
-            .preflight_mutation(&ctx, chat_id, &content, &model, false)
+            .preflight_mutation(&ctx, chat_id, Uuid::new_v4(), &content, &model, false)
             .await
             .expect("preflight should allow the mutation");
         let err = svc

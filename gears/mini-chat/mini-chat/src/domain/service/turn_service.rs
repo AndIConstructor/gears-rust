@@ -105,6 +105,8 @@ impl From<EnforcerError> for MutationError {
 #[domain_model]
 #[derive(Debug)]
 pub struct MutationPreview {
+    /// The turn's original user message; its attachments are carried over.
+    pub source_message_id: Uuid,
     pub user_content: String,
     pub chat_model: String,
     pub web_search_enabled: bool,
@@ -423,24 +425,20 @@ impl<
         )
         .await?;
 
-        let user_content = match new_content {
-            Some(content) => content,
-            None => {
-                self.message_repo
-                    .find_user_message_by_request_id(&conn, &scope, chat_id, request_id)
-                    .await
-                    .map_err(|e| MutationError::Internal {
-                        message: e.to_string(),
-                    })?
-                    .ok_or_else(|| MutationError::Internal {
-                        message: format!("User message not found for turn {request_id}"),
-                    })?
-                    .content
-            }
-        };
+        let original_msg = self
+            .message_repo
+            .find_user_message_by_request_id(&conn, &scope, chat_id, request_id)
+            .await
+            .map_err(|e| MutationError::Internal {
+                message: e.to_string(),
+            })?
+            .ok_or_else(|| MutationError::Internal {
+                message: format!("User message not found for turn {request_id}"),
+            })?;
 
         Ok(MutationPreview {
-            user_content,
+            source_message_id: original_msg.id,
+            user_content: new_content.unwrap_or(original_msg.content),
             chat_model,
             web_search_enabled: target.web_search_enabled,
         })
@@ -553,6 +551,10 @@ impl<
                         .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
 
                     // Insert user message for the new turn
+                    chat_repo
+                        .touch_activity(tx, &scope, chat_id)
+                        .await
+                        .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
                     let new_msg_id = Uuid::new_v4();
                     message_repo
                         .insert_user_message(

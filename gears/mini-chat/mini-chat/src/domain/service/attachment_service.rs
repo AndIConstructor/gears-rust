@@ -161,6 +161,10 @@ fn unwrap_mutation_err(e: toolkit_db::DbError) -> DomainError {
     }
 }
 
+/// A `chat_vector_stores` placeholder still NULL after this long is treated
+/// as abandoned. Provider vector-store creation takes seconds.
+const STALE_VECTOR_STORE_PLACEHOLDER: time::Duration = time::Duration::seconds(120);
+
 /// Service handling file attachment operations.
 #[domain_model]
 pub struct AttachmentService<
@@ -680,24 +684,11 @@ impl<
             .vector_store_repo
             .find_by_chat(&conn, scope, chat_id)
             .await?
+            && let Some(vs_id) = self
+                .use_existing_vector_store(&conn, scope, chat_id, row, &expected_backend)
+                .await?
         {
-            // Provider consistency: reject if existing VS was created for a
-            // different provider than the current upload's resolved provider.
-            if row.provider != expected_backend {
-                return Err(DomainError::conflict(
-                    "provider_mismatch",
-                    format!(
-                        "vector store provider mismatch: existing='{}', current='{expected_backend}'",
-                        row.provider
-                    ),
-                ));
-            }
-            if let Some(vs_id) = row.vector_store_id {
-                return Ok(vs_id);
-            }
-            // Row exists but vector_store_id is NULL → creation in progress.
-            // Fall through to loser polling path.
-            return self.poll_vector_store(scope, chat_id).await;
+            return Ok(vs_id);
         }
 
         // Try to become the winner: insert a placeholder row.
@@ -763,6 +754,47 @@ impl<
                     .await
             }
         }
+    }
+
+    /// Resolves an existing `chat_vector_stores` row. Returns `None` when the
+    /// row was a stale placeholder that has been reclaimed, so the caller
+    /// creates a new vector store.
+    async fn use_existing_vector_store(
+        &self,
+        conn: &toolkit_db::DbConn<'_>,
+        scope: &AccessScope,
+        chat_id: Uuid,
+        row: crate::infra::db::entity::chat_vector_store::Model,
+        expected_backend: &str,
+    ) -> Result<Option<String>, DomainError> {
+        // Provider consistency: reject if existing VS was created for a
+        // different provider than the current upload's resolved provider.
+        if row.provider != expected_backend {
+            return Err(DomainError::conflict(
+                "provider_mismatch",
+                format!(
+                    "vector store provider mismatch: existing='{}', current='{expected_backend}'",
+                    row.provider
+                ),
+            ));
+        }
+        if let Some(vs_id) = row.vector_store_id {
+            return Ok(Some(vs_id));
+        }
+        if time::OffsetDateTime::now_utc() - row.created_at < STALE_VECTOR_STORE_PLACEHOLDER {
+            // Row exists but vector_store_id is NULL → creation in progress.
+            return self.poll_vector_store(scope, chat_id).await.map(Some);
+        }
+        // A NULL placeholder this old means its creator died between the
+        // insert and the CAS. Reclaim it, otherwise every later upload to
+        // this chat would poll and fail with 503.
+        tracing::warn!(
+            chat_id = %chat_id,
+            row_id = %row.id,
+            "reclaiming stale vector store placeholder"
+        );
+        self.vector_store_repo.delete(conn, scope, row.id).await?;
+        Ok(None)
     }
 
     /// Defensive fallback for vector-store insert failures that may be
@@ -897,6 +929,18 @@ impl<
         let tenant_id = ctx.subject_tenant_id();
         let user_id = ctx.subject_id();
         let is_document = attachment_kind == AttachmentKind::Document;
+
+        // The images kill switch rejects image uploads up front, before any
+        // provider or thumbnail work (the stream path rejects image inputs too).
+        if attachment_kind == AttachmentKind::Image
+            && self
+                .model_resolver
+                .get_kill_switches(user_id)
+                .await?
+                .disable_images
+        {
+            return Err(DomainError::ImagesDisabled);
+        }
 
         let scope = upload_ctx.scope;
         let provider_id = upload_ctx.provider_id;

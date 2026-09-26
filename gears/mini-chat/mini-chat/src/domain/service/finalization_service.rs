@@ -7,7 +7,7 @@ use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use mini_chat_sdk::{
-    AuditUsageTokens, LatencyMs, PolicyDecisions, QuotaDecision, TurnAuditEvent,
+    AuditUsageTokens, LatencyMs, PolicyDecisions, QuotaDecision, ToolCalls, TurnAuditEvent,
     TurnAuditEventType, UsageEvent, UsageTokens,
 };
 
@@ -787,7 +787,10 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                         prompt: None,
                         response: None,
                         attachments: Vec::new(),
-                        tool_calls: None,
+                        tool_calls: Some(ToolCalls {
+                            file_search_calls: Some(u64::from(input.file_search_completed_count)),
+                            web_search_calls: Some(u64::from(input.web_search_completed_count)),
+                        }),
                     });
                     wake += outbox_enqueuer
                         .enqueue_audit_event(tx, audit_event)
@@ -866,7 +869,10 @@ fn build_turn_audit_envelope(input: &FinalizationInput, trace_id: Option<String>
         prompt: None,
         response: None,
         attachments: Vec::new(),
-        tool_calls: None,
+        tool_calls: Some(ToolCalls {
+            file_search_calls: Some(u64::from(input.file_search_calls)),
+            web_search_calls: Some(u64::from(input.web_search_calls)),
+        }),
     })
 }
 
@@ -1743,7 +1749,12 @@ mod tests {
                 assert_eq!(evt.usage.output_tokens, 5);
                 assert!(evt.prompt.is_none(), "prompt should be deferred (None)");
                 assert!(evt.response.is_none(), "response should be deferred (None)");
-                assert!(evt.tool_calls.is_none(), "tool_calls should be None");
+                let tool_calls = evt
+                    .tool_calls
+                    .as_ref()
+                    .expect("tool call counts are reported");
+                assert_eq!(tool_calls.web_search_calls, Some(3));
+                assert_eq!(tool_calls.file_search_calls, Some(0));
             }
             other => panic!("expected Turn event, got: {other:?}"),
         }

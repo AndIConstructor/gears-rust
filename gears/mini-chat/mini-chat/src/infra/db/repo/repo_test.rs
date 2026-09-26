@@ -1343,3 +1343,24 @@ fn odata_client_errors_map_to_validation() {
         DomainError::Database { .. }
     ));
 }
+
+#[tokio::test]
+async fn touch_activity_bumps_chat_updated_at() {
+    use crate::domain::repos::ChatRepository as _;
+    use crate::infra::db::repo::chat_repo::ChatRepository;
+
+    let db = test_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    insert_chat(&db, tenant_id, chat_id).await;
+
+    let repo = ChatRepository::new(limit_cfg());
+    let conn = db.conn().unwrap();
+    let before = repo.get(&conn, &scope(), chat_id).await.unwrap().unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    assert!(repo.touch_activity(&conn, &scope(), chat_id).await.unwrap());
+
+    let after = repo.get(&conn, &scope(), chat_id).await.unwrap().unwrap();
+    assert!(after.updated_at > before.updated_at);
+}

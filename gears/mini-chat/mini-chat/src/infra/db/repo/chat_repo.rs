@@ -131,6 +131,28 @@ impl crate::domain::repos::ChatRepository for ChatRepository {
         Ok(chat)
     }
 
+    async fn touch_activity<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<bool, DomainError> {
+        let result = Entity::update_many()
+            .filter(
+                sea_orm::Condition::all()
+                    .add(Expr::col(Column::Id).eq(id))
+                    .add(Expr::col(Column::DeletedAt).is_null()),
+            )
+            .col_expr(Column::UpdatedAt, Expr::value(OffsetDateTime::now_utc()))
+            .secure()
+            .scope_with(scope)
+            .exec(conn)
+            .await
+            .map_err(db_err)?;
+
+        Ok(result.rows_affected > 0)
+    }
+
     async fn soft_delete<C: DBRunner>(
         &self,
         conn: &C,

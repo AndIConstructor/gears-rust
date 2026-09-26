@@ -127,15 +127,22 @@ impl LlmProviderError {
 #[allow(clippy::unwrap_used)] // Compile-time-known regex patterns; panics in init are intentional
 static RE_RESP_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(resp_|chatcmpl-|cmpl-|msg_)[A-Za-z0-9]+").unwrap());
+/// Provider file and vector-store IDs (`OpenAI` `file-…`/`vs_…`, Azure
+/// `assistant-…`). The length floor keeps words like "file-based" intact.
+#[allow(clippy::unwrap_used)]
+static RE_STORAGE_ID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(file-|assistant-|vs_)[A-Za-z0-9]{12,}").unwrap());
 #[allow(clippy::unwrap_used)]
 static RE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s,\])}"']+"#).unwrap());
 #[allow(clippy::unwrap_used)]
 static RE_CRED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(sk-[A-Za-z0-9]{10,}|Bearer\s+[A-Za-z0-9._\-]+)").unwrap());
 
-/// Regex-based scrubbing of provider response IDs, URLs, and credential fragments.
+/// Regex-based scrubbing of provider response/file/vector-store IDs, URLs,
+/// and credential fragments.
 pub(crate) fn sanitize_provider_message(msg: &str) -> String {
     let sanitized = RE_RESP_ID.replace_all(msg, "[provider_id]");
+    let sanitized = RE_STORAGE_ID.replace_all(&sanitized, "[provider_id]");
     let sanitized = RE_URL.replace_all(&sanitized, "[url]");
     RE_CRED.replace_all(&sanitized, "[credential]").into_owned()
 }

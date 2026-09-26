@@ -52,6 +52,9 @@ pub enum DomainError {
     #[error("Web search is currently disabled")]
     WebSearchDisabled,
 
+    #[error("Image input is currently disabled")]
+    ImagesDisabled,
+
     #[error("Web search calls exceeded for this message")]
     WebSearchCallsExceeded,
 

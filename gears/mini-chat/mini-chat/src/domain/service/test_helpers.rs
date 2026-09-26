@@ -129,13 +129,21 @@ use mini_chat_sdk::ModelCatalogEntry;
 /// Default catalog: `gpt-5.2` (enabled, default) and `gpt-5-mini` (disabled).
 pub struct MockModelResolver {
     catalog: Mutex<Vec<ModelCatalogEntry>>,
+    kill_switches: mini_chat_sdk::KillSwitches,
 }
 
 impl MockModelResolver {
     pub fn new(catalog: Vec<ModelCatalogEntry>) -> Self {
         Self {
             catalog: Mutex::new(catalog),
+            kill_switches: mini_chat_sdk::KillSwitches::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_kill_switches(mut self, kill_switches: mini_chat_sdk::KillSwitches) -> Self {
+        self.kill_switches = kill_switches;
+        self
     }
 }
 
@@ -249,7 +257,7 @@ impl ModelResolver for MockModelResolver {
         &self,
         _user_id: Uuid,
     ) -> Result<mini_chat_sdk::KillSwitches, DomainError> {
-        Ok(mini_chat_sdk::KillSwitches::default())
+        Ok(self.kill_switches.clone())
     }
 }
 

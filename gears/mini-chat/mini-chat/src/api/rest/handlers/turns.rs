@@ -172,6 +172,7 @@ async fn start_mutation_stream(
         .preflight_mutation(
             &ctx,
             chat_id,
+            preview.source_message_id,
             &preview.user_content,
             &resolved,
             preview.web_search_enabled,
