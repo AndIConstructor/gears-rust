@@ -291,7 +291,7 @@ All `attachment_ids` submitted with a message are strictly scoped to `(tenant_id
 
 The system MUST support answering questions about uploaded documents by retrieving relevant excerpts during chat. In P1, retrieval always covers all documents currently present in the chat vector store — `attachment_ids` does not scope or filter retrieval. The system MUST NOT inject full file contents into the prompt; only top-k retrieved chunks are included. File search MUST be scoped to the user's tenant. Retrieved excerpts and citations MUST be returned only to the owning user within their tenant. Per-turn file search calls are bounded by the model's `max_tool_calls` catalog setting (default 2), which is shared by all built-in tools in the request; there is no separate `file_search` counter or error code ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). The number of results per call is the model's `max_num_results` catalog setting. A per-user daily file search limit is **not implemented**; `quota_usage.file_search_calls` is not counted.
 
-The backend MUST NOT include the `file_search` tool before the first document attachment reaches `ready` status in the chat (no vector store exists). Once document attachments exist, the backend includes `file_search` on every model request with the chat vector store ID attached via `tool_resources`, without metadata filtering (P1). The backend MUST resolve the provider vector store internally from `(tenant_id, chat_id)` and MUST NOT require or accept provider vector store identifiers from clients. Attachment-scoped retrieval (narrowing to documents referenced in `attachment_ids`) is deferred to P2.
+The backend MUST NOT include the `file_search` tool before the first document attachment reaches `ready` status in the chat (no vector store exists). Once document attachments exist, the backend includes `file_search` on every model request with the chat vector store ID in the `file_search` tool's `vector_store_ids` field, without metadata filtering (P1). The backend MUST resolve the provider vector store internally from `(tenant_id, chat_id)` and MUST NOT require or accept provider vector store identifiers from clients. Attachment-scoped retrieval (narrowing to documents referenced in `attachment_ids`) is deferred to P2.
 
 When users upload files to a chat, those files become part of the chat's knowledge base. The assistant may reference any uploaded file during future responses. Deleting a file removes it from the assistant's knowledge once the asynchronous provider cleanup completes (see `cpt-cf-mini-chat-fr-attachment-deletion`).
 
@@ -380,7 +380,7 @@ The system MUST allow users to delete individual attachments from a chat via `DE
 
 1. Soft-delete the attachment record locally and immediately exclude it from future retrieval and active chat metadata. **P1 status**: immediate exclusion from `file_search` is **not implemented** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). `file_search` runs without attribute filters, so chunks of the deleted document may be returned until the provider cleanup removes the file. Citations never reference a deleted attachment.
 2. Return `204 No Content` after the local transaction commits.
-3. Perform provider-side cleanup asynchronously — file deletion via the provider Files API and document removal from the chat vector store are executed via transactional outbox workers and MUST NOT block the API response.
+3. Perform provider-side cleanup asynchronously — file deletion via the provider Files API is executed via transactional outbox workers and MUST NOT block the API response. **P1**: no separate vector store call is made for the document; the chat vector store is deleted only with the chat ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)).
 4. Re-deleting an already soft-deleted attachment is idempotent and returns `204 No Content`.
 
 Historical messages that reference deleted attachments MUST NOT be modified. In P1 the `attachments` array of a message lists only non-deleted attachments ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)); a deleted file is not available for retrieval or download.
@@ -487,7 +487,7 @@ If quota preflight rejects a send-message request, the system MUST return a JSON
 - Maximum image inputs per message: default 4 (implemented).
 - Maximum image inputs per user per day: default 50 (not implemented). **Whole-request rejection policy**: if the number of images in the request would cause the daily quota to be exceeded (e.g., remaining daily quota is 2 but request contains 4 images), the entire request MUST be rejected with `quota_exceeded` (`quota_scope = "image_inputs"`) before any provider call. No partial acceptance of images within a single request.
 - Optional: maximum total image bytes per message (default: uncapped; operator may configure) (not implemented).
-- Token accounting: `usage.input_tokens` / `usage.output_tokens` from the provider already includes image token costs as the provider defines them. The system enforces these via the same preflight/commit mechanism. Additionally, the system MUST track and enforce explicit image counters (`image_inputs` per day, `image_upload_bytes` per day/month, counted on upload) independent of token quotas to prevent abuse via large or frequent image uploads.
+- Token accounting: `usage.input_tokens` / `usage.output_tokens` from the provider already includes image token costs as the provider defines them. The system enforces these via the same preflight/commit mechanism. Additionally, the system MUST track and enforce explicit image counters (`image_inputs` per day, `image_upload_bytes` per day/month, counted on upload) independent of token quotas to prevent abuse via large or frequent image uploads. **Not implemented** ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)): the `quota_usage.image_inputs` and `image_upload_bytes` columns exist but are never incremented or checked.
 
 **Rationale**: Prevents runaway costs from individual users and ensures fair resource distribution across a tenant.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -808,7 +808,7 @@ Tenant data MUST never be accessible to users from another tenant. All data quer
 
 Parent tenant / MSP administrators MUST NOT have access to chat content. Admin visibility is limited to aggregated usage and operational metrics.
 
-Authorization follows the platform PDP/PEP fail-closed rules; see DESIGN.md (Authorization / Fail-Closed Behavior). A resource that is hidden by the query-level constraints (for example another user's or another tenant's chat, message, turn or attachment) returns 404 (`not_found`). A PDP deny and a PDP evaluation failure or unreachable PDP both return 403 (`permission_denied`, `AUTHZ_DENIED`) ([ADR-0004](./ADR/0004-cpt-cf-mini-chat-adr-canonical-error-contract.md)). Provider error messages are scrubbed of provider file (`file-…`), assistant (`assistant-…`) and vector store (`vs_…`) identifiers before they are returned to clients.
+Authorization follows the platform PDP/PEP fail-closed rules; see DESIGN.md (Authorization / Fail-Closed Behavior). A resource that is hidden by the query-level constraints (for example another user's or another tenant's chat, message, turn or attachment) returns 404 (`not_found`). A PDP deny and a PDP evaluation failure or unreachable PDP both return 403 (`permission_denied`, `AUTHZ_DENIED`) ([ADR-0004](./ADR/0004-cpt-cf-mini-chat-adr-canonical-error-contract.md)). Provider error messages are scrubbed of provider file (`file-…`, Anthropic `file_…`), assistant (`assistant-…`) and vector store (`vs_…`) identifiers before they are returned to clients.
 
 **Threshold**: Zero cross-tenant data leaks
 **Rationale**: Multi-tenant SaaS with sensitive documents requires strict data boundaries.
@@ -894,7 +894,7 @@ The contract has two parts:
 
 - `mini_chat_cancel_requested_total{trigger}`
 - `mini_chat_cancel_effective_total{trigger}`
-- `mini_chat_time_to_abort_ms{trigger}` — measured from the moment the disconnect was observed until the cancelled turn is finalized, not from stream start
+- `mini_chat_time_to_abort_ms{trigger}` — measured from the moment the disconnect was observed until the provider stream is cancelled and the read loop exits; excludes turn finalization (`finalize_turn_cas`) and the time before the disconnect
 - `mini_chat_streams_aborted_total{trigger}`
 
 ##### Emitted: quota and cost control
@@ -985,6 +985,8 @@ Specified but not declared:
 - [ ] `p1` - **ID**: `cpt-cf-mini-chat-nfr-rag-scalability`
 
 RAG retrieval costs and quality MUST remain bounded as document volume grows within a chat. The system MUST enforce per-chat document count, total file size, and indexed chunk limits (see `cpt-cf-mini-chat-fr-per-chat-doc-limits`). Retrieval parameters (top-k, max retrieved tokens per turn) MUST be configurable. Each chat with documents MUST use a dedicated per-chat vector store to ensure isolation and predictable retrieval latency.
+
+**P1 status**: partially implemented ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). The per-chat document count and total size limits and the per-chat vector store are implemented; `file_search` top-k comes from the model catalog `max_num_results`. The indexed chunk limit is **not implemented**. `mini_chat_file_search_latency_ms` is registered but never recorded, so the latency threshold below cannot be measured in P1.
 
 **Threshold**: Per-chat limit enforcement with zero breaches; `mini_chat_file_search_latency_ms` p95 within configured threshold
 **Rationale**: Unbounded document ingestion degrades retrieval relevance and inflates per-turn costs via excessive chunk processing.
@@ -1706,6 +1708,7 @@ These defaults are used for P1 and MUST be configurable per tenant/operator. Val
 - Code interpreter per-turn call limit: 10 (`quota.code_interpreter_max_calls_per_message: 10`)
 - Code interpreter per-user daily quota: 50 (`quota.code_interpreter_daily_quota: 50`)
 - Built-in tool calls per provider request: 2 (model catalog `max_tool_calls`, default 2; bounds `file_search`)
+- Interaction of the two limits: `max_tool_calls` is sent in each provider request (only the OpenAI Responses adapter sends it; the vLLM, Chat Completions and Anthropic adapters do not) and the provider stops calling built-in tools (`file_search`, `web_search`, `code_interpreter` together) once it is reached. The per-turn web search and code interpreter limits are checked by Mini Chat on each streamed tool `start` event, counted across all provider requests of the turn; exceeding one cancels the provider stream and fails the turn with `web_search_calls_exceeded` / `code_interpreter_calls_exceeded`. A turn makes more than one provider request only in the `search_knowledge` loop (at most knowledge-search `max_calls + 2` requests). With the defaults on the OpenAI Responses adapter (`max_tool_calls` 2, one request per turn) the provider bound applies first and the code interpreter limit of 10 is not reached; on adapters that do not send `max_tool_calls`, only the Mini Chat per-turn limits apply.
 - Web search provider parameters: **Deferred to P2+**. P1 uses provider defaults and the per-model `web_search_context_size`. When implemented, configurable via `web_search.provider_parameters` (search_depth, max_results, include_answer, include_raw_content, include_images, auto_parameters).
 - Document upload size limit: 25 MiB (`rag.uploaded_file_max_size_kb: 25600`)
 - Image upload size limit: 5 MiB (`rag.uploaded_image_max_size_kb: 5120`)

@@ -60,7 +60,7 @@ The MCP design text moves from DESIGN to [features/mcp-servers-support.md](../fe
 
 ### Confirmation
 
-* `grep -ri mcp gears/mini-chat/mini-chat/src` finds no MCP implementation beyond the catalog flag.
+* `grep -ri mcp gears/mini-chat/mini-chat/src` finds no MCP implementation; the only matches are test fixtures setting the catalog flag `ModelToolSupport.mcp` (defined in `mini-chat-sdk`).
 * DESIGN §3.3 endpoint table lists no MCP endpoints.
 
 ## More Information

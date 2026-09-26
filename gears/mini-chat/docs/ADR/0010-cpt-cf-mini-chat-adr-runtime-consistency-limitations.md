@@ -40,7 +40,7 @@ Chosen option: "Accept the current behaviour, document it and state what it reli
 | `done.usage.model` | §3.3 | Removed | The `usage` object carries token counts only; the model is in `done.effective_model`. |
 | SSE `ping` | §3.3: every 15 s of idle time, at any point before the terminal event | Accepted (different) | `event: ping` is sent only between `stream_started` and the first `delta`/`tool` event (`api/rest/sse.rs`, `StreamPhase`), at `sse_ping_interval_seconds`. After content starts, Axum sends an SSE comment keep-alive every 30 s, which keeps proxies from closing the connection. |
 | Terminal event of a CAS loser | §5.7: close without a terminal event | Accepted (different) | When the provider task ends without sending a terminal event (CAS lost to the orphan watchdog, or a panic), the relay sends `error{code: "stream_interrupted"}`, which matches the `failed` state the winner committed. After a client disconnect nothing is sent. |
-| Deprecated configuration fields | Appendix B | Accepted until removal | `cleanup_worker.{enabled, poll_interval_secs, reconcile_interval_secs, stale_in_progress_timeout_secs, batch_size}` and `thread_summary_worker.reconcile_interval_secs` are parsed, not validated, and have no effect. A warning naming the field is logged at startup when one is set to a non-default value. The cleanup and thread-summary work runs as outbox handlers. Removing the fields would break existing configs, because `MiniChatConfig` uses `deny_unknown_fields`. |
+| Deprecated configuration fields | Appendix B | Accepted until removal | `cleanup_worker.{enabled, poll_interval_secs, reconcile_interval_secs, stale_in_progress_timeout_secs, batch_size}` and `thread_summary_worker.reconcile_interval_secs` are parsed, not validated, and have no effect. A warning naming the field is logged at startup when one is set to a non-default value. The cleanup and thread-summary work runs as outbox handlers. The fields are kept for a staged removal: `orphan_watchdog`, `thread_summary_worker` and `cleanup_worker` do not use `deny_unknown_fields`, so a removed key would be silently ignored; keeping the field lets the startup warning tell operators that the setting has no effect before the field is dropped. |
 
 ### Consequences
 
@@ -49,8 +49,8 @@ Chosen option: "Accept the current behaviour, document it and state what it reli
 
 ### Confirmation
 
-* `mini-chat/src/infra/db/repo/turn_repo.rs` tests cover the stale-progress fallback.
-* `mini-chat/src/domain/service/replay.rs` tests pin the replay event set.
+* `mini-chat/src/infra/db/repo/turn_repo.rs` tests cover the stale-progress fallback to `started_at` (`find_orphan_candidates_includes_stale_turn_without_progress`, `find_orphan_candidates_excludes_recent_turn_without_progress`).
+* `mini-chat/src/domain/service/replay.rs` tests pin the replay event set (`replay_turn_happy_path`: `stream_started`, `delta`, `done`) and the rebuilt downgrade fields (`replay_turn_downgrade_detected`, `replay_turn_no_downgrade`).
 
 ## More Information
 

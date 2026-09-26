@@ -76,8 +76,8 @@ Chosen option: "Tenant-owned resource with usage attributed to the requesting se
 
 ### Confirmation
 
-* Design review: verify shared chat resource model is tenant-owned and uses group membership predicates in PDP constraints.
-* Integration tests: simulate two users in the same tenant; confirm per-request quota usage increments only for the sender and that access decisions are enforced correctly.
+* Design review (P2+, with group chats): verify shared chat resource model is tenant-owned and uses group membership predicates in PDP constraints.
+* Integration tests (P2+, with group chats): two users in the same group chat; confirm per-request quota usage increments only for the sender. P1 has single-user chats only; `testing/e2e/suites/mini_chat/test_isolation.py` covers the P1 part: `TestQuotaIsolation::test_other_user_usage_is_not_charged` (a send by user A does not change user B's usage) and `TestIsolation` (another user in the same tenant gets 404 on A's resources).
 * Audit validation (P2+, with group chats): verify emitted audit events include both `requester_user_id` and tenant billing attribution (`billing_tenant_id = chat.tenant_id`) and that system tasks use `requester_type=system`.
 * Metrics validation (P2+): verify system-attributed usage is observable via a bounded-label metric series (no tenant/user labels).
 

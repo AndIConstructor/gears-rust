@@ -44,8 +44,8 @@ Chosen option: "Record the implemented behaviour and mark the gaps".
 
 ### Confirmation
 
-* E2E: upload returns `ready`, and `doc_summary` is `null` (`testing/e2e/suites/mini_chat/test_attachments.py`, `test_code_interpreter.py`).
-* E2E: deleting a referenced attachment gives 409.
+* E2E: a document upload reaches `ready` (`testing/e2e/suites/mini_chat/test_attachments.py::TestUploadAndGet::test_upload_and_get_attachment`). `doc_summary` is asserted null/absent only for an XLSX (code interpreter) upload (`test_code_interpreter.py::TestXlsxUploadAccepted::test_xlsx_reaches_ready`); no test asserts it for a `file_search` document.
+* E2E: deleting a referenced attachment gives 409 `attachment_locked` (`test_attachments.py::TestDeleteReferencedAttachment::test_delete_referenced_attachment_409`).
 
 ## More Information
 

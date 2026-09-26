@@ -73,9 +73,9 @@ The gear therefore declares `deps = [types_registry, authn_resolver, authz_resol
 
 ### Confirmation
 
-* Unit tests per adapter in `mini-chat/src/infra/llm/providers/*_tests.rs`.
+* Unit tests per adapter: `openai_responses_tests.rs` and `vllm_responses_tests.rs` in `mini-chat/src/infra/llm/providers/`; the Chat Completions and Anthropic adapters have inline test modules in `openai_chat.rs` and `anthropic_messages.rs`.
 * Provisioning tests in `mini-chat/src/infra/oagw_provisioning.rs`.
-* The E2E suite runs every provider-dependent test against both configured providers (`provider` fixture in `testing/e2e/suites/mini_chat/conftest.py`).
+* E2E tests that use the `provider` fixture (directly or via `provider_chat`) run against both configured providers, `openai` and `azure` (`testing/e2e/suites/mini_chat/conftest.py`). Both E2E providers use `kind: openai_responses` (`config/base.yaml`); the Chat Completions, vLLM and Anthropic adapters have no E2E coverage.
 
 ## Pros and Cons of the Options
 

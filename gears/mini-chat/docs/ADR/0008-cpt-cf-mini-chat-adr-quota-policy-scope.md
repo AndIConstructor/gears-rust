@@ -46,7 +46,7 @@ The daily web-search and code-interpreter quotas **are** implemented. They rejec
 ### Confirmation
 
 * Unit tests in `mini-chat/src/domain/service/quota_service.rs` cover tool-quota gating and the downgrade cascade.
-* E2E `testing/e2e/suites/mini_chat/test_quota_policy.py` covers 429, premium downgrade, `model_disabled`, the daily web-search quota and the quota status flags (usage is seeded per test user). Kill switches are fixed configuration of the E2E rig and are covered by unit tests (`quota_service.rs`, `attachment_service_test.rs`).
+* E2E `testing/e2e/suites/mini_chat/test_quota_policy.py` covers 429, premium downgrade, `model_disabled`, the daily web-search and code-interpreter quotas and the quota status flags (usage is seeded per test user). Kill switches are fixed configuration of the E2E rig and are covered by unit tests (`quota_service.rs`, `attachment_service_test.rs`).
 
 ## More Information
 

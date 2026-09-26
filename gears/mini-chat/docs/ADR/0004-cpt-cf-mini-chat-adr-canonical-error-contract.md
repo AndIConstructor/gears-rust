@@ -76,7 +76,7 @@ Chosen option: "Adopt the canonical `Problem` for REST, and keep `{code, message
 
 ### Confirmation
 
-* `mini-chat/src/api/rest/error.rs` unit tests pin the category, status and reason of each mapping.
+* `mini-chat/src/api/rest/error.rs` unit tests pin the category, status and reason of the mappings they cover (not every variant has a dedicated test).
 * The E2E suite (`testing/e2e/suites/mini_chat`) asserts `Problem.type` and the reason fields through a shared `assert_problem` helper.
 * The generated OpenAPI (`docs/api/api.json`) is the reference for the response schemas.
 

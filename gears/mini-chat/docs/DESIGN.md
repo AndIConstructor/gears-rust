@@ -275,7 +275,7 @@ Once a chat is created with a model (user-selected or resolved via the `is_defau
 The **effective_model** is the model actually used for a specific turn. Invariants:
 
 - `selected_model` never changes during chat lifetime.
-- `effective_model` may differ from `selected_model` due to automatic downgrade (quota exhaustion), kill switches (`disable_premium_tier`, `force_standard_tier`), or per-model catalog disablement (`global_enabled=false` on the specific model).
+- `effective_model` may differ from `selected_model` due to automatic downgrade (quota exhaustion), kill switches (`disable_premium_tier`, `force_standard_tier`), or per-model catalog disablement (`enabled=false` on the specific model).
 - `effective_model` MUST be recorded in:
   - `messages.model` column (per assistant message)
   - SSE `event: done` payload (`effective_model` field; `usage` carries token counts only)
@@ -706,12 +706,12 @@ Request body:
 }
 ```
 
-Validation rules:
-- `title` MUST be present in the request body.
-- `title` MUST be a non-null string.
+Validation rules ([ADR-0004](./ADR/0004-cpt-cf-mini-chat-adr-canonical-error-contract.md)):
+- `title` MUST be present and MUST be a non-null string. A body that does not match the schema (missing `title`, `null`, wrong type) is rejected by the platform JSON extractor with HTTP 422 `invalid_argument`; malformed JSON returns 400.
 - `title` is trimmed (leading/trailing whitespace removed); the trimmed value MUST have length ≥ 1 and ≤ 255.
 - A string consisting entirely of whitespace is rejected (trimmed length = 0).
-- Validation failure returns HTTP 400 `invalid_argument`.
+- An empty/whitespace-only or too long title returns HTTP 400 `invalid_argument`.
+- Unknown fields in the body are ignored (the DTO does not use `deny_unknown_fields`). A body such as `{"title": "Renamed", "model": "..."}` returns 200, renames the chat and leaves `model` unchanged.
 
 On success the server sets `updated_at = now()` and returns HTTP 200 with the updated `ChatDetail` (same shape as `GET /v1/chats/{id}`):
 
@@ -896,10 +896,10 @@ If any of the above validations fail, the request MUST be rejected with an appro
 | State | Server behavior |
 |-------|----------------|
 | `completed` and not soft-deleted | Return a fast replay SSE stream without triggering a new provider request: `stream_started` (with `is_new_turn: false`), one `delta` event containing the full persisted assistant text, then `done`. Citations are not persisted and are not replayed. `done.quota_decision` and `downgrade_from` are rebuilt from the stored models; `downgrade_reason` is omitted ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)). |
-| Any other state (`running`, `failed`, `cancelled`), or a soft-deleted turn (replaced by retry/edit or deleted) | HTTP 409 `aborted`, `context.reason = request_id_conflict` (JSON error response; no SSE stream is opened). `UNIQUE(chat_id, request_id)` keeps the key taken. (P2+: attach to a running stream.) |
+| Any other state (`running`, `failed`, `cancelled`), or a soft-deleted turn (replaced by retry/edit or deleted) | HTTP 409 `aborted`, `context.reason = request_id_conflict` (JSON error response; no SSE stream is opened). `UNIQUE(chat_id, request_id)` keeps the key taken. When two requests with the same `request_id` race and the lookup finds no row, the losing insert conflicts; `classify_turn_conflict` re-reads the key and reports the conflict as `request_id_conflict` (not `turn_already_running`) when a turn with that `request_id` exists. (P2+: attach to a running stream.) |
 | No record for key | Start a new generation normally (subject to the Parallel Turn Policy below). |
 
-If `request_id` is omitted in the request body, the server MUST generate a UUID v4 and assign it as the turn's `request_id`. The generated key participates in normal idempotency semantics: if the client persists the server-assigned value (e.g. from the SSE `done` event or Turn Status response), it can resubmit it for replay or recovery. In the public DTO, `request_id` is always present and non-null on every Message. Within a normal turn, the user message and assistant response always share the same `request_id` (turn correlation key). System/background messages (e.g. `doc_summary`, `thread_summary`) carry an independently server-generated UUID v4 and do not correspond to `chat_turns` rows.
+If `request_id` is omitted in the request body, the server MUST generate a UUID v4 and assign it as the turn's `request_id`. The generated key participates in normal idempotency semantics: if the client persists the server-assigned value (e.g. from the SSE `done` event or Turn Status response), it can resubmit it for replay or recovery. In the public DTO, `request_id` is always present and non-null on every Message. Within a normal turn, the user message and assistant response always share the same `request_id` (turn correlation key). System/background messages carry an independently server-generated UUID v4 and do not correspond to `chat_turns` rows. In P1 no such messages are written: the thread summary is stored in `thread_summaries`, not as a message, and document summaries are not implemented ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)).
 
 **Parallel turn guard**: independently of idempotency, the server MUST reject with HTTP 409 `aborted`, `context.reason = turn_already_running`, any request to a chat that already has a `running` turn — even if the new request carries a different (or no) `request_id`. The same reason is returned when the request loses the insert race on the one-running-turn-per-chat unique index. P1 enforces at most one running turn per chat. See **Parallel Turn Policy (P1)** (section 3.7).
 
@@ -972,10 +972,10 @@ The Turn Status API `state: "error"` maps to internal `chat_turns.state = 'faile
 - Client disconnect → internal `cancelled` → billing outcome `ABORTED` (estimated settlement)
 
 **IMPORTANT: Overshoot tolerance violations do NOT change turn state to error:**
-- When actual usage exceeds overshoot tolerance (`quota_overshoot_exceeded` condition), the turn remains in `state: "done"` (internal `chat_turns.state = completed`)
+- When actual usage exceeds overshoot tolerance (actual/reserve > `quota.overshoot_tolerance_factor`), the turn remains in `state: "done"` (internal `chat_turns.state = completed`)
 - Billing is capped at reserved credits, but the completed response is delivered to the user
 - The "completed remains completed" rule (see Reserve Overshoot Reconciliation Rule, section 5.8.1) is absolute: a COMPLETED turn MUST remain COMPLETED regardless of overshoot magnitude
-- This is logged via the `mini_chat_quota_overshoot_exceeded_total` metric for operator investigation, but does NOT result in `state: "error"` or any error_code visible to the client
+- It does NOT result in `state: "error"` or any error_code visible to the client. P1 has no dedicated metric or log for the capped case: `mini_chat_quota_overshoot_total{period}` counts every completed turn whose actual tokens exceed the reserve, whether or not the tolerance was exceeded (`mini_chat_quota_overshoot_exceeded_total` is not defined)
 
 The Turn Status API deliberately hides billing outcomes to keep the client contract simple. Billing settlement details (outcome, settlement method, charged credits) are internal to the system and NOT exposed via this endpoint.
 
@@ -1089,7 +1089,7 @@ Finalizes the stream. Provides usage and model selection metadata.
 | `selected_model` | string | Model chosen at chat creation (`chats.model`). Always present. Equals `effective_model` when no downgrade occurred. |
 | `quota_decision` | `"allow"` \| `"downgrade"` (required) | Always present. `"allow"` when the turn used the selected model without override; `"downgrade"` when a quota-driven downgrade occurred. |
 | `downgrade_from` | string (optional) | Always equals `selected_model` when present — the model from which the quota-driven downgrade occurred. Present only when `quota_decision="downgrade"`. |
-| `downgrade_reason` | string (optional) | Why downgrade occurred. Present only when `quota_decision="downgrade"`. Values: `"premium_quota_exhausted"` (user's premium quota exhausted — quota-driven downgrade); `"force_standard_tier"` (operator kill switch: premium tier forcibly disabled for this tenant via `force_standard_tier=true`); `"disable_premium_tier"` (operator kill switch: premium tier globally disabled via `disable_premium_tier=true`); `"model_disabled"` (operator kill switch: the selected model's `global_enabled=false`). |
+| `downgrade_reason` | string (optional) | Why downgrade occurred. Present only when `quota_decision="downgrade"`. Values: `"premium_quota_exhausted"` (user's premium quota exhausted — quota-driven downgrade); `"force_standard_tier"` (operator kill switch: premium tier forcibly disabled for this tenant via `force_standard_tier=true`); `"disable_premium_tier"` (operator kill switch: premium tier globally disabled via `disable_premium_tier=true`); `"model_disabled"` (operator kill switch: the selected model's `enabled=false`). |
 | `quota_warnings` | array of objects (optional) | Per-tier quota status. Each entry: `{ tier, period, remaining_percentage, warning, exhausted, next_reset? }`. Present on CAS-winning completed/incomplete turns. Absent on error, cancelled, replay, and CAS-loser paths. |
 
 `done` is sent only after the finalization transaction committed the turn as `completed` (a provider `incomplete` response is also finalized as `completed`). If finalization fails, or the assistant message could not be persisted and the turn was finalized as `failed`, the terminal event is `error` with `finalization_failed` or `message_persistence_failed` instead (section 5.7 "Terminal SSE Event Emission Guard"). On replay, `downgrade_reason` is omitted ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)).
@@ -1296,7 +1296,7 @@ Standard errors: `401` (unauthenticated), `403` (license / permissions), `404` (
 The domain service computes model visibility as follows:
 
 1. Read the policy catalog from `mini-chat-model-policy-plugin`.
-2. Filter to models where `global_enabled = true`.
+2. Filter to models where `enabled = true`.
 3. `GET /v1/models` returns all globally enabled models.
 4. `GET /v1/models/{model_id}` applies the same rule; returns `404` if disabled or not in the catalog.
 
@@ -1756,7 +1756,7 @@ Such heuristics MUST NOT be used as the sole correctness criterion for summary g
 Observability (P1):
 
 - Increment `mini_chat_thread_summary_trigger_total{result}` when trigger evaluation runs; `result` SHOULD distinguish at least `scheduled|not_needed`.
-- Increment `mini_chat_thread_summary_execution_total{result}` (counter) with a bounded `result` allowlist such as `success|provider_error|timeout|retry`.
+- Increment `mini_chat_thread_summary_execution_total{result}` (counter) with a bounded `result` allowlist. P1 emits `success`, `provider_error` (any LLM call failure, including timeouts), `empty_summary` and `retry`; there is no separate `timeout` value.
 - `mini_chat_thread_summary_execution_total{result}` MAY exceed the number of successful frontier advances because outbox retry or replay can trigger duplicate provider calls for the same frozen range; this is expected in P1 and MUST NOT by itself be interpreted as a correctness failure.
 - Increment `mini_chat_thread_summary_cas_conflicts_total` when a handler loses the CAS precondition because another commit already advanced the frontier.
 - Increment `mini_chat_summary_fallback_total` when the system keeps the previous summary unchanged because summary generation failed before a successful CAS commit.
@@ -2994,7 +2994,7 @@ The result is reversed to chronological order for ContextPlan assembly. K is a s
 
 The `file_search` tool is only provided to the LLM after at least one document attachment has been uploaded and reached `ready` status in the chat. Before any attachments exist, the backend MUST NOT include `file_search` in Responses API calls because no vector store exists for the chat.
 
-Once document attachments exist, the backend includes the `file_search` tool on every model request with the chat vector store ID attached via `tool_resources.file_search.vector_store_ids`. The provider/model decides whether to actually invoke the tool.
+Once document attachments exist, the backend includes the `file_search` tool on every model request with the chat vector store ID in the tool's flat `vector_store_ids` field (`{"type": "file_search", "vector_store_ids": [...], "max_num_results": N}`, Responses API format; `infra/llm/providers/openai_responses.rs`). The provider/model decides whether to actually invoke the tool.
 
 **P1 constraint**: the backend MUST NOT infer document references from free-form user text. All attachment association is via `attachment_ids`, resolved to `attachment_id` values by the UI before the request is sent.
 
@@ -3229,30 +3229,49 @@ This operation deletes the attachment only if it is not referenced by any submit
 
 If the attachment is referenced by one or more submitted messages, the operation MUST be rejected with HTTP 409 `already_exists` (`resource_name = attachment_locked`).
 
-If the attachment is not referenced by any submitted message, the attachment is soft-deleted locally and immediately excluded from chat metadata, from `file_search` tool inclusion checks and from citations. Provider-side cleanup (file deletion via the Files API and document removal from the vector store) is performed asynchronously via the transactional outbox mechanism. The API response MUST NOT wait for external cleanup to complete.
+If the attachment is not referenced by any submitted message, the attachment is soft-deleted locally and immediately excluded from chat metadata, from `file_search` tool inclusion checks and from citations. It is **not** excluded from `file_search` results ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). Provider-side cleanup (file deletion via the Files API) is performed asynchronously via the transactional outbox mechanism. The API response MUST NOT wait for external cleanup to complete.
 
 Deletion follows a two-phase approach using the transactional outbox pattern (see section 5.7):
 
 **Phase 1 — Transactional commit (synchronous, within the HTTP request)**:
 
 1. Soft-delete the `attachments` row (`deleted_at = now()`).
-2. Enqueue an `attachment_cleanup` message through `toolkit_db::outbox::Outbox::enqueue(...)` (or the equivalent helper) with `provider_file_id` and `vector_store_id` in the serialized payload.
+2. Enqueue a message to the `mini-chat.attachment_cleanup` queue (`OutboxEnqueuer::enqueue_attachment_cleanup`, partitioned by tenant). The payload is `AttachmentCleanupEvent` (`domain/repos/outbox_enqueuer.rs`) serialized as JSON:
+
+   | Field | Type | Value |
+   |-------|------|-------|
+   | `event_type` | string | `"attachment_deleted"` |
+   | `tenant_id` | UUID | Attachment tenant |
+   | `chat_id` | UUID | Parent chat |
+   | `attachment_id` | UUID | Deleted attachment |
+   | `provider_file_id` | string or null | Primary provider file id; `null` if the upload never reached the provider |
+   | `vector_store_id` | string or null | Always `null` in P1; the handler does not read it |
+   | `storage_backend` | string | Upstream used to delete the primary file |
+   | `attachment_kind` | string | `document` or `image` |
+   | `deleted_at` | timestamp | Enqueue time |
+   | `secondary_ref` | object or null | `{file_id, provider_kind, upstream_alias}` when a secondary upload (Anthropic) succeeded; otherwise `null` |
+
 3. The soft-delete and the outbox enqueue execute in the same DB transaction. The endpoint returns `204 No Content` once the transaction commits.
 
-After Phase 1 commits, the `file_search` tool inclusion check counts only `status = 'ready' AND deleted_at IS NULL` attachments and citations of the deleted attachment are omitted. The document itself stays searchable in the chat vector store until Phase 2 removes it, because `file_search` is called without attribute filters (**not implemented**: immediate retrieval exclusion, [ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)).
+After Phase 1 commits, the `file_search` tool inclusion check counts only `status = 'ready' AND deleted_at IS NULL` attachments and citations of the deleted attachment are omitted. The document itself stays searchable in the chat vector store until the provider file is deleted in Phase 2, because `file_search` is called without attribute filters (**not implemented**: immediate retrieval exclusion, [ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)).
 
 **Phase 2 — Asynchronous cleanup (decoupled outbox handler)**:
 
-The shared outbox pipeline delivers the `attachment_cleanup` message to the Mini-Chat decoupled handler, which performs provider-side cleanup:
+The shared outbox pipeline delivers the `attachment_cleanup` message to `AttachmentCleanupHandler` (`infra/workers/cleanup_worker.rs`), which:
 
-1. Remove the document from the chat vector store (provider Vector Stores API).
-2. Delete the file from the provider Files API.
+1. Acks the message without action if the parent chat is soft-deleted (chat-deletion cleanup owns the files).
+2. Marks cleanup done if `provider_file_id` is `null`.
+3. Deletes the primary file from the provider Files API through `storage_backend` (404 counts as success).
+4. Deletes the secondary file when `secondary_ref` is set (best effort; a failure is logged and does not block step 5).
+5. Marks the attachment cleanup done.
 
-If either provider call fails transiently, the handler MUST return `Retry` so the shared outbox applies lease-aware retry/backoff. If the message is permanently malformed or unrecoverable, the handler MAY return `Reject`, which moves the message to the shared outbox dead-letter store for operator recovery. Partial failure is safe: the attachment is already soft-deleted and excluded from retrieval. Provider-side orphans are eventually cleaned up by retries, dead-letter replay, or by the outbox-driven chat-deletion cleanup path.
+The handler makes no Vector Stores API call; there is no per-document removal from the vector store. The vector store itself is deleted by the chat-deletion cleanup.
+
+If the primary delete fails, the handler records the attempt and returns `Retry` so the shared outbox applies lease-aware retry/backoff; after `cleanup_worker.max_attempts` it marks the attachment cleanup `failed` and returns `Reject`. A malformed payload is rejected immediately. `Reject` moves the message to the shared outbox dead-letter store for operator recovery. Partial failure is safe: the attachment is already soft-deleted and excluded from chat metadata and citations. Provider-side orphans are eventually cleaned up by retries, dead-letter replay, or by the outbox-driven chat-deletion cleanup path.
 
 **Invariants**:
 
-- After Phase 1, the attachment MUST NOT appear in chat metadata or citations. (Removal from the retrieval scope happens in Phase 2.)
+- After Phase 1, the attachment MUST NOT appear in chat metadata or citations. (Its chunks can still be returned by `file_search` until the provider file is deleted in Phase 2; [ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md).)
 - Deleting an already-deleted attachment is idempotent: returns `204 No Content` without inserting a duplicate outbox event.
 
 #### RAG Quality & Scale Controls (P1)
@@ -3472,11 +3491,11 @@ The domain service resolves the effective model for each turn before any outboun
    a. If the tier is disabled by a kill switch, skip.
    b. Evaluate `tier_available(tier)`: the tier is available only if `remaining_credits(bucket, period) > 0` for ALL required buckets and ALL enabled periods (daily AND monthly). For standard: check bucket `total`. For premium: check buckets `total` AND `tier:premium`.
    c. If available, select a concrete model for that tier:
-      - Prefer the model marked `is_default: true` in that tier, **provided it has `global_enabled=true`**.
-      - If the default model is absent or has `global_enabled=false`, choose the first model in the tier with `global_enabled=true` (catalog order).
-      - If no `global_enabled=true` model exists for this tier (all individually disabled), treat the tier as unavailable and continue the cascade. Per-model disablement via `global_enabled=false` is orthogonal to tier-level quota and kill switches; a tier with quota remaining but no enabled models is still treated as exhausted.
+      - Prefer the model marked `is_default: true` in that tier, **provided it has `enabled=true`**.
+      - If the default model is absent or has `enabled=false`, choose the first model in the tier with `enabled=true` (catalog order).
+      - If no `enabled=true` model exists for this tier (all individually disabled), treat the tier as unavailable and continue the cascade. Per-model disablement via `enabled=false` is orthogonal to tier-level quota and kill switches; a tier with quota remaining but no enabled models is still treated as exhausted.
    d. Set `effective_model` to the selected model and stop.
-4. If no tier is available after the full cascade, reject with HTTP 429 `quota_exceeded`. This covers both quota exhaustion and the case where all models across all tiers have `global_enabled=false`.
+4. If no tier is available after the full cascade, reject with HTTP 429 `quota_exceeded`. This covers both quota exhaustion and the case where all models across all tiers have `enabled=false`.
 
 ```text
 fn resolve_effective_model(selected_model, catalog, usage, kill_switches) -> Result<Model, QuotaExceeded>:
@@ -3484,7 +3503,7 @@ fn resolve_effective_model(selected_model, catalog, usage, kill_switches) -> Res
     for tier in cascade:
         if kill_switches.is_disabled(tier): continue
         if tier_available(tier, usage):
-            # Only consider models with global_enabled=true
+            # Only consider models with enabled=true
             model = catalog.default_for_enabled(tier)
                     .or_else(|| catalog.first_enabled(tier))
             if model.is_none(): continue  # all models in tier are individually disabled; try next tier
@@ -3579,19 +3598,19 @@ This is the normalized internal representation; provider-specific request shapin
 
 ### Cancellation Observability
 
-The following metrics MUST be instrumented on the cancellation path:
+Cancellation path metrics. All carry a `trigger` label; P1 records only `trigger="disconnect"` (the only cancellation source is a client disconnect). The `user_stop` and `timeout` values are declared in `metric_labels.rs` but never emitted.
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `mini_chat_cancel_requested_total` | Counter (labeled by trigger: `user_stop`, `disconnect`, `timeout`) | Total cancellation requests |
-| `mini_chat_cancel_effective_total` | Counter | Cancellations where the provider stream was actually closed |
-| `mini_chat_tokens_after_cancel` | Histogram | Tokens received between cancel signal and stream close |
-| `mini_chat_time_to_abort_ms` | Histogram | Latency from cancel signal to provider connection closed |
-| `mini_chat_time_from_ui_disconnect_to_cancel_ms` | Histogram | End-to-end cancel propagation latency (UI -> provider close) |
+| Metric | Type | P1 status | Description |
+|--------|------|-----------|-------------|
+| `mini_chat_cancel_requested_total` | Counter | Recorded | Disconnects observed through the cancellation token (a disconnect detected by a failed channel send does not increment it) |
+| `mini_chat_cancel_effective_total` | Counter | Recorded | Cancelled turns whose provider stream was cancelled and finalized |
+| `mini_chat_time_to_abort_ms` | Histogram | Recorded | From the observed disconnect until the provider stream is cancelled and the read loop exits; excludes finalization |
+| `mini_chat_tokens_after_cancel` | Histogram | Declared, not recorded (deferred) | Tokens received between cancel signal and stream close |
+| `mini_chat_time_from_ui_disconnect_to_cancel_ms` | Histogram | Declared, not recorded (deferred) | End-to-end cancel propagation latency (UI -> provider close) |
 
 **Quality thresholds (acceptance criteria)**:
 - `mini_chat_time_to_abort_ms` p99 < 200 ms
-- `mini_chat_tokens_after_cancel` p99 < 50 tokens
+- `mini_chat_tokens_after_cancel` p99 < 50 tokens (not measurable in P1; the histogram is not recorded)
 
 ### Metrics (Prometheus) and Alerts (P1)
 
@@ -3654,7 +3673,7 @@ These instruments are registered in `infra/metrics.rs` but no code path records 
 
 ##### Not defined
 
-Series named in earlier revisions of this document that have no instrument: `mini_chat_quota_reserved_tokens`, `mini_chat_code_interpreter_disabled_total`, `mini_chat_cleanup_latency_ms`, `mini_chat_outbox_handler_total`, `mini_chat_outbox_dead_letter_backlog`, `mini_chat_outbox_dead_letter_oldest_age_seconds`, and all `mini_chat_mcp_*` series ([ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)).
+Series named in earlier revisions of this document that have no instrument: `mini_chat_quota_reserved_tokens`, `mini_chat_quota_overshoot_exceeded_total`, `mini_chat_code_interpreter_disabled_total`, `mini_chat_cleanup_latency_ms`, `mini_chat_outbox_handler_total`, `mini_chat_outbox_dead_letter_backlog`, `mini_chat_outbox_dead_letter_oldest_age_seconds`, and all `mini_chat_mcp_*` series ([ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)).
 
 **Health degradation rules** (target; depend on the outbox dead-letter metrics, which are not implemented): if Mini-Chat usage dead letters are pending, or the oldest one is older than 1 hour, health status SHOULD be `degraded`.
 
@@ -3668,13 +3687,13 @@ Alerts on series listed under "Declared but not recorded" or "Not defined" above
 - `mini_chat_time_to_abort_ms` p99 > 200 ms
 - `mini_chat_active_streams` approaching configured concurrency cap
 - Provider error spikes: elevated `mini_chat_provider_errors_total{status=~"429|5.."}`
-- Summary execution failures: sustained increase in `mini_chat_thread_summary_execution_total{result=~"provider_error|timeout"}` or `mini_chat_summary_fallback_total`
+- Summary execution failures: sustained increase in `mini_chat_thread_summary_execution_total{result="provider_error"}` or `mini_chat_summary_fallback_total`
 - Summary CAS churn: sustained increase in `mini_chat_thread_summary_cas_conflicts_total`
 - Orphan watchdog activity: sustained increase in `mini_chat_orphan_detected_total{reason="stale_progress"}` without a corresponding increase in `mini_chat_orphan_finalized_total{reason="stale_progress"}`
 - Cleanup backlog growth: rising `mini_chat_cleanup_backlog{state="pending",resource_type="file"}` or sustained `mini_chat_cleanup_backlog{state="failed",resource_type="file"}`
-- Summary or cleanup dead letters: `mini_chat_outbox_dead_letter_backlog{kind=~"thread_summary|chat_cleanup"}` > 0
-- Mini-Chat usage dead letters: `mini_chat_outbox_dead_letter_backlog{kind="usage"}` > 0
-- Audit emission failures: sustained `mini_chat_audit_emit_total{result="failed"}`
+- Summary or cleanup dead letters: `mini_chat_outbox_dead_letter_backlog{kind=~"thread_summary|chat_cleanup"}` > 0 (series not defined)
+- Mini-Chat usage dead letters: `mini_chat_outbox_dead_letter_backlog{kind="usage"}` > 0 (series not defined)
+- Audit emission failures: `mini_chat_audit_emit_total{result="reject"}` > 0 (permanent failure, dead-lettered) or sustained `mini_chat_audit_emit_total{result="retry"}`
 - Quota anomalies: sustained increase in `mini_chat_quota_negative_total`
 
 #### Alerting and SLO contract (P1)
@@ -3689,17 +3708,17 @@ Alerts (P1) are defined as explicit condition -> window -> severity mappings:
 |----------|--------|----------|
 | `mini_chat_ttft_overhead_ms` p99 > 50 ms | 5m | warning |
 | `mini_chat_time_to_abort_ms` p99 > 200 ms | 5m | critical |
-| `mini_chat_audit_emit_total{result="failed"}` > 0 | 5m | critical |
-| Provider failure rate `rate(mini_chat_provider_errors_total[5m]) / rate(mini_chat_provider_requests_total[5m])` exceeds configured threshold | 5m | critical |
-| `rate(mini_chat_thread_summary_execution_total{result=~"provider_error\|timeout"}[15m])` sustained above configured threshold | 15m | warning |
-| `mini_chat_outbox_dead_letter_backlog{kind="thread_summary"}` > 0 | 15m | critical |
+| `mini_chat_audit_emit_total{result="reject"}` > 0 | 5m | critical |
+| Provider failure rate `rate(mini_chat_provider_errors_total[5m]) / rate(mini_chat_provider_requests_total[5m])` exceeds configured threshold (series declared but not recorded; cannot fire) | 5m | critical |
+| `rate(mini_chat_thread_summary_execution_total{result="provider_error"}[15m])` sustained above configured threshold | 15m | warning |
+| `mini_chat_outbox_dead_letter_backlog{kind="thread_summary"}` > 0 (series not defined; cannot fire) | 15m | critical |
 | `mini_chat_thread_summary_cas_conflicts_total` increases above configured background threshold | 15m | warning |
 | `rate(mini_chat_orphan_detected_total{reason="stale_progress"}[15m]) > 0` AND `rate(mini_chat_orphan_finalized_total{reason="stale_progress"}[15m]) = 0` | 15m | critical |
-| `mini_chat_cleanup_backlog{state="pending",resource_type="file"}` grows monotonically | 60m | warning |
-| `mini_chat_cleanup_backlog{state="failed",resource_type="file"}` > 0 | 15m | critical |
-| `mini_chat_outbox_dead_letter_backlog{kind="chat_cleanup"}` > 0 | 15m | critical |
-| `mini_chat_outbox_dead_letter_backlog{kind="usage"}` > 0 | 15m | critical |
-| `mini_chat_outbox_dead_letter_oldest_age_seconds{kind="usage"}` > 3600 | 15m | warning |
+| `mini_chat_cleanup_backlog{state="pending",resource_type="file"}` grows monotonically (series declared but not recorded; cannot fire) | 60m | warning |
+| `mini_chat_cleanup_backlog{state="failed",resource_type="file"}` > 0 (series declared but not recorded; cannot fire) | 15m | critical |
+| `mini_chat_outbox_dead_letter_backlog{kind="chat_cleanup"}` > 0 (series not defined; cannot fire) | 15m | critical |
+| `mini_chat_outbox_dead_letter_backlog{kind="usage"}` > 0 (series not defined; cannot fire) | 15m | critical |
+| `mini_chat_outbox_dead_letter_oldest_age_seconds{kind="usage"}` > 3600 (series not defined; cannot fire) | 15m | warning |
 
 ### Operational Traceability and Debugging (P1)
 
@@ -3772,11 +3791,11 @@ Operators MUST be able to reconstruct the full request lifecycle using logs, tra
   - `selected_model` (from `chats.model`) and `effective_model` (from `chat_turns.effective_model`) are both present and consistent with expected downgrade behavior
   - if a downgrade occurred, confirm `effective_model` differs from `selected_model` and the turn metadata reflects the downgrade reason
 6. Consult operational dashboards/alerts:
-  - streaming health (`mini_chat_stream_failed_total`, `mini_chat_provider_errors_total`)
-  - cancellation health (`mini_chat_time_to_abort_ms`, `mini_chat_cancel_orphan_total`)
+  - streaming health (`mini_chat_stream_failed_total`; `mini_chat_provider_errors_total` is declared but not recorded)
+  - cancellation health (`mini_chat_time_to_abort_ms`, `mini_chat_cancel_effective_total`; `mini_chat_cancel_orphan_total` is declared but not recorded)
   - orphan watchdog health (`mini_chat_orphan_detected_total{reason="stale_progress"}`, `mini_chat_orphan_finalized_total{reason="stale_progress"}`, `mini_chat_orphan_scan_duration_seconds`)
   - summary health (`mini_chat_summary_fallback_total`, `mini_chat_thread_summary_trigger_total`, `mini_chat_thread_summary_execution_total`, `mini_chat_thread_summary_cas_conflicts_total`)
-  - cleanup/audit health (`mini_chat_cleanup_backlog`, `mini_chat_audit_emit_total`)
+  - cleanup/audit health (`mini_chat_cleanup_failed_total`, `mini_chat_cleanup_retry_total`, `mini_chat_audit_emit_total`; `mini_chat_cleanup_backlog` is declared but not recorded)
 
 ### SSE Infrastructure Requirements
 
@@ -4117,7 +4136,7 @@ Contents (logically):
   - `display_name` (user-facing name; used by Models API)
   - `provider_display_name` (user-facing display name, e.g. `"OpenAI"`, `"Azure OpenAI"`; used by Models API — MUST NOT be a deployment handle, routing identifier, or internal provider key)
   - `tier` (premium/standard)
-  - `global_enabled` (boolean; `false` → model excluded from runtime catalog and Models API)
+  - `enabled` (boolean, `ModelCatalogEntry.enabled` in `mini-chat-sdk`; defaults to `false` when omitted; `false` → model excluded from runtime catalog and Models API)
   - `description` (user-facing help text; used by Models API)
   - `multimodal_capabilities` (array of capability flags, e.g. `["VISION_INPUT", "RAG"]`; used by Models API)
   - `context_window` (integer; max context tokens; used by Models API and token budget computation)
@@ -4840,9 +4859,9 @@ In the normal scheme you should not exceed limits, because:
            committed_tokens = actual_tokens
            committed_credits_micro = credits_micro(actual_input_tokens, actual_output_tokens, in_mult, out_mult)
 
-           // Log overshoot metric for monitoring
-           mini_chat_quota_overshoot_tokens.observe(actual_tokens - reserve_tokens)
-           mini_chat_quota_overshoot_total{period}.inc()
+           // P1: mini_chat_quota_overshoot_tokens is declared but not recorded.
+           // mini_chat_quota_overshoot_total{period} is incremented in both
+           // branches (daily and monthly) whenever actual_tokens > reserve_tokens.
        ELSE:
            // Overshoot exceeds tolerance: cap billing at reserve
            // CRITICAL: Keep turn as COMPLETED (never retroactively cancel completed response)
@@ -4850,11 +4869,9 @@ In the normal scheme you should not exceed limits, because:
            committed_tokens = reserve_tokens
            committed_credits_micro = reserved_credits_micro
 
-           // Log severe overshoot for operator investigation
-           mini_chat_quota_overshoot_exceeded_total.inc()
-           log.error("Overshoot exceeded tolerance", {
-               turn_id, actual_tokens, reserve_tokens, overshoot_factor
-           })
+           // Target (not implemented in P1): a dedicated metric and error log for
+           // the capped case. P1 records only mini_chat_quota_overshoot_total{period}
+           // and sets SettlementOutcome.overshoot_capped = true (not exported).
    ```
 
    **Type specifications (normative):**
@@ -4874,8 +4891,8 @@ In the normal scheme you should not exceed limits, because:
    **P1 constraint**: `max_output_tokens` is a hard cap sent to the provider, so output token overshoot should not occur under normal operation. Overshoot typically occurs on the input side due to underestimation of multimodal surcharges (images, tools, web_search) or retrieved context. Operators SHOULD tune estimation budgets (section 5.5) to minimize overshoot occurrences.
 
    **Monitoring**:
-   - If `mini_chat_quota_overshoot_total` exceeds 5% of completed turns, operators SHOULD review estimation budgets (image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, safety_margin_pct) and consider increasing conservative margins.
-   - If `mini_chat_quota_overshoot_exceeded_total` fires (overshoot > tolerance), this indicates a severe estimation failure requiring immediate investigation. The response was delivered to the user but billing was capped at reserve to prevent unbounded quota drift.
+   - If `mini_chat_quota_overshoot_total` (incremented once per period, `daily` and `monthly`, for each completed turn with actual tokens > reserve) exceeds 5% of completed turns, operators SHOULD review estimation budgets (image_token_budget, tool_surcharge_tokens, web_search_surcharge_tokens, safety_margin_pct) and consider increasing conservative margins.
+   - Overshoot beyond tolerance (billing capped at reserve) indicates a severe estimation failure. P1 has no series that isolates it; `mini_chat_quota_overshoot_exceeded_total` is not defined.
 
    **Invariant (P1 normative)**: A COMPLETED turn MUST remain COMPLETED regardless of overshoot magnitude. The "never retroactively cancel a completed response" principle is absolute. Overshoot beyond tolerance caps billing at reserve_tokens, logs the anomaly, but does NOT change turn state to FAILED or prevent response delivery.
 
@@ -5677,7 +5694,7 @@ A turn MUST NOT transition to `completed` unless the full assistant message cont
 Three subcases:
 
 - **failed_pre_reserve**: error before a quota reserve is taken (validation error, authorization denial, quota preflight rejection — no `chat_turns` row with a reserve exists). No settlement occurs and no quota debit applies. Emitting an outbox message is OPTIONAL (the "exactly one event per reserve" invariant does not apply because no reserve was created). If the system does emit one for observability, the payload MUST use `outcome = "failed"`, `settlement_method = "released"`, `usage = { input_tokens: 0, output_tokens: 0 }`.
-- **failed_post_reserve_pre_provider**: a quota reserve was taken (the `chat_turns` row entered `IN_PROGRESS`) but the provider request was NOT issued (e.g., context assembly error, internal timeout, transient infrastructure failure between successful preflight and the outbound call). The reserve MUST be fully released (`charged_tokens = 0`). A Mini-Chat outbox message MUST be emitted with `outcome = "failed"`, `settlement_method = "released"`, `usage = { input_tokens: 0, output_tokens: 0 }` to satisfy the exactly-once billing event invariant. The reserve release, `chat_turns` state transition to `failed`, and outbox enqueue MUST occur in a single atomic DB transaction.
+- **failed_post_reserve_pre_provider**: a quota reserve was taken (the `chat_turns` row entered `IN_PROGRESS`) but the provider request was NOT issued (e.g., context assembly error, internal timeout, transient infrastructure failure between successful preflight and the outbound call). The reserve MUST be fully released (`charged_tokens = 0`). A Mini-Chat outbox message MUST be emitted with `outcome = "failed"`, `settlement_method = "released"`, `usage = { input_tokens: 0, output_tokens: 0 }` to satisfy the exactly-once billing event invariant. The reserve release, `chat_turns` state transition to `failed`, and outbox enqueue MUST occur in a single atomic DB transaction. **P1**: no code path reaches this subcase, so no `released` event is emitted. Context assembly and provider resolution run before the reserve, and on retry/edit the reserve is the last setup step (see section 5.8, "Pre-Provider Failure Handling", implementation note). The rule applies if a failure point is added between reserve and provider call. A pod crash in that window is settled by the orphan watchdog as `estimated`.
 - **failed_post_provider_start**: provider call started (stream may have begun), then a terminal error occurs (`provider_error`, `provider_timeout`, or internal error). If the provider reported usage, settle on actual usage. Otherwise settle using a bounded estimate: `charged_tokens = min(reserve_tokens, estimated_input_tokens + minimal_generation_floor_applied)` where `minimal_generation_floor_applied` is read from `chat_turns.minimal_generation_floor_applied`. Emit the outbox message with `outcome = "failed"`, `settlement_method = "actual"` or `"estimated"`, and `usage` reflecting the settled amount.
 
 **3) aborted** (client disconnect / pod crash / orphan watchdog / internal abort):
@@ -5935,7 +5952,7 @@ MiniChatManager MUST receive exactly one usage event for every turn that took a 
 
 #### Pre-Provider Failure Handling
 
-If a failure occurs AFTER a quota reserve was taken but BEFORE the provider request is issued (e.g., context assembly error, internal timeout, or transient infrastructure failure between preflight and outbound call):
+If a failure occurs AFTER a quota reserve was taken but BEFORE the provider request is issued (e.g., context assembly error, internal timeout, or transient infrastructure failure between preflight and outbound call), the following rules apply. In P1 no code path fails in this window (see the implementation note below), so these rules are not exercised:
 
 - The reserve MUST be fully released (`charged_tokens = 0`).
 - `settlement_method` MUST be `"released"`.
@@ -5989,6 +6006,8 @@ Section 5.7 defines the `failed` outcome taxonomy (pre-provider vs. post-provide
 - The reserve release, `chat_turns` state transition to `failed`, and outbox enqueue MUST occur in a single atomic DB transaction (consistent with section 5.8, "Pre-Provider Failure Handling").
 
 This distinction eliminates ambiguity: case (A) never holds a reserve and has no settlement obligation; case (B) holds a reserve that MUST be released with a mandatory outbox event (`settlement_method = "released"`). Both cases result in zero charges. The provider is never called in either case.
+
+**P1**: case (B) does not occur. Every pre-provider failure happens before the reserve (send path) or before the reserve step of retry/edit (`fail_unstarted_turn`, no settlement, no outbox event); see section 5.8, "Pre-Provider Failure Handling", implementation note.
 
 The remainder of this subsection addresses **post-stream terminal errors** exclusively.
 
@@ -6406,14 +6425,14 @@ A monotonic, strictly increasing integer that identifies a specific immutable po
   "snapshot": {
     "model_catalog": [
       {
-        "model_id": "gpt-5.2",
+        "id": "gpt-5.2",
         "provider_model_id": "gpt-5.2",
         "display_name": "GPT-5.2",
         "provider_display_name": "Azure OpenAI",
         "provider_id": "azure_openai",
         "tier": "premium",
-        "global_enabled": true,
-        "is_default": false,
+        "enabled": true,
+        "preference": { "is_default": false, "sort_order": 0 },
         "description": "Best for complex reasoning tasks",
         "multimodal_capabilities": [
           "VISION_INPUT",
@@ -6429,6 +6448,8 @@ A monotonic, strictly increasing integer that identifies a specific immutable po
       }
     ],
     "kill_switches": {
+      "disable_premium_tier": false,
+      "force_standard_tier": false,
       "disable_web_search": false,
       "disable_file_search": false,
       "disable_images": false,
@@ -6494,6 +6515,8 @@ A monotonic, strictly increasing integer that identifies a specific immutable po
 **Critical design principle**: If the user's entitlements/plan changes such that limits change, CCM must bump `policy_version`.
 
 ### Policy Change Notification (Optional)
+
+**Status**: Future — not implemented ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)). Mini Chat exposes no `POST /internal/policy:notify` endpoint and keeps no snapshot cache to invalidate; every preflight and settlement asks the policy plugin for the current version.
 
 **Purpose**: Optional asynchronous notification of policy updates.
 
@@ -6592,7 +6615,7 @@ This endpoint accepts usage settlement events from MiniChat for finalized turn o
 
 CCM MUST retain immutable snapshots per `(user_id, policy_version)` for at least the billing/audit retention window. Snapshots must remain retrievable during that period. This preserves deterministic replay and auditability.
 
-**MiniChat caching strategy**:
+**MiniChat caching strategy** (Future — not implemented, [ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md); P1 has no snapshot or user-limits cache and calls the policy plugin on each preflight and settlement):
 - Policy snapshots: Persist by `(user_id, policy_version)`; bounded LRU memory cache.
 - User limits: Bounded LRU cache with 60–300 second TTL; key by `(user_id, policy_version)`.
 
@@ -6623,7 +6646,7 @@ Legend:
 
 ## B.1 Gear config (ToolKit config)
 
-The gear configuration is `MiniChatConfig` (`src/config.rs`, worker sections in `src/config/background.rs`). It is declared with `#[serde(deny_unknown_fields)]` (as are most nested sections), so an unknown or misspelled key fails startup; removed keys must therefore stay parseable until configs are migrated. Every section is validated in `init()`. Values support `${VAR}` expansion where marked `expand_vars` (provider `host`, `auth_config`, `client_credentials`).
+The gear configuration is `MiniChatConfig` (`src/config.rs`, worker sections in `src/config/background.rs`). It is declared with `#[serde(deny_unknown_fields)]`, as are all nested sections in `config.rs` (`streaming`, `estimation_budgets`, `quota`, `outbox`, `context`, `rag`, `client_credentials`, `metrics`, `providers.<id>` and its `tenant_overrides`, `thumbnail`, `knowledge_search`), so an unknown or misspelled key there fails startup. The worker sections in `config/background.rs` (`orphan_watchdog`, `thread_summary_worker`, `cleanup_worker`) do not use `deny_unknown_fields`: unknown keys in them are accepted and ignored. Every section is validated in `init()`. Values support `${VAR}` expansion where marked `expand_vars` (provider `host`, `auth_config`, `client_credentials`).
 
 | Parameter | Type | Default | Validation / notes |
 |-----------|------|---------|--------------------|
