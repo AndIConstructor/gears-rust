@@ -305,7 +305,7 @@ impl<
             match chat_opt {
                 Some(chat) => match self
                     .model_resolver
-                    .resolve_model(ctx.subject_id(), Some(chat.model.clone()))
+                    .resolve_chat_model(ctx.subject_id(), &chat.model)
                     .await
                 {
                     Ok(resolved)

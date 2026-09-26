@@ -520,6 +520,8 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
         let estimation_budgets = self.estimation_budgets;
         let web_search_daily_quota = self.quota_config.web_search_daily_quota;
         let code_interpreter_daily_quota = self.quota_config.code_interpreter_daily_quota;
+        let web_search_enabled = input.web_search_enabled;
+        let code_interpreter_enabled = input.code_interpreter_enabled;
 
         let tx_result = self
             .db
@@ -594,8 +596,11 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                     to_db(DomainError::internal("effective model not in catalog"))
                                 })?;
 
-                            // 6a. Daily web search quota check (post-cascade)
-                            if eff_entry.general_config.tool_support.web_search {
+                            // 6a. Daily web search quota check (post-cascade). Only a
+                            // request that uses the tool is charged against its quota.
+                            if web_search_enabled
+                                && eff_entry.general_config.tool_support.web_search
+                            {
                                 let today = period_starts[0];
                                 let daily_web_search_calls = repo
                                     .get_daily_web_search_calls(
@@ -622,7 +627,9 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                             }
 
                             // 6b. Daily code interpreter quota check (post-cascade)
-                            if eff_entry.general_config.tool_support.code_interpreter {
+                            if code_interpreter_enabled
+                                && eff_entry.general_config.tool_support.code_interpreter
+                            {
                                 let today = period_starts[0];
                                 let daily_ci_calls = repo
                                     .get_daily_code_interpreter_calls(
@@ -2274,25 +2281,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn preflight_web_search_daily_quota_rejects() {
-        let db_raw = inmem_db().await;
-        let db = mock_db_provider(db_raw);
-        // Use a snapshot whose models have web_search capability enabled
-        let mut snapshot = default_snapshot();
-        for entry in &mut snapshot.model_catalog {
-            entry.general_config.tool_support.web_search = true;
-        }
-        let svc = make_test_service(Arc::clone(&db), snapshot, 1.10);
-
-        // Seed daily web search usage at the quota limit
+    /// Seeds today's `total` bucket row with the given tool call counts.
+    async fn seed_daily_tool_calls(
+        db: &Arc<DbProvider>,
+        web_search_calls: u32,
+        code_interpreter_calls: u32,
+    ) {
+        use crate::domain::repos::{IncrementReserveParams, SettleParams};
         let today = OffsetDateTime::now_utc().date();
         let scope = AccessScope::for_tenant(Uuid::nil());
         let repo = QuotaUsageRepo;
         let conn = db.conn().unwrap();
-
-        // First create the row via increment_reserve, then settle with web_search_calls
-        use crate::domain::repos::IncrementReserveParams;
         repo.increment_reserve(
             &conn,
             &scope,
@@ -2307,9 +2306,6 @@ mod tests {
         )
         .await
         .unwrap();
-
-        // Settle with web_search_calls = daily quota (default 75)
-        use crate::domain::repos::SettleParams;
         repo.settle(
             &conn,
             &scope,
@@ -2323,14 +2319,40 @@ mod tests {
                 actual_credits_micro: 1000,
                 input_tokens: Some(10),
                 output_tokens: Some(5),
-                web_search_calls: QuotaConfig::default().web_search_daily_quota,
-                code_interpreter_calls: 0,
+                web_search_calls,
+                code_interpreter_calls,
             },
         )
         .await
         .unwrap();
+    }
 
-        let input = preflight_input("gpt-5");
+    /// Service whose catalog models support both tools, with both daily
+    /// tool quotas already exhausted.
+    async fn service_with_exhausted_tool_quotas() -> TestQuotaService {
+        let db_raw = inmem_db().await;
+        let db = mock_db_provider(db_raw);
+        let mut snapshot = default_snapshot();
+        for entry in &mut snapshot.model_catalog {
+            entry.general_config.tool_support.web_search = true;
+            entry.general_config.tool_support.code_interpreter = true;
+        }
+        let svc = make_test_service(Arc::clone(&db), snapshot, 1.10);
+        let quota = QuotaConfig::default();
+        seed_daily_tool_calls(
+            &db,
+            quota.web_search_daily_quota,
+            quota.code_interpreter_daily_quota,
+        )
+        .await;
+        svc
+    }
+
+    #[tokio::test]
+    async fn preflight_web_search_daily_quota_rejects() {
+        let svc = service_with_exhausted_tool_quotas().await;
+        let mut input = preflight_input("gpt-5");
+        input.web_search_enabled = true;
 
         let computed = svc.preflight_evaluate(input).await.unwrap();
         match computed.decision {
@@ -2348,61 +2370,9 @@ mod tests {
 
     #[tokio::test]
     async fn preflight_code_interpreter_daily_quota_rejects() {
-        let db_raw = inmem_db().await;
-        let db = mock_db_provider(db_raw);
-        // Use a snapshot whose models have code_interpreter capability enabled
-        let mut snapshot = default_snapshot();
-        for entry in &mut snapshot.model_catalog {
-            entry.general_config.tool_support.code_interpreter = true;
-        }
-        let svc = make_test_service(Arc::clone(&db), snapshot, 1.10);
-
-        // Seed daily code interpreter usage at the quota limit
-        let today = OffsetDateTime::now_utc().date();
-        let scope = AccessScope::for_tenant(Uuid::nil());
-        let repo = QuotaUsageRepo;
-        let conn = db.conn().unwrap();
-
-        // First create the row via increment_reserve, then settle with code_interpreter_calls
-        use crate::domain::repos::IncrementReserveParams;
-        repo.increment_reserve(
-            &conn,
-            &scope,
-            IncrementReserveParams {
-                tenant_id: Uuid::nil(),
-                user_id: Uuid::nil(),
-                period_type: PeriodType::Daily,
-                period_start: today,
-                bucket: "total".to_owned(),
-                amount_micro: 1000,
-            },
-        )
-        .await
-        .unwrap();
-
-        // Settle with code_interpreter_calls = daily quota (default 50)
-        use crate::domain::repos::SettleParams;
-        repo.settle(
-            &conn,
-            &scope,
-            SettleParams {
-                tenant_id: Uuid::nil(),
-                user_id: Uuid::nil(),
-                period_type: PeriodType::Daily,
-                period_start: today,
-                bucket: "total".to_owned(),
-                reserved_credits_micro: 1000,
-                actual_credits_micro: 1000,
-                input_tokens: Some(10),
-                output_tokens: Some(5),
-                web_search_calls: 0,
-                code_interpreter_calls: QuotaConfig::default().code_interpreter_daily_quota,
-            },
-        )
-        .await
-        .unwrap();
-
-        let input = preflight_input("gpt-5");
+        let svc = service_with_exhausted_tool_quotas().await;
+        let mut input = preflight_input("gpt-5");
+        input.code_interpreter_enabled = true;
 
         let computed = svc.preflight_evaluate(input).await.unwrap();
         match computed.decision {
@@ -2416,6 +2386,21 @@ mod tests {
             }
             other => panic!("expected Reject with code_interpreter scope, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn preflight_exhausted_tool_quotas_allow_turn_without_tools() {
+        let svc = service_with_exhausted_tool_quotas().await;
+
+        let computed = svc
+            .preflight_evaluate(preflight_input("gpt-5"))
+            .await
+            .unwrap();
+        assert!(
+            !matches!(computed.decision, PreflightDecision::Reject { .. }),
+            "a turn that uses no tool must not hit tool quotas, got {:?}",
+            computed.decision
+        );
     }
 
     // ── 10: Integration tests ──

@@ -218,3 +218,32 @@ async fn get_model_denied_returns_forbidden() {
         "expected Forbidden, got: {err:?}"
     );
 }
+
+// ── resolve_chat_model ──
+
+#[tokio::test]
+async fn resolve_chat_model_returns_disabled_model_for_downgrade() {
+    let svc = build_service(mock_catalog()).await;
+
+    let resolved = svc
+        .resolve_chat_model(Uuid::nil(), "disabled-model")
+        .await
+        .expect("an existing chat keeps resolving its disabled model");
+
+    assert_eq!(resolved.model_id, "disabled-model");
+}
+
+#[tokio::test]
+async fn resolve_chat_model_rejects_model_missing_from_catalog() {
+    let svc = build_service(mock_catalog()).await;
+
+    let err = svc
+        .resolve_chat_model(Uuid::nil(), "nonexistent")
+        .await
+        .expect_err("a model gone from the catalog cannot be resolved");
+
+    assert!(
+        matches!(err, DomainError::InvalidModel { .. }),
+        "expected InvalidModel, got: {err:?}"
+    );
+}

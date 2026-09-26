@@ -210,6 +210,19 @@ impl ModelResolver for MockModelResolver {
         }
     }
 
+    async fn resolve_chat_model(
+        &self,
+        _user_id: Uuid,
+        model_id: &str,
+    ) -> Result<ResolvedModel, DomainError> {
+        let catalog = self.catalog.lock().unwrap();
+        catalog
+            .iter()
+            .find(|m| m.id == model_id)
+            .map(ResolvedModel::from)
+            .ok_or_else(|| DomainError::invalid_model(model_id))
+    }
+
     async fn list_visible_models(&self, _user_id: Uuid) -> Result<Vec<ResolvedModel>, DomainError> {
         let catalog = self.catalog.lock().unwrap();
         Ok(catalog

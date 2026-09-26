@@ -307,7 +307,7 @@ impl<
     ) {
         match self
             .model_resolver
-            .resolve_model(ctx.subject_id(), Some(model))
+            .resolve_chat_model(ctx.subject_id(), &model)
             .await
         {
             Ok(resolved) => {
@@ -485,7 +485,7 @@ impl<
 
         let resolved = match self
             .model_resolver
-            .resolve_model(ctx.subject_id(), Some(chat_row.model.clone()))
+            .resolve_chat_model(ctx.subject_id(), &chat_row.model)
             .await
         {
             Ok(r) => r,

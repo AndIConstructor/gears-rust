@@ -77,7 +77,7 @@ pub(crate) async fn stream_message(
     let selected_model = chat.model;
     let resolved = match svc
         .models
-        .resolve_model(ctx.subject_id(), Some(selected_model.clone()))
+        .resolve_chat_model(ctx.subject_id(), &selected_model)
         .await
     {
         Ok(r) => r,

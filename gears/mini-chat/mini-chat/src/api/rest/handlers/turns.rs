@@ -156,7 +156,7 @@ async fn start_mutation_stream(
     let chat_model = mutation.chat_model.clone();
     let resolved = match svc
         .models
-        .resolve_model(ctx.subject_id(), Some(mutation.chat_model))
+        .resolve_chat_model(ctx.subject_id(), &mutation.chat_model)
         .await
     {
         Ok(r) => r,

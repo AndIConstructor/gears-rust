@@ -121,6 +121,20 @@ impl ModelResolver for ModelPolicyGateway {
         }
     }
 
+    async fn resolve_chat_model(
+        &self,
+        user_id: Uuid,
+        model_id: &str,
+    ) -> Result<ResolvedModel, DomainError> {
+        let snapshot = self.current_snapshot(user_id).await?;
+        snapshot
+            .model_catalog
+            .iter()
+            .find(|m| m.id == model_id)
+            .map(ResolvedModel::from)
+            .ok_or_else(|| DomainError::invalid_model(model_id))
+    }
+
     async fn list_visible_models(&self, user_id: Uuid) -> Result<Vec<ResolvedModel>, DomainError> {
         let snapshot = self.current_snapshot(user_id).await?;
 
