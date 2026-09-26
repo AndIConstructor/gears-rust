@@ -3,6 +3,7 @@
 pub(super) mod provider_task;
 mod types;
 
+pub use types::requester_type_column;
 pub use types::{StreamError, StreamOutcome};
 
 use std::sync::Arc;
@@ -581,7 +582,7 @@ impl<
         // ── Single transaction: reserve + user message + turn ──
         // Runs after every fallible pre-provider step so an error before this
         // point leaves no running turn and no quota reserve behind.
-        let requester_type = ctx.subject_type().unwrap_or("user").to_owned();
+        let requester_type = types::requester_type_column(ctx.subject_type()).to_owned();
         let turn_id = self
             .reserve_and_create_turn(
                 &scope,
@@ -2532,6 +2533,51 @@ mod tests {
             matches!(err, StreamError::Replay { .. }),
             "expected Replay, got: {err:?}"
         );
+    }
+
+    /// Authenticated users carry a GTS `subject_type`; it maps to the
+    /// `requester_type = 'user'` column value instead of being stored verbatim
+    /// (which violated `CHECK (requester_type IN ('user', 'system'))`).
+    #[tokio::test]
+    async fn run_stream_accepts_gts_subject_type() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["hi"]));
+        let svc = build_stream_service(db, provider);
+        let ctx = SecurityContext::builder()
+            .subject_id(user_id)
+            .subject_tenant_id(tenant_id)
+            .subject_type("gts.cf.core.security.subject_user.v1~")
+            .build()
+            .expect("security context");
+        let (tx, mut rx) = mpsc::channel(32);
+
+        let result = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                Uuid::new_v4(),
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                CancellationToken::new(),
+                tx,
+            )
+            .await;
+        assert!(result.is_ok(), "stream should start: {:?}", result.err());
+        let mut got_done = false;
+        while let Some(ev) = rx.recv().await {
+            if ev.is_terminal() {
+                got_done = matches!(ev, StreamEvent::Done(_));
+                break;
+            }
+        }
+        assert!(got_done);
     }
 
     /// A completed but soft-deleted turn (replaced by retry/edit) is not

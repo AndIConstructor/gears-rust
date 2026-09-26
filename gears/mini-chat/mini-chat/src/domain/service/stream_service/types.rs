@@ -326,6 +326,18 @@ pub(super) fn requester_type_from_str(s: Option<&str>) -> RequesterType {
     }
 }
 
+/// Value stored in `chat_turns.requester_type` (`CHECK IN ('user', 'system')`).
+///
+/// The authenticated `subject_type` is a GTS type id (for example
+/// `gts.cf.core.security.subject_user.v1~`), not a column value, so it must be
+/// mapped rather than stored verbatim.
+pub fn requester_type_column(subject_type: Option<&str>) -> &'static str {
+    match requester_type_from_str(subject_type) {
+        RequesterType::User => "user",
+        RequesterType::System => "system",
+    }
+}
+
 /// Normalize an [`LlmProviderError`] to a `(code, message)` pair for the SSE
 /// error event. Messages are already sanitized by the infra layer.
 ///

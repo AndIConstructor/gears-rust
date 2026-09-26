@@ -512,7 +512,11 @@ impl<
 
                     // Insert new running turn
                     let tenant_id = ctx_clone.subject_tenant_id();
-                    let requester_type = ctx_clone.subject_type().unwrap_or("user").to_owned();
+                    let requester_type =
+                        crate::domain::service::stream_service::requester_type_column(
+                            ctx_clone.subject_type(),
+                        )
+                        .to_owned();
 
                     turn_repo
                         .create_turn(
