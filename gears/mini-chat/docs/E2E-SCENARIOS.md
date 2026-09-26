@@ -258,6 +258,7 @@ still works but is not required (ADR-0007).
 | 10-36 | DELETE Unknown Attachment → 404 `not_found`  | test_attachments.py      | TestDeleteMissingAttachment::test_delete_unknown_attachment_404 |
 | 10-37 | XLSX Upload While Code Interpreter Is Unavailable (model without it) → 400 `invalid_argument`, nothing stored | test_code_interpreter.py | TestXlsxUploadAccepted::test_xlsx_rejected_without_code_interpreter |
 | 10-38 | Send Message Referencing Two Ready Documents → 200, `done` | test_attachments.py | TestSendMessageWithAttachments::test_send_message_with_attachments |
+| 10-39 | Repeated DELETE of an Attachment → 204 (idempotent), then GET → 404 | test_attachments.py | TestDeleteMissingAttachment::test_second_delete_attachment_is_idempotent |
 
 ## 11 — Models API
 

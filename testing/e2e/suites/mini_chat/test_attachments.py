@@ -1258,3 +1258,11 @@ class TestDeleteMissingAttachment:
     def test_delete_unknown_attachment_404(self, chat):
         resp = httpx.delete(f"{API_PREFIX}/chats/{chat['id']}/attachments/{uuid.uuid4()}")
         assert_problem(resp, 404, "not_found")
+
+    def test_second_delete_attachment_is_idempotent(self, chat):
+        """A repeated DELETE of an attachment returns 204 (idempotent)."""
+        att_id = _upload_ready(chat["id"], "twice.txt", b"delete me twice", "text/plain")
+        url = f"{API_PREFIX}/chats/{chat['id']}/attachments/{att_id}"
+        assert httpx.delete(url).status_code == 204
+        assert httpx.delete(url).status_code == 204
+        assert httpx.get(url).status_code == 404
