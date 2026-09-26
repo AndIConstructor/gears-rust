@@ -1403,6 +1403,55 @@ fn extract_citations_empty_annotations() {
     assert!(citations.is_empty());
 }
 
+// Indices are character offsets into the annotated part, not byte offsets
+// into the whole answer: a second message part with non-ASCII text.
+#[test]
+fn extract_citations_range_uses_characters_of_its_own_part() {
+    let first = "Intro \u{e9}t\u{e9}. ";
+    let second = "Caf\u{e9} cr\u{e8}me is sold here.";
+    let response = ResponseObject {
+        id: "resp-1".into(),
+        output: vec![
+            OutputItem {
+                r#type: "message".into(),
+                content: vec![ResponseContentPart {
+                    r#type: "output_text".into(),
+                    text: first.into(),
+                    annotations: vec![],
+                }],
+                ..Default::default()
+            },
+            OutputItem {
+                r#type: "message".into(),
+                content: vec![ResponseContentPart {
+                    r#type: "output_text".into(),
+                    text: second.into(),
+                    annotations: vec![Annotation {
+                        r#type: "url_citation".into(),
+                        title: "Wiki".into(),
+                        url: Some("https://example.org".into()),
+                        file_id: None,
+                        filename: None,
+                        start_index: Some(0),
+                        end_index: Some(10),
+                        text: None,
+                    }],
+                }],
+                ..Default::default()
+            },
+        ],
+        usage: RawUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            input_tokens_details: None,
+            output_tokens_details: None,
+        },
+        incomplete_details: None,
+    };
+    let citations = extract_citations(&response, &format!("{first}{second}"));
+    assert_eq!(citations[0].snippet, "Caf\u{e9} cr\u{e8}me");
+}
+
 #[test]
 fn extract_citations_url_citation_snippet_from_text_range() {
     let accumulated = "0123456789The capital of France is Paris.";

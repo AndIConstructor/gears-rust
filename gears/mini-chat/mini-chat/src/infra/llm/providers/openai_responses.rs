@@ -663,6 +663,16 @@ pub(super) fn translate_provider_event(
 }
 
 /// Extract citations from a `ResponseCompleted`'s output annotations.
+/// Characters `start..end` of `text`, or `None` if the range is empty or
+/// outside the text.
+fn char_slice(text: &str, start: usize, end: usize) -> Option<String> {
+    if start >= end {
+        return None;
+    }
+    let slice: String = text.chars().skip(start).take(end - start).collect();
+    (slice.chars().count() == end - start).then_some(slice)
+}
+
 pub(super) fn extract_citations(
     response: &ResponseObject,
     accumulated_text: &str,
@@ -680,7 +690,14 @@ pub(super) fn extract_citations(
                             .or_else(|| {
                                 annotation.start_index.zip(annotation.end_index).and_then(
                                     |(start, end)| {
-                                        accumulated_text.get(start..end).map(ToOwned::to_owned)
+                                        // Indices are character offsets into the
+                                        // annotated `output_text` part.
+                                        let source = if content_part.text.is_empty() {
+                                            accumulated_text
+                                        } else {
+                                            content_part.text.as_str()
+                                        };
+                                        char_slice(source, start, end)
                                     },
                                 )
                             })
