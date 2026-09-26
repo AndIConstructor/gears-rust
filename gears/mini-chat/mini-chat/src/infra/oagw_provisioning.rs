@@ -430,7 +430,9 @@ async fn create_upstream(
 
     let mut builder = CreateUpstreamRequest::builder(server, HTTP_PROTOCOL_ID).enabled(true);
 
-    // Only pass alias when explicitly configured (IP-based hosts).
+    // `init()` fills `upstream_alias` with the host when it is not configured,
+    // so the alias is always passed and OAGW creates (or `reuse_existing_upstream`
+    // finds) the upstream under the alias the `ProviderResolver` already uses.
     if let Some(alias) = &entry.upstream_alias {
         builder = builder.alias(alias);
     }
