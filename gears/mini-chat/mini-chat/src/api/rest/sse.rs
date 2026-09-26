@@ -32,7 +32,30 @@ impl StreamEvent {
     }
 }
 
-impl toolkit::api::api_dto::ResponseApiDto for StreamEvent {}
+/// `OpenAPI` description of one SSE event of the `messages:stream`, retry and
+/// edit responses. Each event is sent as `event: <name>` and `data: <payload>`
+/// (JSON); `event` below is the SSE event name and `data` its payload. This
+/// type only documents the wire format; `StreamEvent::into_sse_event` writes it.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(tag = "event", content = "data", rename_all = "snake_case")]
+#[allow(dead_code)] // documentation-only type, never constructed
+pub enum MiniChatSseEvent {
+    StreamStarted(crate::domain::stream_events::StreamStartedData),
+    Ping(PingData),
+    Delta(DeltaData),
+    Tool(ToolData),
+    Citations(CitationsData),
+    Done(crate::domain::stream_events::DoneData),
+    Error(crate::domain::stream_events::ErrorData),
+}
+
+/// Payload of the `ping` event: an empty JSON object (a unit struct would
+/// be documented as `null`).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[allow(clippy::empty_structs_with_brackets)]
+pub struct PingData {}
+
+impl toolkit::api::api_dto::ResponseApiDto for MiniChatSseEvent {}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Provider → domain conversion

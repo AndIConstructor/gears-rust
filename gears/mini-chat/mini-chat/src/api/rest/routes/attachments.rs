@@ -3,7 +3,7 @@ use axum::extract::DefaultBodyLimit;
 use toolkit::api::OpenApiRegistry;
 use toolkit::api::operation_builder::OperationBuilder;
 
-use super::AiChatLicense;
+use super::{AiChatLicense, retry_after_header};
 use crate::api::rest::{dto, handlers};
 
 const API_TAG: &str = "Mini Chat Attachments";
@@ -39,8 +39,15 @@ pub(super) fn register_attachment_routes(
             http::StatusCode::CREATED,
             "Attachment uploaded and processed",
         )
-        .standard_errors(openapi)
+        .error_400(openapi)
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_404(openapi)
+        .error_409(openapi)
+        .error_429(openapi)
+        .error_500(openapi)
         .error_503(openapi)
+        .response_header(retry_after_header())
         .register(router, openapi)
         .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT));
 
@@ -61,7 +68,11 @@ pub(super) fn register_attachment_routes(
         http::StatusCode::OK,
         "Attachment metadata",
     )
-    .standard_errors(openapi)
+    .error_400(openapi)
+    .error_401(openapi)
+    .error_403(openapi)
+    .error_404(openapi)
+    .error_500(openapi)
     .register(router, openapi);
 
     // DELETE {prefix}/v1/chats/{id}/attachments/{attachment_id}
@@ -78,7 +89,11 @@ pub(super) fn register_attachment_routes(
     .handler(handlers::attachments::delete_attachment)
     .no_content_response(http::StatusCode::NO_CONTENT, "Attachment deleted")
     .error_409(openapi)
-    .standard_errors(openapi)
+    .error_400(openapi)
+    .error_401(openapi)
+    .error_403(openapi)
+    .error_404(openapi)
+    .error_500(openapi)
     .register(router, openapi);
 
     router

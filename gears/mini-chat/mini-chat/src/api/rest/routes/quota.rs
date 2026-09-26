@@ -26,7 +26,9 @@ pub(super) fn register_quota_routes(
             http::StatusCode::OK,
             "Quota status with remaining percentages and warning flags",
         )
-        .standard_errors(openapi)
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_500(openapi)
         .register(router, openapi);
 
     router
