@@ -18,6 +18,9 @@ import time
 import httpx
 import pytest
 
+# Real LLM calls only: offline, the suite's mock-based tests cover the same paths.
+pytestmark = pytest.mark.online_only
+
 BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8087")
 API = f"{BASE_URL}/cf/mini-chat/v1"
 TIMEOUT = 90
@@ -401,7 +404,7 @@ class TestLiveWebSearch:
         status, events, raw = send_message(
             chat["id"],
             "Search the web: what is the current population of Tokyo?",
-            web_search_enabled=True,
+            web_search={"enabled": True},
         )
         assert status == 200, f"web search failed: {raw}"
         done = require_done(events)
@@ -436,39 +439,6 @@ class TestLiveReactions:
             timeout=10,
         )
         assert resp.status_code == 204
-
-
-class TestLiveErrorHandling:
-    """Error scenarios."""
-
-    def test_empty_content_rejected(self, chat):
-        resp = httpx.post(
-            f"{API}/chats/{chat['id']}/messages:stream",
-            json={"content": ""},
-            headers={"Accept": "text/event-stream"},
-            timeout=10,
-        )
-        assert resp.status_code in (400, 422)
-
-    def test_chat_not_found_stream(self, _check_live):
-        fake_id = "00000000-0000-0000-0000-000000000000"
-        resp = httpx.post(
-            f"{API}/chats/{fake_id}/messages:stream",
-            json={"content": "hello"},
-            headers={"Accept": "text/event-stream"},
-            timeout=10,
-        )
-        assert resp.status_code in (403, 404)
-
-    def test_invalid_attachment_id_rejected(self, chat):
-        fake_att = "00000000-0000-0000-0000-000000000000"
-        resp = httpx.post(
-            f"{API}/chats/{chat['id']}/messages:stream",
-            json={"content": "hello", "attachment_ids": [fake_att]},
-            headers={"Accept": "text/event-stream"},
-            timeout=10,
-        )
-        assert resp.status_code in (400, 404, 422)
 
 
 class TestLiveMessagesAPI:
@@ -516,7 +486,7 @@ class TestLiveChatUpdate:
             json={"title": "   "},
             timeout=10,
         )
-        assert resp.status_code in (400, 422)
+        assert resp.status_code == 400
 
 
 class TestLiveThreadSummary:
@@ -715,6 +685,8 @@ class TestLiveAttachmentDeletion:
         time.sleep(5)
 
         # Ask WITH attachment
+        # No attachment_ids: file_search covers every document of the chat, and
+        # the attachment stays unreferenced (deletable).
         status, events, raw = send_message(chat_id, "What is the capital of Zarvonia? Use the attached document.")
         assert status == 200, f"Stream failed: {raw}"
         require_done(events)
@@ -725,7 +697,7 @@ class TestLiveAttachmentDeletion:
 
         # Delete attachment
         resp = httpx.delete(f"{API}/chats/{chat_id}/attachments/{att_id}", timeout=10)
-        assert resp.status_code in (204, 409)  # 409 = referenced by message, still soft-deleted
+        assert resp.status_code == 204
 
         # NEW chat — no vector store, no history
         clean_chat = create_chat(DEFAULT_MODEL)
@@ -848,8 +820,8 @@ class TestLiveChatDeletionCleanup:
         else:
             pytest.fail(f"Chat {chat_id} not deleted after 10s")
 
-    def test_delete_chat_idempotent(self, _check_live):
-        """Deleting the same chat twice should succeed both times."""
+    def test_second_delete_chat_404(self, _check_live):
+        """A second DELETE of the same chat is 404."""
         chat = create_chat(MINI_MODEL)
         chat_id = chat["id"]
 
@@ -857,4 +829,4 @@ class TestLiveChatDeletionCleanup:
         assert resp1.status_code == 204
 
         resp2 = httpx.delete(f"{API}/chats/{chat_id}", timeout=10)
-        assert resp2.status_code in (204, 404)
+        assert resp2.status_code == 404

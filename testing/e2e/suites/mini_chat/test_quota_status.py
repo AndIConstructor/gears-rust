@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from .conftest import API_PREFIX, expect_done, stream_message
+from .conftest import API_PREFIX, USER_A_ID, assert_no_reserves, expect_done, stream_message
 
 import pytest
 
@@ -130,27 +130,22 @@ class TestQuotaUsageTracking:
             f"before={before_used}, after={after_used}"
         )
 
-    def test_remaining_percentage_decreases_after_send(self, provider_chat):
+    def test_remaining_credits_decrease_after_send(self, provider_chat):
+        """remaining_credits_micro strictly decreases after a charged turn.
+
+        (remaining_percentage is an integer and stays at 99 for one small turn.)
+        """
         chat_id = provider_chat["id"]
+        before = find_period(get_quota_status()["tiers"], "total", "daily")
 
-        before = get_quota_status()
-        before_total_daily = find_period(before["tiers"], "total", "daily")
-        before_pct = before_total_daily["remaining_percentage"]
-
-        # Send a message
-        status, _, _ = stream_message(chat_id, "Say hi.")
+        status, events, _ = stream_message(chat_id, "Say hi.")
         assert status == 200
+        expect_done(events)
+        assert_no_reserves(USER_A_ID)
 
-        time.sleep(0.5)
-
-        after = get_quota_status()
-        after_total_daily = find_period(after["tiers"], "total", "daily")
-        after_pct = after_total_daily["remaining_percentage"]
-
-        assert after_pct <= before_pct, (
-            f"remaining_percentage should decrease: "
-            f"before={before_pct}, after={after_pct}"
-        )
+        after = find_period(get_quota_status()["tiers"], "total", "daily")
+        assert after["remaining_credits_micro"] < before["remaining_credits_micro"]
+        assert after["remaining_credits_micro"] == after["limit_credits_micro"] - after["used_credits_micro"]
 
 
 # ---------------------------------------------------------------------------

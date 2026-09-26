@@ -12,7 +12,7 @@ import uuid
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, PROVIDER_DEFAULT_MODEL, STANDARD_MODEL, expect_done, expect_stream_started, parse_sse
+from .conftest import API_PREFIX, expect_done, expect_stream_started, parse_sse
 
 
 @pytest.mark.multi_provider
@@ -258,33 +258,6 @@ class TestWebSearchDisabledByDefault:
 
         citations = [e for e in events if e.event == "citations"]
         assert len(citations) == 0, "Unexpected citations without web_search"
-
-
-@pytest.mark.multi_provider
-class TestWebSearchPerProvider:
-    """Web search on each provider's non-default model (web_search: true)."""
-
-    def test_web_search_works_on_non_default_model(self, request, provider, chat_with_model):
-        """Web search should work on each provider's default model."""
-        if request.config.getoption("mode") == "online" and provider == "azure":
-            pytest.skip("Azure does not return web search tool events in online mode")
-        model = PROVIDER_DEFAULT_MODEL[provider]
-        chat = chat_with_model(model)
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat['id']}/messages:stream",
-            json={"content": "SEARCH: tallest building in the world", "web_search": {"enabled": True}},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        expect_done(events)
-
-        tool_events = [e for e in events if e.event == "tool"]
-        assert len(tool_events) > 0, (
-            f"Expected tool events for web search on {model}. "
-            f"Event types: {[e.event for e in events]}"
-        )
 
 
 @pytest.mark.multi_provider

@@ -3,7 +3,7 @@
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, DEFAULT_MODEL, STANDARD_MODEL
+from .conftest import API_PREFIX, DEFAULT_MODEL, DISABLED_MODEL, STANDARD_MODEL, assert_problem
 
 
 @pytest.mark.multi_provider
@@ -38,17 +38,9 @@ class TestListModels:
 class TestGetModel:
     """GET /v1/models/{model_id}"""
 
-    def test_get_existing_model(self, server):
-        resp = httpx.get(f"{API_PREFIX}/models/{DEFAULT_MODEL}")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["model_id"] == DEFAULT_MODEL
-        assert "provider_id" not in body, "provider_id must not be exposed"
-        assert "provider_model_id" not in body, "provider_model_id must not be exposed"
-
     def test_get_nonexistent_model(self, server):
         resp = httpx.get(f"{API_PREFIX}/models/fake-model-xyz")
-        assert resp.status_code == 404
+        assert_problem(resp, 404, "not_found")
 
     def test_internal_fields_not_exposed(self, server):
         """11-06: Internal fields must not be in model response."""
@@ -72,17 +64,12 @@ class TestGetModel:
             assert field in body, f"Extended field '{field}' missing from model response"
 
 
-@pytest.mark.multi_provider
-class TestModelFieldPresence:
-    """Verify only enabled models are exposed and all have required fields."""
+class TestDisabledModel:
+    """A catalog entry with `enabled: false` is invisible to users."""
 
-    def test_all_listed_models_have_required_fields(self, server):
-        resp = httpx.get(f"{API_PREFIX}/models")
-        assert resp.status_code == 200
-        items = resp.json()["items"]
-        assert len(items) >= 1
-        for model in items:
-            assert "model_id" in model, f"model missing model_id: {model}"
-            assert "display_name" in model, f"model missing display_name: {model}"
-            assert "tier" in model, f"model missing tier: {model}"
-            assert "context_window" in model, f"model missing context_window: {model}"
+    def test_disabled_model_not_listed(self, server):
+        ids = {m["model_id"] for m in httpx.get(f"{API_PREFIX}/models").json()["items"]}
+        assert DISABLED_MODEL not in ids
+
+    def test_get_disabled_model_404(self, server):
+        assert_problem(httpx.get(f"{API_PREFIX}/models/{DISABLED_MODEL}"), 404, "not_found")

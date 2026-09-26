@@ -1,197 +1,112 @@
-"""Tests for error mapping: provider errors -> client-facing SSE/JSON errors."""
+"""Tests for error mapping: provider errors -> client-facing SSE error events.
+
+A provider failure after the stream opened is an SSE `error` event with
+`{code, message}` (ADR-0004); the codes are listed in DESIGN §3.3
+"Streaming error codes".
+"""
 
 import httpx
 import pytest
-from uuid import uuid4
 
-from .conftest import API_PREFIX, parse_sse, expect_done, DB_PATH
-from .mock_provider.responses import Scenario, MockEvent, Usage
+from .conftest import API_PREFIX, expect_stream_started, parse_sse, poll_turn
+from .mock_provider.responses import MockEvent, Scenario
+
+# Provider identifiers the sanitizer must scrub (shapes of real IDs; the
+# storage-ID pattern needs at least 12 characters after the prefix).
+PROVIDER_IDS = (
+    "resp_0a1b2c3d4e5f6a7b8c9d",
+    "file-AbCdEf0123456789XyZ",
+    "vs_0123456789abcdefABCD",
+    "assistant-0123456789abcdEF",
+)
+LEAKY_MESSAGE = "Upstream failure for " + ", ".join(PROVIDER_IDS)
 
 
-def _create_chat() -> str:
-    """Create a chat and return its id."""
-    resp = httpx.post(f"{API_PREFIX}/chats", json={})
-    assert resp.status_code == 201
-    return resp.json()["id"]
+
+def _stream_error(chat_id: str) -> tuple[dict, str]:
+    """Send a message and return (error event data, request_id)."""
+    resp = httpx.post(
+        f"{API_PREFIX}/chats/{chat_id}/messages:stream",
+        json={"content": "trigger error"},
+        headers={"Accept": "text/event-stream"},
+        timeout=90,
+    )
+    assert resp.status_code == 200, f"expected an SSE stream, got {resp.status_code}: {resp.text}"
+    events = parse_sse(resp.text)
+    assert [e.event for e in events][-1] == "error", [e.event for e in events]
+    rid = expect_stream_started(events).data["request_id"]
+    return events[-1].data, rid
 
 
 class TestErrorMapping:
-    """Verify that provider-level errors are correctly mapped to client-facing errors."""
+    """Provider-level errors map to stable streaming error codes."""
 
     @pytest.fixture(autouse=True)
     def _skip_online(self, request):
         if request.config.getoption("mode") == "online":
             pytest.skip("requires mock provider (offline mode)")
 
-    def test_post_stream_sse_error_event(self, server, mock_provider):
-        """Mid-stream provider failure should surface as an SSE error event."""
-        chat_id = _create_chat()
-
+    def test_post_stream_sse_error_event(self, chat, mock_provider):
+        """A `response.failed` mid-stream is an SSE error `provider_error`; the turn fails."""
         mock_provider.set_next_scenario(Scenario(
             terminal="failed",
             error={"code": "server_error", "message": "Mock fail"},
             events=[MockEvent("response.output_text.delta", {"delta": "Partial"})],
         ))
+        data, rid = _stream_error(chat["id"])
+        assert data["code"] == "provider_error"
+        assert isinstance(data["message"], str) and data["message"]
+        assert poll_turn(chat["id"], rid)["state"] == "error"
 
-        _resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "trigger error"},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        status, raw = _resp.status_code, _resp.text
-        events = parse_sse(raw) if status == 200 else []
-        assert status == 200, f"Expected SSE stream (200), got {status}: {raw}"
+    def test_provider_504_is_provider_error(self, chat, mock_provider):
+        """An HTTP 504 returned by the provider is a non-429 provider error: `provider_error`.
 
-        error_events = [e for e in events if e.event == "error"]
-        assert len(error_events) >= 1, (
-            f"Expected at least one 'error' SSE event, got events: {[e.event for e in events]}"
-        )
-        error_data = error_events[0].data
-        assert isinstance(error_data, dict), f"Error event data should be dict, got: {error_data}"
-        assert "code" in error_data, f"Error event missing 'code' field: {error_data}"
-
-    @pytest.mark.xfail(reason="BUG: 504 mapped to provider_error instead of provider_timeout")
-    def test_provider_timeout_error_code(self, server, mock_provider):
-        """504 from provider should map to a timeout-related error."""
-        chat_id = _create_chat()
-
+        `provider_timeout` is for the gear's own request timeout (OAGW
+        `proxy_timeout_secs`, 30 s in this rig), which is too slow to exercise here.
+        """
         mock_provider.set_next_scenario(Scenario(
             http_error_status=504,
             http_error_body={"error": {"message": "Gateway Timeout", "type": "timeout"}},
         ))
+        data, _ = _stream_error(chat["id"])
+        assert data["code"] == "provider_error"
 
-        _resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "trigger timeout"},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        status, raw = _resp.status_code, _resp.text
-        events = parse_sse(raw) if status == 200 else []
-
-        # Could be a pre-stream JSON error or an SSE error event
-        if status != 200:
-            # Pre-stream JSON error
-            body = httpx.Response(status_code=status, text=raw).json() if raw.strip().startswith("{") else {}
-            error_code = body.get("code", body.get("error", {}).get("code", ""))
-            assert "timeout" in error_code.lower() or "provider" in error_code.lower() or status in (502, 504), (
-                f"Expected timeout-related error, got status={status}, body={raw[:500]}"
-            )
-        else:
-            # SSE error event
-            error_events = [e for e in events if e.event == "error"]
-            assert len(error_events) >= 1, (
-                f"Expected error event for 504, got: {[e.event for e in events]}"
-            )
-            code = error_events[0].data.get("code", "") if isinstance(error_events[0].data, dict) else ""
-            assert code == "provider_timeout", (
-                f"Expected provider_timeout error code, got: {code}"
-            )
-
-    def test_provider_unavailable_error_code(self, server, mock_provider):
-        """503 from provider should map to a provider_error or similar."""
-        chat_id = _create_chat()
-
+    def test_provider_unavailable_error_code(self, chat, mock_provider):
+        """An HTTP 503 from the provider is `provider_error`."""
         mock_provider.set_next_scenario(Scenario(
             http_error_status=503,
             http_error_body={"error": {"message": "Service Unavailable", "type": "server_error"}},
         ))
+        data, _ = _stream_error(chat["id"])
+        assert data["code"] == "provider_error"
 
-        _resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "trigger unavailable"},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        status, raw = _resp.status_code, _resp.text
-        events = parse_sse(raw) if status == 200 else []
-
-        if status != 200:
-            # Accept any 5xx pass-through or mapped error
-            assert status == 503, f"Expected 503 for unavailable provider, got {status}"
-        else:
-            error_events = [e for e in events if e.event == "error"]
-            assert len(error_events) >= 1, (
-                f"Expected error event for 503, got: {[e.event for e in events]}"
-            )
-            code = error_events[0].data.get("code", "") if isinstance(error_events[0].data, dict) else ""
-            assert code == "provider_error", (
-                f"Expected provider_error error code, got: {code}"
-            )
-
-    @pytest.mark.xfail(reason="BUG: 429 mapped to provider_error instead of rate_limited")
-    def test_rate_limited_error_code(self, server, mock_provider):
-        """429 from provider should map to a rate_limited error or similar."""
-        chat_id = _create_chat()
-
+    def test_rate_limited_error_code(self, chat, mock_provider):
+        """An HTTP 429 from the provider is `rate_limited`."""
         mock_provider.set_next_scenario(Scenario(
             http_error_status=429,
             http_error_body={"error": {"message": "Rate limited", "type": "rate_limit_error"}},
         ))
+        data, _ = _stream_error(chat["id"])
+        assert data["code"] == "rate_limited"
 
-        _resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "trigger rate limit"},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        status, raw = _resp.status_code, _resp.text
-        events = parse_sse(raw) if status == 200 else []
-
-        if status != 200:
-            assert status in (429, 400, 503), f"Expected rate-limit mapped status, got {status}: {raw[:300]}"
-        else:
-            error_events = [e for e in events if e.event == "error"]
-            assert len(error_events) >= 1, (
-                f"Expected error event for 429, got: {[e.event for e in events]}"
+    @pytest.mark.parametrize("source", ["response_failed", "http_500"])
+    def test_error_message_no_provider_ids(self, chat, mock_provider, source):
+        """Provider response, file, vector store and assistant IDs never reach the client."""
+        if source == "response_failed":
+            scenario = Scenario(
+                terminal="failed",
+                error={"code": "server_error", "message": LEAKY_MESSAGE},
+                events=[MockEvent("response.output_text.delta", {"delta": "x"})],
             )
-            code = error_events[0].data.get("code", "") if isinstance(error_events[0].data, dict) else ""
-            assert "rate" in code.lower() or "limit" in code.lower() or "throttl" in code.lower(), (
-                f"Expected rate-limit error code, got: {code}"
-            )
-
-    @pytest.mark.xfail(reason="BUG: provider batch ID leaks in error message")
-    def test_error_message_no_provider_ids(self, server, mock_provider):
-        """Provider-internal IDs (resp_*, batch_*) must not leak to the client."""
-        chat_id = _create_chat()
-
-        mock_provider.set_next_scenario(Scenario(
-            terminal="failed",
-            error={
-                "code": "server_error",
-                "message": "Error processing resp_abc123xyz in batch_456",
-            },
-            events=[MockEvent("response.output_text.delta", {"delta": "x"})],
-        ))
-
-        _resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "trigger id leak"},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        status, raw = _resp.status_code, _resp.text
-        events = parse_sse(raw) if status == 200 else []
-
-        # Find any error in the response (SSE event or JSON body)
-        error_message = ""
-        if status == 200:
-            for e in events:
-                if e.event == "error" and isinstance(e.data, dict):
-                    error_message = e.data.get("message", "")
-                    break
         else:
-            import json
-            try:
-                body = json.loads(raw)
-                error_message = body.get("message", body.get("error", {}).get("message", ""))
-            except (json.JSONDecodeError, ValueError):
-                error_message = raw
-
-        assert "resp_abc123" not in error_message, (
-            f"Provider response ID leaked to client: {error_message}"
-        )
-        assert "batch_456" not in error_message, (
-            f"Provider batch ID leaked to client: {error_message}"
-        )
+            scenario = Scenario(
+                http_error_status=500,
+                http_error_body={"error": {"message": LEAKY_MESSAGE, "type": "server_error"}},
+            )
+        mock_provider.set_next_scenario(scenario)
+        data, _ = _stream_error(chat["id"])
+        assert data["code"] == "provider_error"
+        for provider_id in PROVIDER_IDS:
+            assert provider_id not in data["message"], (
+                f"provider id {provider_id} leaked: {data['message']!r}"
+            )

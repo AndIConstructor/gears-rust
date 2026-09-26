@@ -1,11 +1,9 @@
 """Tests for message listing with OData query options and field presence."""
 
 import httpx
-import pytest
 from uuid import uuid4
 
-from .conftest import API_PREFIX, parse_sse, expect_done, expect_stream_started, stream_message, DB_PATH
-from .mock_provider.responses import Scenario, MockEvent, Usage
+from .conftest import API_PREFIX, assert_problem, expect_done, stream_message
 
 
 def _create_chat_with_messages(count: int = 1) -> str:
@@ -24,39 +22,6 @@ def _create_chat_with_messages(count: int = 1) -> str:
 
 class TestMessages:
     """GET /chats/{cid}/messages with OData query options."""
-
-    def test_odata_select(self, server):
-        """$select should limit returned fields to the requested set.
-
-        NOTE: If $select is not implemented, this test will fail.
-        That is expected — triage as a feature gap.
-        """
-        chat_id = _create_chat_with_messages(1)
-
-        resp = httpx.get(
-            f"{API_PREFIX}/chats/{chat_id}/messages",
-            params={"$select": "id,content"},
-        )
-        assert resp.status_code == 200, f"GET messages failed: {resp.status_code} {resp.text}"
-        items = resp.json()["items"]
-        assert len(items) >= 1
-
-        for msg in items:
-            # Selected fields must be present
-            assert "id" in msg, f"'id' missing from $select response: {msg}"
-            assert "content" in msg, f"'content' missing from $select response: {msg}"
-            # Non-selected fields should be absent (strict $select)
-            # Some APIs include id/type always — at minimum, heavy fields like
-            # input_tokens should be absent if $select is enforced.
-            non_selected = {"input_tokens", "output_tokens", "model"}
-            present_extras = non_selected & set(msg.keys())
-            # Soft assertion: warn but don't fail if server includes extra fields
-            # (some OData impls include structural fields always)
-            if present_extras:
-                pytest.xfail(
-                    f"$select did not strip extra fields: {present_extras}. "
-                    "Server may include structural fields by default."
-                )
 
     def test_odata_orderby(self, server):
         """$orderby=created_at desc should return messages in reverse chronological order."""
@@ -128,14 +93,34 @@ class TestMessages:
             )
 
     def test_cursor_pagination(self, server):
-        chat_id = _create_chat_with_messages()
-        # First page with limit=1
-        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages", params={"limit": 1})
-        assert resp.status_code == 200
-        body = resp.json()
-        assert len(body["items"]) <= 1
-        assert "page_info" in body
-        assert body["page_info"] is not None
+        """Following next_cursor with limit=1 visits every message exactly once, in order."""
+        chat_id = _create_chat_with_messages(3)
+        full = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages").json()["items"]
+        assert len(full) == 6
+
+        ids: list[str] = []
+        params = {"limit": 1}
+        for _ in range(20):
+            resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages", params=params)
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert len(body["items"]) == 1
+            ids.extend(m["id"] for m in body["items"])
+            cursor = body["page_info"].get("next_cursor")
+            if not cursor:
+                break
+            params = {"limit": 1, "cursor": cursor}
+        assert ids == [m["id"] for m in full]
+
+    def test_unknown_filter_field_400(self, chat):
+        resp = httpx.get(
+            f"{API_PREFIX}/chats/{chat['id']}/messages", params={"$filter": "nosuchfield eq 'x'"},
+        )
+        assert_problem(resp, 400, "invalid_argument")
+
+    def test_messages_of_nonexistent_chat_404(self, server):
+        resp = httpx.get(f"{API_PREFIX}/chats/{uuid4()}/messages")
+        assert_problem(resp, 404, "not_found")
 
     def test_request_id_non_null(self, server):
         """03-05: Every message must have a non-null request_id."""

@@ -1,9 +1,6 @@
-"""Tests for turn mutation operations — retry, delete, concurrency, replaced_by tracking."""
+"""Tests for turn mutation operations — retry, edit, delete, concurrency, replaced_by tracking."""
 
-import os
-import sqlite3
 import threading
-import time
 import uuid
 
 import httpx
@@ -11,11 +8,19 @@ import pytest
 
 from .conftest import (
     API_PREFIX,
-    DB_PATH,
+    OpenStream,
+    assert_problem,
+    delta_text,
     expect_done,
     expect_stream_started,
+    list_messages,
+    open_stream,
     parse_sse,
+    poll_turn,
+    query_db,
+    slow_scenario,
     stream_message,
+    uuid_from_db,
 )
 from .mock_provider.responses import MockEvent, Scenario
 
@@ -24,56 +29,49 @@ from .mock_provider.responses import MockEvent, Scenario
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_blob(value):
-    if isinstance(value, str):
-        try:
-            return uuid.UUID(value).bytes
-        except ValueError:
-            pass
-    return value
-
-
-def query_db(sql, params=()):
-    if not os.path.exists(DB_PATH):
-        pytest.skip(f"DB not found at {DB_PATH}")
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    blob_params = tuple(_to_blob(p) for p in params)
-    try:
-        rows = conn.execute(sql, blob_params).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-
-def poll_turn_state(chat_id: str, request_id: str, target: str,
-                    timeout: float = 15.0) -> dict:
-    """Poll GET /turns/{request_id} until the target state or timeout."""
-    deadline = time.monotonic() + timeout
-    body = None
-    while time.monotonic() < deadline:
-        resp = httpx.get(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{request_id}", timeout=5
-        )
-        if resp.status_code == 200:
-            body = resp.json()
-            if body["state"] == target:
-                return body
-        time.sleep(0.3)
-    state = body["state"] if body else "no response"
-    raise AssertionError(
-        f"Turn {request_id} did not reach '{target}' within {timeout}s "
-        f"(last state: {state})"
-    )
-
-
 def complete_turn(chat_id: str, content: str = "Say OK.") -> str:
-    """Send a message and return its request_id after confirming done."""
+    """Send a message and return its request_id once the turn is done."""
     rid = str(uuid.uuid4())
     status, events, _ = stream_message(chat_id, content, request_id=rid)
     assert status == 200, f"stream_message failed: {status}"
     expect_done(events)
+    poll_turn(chat_id, rid, ("done",))
     return rid
+
+
+def turn_url(chat_id: str, rid: str) -> str:
+    return f"{API_PREFIX}/chats/{chat_id}/turns/{rid}"
+
+
+def retry(chat_id: str, rid: str) -> httpx.Response:
+    return httpx.post(
+        f"{turn_url(chat_id, rid)}/retry",
+        headers={"Accept": "text/event-stream"}, timeout=90,
+    )
+
+
+def edit(chat_id: str, rid: str, content: str) -> httpx.Response:
+    return httpx.patch(
+        turn_url(chat_id, rid), json={"content": content},
+        headers={"Accept": "text/event-stream"}, timeout=90,
+    )
+
+
+def cancel_turn(chat_id: str, mock_provider, content: str = "Cancel me.") -> tuple[str, str]:
+    """Disconnect after two deltas; return (request_id, received text)."""
+    rid = str(uuid.uuid4())
+    mock_provider.set_next_scenario(slow_scenario(20, slow=0.3))
+    with open_stream(chat_id, content, request_id=rid) as s:
+        seen = []
+        s.read_until(lambda e: e.event == "delta" and (seen.append(e) or len(seen) == 2))
+        received = delta_text(s.events)
+    assert poll_turn(chat_id, rid)["state"] == "cancelled"
+    return rid, received
+
+
+def _require_offline(request):
+    if request.config.getoption("mode") == "online":
+        pytest.skip("requires mock provider (offline mode)")
 
 
 # ---------------------------------------------------------------------------
@@ -81,105 +79,142 @@ def complete_turn(chat_id: str, content: str = "Say OK.") -> str:
 # ---------------------------------------------------------------------------
 
 class TestTurnRetry:
-    """POST /turns/{request_id}/retry constraints."""
+    """POST /turns/{request_id}/retry constraints and effect."""
 
-    @pytest.mark.xfail(reason="BUG: error_code not set on 400/409 turn mutation responses")
-    def test_retry_running_turn_400(self, chat, mock_provider):
-        """Cannot retry a turn that is still running."""
+    @pytest.mark.timeout(30)
+    def test_retry_running_turn_400(self, request, chat, mock_provider):
+        """Retrying a running turn is 400 failed_precondition (turn_state/STATE)."""
+        _require_offline(request)
         chat_id = chat["id"]
         rid = str(uuid.uuid4())
+        mock_provider.set_next_scenario(slow_scenario(10, slow=0.3))
 
-        # Slow scenario keeps the turn in-flight
-        many_deltas = [
-            MockEvent("response.output_text.delta", {"delta": f"w{i} "})
-            for i in range(20)
-        ]
-        many_deltas.append(
-            MockEvent("response.output_text.done", {"text": "done"})
-        )
-        mock_provider.set_next_scenario(Scenario(slow=0.5, events=many_deltas))
-
-        url = f"{API_PREFIX}/chats/{chat_id}/messages:stream"
-        body = {"content": "Slow turn.", "request_id": rid}
-
-        first_result = [None]
-
-        def first_stream():
-            first_result[0] = httpx.post(
-                url, json=body,
-                headers={"Accept": "text/event-stream"},
-                timeout=90,
+        with open_stream(chat_id, "Slow turn.", request_id=rid) as s:
+            s.read_until_started()
+            resp = retry(chat_id, rid)
+            assert_problem(
+                resp, 400, "failed_precondition",
+                violation_subject="turn_state", violation_type="STATE",
             )
+            assert httpx.get(turn_url(chat_id, rid)).json()["state"] == "running"
+            expect_done(s.drain())
 
-        t = threading.Thread(target=first_stream)
-        t.start()
-
-        time.sleep(1.0)
-
-        # Attempt retry while running
-        retry_resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{rid}/retry",
-            headers={"Accept": "text/event-stream"},
-            timeout=10,
-        )
-        assert retry_resp.status_code == 400
-        assert retry_resp.json().get("title") == "invalid_turn_state"
-
-        t.join(timeout=60)
-
-    @pytest.mark.xfail(reason="BUG: error_code not set on 400/409 turn mutation responses")
     def test_retry_non_latest_turn_409(self, chat):
-        """Cannot retry a turn that is not the latest in the chat."""
+        """Retrying a turn that is not the latest is 409 NOT_LATEST_TURN; nothing changes."""
         chat_id = chat["id"]
-
-        # Create 2 turns sequentially
         rid1 = complete_turn(chat_id, "First turn.")
-        rid2 = complete_turn(chat_id, "Second turn.")
+        complete_turn(chat_id, "Second turn.")
+        before = list_messages(chat_id)
 
-        # Retry the first turn (not latest)
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{rid1}/retry",
-            headers={"Accept": "text/event-stream"},
-            timeout=10,
-        )
-        assert resp.status_code == 409
-        assert resp.json().get("code") == "not_latest_turn"
+        assert_problem(retry(chat_id, rid1), 409, "aborted", reason="NOT_LATEST_TURN")
+        assert list_messages(chat_id) == before
 
-    def test_retry_cancelled_turn(self, request, chat, mock_provider):
-        """08-12: Retrying a turn in error/cancelled state should succeed with a new generation."""
-        if request.config.getoption("mode") == "online":
-            pytest.skip("requires mock provider (offline mode)")
+    def test_retry_replaces_the_answer(self, chat):
+        """After retry the chat holds the original user message and exactly one new answer."""
         chat_id = chat["id"]
+        rid = complete_turn(chat_id, "Retry me.")
 
-        # Drive the turn into an error state via the mock ERROR scenario
+        resp = retry(chat_id, rid)
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        new_rid = expect_stream_started(events).data["request_id"]
+        expect_done(events)
+
+        messages = list_messages(chat_id)
+        assert [(m["role"], m["request_id"]) for m in messages] == [
+            ("user", new_rid), ("assistant", new_rid),
+        ]
+        assert messages[0]["content"] == "Retry me."
+        assert messages[1]["content"] == delta_text(events)
+
+    def test_retry_failed_turn(self, request, chat, mock_provider):
+        """08-12: a turn in `error` state can be retried; the retry produces one new answer."""
+        _require_offline(request)
+        chat_id = chat["id"]
         mock_provider.set_next_scenario(Scenario(
             events=[MockEvent("response.output_text.delta", {"delta": "Partial"})],
             terminal="failed",
             error={"code": "server_error", "message": "Mock provider error"},
         ))
-
         rid = str(uuid.uuid4())
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "Trigger error.", "request_id": rid},
-            headers={"Accept": "text/event-stream"},
-            timeout=30,
-        )
-        assert resp.status_code == 200
-        # Wait for the turn to reach 'error' state
-        poll_turn_state(chat_id, rid, "error")
+        status, _, _ = stream_message(chat_id, "Trigger error.", request_id=rid)
+        assert status == 200
+        assert poll_turn(chat_id, rid)["state"] == "error"
 
-        # Retry the errored (latest) turn — should succeed
-        retry_resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{rid}/retry",
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert retry_resp.status_code == 200, (
-            f"Expected 200 on retry of error turn, got {retry_resp.status_code}: {retry_resp.text[:300]}"
-        )
-        retry_events = parse_sse(retry_resp.text)
-        expect_done(retry_events)
+        resp = retry(chat_id, rid)
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        new_rid = expect_stream_started(events).data["request_id"]
+        expect_done(events)
+
+        assistant = [m for m in list_messages(chat_id) if m["role"] == "assistant"]
+        assert [m["request_id"] for m in assistant] == [new_rid]
+
+    @pytest.mark.timeout(30)
+    def test_retry_cancelled_turn(self, request, chat, mock_provider):
+        """A cancelled turn can be retried; its partial answer is replaced by one new answer."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        rid, _ = cancel_turn(chat_id, mock_provider)
+
+        resp = retry(chat_id, rid)
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        new_rid = expect_stream_started(events).data["request_id"]
+        expect_done(events)
+
+        messages = list_messages(chat_id)
+        assert [(m["role"], m["request_id"]) for m in messages] == [
+            ("user", new_rid), ("assistant", new_rid),
+        ]
+        assert messages[1]["content"] == delta_text(events)
+
+
+# ---------------------------------------------------------------------------
+# Tests: edit
+# ---------------------------------------------------------------------------
+
+class TestTurnEdit:
+    """PATCH /turns/{request_id} replaces the last user message and its answer."""
+
+    def test_edit_replaces_user_message_and_answer(self, chat):
+        chat_id = chat["id"]
+        complete_turn(chat_id, "Keep this turn.")
+        rid = complete_turn(chat_id, "Original question.")
+        before = list_messages(chat_id)
+
+        resp = edit(chat_id, rid, "Edited question.")
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        new_rid = expect_stream_started(events).data["request_id"]
+        expect_done(events)
+
+        messages = list_messages(chat_id)
+        assert messages[:2] == before[:2], "the earlier turn must be untouched"
+        assert [(m["role"], m["request_id"]) for m in messages[2:]] == [
+            ("user", new_rid), ("assistant", new_rid),
+        ]
+        assert messages[2]["content"] == "Edited question."
+        assert messages[3]["content"] == delta_text(events)
+        old_ids = {m["id"] for m in before[2:]}
+        assert old_ids.isdisjoint(m["id"] for m in messages)
+
+    def test_edit_empty_content_400(self, chat):
+        chat_id = chat["id"]
+        rid = complete_turn(chat_id, "Question.")
+        before = list_messages(chat_id)
+
+        assert_problem(edit(chat_id, rid, ""), 400, "invalid_argument", field_reason="EMPTY_CONTENT")
+        assert list_messages(chat_id) == before
+
+    def test_edit_non_latest_turn_409(self, chat):
+        chat_id = chat["id"]
+        rid1 = complete_turn(chat_id, "First turn.")
+        complete_turn(chat_id, "Second turn.")
+        before = list_messages(chat_id)
+
+        assert_problem(edit(chat_id, rid1, "Changed."), 409, "aborted", reason="NOT_LATEST_TURN")
+        assert list_messages(chat_id) == before
 
 
 # ---------------------------------------------------------------------------
@@ -194,98 +229,82 @@ class TestTurnDelete:
         chat_id = chat["id"]
         rid = complete_turn(chat_id, "Only turn.")
 
-        # Delete
-        resp = httpx.delete(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{rid}",
-            timeout=10,
-        )
+        resp = httpx.delete(turn_url(chat_id, rid), timeout=10)
         assert resp.status_code == 204
+        assert list_messages(chat_id) == []
 
-        # Messages should be empty
-        msgs_resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages", timeout=10)
-        assert msgs_resp.status_code == 200
-        items = msgs_resp.json()["items"]
-        assert len(items) == 0, f"Expected no messages after delete, got {len(items)}"
-
-    @pytest.mark.xfail(reason="BUG: error_code not set on 400/409 turn mutation responses")
-    def test_delete_running_turn_400(self, chat, mock_provider):
-        """Cannot delete a turn that is still running."""
+    @pytest.mark.timeout(30)
+    def test_delete_running_turn_400(self, request, chat, mock_provider):
+        """Deleting a running turn is 400 failed_precondition (turn_state/STATE)."""
+        _require_offline(request)
         chat_id = chat["id"]
         rid = str(uuid.uuid4())
+        mock_provider.set_next_scenario(slow_scenario(10, slow=0.3))
 
-        many_deltas = [
-            MockEvent("response.output_text.delta", {"delta": f"w{i} "})
-            for i in range(20)
-        ]
-        many_deltas.append(
-            MockEvent("response.output_text.done", {"text": "done"})
-        )
-        mock_provider.set_next_scenario(Scenario(slow=0.5, events=many_deltas))
-
-        url = f"{API_PREFIX}/chats/{chat_id}/messages:stream"
-        body = {"content": "Slow turn.", "request_id": rid}
-
-        first_result = [None]
-
-        def first_stream():
-            first_result[0] = httpx.post(
-                url, json=body,
-                headers={"Accept": "text/event-stream"},
-                timeout=90,
+        with open_stream(chat_id, "Slow turn.", request_id=rid) as s:
+            s.read_until_started()
+            resp = httpx.delete(turn_url(chat_id, rid), timeout=10)
+            assert_problem(
+                resp, 400, "failed_precondition",
+                violation_subject="turn_state", violation_type="STATE",
             )
+            assert httpx.get(turn_url(chat_id, rid)).json()["state"] == "running"
+            expect_done(s.drain())
 
-        t = threading.Thread(target=first_stream)
-        t.start()
-
-        time.sleep(1.0)
-
-        # Attempt delete while running
-        del_resp = httpx.delete(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{rid}",
-            timeout=10,
-        )
-        assert del_resp.status_code == 400
-        assert del_resp.json().get("title") == "invalid_turn_state"
-
-        t.join(timeout=60)
-
-    @pytest.mark.xfail(reason="BUG: error_code not set on 400/409 turn mutation responses")
     def test_delete_non_latest_turn_409(self, chat):
-        """Cannot delete a turn that is not the latest."""
+        """Deleting a turn that is not the latest is 409 NOT_LATEST_TURN; nothing changes."""
         chat_id = chat["id"]
-
         rid1 = complete_turn(chat_id, "First turn.")
-        rid2 = complete_turn(chat_id, "Second turn.")
+        complete_turn(chat_id, "Second turn.")
+        before = list_messages(chat_id)
 
-        resp = httpx.delete(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{rid1}",
-            timeout=10,
-        )
-        assert resp.status_code == 409
-        assert resp.json().get("code") == "not_latest_turn"
+        resp = httpx.delete(turn_url(chat_id, rid1), timeout=10)
+        assert_problem(resp, 409, "aborted", reason="NOT_LATEST_TURN")
+        assert list_messages(chat_id) == before
 
     def test_soft_deleted_turn_excluded_from_messages(self, chat):
         """After deleting the last turn, its messages disappear from GET /messages."""
         chat_id = chat["id"]
-
         rid1 = complete_turn(chat_id, "First turn.")
         rid2 = complete_turn(chat_id, "Second turn.")
 
-        # Delete the last turn
-        resp = httpx.delete(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{rid2}",
-            timeout=10,
-        )
+        resp = httpx.delete(turn_url(chat_id, rid2), timeout=10)
         assert resp.status_code == 204
 
-        # Only first turn's messages should remain
-        msgs_resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages", timeout=10)
-        assert msgs_resp.status_code == 200
-        items = msgs_resp.json()["items"]
-        # First turn produces user + assistant = 2 messages
-        assert len(items) == 2, f"Expected 2 messages (first turn only), got {len(items)}"
-        roles = [m["role"] for m in items]
-        assert roles == ["user", "assistant"]
+        messages = list_messages(chat_id)
+        assert [(m["role"], m["request_id"]) for m in messages] == [
+            ("user", rid1), ("assistant", rid1),
+        ]
+
+    def test_get_deleted_turn_404(self, chat):
+        chat_id = chat["id"]
+        rid = complete_turn(chat_id)
+        assert httpx.delete(turn_url(chat_id, rid), timeout=10).status_code == 204
+
+        assert_problem(httpx.get(turn_url(chat_id, rid)), 404, "not_found")
+
+    def test_second_delete_turn_409_not_latest(self, chat):
+        """A deleted turn is no longer the latest one: deleting it again is 409 NOT_LATEST_TURN."""
+        chat_id = chat["id"]
+        rid = complete_turn(chat_id)
+        assert httpx.delete(turn_url(chat_id, rid), timeout=10).status_code == 204
+
+        resp = httpx.delete(turn_url(chat_id, rid), timeout=10)
+        assert_problem(resp, 409, "aborted", reason="NOT_LATEST_TURN")
+
+    def test_deleted_turn_not_sent_to_provider(self, request, chat, mock_provider):
+        """The content of a deleted turn is not part of the next provider request."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        complete_turn(chat_id, "KEEP-7f3a question.")
+        rid = complete_turn(chat_id, "FORGET-9c1d question.")
+        assert httpx.delete(turn_url(chat_id, rid), timeout=10).status_code == 204
+
+        mock_provider.clear_captured_requests()
+        complete_turn(chat_id, "Next question.")
+        provider_input = str(mock_provider.get_last_request()["input"])
+        assert "KEEP-7f3a" in provider_input
+        assert "FORGET-9c1d" not in provider_input
 
 
 # ---------------------------------------------------------------------------
@@ -293,37 +312,45 @@ class TestTurnDelete:
 # ---------------------------------------------------------------------------
 
 class TestConcurrentRetries:
-    """Race condition: two concurrent retry requests — exactly one wins."""
+    """Two retries of the same turn — exactly one wins."""
 
-    @pytest.mark.xfail(reason="BUG: concurrent retry returns 500 instead of 409")
-    def test_concurrent_retries_one_wins(self, chat, mock_provider):
-        """Send 2 concurrent retry requests; one gets 200, the other gets 409."""
+    @pytest.mark.timeout(30)
+    def test_concurrent_retries_one_wins(self, chat):
+        """Two simultaneous retries: one 200, the other 409 aborted."""
         chat_id = chat["id"]
-
         rid = complete_turn(chat_id, "Retryable turn.")
-        poll_turn_state(chat_id, rid, "done")
 
-        url = f"{API_PREFIX}/chats/{chat_id}/turns/{rid}/retry"
         results = [None, None]
 
         def send_retry(idx):
-            results[idx] = httpx.post(
-                url,
-                headers={"Accept": "text/event-stream"},
-                timeout=90,
-            )
+            results[idx] = retry(chat_id, rid)
 
-        t1 = threading.Thread(target=send_retry, args=(0,))
-        t2 = threading.Thread(target=send_retry, args=(1,))
-        t1.start()
-        t2.start()
-        t1.join(timeout=60)
-        t2.join(timeout=60)
+        threads = [threading.Thread(target=send_retry, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=25)
 
-        codes = sorted([results[0].status_code, results[1].status_code])
-        assert codes == [200, 409], (
-            f"Expected exactly one 200 and one 409, got {codes}"
+        by_status = sorted(results, key=lambda r: r.status_code)
+        assert [r.status_code for r in by_status] == [200, 409], (
+            f"expected one 200 and one 409, got {[r.status_code for r in results]}"
         )
+        assert_problem(by_status[1], 409, "aborted")
+        assistant = [m for m in list_messages(chat_id) if m["role"] == "assistant"]
+        assert len(assistant) == 1
+
+    @pytest.mark.timeout(30)
+    def test_retry_while_retry_running_409_not_latest(self, request, chat, mock_provider):
+        """A retry of the old turn while its first retry is streaming is 409 NOT_LATEST_TURN."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        rid = complete_turn(chat_id, "Retryable turn.")
+
+        mock_provider.set_next_scenario(slow_scenario(10, slow=0.3))
+        with OpenStream(f"{turn_url(chat_id, rid)}/retry", None) as first:
+            first.read_until_started()
+            assert_problem(retry(chat_id, rid), 409, "aborted", reason="NOT_LATEST_TURN")
+            expect_done(first.drain())
 
 
 # ---------------------------------------------------------------------------
@@ -333,19 +360,11 @@ class TestConcurrentRetries:
 class TestReplacedByRequestId:
     """After retry, the original turn's replaced_by_request_id points to the new turn."""
 
-    def test_replaced_by_request_id_set(self, chat, mock_provider):
-        """DB column replaced_by_request_id is set on the original turn after retry."""
+    def test_replaced_by_request_id_set(self, chat):
         chat_id = chat["id"]
-
         rid1 = complete_turn(chat_id, "Original turn.")
-        poll_turn_state(chat_id, rid1, "done")
 
-        # Retry
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{rid1}/retry",
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
+        resp = retry(chat_id, rid1)
         assert resp.status_code == 200, f"Retry failed: {resp.status_code} {resp.text}"
         retry_events = parse_sse(resp.text)
         ss = expect_stream_started(retry_events)
@@ -353,21 +372,9 @@ class TestReplacedByRequestId:
         new_rid = ss.data["request_id"]
         expect_done(retry_events)
 
-        # TODO: This test queries the SQLite DB directly. If DB_PATH is not
-        # populated in the test environment (e.g., because the server uses a
-        # different home_dir), this assertion will fail. Adjust DB_PATH or
-        # use an API endpoint if one becomes available.
         rows = query_db(
             "SELECT replaced_by_request_id FROM chat_turns WHERE request_id = ?",
             (rid1,),
         )
-
         assert len(rows) == 1, f"Turn {rid1} not found in DB"
-        actual = rows[0]["replaced_by_request_id"]
-        # DB stores UUIDs as bytes; normalise both sides to str for comparison.
-        if isinstance(actual, (bytes, bytearray)):
-            actual = str(uuid.UUID(bytes=bytes(actual)))
-        assert actual == new_rid, (
-            f"Expected replaced_by_request_id={new_rid}, "
-            f"got {actual}"
-        )
+        assert uuid_from_db(rows[0]["replaced_by_request_id"]) == new_rid

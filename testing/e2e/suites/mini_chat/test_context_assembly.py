@@ -11,21 +11,33 @@ import uuid
 
 import httpx
 
-from .conftest import API_PREFIX, PROVIDER_DEFAULT_MODEL, parse_sse, expect_done, expect_stream_started
+from .conftest import API_PREFIX, CATALOG_SYSTEM_PROMPT, parse_sse, expect_done
 
 import pytest
 
 
 @pytest.mark.multi_provider
 class TestSystemPrompt:
-    """Verify system prompt is delivered to the LLM.
+    """The catalog system prompt is delivered to the provider as `instructions`."""
 
-    The test config sets: 'When the user says exactly PING, respond with exactly PONG.'
-    If the system prompt is missing, the model has no reason to reply 'PONG'.
-    """
+    def test_system_prompt_sent_as_instructions(self, request, provider_chat, mock_provider):
+        """Offline: the captured provider request carries the catalog system prompt."""
+        if request.config.getoption("mode") == "online":
+            pytest.skip("inspects the mock provider's captured request")
+        _resp = httpx.post(
+            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
+            json={"content": "Hello"},
+            headers={"Accept": "text/event-stream"},
+            timeout=90,
+        )
+        expect_done(parse_sse(_resp.text))
 
+        instructions = mock_provider.get_last_request()["instructions"]
+        assert CATALOG_SYSTEM_PROMPT in instructions
+
+    @pytest.mark.online_only
     def test_ping_pong_proves_system_prompt(self, provider_chat):
-        """Send 'PING' — model must reply 'PONG' per system prompt rule."""
+        """Online: 'PING' gets 'PONG' only because the system prompt says so."""
         _resp = httpx.post(
             f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
             json={"content": "PING"},
@@ -39,25 +51,6 @@ class TestSystemPrompt:
         assert "PONG" in text.upper(), (
             f"System prompt instructs model to reply 'PONG' to 'PING'. Got: {text!r}"
         )
-
-    @pytest.mark.multi_provider
-    def test_ping_pong_across_models(self, chat_with_model):
-        """System prompt rule works for both premium and standard models."""
-        for model in PROVIDER_DEFAULT_MODEL.values():
-            chat = chat_with_model(model)
-            _resp = httpx.post(
-                f"{API_PREFIX}/chats/{chat['id']}/messages:stream",
-                json={"content": "PING"},
-                headers={"Accept": "text/event-stream"},
-                timeout=90,
-            )
-            events = parse_sse(_resp.text) if _resp.status_code == 200 else []
-            expect_done(events)
-
-            text = "".join(e.data["content"] for e in events if e.event == "delta")
-            assert "PONG" in text.upper(), (
-                f"[{model}] System prompt should make model reply 'PONG'. Got: {text!r}"
-            )
 
 
 @pytest.mark.multi_provider

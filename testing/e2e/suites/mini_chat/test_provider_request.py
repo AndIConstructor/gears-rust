@@ -13,7 +13,7 @@ import time
 import httpx
 import pytest
 
-from .conftest import API_PREFIX, expect_done, stream_message
+from .conftest import API_PREFIX, expect_done, poll_until, stream_message
 
 
 @pytest.fixture(autouse=True)
@@ -126,31 +126,31 @@ class TestFileSearchMaxNumResults:
     """Verify file_search tool includes max_num_results."""
 
     def test_file_search_has_max_num_results(self, provider_chat, mock_provider):
-        """When file_search tool is present, it should include max_num_results."""
-        # Upload a mock file to trigger file_search
+        """A message with a ready document sends file_search with the catalog max_num_results."""
+        chat_id = provider_chat["id"]
         resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/attachments",
+            f"{API_PREFIX}/chats/{chat_id}/attachments",
             files={"file": ("test.txt", b"test content", "text/plain")},
             timeout=30,
         )
-        if resp.status_code not in (200, 201):
-            pytest.skip(f"Attachment upload not supported or failed: {resp.status_code}")
+        assert resp.status_code == 201, resp.text
+        att_id = resp.json()["id"]
+        detail = poll_until(
+            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
+            until=lambda r: r.json()["status"] in ("ready", "failed"),
+            timeout=30,
+        ).json()
+        assert detail["status"] == "ready", detail
 
-        # Send message referencing the attachment
-        status, _, _ = stream_message(provider_chat["id"], "What does the attached file say?")
-        assert status == 200
-        time.sleep(0.5)
-        req = mock_provider.get_last_request()
-        if req is None:
-            pytest.skip("No request captured")
-
-        tools = req.get("tools", [])
-        fs_tools = [t for t in tools if t.get("type") == "file_search"]
-        if not fs_tools:
-            pytest.skip("No file_search tool in request (attachment may not have triggered it)")
-
-        assert "max_num_results" in fs_tools[0], (
-            f"max_num_results missing from file_search tool: {fs_tools[0]}"
+        mock_provider.clear_captured_requests()
+        status, events, _ = stream_message(
+            chat_id, "What does the attached file say?", attachment_ids=[att_id],
         )
-        assert isinstance(fs_tools[0]["max_num_results"], int)
-        assert fs_tools[0]["max_num_results"] > 0
+        assert status == 200
+        expect_done(events)
+
+        tools = mock_provider.get_last_request()["tools"]
+        fs_tools = [t for t in tools if t.get("type") == "file_search"]
+        assert len(fs_tools) == 1, tools
+        # max_num_results: 10 for both gpt-5.2 and azure-gpt-4.1 (config/base.yaml).
+        assert fs_tools[0]["max_num_results"] == 10

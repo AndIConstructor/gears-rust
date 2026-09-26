@@ -12,9 +12,12 @@ import zlib
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, DEFAULT_MODEL, STANDARD_MODEL, SSEEvent, expect_done, expect_stream_started, parse_sse, poll_until, stream_message
+from .conftest import API_PREFIX, DEFAULT_MODEL, STANDARD_MODEL, SSEEvent, assert_problem, expect_done, expect_stream_started, parse_sse, poll_until, stream_message
 
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
+
+# Storage internals that must never appear in attachment responses.
+INTERNAL_ATTACHMENT_FIELDS = ("provider_file_id", "storage_backend", "vector_store_id")
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +55,24 @@ class TestUploadAndGet:
         detail = resp.json()
         assert detail["status"] == "ready", f"Expected ready, got: {detail}"
         assert detail["id"] == att_id
+
+    def test_provider_storage_fields_not_exposed(self, provider_chat):
+        """Neither the upload response nor GET exposes provider storage details."""
+        chat_id = provider_chat["id"]
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/attachments",
+            files={"file": ("notes.txt", io.BytesIO(b"internal fields check"), "text/plain")},
+            timeout=60,
+        )
+        assert resp.status_code == 201, resp.text
+        detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{resp.json()['id']}").json()
+        for body in (resp.json(), detail):
+            for field in INTERNAL_ATTACHMENT_FIELDS:
+                assert field not in body, f"{field} exposed: {body}"
+
+    def test_get_nonexistent_attachment_404(self, provider_chat):
+        resp = httpx.get(f"{API_PREFIX}/chats/{provider_chat['id']}/attachments/{uuid.uuid4()}")
+        assert_problem(resp, 404, "not_found")
 
 
 # ---------------------------------------------------------------------------
@@ -158,9 +179,13 @@ class TestDeleteReferencedAttachment:
             f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}",
             timeout=10,
         )
-        assert resp.status_code == 409, (
-            f"Expected 409 conflict, got {resp.status_code}: {resp.text}"
-        )
+        body = assert_problem(resp, 409, "already_exists")
+        assert body["context"]["resource_name"] == "attachment_locked"
+
+        # The attachment is kept.
+        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ready"
 
 
 # ---------------------------------------------------------------------------
@@ -267,36 +292,6 @@ class TestUploadSearchCitationFlow:
 # ---------------------------------------------------------------------------
 # Azure provider: upload, get, send-message with attachments
 # ---------------------------------------------------------------------------
-
-@pytest.mark.multi_provider
-class TestProviderUploadAndGet:
-    """Upload a file to a chat per provider, verify upload + poll works."""
-
-    def test_upload_and_get_attachment(self, provider_chat):
-        chat_id = provider_chat["id"]
-        content = b"This is a test document for RAG."
-
-        # Upload
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("notes.txt", io.BytesIO(content), "text/plain")},
-            timeout=60,
-        )
-        assert resp.status_code == 201, f"Upload failed: {resp.status_code} {resp.text}"
-        body = resp.json()
-        att_id = body["id"]
-        assert body["filename"] == "notes.txt"
-        assert body["kind"] == "document"
-        assert body["status"] == "pending" or body["status"] == "ready"
-
-        # Poll until ready
-        resp = poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
-        detail = resp.json()
-        assert detail["status"] == "ready", f"Expected ready, got: {detail}"
-
 
 @pytest.mark.multi_provider
 @pytest.mark.online_only
@@ -485,7 +480,7 @@ def make_minimal_png(width: int = 2, height: int = 2, color: tuple = (255, 0, 0)
 class TestImageUploadAndSend:
     """Upload a PNG image, verify it reaches ready, send a message referencing it."""
 
-    def test_image_upload_and_send(self, provider_chat):
+    def test_image_upload_and_send(self, provider_chat, mock_provider):
         chat_id = provider_chat["id"]
 
         # Generate a small red PNG
@@ -509,6 +504,10 @@ class TestImageUploadAndSend:
             until=lambda r: r.json()["status"] in ("ready", "failed"),
         ).json()
         assert detail["status"] == "ready", f"Expected ready, got: {detail}"
+        assert detail["img_thumbnail"] is not None, "ready image must have a thumbnail"
+        # An image is not indexed for file_search: no vector store is created.
+        vector_store_calls = [p for p in mock_provider.get_request_paths() if "/vector_stores" in p[1]]
+        assert vector_store_calls == []
 
         # Send a message referencing the image
         resp = httpx.post(
@@ -531,10 +530,6 @@ class TestImageUploadAndSend:
 
         # The LLM should have produced some response
         assert len(delta_text) > 0, "Expected non-empty response from LLM"
-
-        # img_thumbnail may not be implemented yet — check only after streaming assertions pass
-        if detail.get("img_thumbnail") is None:
-            pytest.xfail("img_thumbnail not populated for ready images yet")
 
 
 @pytest.mark.multi_provider
@@ -611,10 +606,7 @@ class TestImageRecognition:
             f"[{provider_label}] LLM responded but did not recognize the cat. "
             f"Response: {delta_text!r}"
         )
-
-        # img_thumbnail may not be implemented yet — check only after streaming assertions pass
-        if detail.get("img_thumbnail") is None:
-            pytest.xfail("img_thumbnail not populated for ready images yet")
+        assert detail["img_thumbnail"] is not None, f"[{provider_label}] ready image must have a thumbnail"
 
     def test_image_recognition_cat(self, provider_chat):
         cat_bytes = self._load_cat_image()

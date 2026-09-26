@@ -1,20 +1,14 @@
 """Code interpreter usage verification tests.
 
-Exercises code interpreter (XLSX upload) with mock/real LLM, then verifies
-quota usage via the REST quota endpoint and message tokens via the messages API.
-
-Falls back to direct SQLite only for turn-level fields not exposed via REST
-(reserve_tokens, reserved_credits_micro).
-
-Follows the same patterns as test_web_search_usage.py.
+Exercises code interpreter (XLSX upload) with the mock provider, then checks
+quota usage via the REST quota endpoint (literal expected credits, see
+EXPECTED_CREDITS), message tokens via the messages API, and the
+code_interpreter_calls counter and reserves in the DB.
 """
 
 from __future__ import annotations
 
 import io
-import os
-import sqlite3
-import time
 import uuid
 from datetime import datetime, timezone
 
@@ -22,8 +16,8 @@ import pytest
 import httpx
 
 from .conftest import (
-    API_PREFIX, DB_PATH, DEFAULT_MODEL, PROVIDER_DEFAULT_MODEL,
-    expect_done, poll_until, stream_message,
+    API_PREFIX, PROVIDER_DEFAULT_MODEL, USER_A_ID,
+    assert_no_reserves, expect_done, poll_until, query_db, stream_message,
 )
 from .test_code_interpreter import XLSX_CONTENT_TYPE, _make_minimal_xlsx
 
@@ -45,89 +39,29 @@ def _find_period(tiers: list, tier_name: str, period_name: str) -> dict | None:
     return None
 
 
-def _wait_for_quota_settled(before_used: int, *, timeout: float = 5.0, interval: float = 0.1):
-    """Poll quota status until used_credits_micro changes (settlement landed)."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        status = _get_quota_status()
-        td = _find_period(status["tiers"], "total", "daily")
-        if td and td["used_credits_micro"] != before_used:
-            return status
-        time.sleep(interval)
-    # Return last snapshot even if unchanged (caller will assert)
-    return _get_quota_status()
+# ── DB helpers (quota_usage tool counters are not exposed via REST) ─────
 
-
-# ── DB helpers (only for turn-level fields not in REST API) ──────────────
-
-def _to_blob(value):
-    if isinstance(value, str):
-        try:
-            return uuid.UUID(value).bytes
-        except ValueError:
-            pass
-    return value
-
-
-def query_db(sql: str, params: tuple = ()) -> list[dict]:
-    if not os.path.exists(DB_PATH):
-        pytest.skip(f"DB not found at {DB_PATH}")
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    blob_params = tuple(_to_blob(p) for p in params)
-    try:
-        rows = conn.execute(sql, blob_params).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
-
-
-def _get_chat_owner(chat_id: str) -> tuple[str, str]:
-    """Return (tenant_id, user_id) for a chat from the DB."""
-    rows = query_db(
-        "SELECT tenant_id, user_id FROM chats WHERE id = ?",
-        (chat_id,),
-    )
-    assert rows, f"Chat {chat_id} not found in DB"
-    return rows[0]["tenant_id"], rows[0]["user_id"]
-
-
-def _today_str() -> str:
-    """Return the current UTC date as ISO string (matches quota period_start)."""
-    return datetime.now(timezone.utc).date().isoformat()
-
-
-def _query_ci_calls(chat_id: str) -> int:
-    """Query code_interpreter_calls for the exact active quota_usage row."""
-    tenant_id, user_id = _get_chat_owner(chat_id)
+def _query_ci_calls(user_id: str = USER_A_ID) -> int:
+    """code_interpreter_calls of today's daily `total` quota_usage row."""
     rows = query_db(
         "SELECT code_interpreter_calls FROM quota_usage "
-        "WHERE tenant_id = ? AND user_id = ? AND period_type = 'daily' "
-        "AND period_start = ? AND bucket = 'total' LIMIT 1",
-        (tenant_id, user_id, _today_str()),
+        "WHERE user_id = ? AND period_type = 'daily' "
+        "AND period_start = ? AND bucket = 'total'",
+        (user_id, datetime.now(timezone.utc).date().isoformat()),
     )
     return rows[0]["code_interpreter_calls"] if rows else 0
 
 
-# ── Credit math helpers ──────────────────────────────────────────────────
-
-def ceil_div(a: int, b: int) -> int:
-    if a == 0 or b == 0:
-        return 0
-    return (a + b - 1) // b
-
-
-def expected_credits_micro(input_tokens: int, output_tokens: int, in_mult: int, out_mult: int) -> int:
-    divisor = 1_000_000
-    return ceil_div(input_tokens * in_mult, divisor) + ceil_div(output_tokens * out_mult, divisor)
-
-
-MODEL_MULTIPLIERS = {
-    "gpt-5.2": (1_000_000, 3_000_000),
-    "gpt-5-mini": (1_000_000, 3_000_000),
-    "gpt-5-nano": (500_000, 1_500_000),
-    "azure-gpt-4.1": (3_000_000, 15_000_000),
-}
+# ── Expected charges ─────────────────────────────────────────────────────
+#
+# Mock "CODEINTERP:*" scenario: usage input = max(300, 50 * input items) and
+# output = 20. A first message sends one input item, so input = 300.
+# credits_micro = ceil(input * in_mult / 1e6) + ceil(output * out_mult / 1e6)
+# with the base.yaml multipliers:
+#   gpt-5.2        (openai): 300 * 1.0 + 20 * 3.0  = 300 +  60 =  360
+#   azure-gpt-4.1  (azure):  300 * 3.0 + 20 * 15.0 = 900 + 300 = 1200
+EXPECTED_USAGE = {"input_tokens": 300, "output_tokens": 20}
+EXPECTED_CREDITS = {"openai": 360, "azure": 1200}
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -162,11 +96,15 @@ def xlsx_chat(provider):
 class TestCodeInterpreterUsageAccounting:
     """Verify that code interpreter turns produce correct quota and message records."""
 
+    @pytest.fixture(autouse=True)
+    def _offline_only(self, request):
+        if request.config.getoption("mode") == "online":
+            pytest.skip("literal credit amounts depend on the mock's fixed usage")
+
     def test_code_interpreter_usage_correct(self, provider, server, xlsx_chat):
         """Single CI turn: verify credits, messages, tool events, and turn state."""
         chat_id = xlsx_chat["chat_id"]
         att_id = xlsx_chat["att_id"]
-        model = xlsx_chat["model"]
 
         # Snapshot quota before
         before = _get_quota_status()
@@ -222,51 +160,11 @@ class TestCodeInterpreterUsageAccounting:
         )
 
         # ── Verify credits via quota endpoint ──
-        after = _wait_for_quota_settled(spent_before)
-        after_td = _find_period(after["tiers"], "total", "daily")
-        spent_after = after_td["used_credits_micro"]
-
-        in_mult, out_mult = MODEL_MULTIPLIERS[model]
-        formula_credits = expected_credits_micro(sse_input, sse_output, in_mult, out_mult)
-
-        # Overshoot check via DB
-        turns_db = query_db(
-            "SELECT reserve_tokens, reserved_credits_micro FROM chat_turns WHERE chat_id = ? AND request_id = ?",
-            (chat_id, rid),
-        )
-        assert len(turns_db) == 1
-        reserve_tokens = turns_db[0]["reserve_tokens"]
-        reserved_credits = turns_db[0]["reserved_credits_micro"]
-        actual_tokens = sse_input + sse_output
-        overshoot_tolerance = 1.1
-
-        if actual_tokens > reserve_tokens and actual_tokens / max(reserve_tokens, 1) > overshoot_tolerance:
-            expected_credits = reserved_credits
-            capped = True
-        else:
-            expected_credits = formula_credits
-            capped = False
-
-        spent_delta = spent_after - spent_before
-
-        print(f"  CI CREDIT VERIFICATION ({provider}/{model}):")
-        print(f"    SSE tokens: input={sse_input}, output={sse_output}")
-        print(f"    actual_tokens={actual_tokens}, reserve_tokens={reserve_tokens}")
-        print(f"    Overshoot capped: {capped}")
-        print(f"    Expected: {expected_credits}, Actual delta: {spent_delta}")
-
-        assert spent_delta == expected_credits, (
-            f"Credit mismatch: delta={spent_delta} != expected={expected_credits} "
-            f"(formula={formula_credits}, capped={capped})"
-        )
-
-        # No stuck reserves
-        for tier in after["tiers"]:
-            for p in tier["periods"]:
-                expected_remaining = p["limit_credits_micro"] - p["used_credits_micro"]
-                assert p["remaining_credits_micro"] == expected_remaining, (
-                    f"Stuck reserve in {tier['tier']}/{p['period']}"
-                )
+        assert sse_usage == EXPECTED_USAGE
+        assert_no_reserves(USER_A_ID)
+        after = _get_quota_status()
+        spent_after = _find_period(after["tiers"], "total", "daily")["used_credits_micro"]
+        assert spent_after - spent_before == EXPECTED_CREDITS[provider]
 
     def test_code_interpreter_calls_tracked_in_db(self, provider, server, xlsx_chat):
         """Verify code_interpreter_calls is incremented in quota_usage table."""
@@ -274,7 +172,7 @@ class TestCodeInterpreterUsageAccounting:
         att_id = xlsx_chat["att_id"]
 
         # Get CI calls before
-        ci_before = _query_ci_calls(chat_id)
+        ci_before = _query_ci_calls()
 
         status, events, _ = stream_message(
             chat_id,
@@ -283,18 +181,10 @@ class TestCodeInterpreterUsageAccounting:
         )
         assert status == 200
         expect_done(events)
+        assert_no_reserves(USER_A_ID)
 
-        # Poll until quota settles
-        before_status = _get_quota_status()
-        before_td = _find_period(before_status["tiers"], "total", "daily")
-        _wait_for_quota_settled(before_td["used_credits_micro"])
-
-        ci_after = _query_ci_calls(chat_id)
-
-        # Mock provider emits exactly 1 code_interpreter completed event per CODEINTERP scenario
-        assert ci_after > ci_before, (
-            f"code_interpreter_calls not incremented: before={ci_before}, after={ci_after}"
-        )
+        # The CODEINTERP scenario emits exactly one completed code_interpreter call.
+        assert _query_ci_calls() == ci_before + 1
 
     def test_non_ci_turn_has_zero_ci_calls(self, provider, server):
         """A normal turn (no XLSX) should not increment code_interpreter_calls."""
@@ -304,19 +194,14 @@ class TestCodeInterpreterUsageAccounting:
         assert resp.status_code == 201
         chat_id = resp.json()["id"]
 
-        ci_before = _query_ci_calls(chat_id)
-
-        before_status = _get_quota_status()
-        before_td = _find_period(before_status["tiers"], "total", "daily")
-        spent_before = before_td["used_credits_micro"]
+        ci_before = _query_ci_calls()
 
         status, events, _ = stream_message(chat_id, "What is 2+2? Answer in one word.")
         assert status == 200
         expect_done(events)
+        assert_no_reserves(USER_A_ID)
 
-        _wait_for_quota_settled(spent_before)
-
-        ci_after = _query_ci_calls(chat_id)
+        ci_after = _query_ci_calls()
 
         assert ci_after == ci_before, (
             f"code_interpreter_calls changed without CI: before={ci_before}, after={ci_after}"
@@ -330,80 +215,4 @@ class TestCodeInterpreterUsageAccounting:
         ]
         assert len(ci_events) == 0, (
             f"Unexpected code_interpreter events: {[t.data for t in ci_events]}"
-        )
-
-
-@pytest.mark.openai
-@pytest.mark.online_only
-class TestCodeInterpreterUsageOnline:
-    """Online test: verify code interpreter credit accounting with real provider."""
-
-    def test_ci_credits_match_model_multipliers(self, provider, server, xlsx_chat):
-        """Verify credit formula with real provider code interpreter."""
-        chat_id = xlsx_chat["chat_id"]
-        att_id = xlsx_chat["att_id"]
-        model = xlsx_chat["model"]
-
-        before = _get_quota_status()
-        before_td = _find_period(before["tiers"], "total", "daily")
-        spent_before = before_td["used_credits_micro"]
-
-        rid = str(uuid.uuid4())
-        status, events, _ = stream_message(
-            chat_id,
-            "Read the spreadsheet and tell me the value in cell B1.",
-            attachment_ids=[att_id],
-            request_id=rid,
-        )
-        assert status == 200
-        done = expect_done(events)
-
-        # Verify the turn actually invoked code_interpreter
-        tool_events = [e for e in events if e.event == "tool"]
-        ci_events = [
-            e for e in tool_events
-            if isinstance(e.data, dict) and e.data.get("name") == "code_interpreter"
-            and e.data.get("phase") == "done"
-        ]
-        assert len(ci_events) >= 1, (
-            f"Expected at least one code_interpreter done event, got {len(ci_events)}; "
-            f"tool events: {[t.data for t in tool_events]}"
-        )
-
-        sse_input = done.data["usage"]["input_tokens"]
-        sse_output = done.data["usage"]["output_tokens"]
-
-        after = _wait_for_quota_settled(spent_before)
-        after_td = _find_period(after["tiers"], "total", "daily")
-        spent_after = after_td["used_credits_micro"]
-        spent_delta = spent_after - spent_before
-
-        in_mult, out_mult = MODEL_MULTIPLIERS[model]
-        formula_credits = expected_credits_micro(sse_input, sse_output, in_mult, out_mult)
-
-        turns_db = query_db(
-            "SELECT reserve_tokens, reserved_credits_micro FROM chat_turns WHERE chat_id = ? AND request_id = ?",
-            (chat_id, rid),
-        )
-        assert len(turns_db) == 1
-        reserve_tokens = turns_db[0]["reserve_tokens"]
-        reserved_credits = turns_db[0]["reserved_credits_micro"]
-        actual_tokens = sse_input + sse_output
-        overshoot_tolerance = 1.1
-
-        if actual_tokens > reserve_tokens and actual_tokens / max(reserve_tokens, 1) > overshoot_tolerance:
-            expected = reserved_credits
-            capped = True
-        else:
-            expected = formula_credits
-            capped = False
-
-        print(f"  CI CREDIT VERIFICATION ({provider}/{model}):")
-        print(f"    actual_tokens={actual_tokens}, reserve_tokens={reserve_tokens}")
-        print(f"    Overshoot capped: {capped}")
-        print(f"    Expected: {expected}, Actual delta: {spent_delta}")
-
-        assert spent_delta == expected, (
-            f"Credit mismatch for {provider}/{model}: "
-            f"delta={spent_delta} != expected={expected}"
         )

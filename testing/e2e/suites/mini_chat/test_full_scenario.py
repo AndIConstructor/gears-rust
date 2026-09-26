@@ -10,39 +10,21 @@ max_output_tokens_applied, reserved_credits_micro).
 
 from __future__ import annotations
 
-import os
-import sqlite3
-import time
 import uuid
 
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, DB_PATH, expect_done, expect_stream_started, parse_sse, stream_message
-
-
-# ── DB helpers (only for fields not exposed via REST) ────────────────────
-
-def _to_blob(value):
-    if isinstance(value, str):
-        try:
-            return uuid.UUID(value).bytes
-        except ValueError:
-            pass
-    return value
-
-
-def query_db(sql: str, params: tuple = ()) -> list[dict]:
-    if not os.path.exists(DB_PATH):
-        pytest.skip(f"DB not found at {DB_PATH}")
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    blob_params = tuple(_to_blob(p) for p in params)
-    try:
-        rows = conn.execute(sql, blob_params).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+from .conftest import (
+    API_PREFIX,
+    USER_A_ID,
+    assert_no_reserves,
+    expect_done,
+    expect_stream_started,
+    parse_sse,
+    query_db,
+    stream_message,
+)
 
 
 # ── Quota endpoint helpers ───────────────────────────────────────────────
@@ -175,21 +157,11 @@ class TestFullConversationScenario:
             assert m.get("output_tokens") is not None and m["output_tokens"] > 0
             assert len(m["content"]) > 0
 
-        # ── 9. Verify quota via REST endpoint ────────────────────────────
-        time.sleep(0.5)  # settlement delay
-        status = _get_quota_status()
-
-        total_daily = _find_period(status["tiers"], "total", "daily")
+        # ── 9. Verify quota: usage recorded, no reserve left ─────────────
+        assert_no_reserves(USER_A_ID)
+        total_daily = _find_period(_get_quota_status()["tiers"], "total", "daily")
         assert total_daily is not None
         assert total_daily["used_credits_micro"] > 0
-
-        # No stuck reserves: remaining = limit - used
-        for tier in status["tiers"]:
-            for p in tier["periods"]:
-                expected_remaining = p["limit_credits_micro"] - p["used_credits_micro"]
-                assert p["remaining_credits_micro"] == expected_remaining, (
-                    f"Stuck reserve in {tier['tier']}/{p['period']}"
-                )
 
         # ── 10. Idempotency: replay turn 1 ───────────────────────────────
         _resp_replay = httpx.post(_url, json={"content": "What is 2+2? Reply with just the number.", "request_id": rid1}, headers={"Accept": "text/event-stream"}, timeout=90)
@@ -221,10 +193,11 @@ class TestQuotaAccumulation:
 
         chat_id = provider_chat["id"]
 
-        stream_message(chat_id, "Say A.")
-        stream_message(chat_id, "Say B.")
-
-        time.sleep(0.5)
+        for content in ("Say A.", "Say B."):
+            status, events, _ = stream_message(chat_id, content)
+            assert status == 200
+            expect_done(events)
+        assert_no_reserves(USER_A_ID)
 
         after = _get_quota_status()
         after_total_daily = _find_period(after["tiers"], "total", "daily")
@@ -236,21 +209,11 @@ class TestQuotaAccumulation:
         )
 
     def test_no_stuck_reserves_after_completion(self, server, provider_chat):
-        """After all turns complete, remaining should equal limit - used."""
-        chat_id = provider_chat["id"]
-
-        stream_message(chat_id, "Hello.")
-        time.sleep(0.5)
-
-        status = _get_quota_status()
-        for tier in status["tiers"]:
-            for p in tier["periods"]:
-                expected_remaining = p["limit_credits_micro"] - p["used_credits_micro"]
-                assert p["remaining_credits_micro"] == expected_remaining, (
-                    f"Stuck reserve in {tier['tier']}/{p['period']}: "
-                    f"remaining={p['remaining_credits_micro']} != "
-                    f"limit({p['limit_credits_micro']}) - used({p['used_credits_micro']})"
-                )
+        """After a completed turn the user's quota reserve is back to 0."""
+        status, events, _ = stream_message(provider_chat["id"], "Hello.")
+        assert status == 200
+        expect_done(events)
+        assert_no_reserves(USER_A_ID)
 
 
 @pytest.mark.multi_provider
@@ -262,49 +225,23 @@ class TestTurnDetailsInDb:
     """
 
     def test_max_output_tokens_applied(self, server, provider_chat):
-        """max_output_tokens_applied should reflect min(catalog, config_cap)."""
+        """max_output_tokens_applied = min(catalog max_output_tokens, streaming cap).
+
+        Both default models have max_output_tokens 8192 (base.yaml); the
+        streaming cap defaults to 32768, so 8192 applies.
+        """
         chat_id = provider_chat["id"]
         rid = str(uuid.uuid4())
-
-        stream_message(chat_id, "Say hi.", request_id=rid)
+        status, events, _ = stream_message(chat_id, "Say hi.", request_id=rid)
+        assert status == 200
+        expect_done(events)
 
         turns = query_db(
-            "SELECT * FROM chat_turns WHERE chat_id = ? AND request_id = ?",
+            "SELECT max_output_tokens_applied, reserve_tokens FROM chat_turns "
+            "WHERE chat_id = ? AND request_id = ?",
             (chat_id, rid),
         )
         assert len(turns) == 1
-        t = turns[0]
-
-        assert t["max_output_tokens_applied"] is not None
-        assert t["max_output_tokens_applied"] > 0
-        assert t["max_output_tokens_applied"] <= 8192
-
-    def test_reserve_tokens_formula(self, server, provider_chat):
-        """reserve_tokens = estimated_input_tokens + max_output_tokens_applied."""
-        chat_id = provider_chat["id"]
-        rid = str(uuid.uuid4())
-
-        stream_message(chat_id, "Hello.", request_id=rid)
-
-        turns = query_db(
-            "SELECT * FROM chat_turns WHERE chat_id = ? AND request_id = ?",
-            (chat_id, rid),
-        )
-        t = turns[0]
-
-        assert t["reserve_tokens"] > t["max_output_tokens_applied"]
-
-    def test_credits_settled_after_completion(self, server, provider_chat):
-        """After completion, no stuck reserves in quota (verified via REST)."""
-        chat_id = provider_chat["id"]
-
-        stream_message(chat_id, "Say OK.")
-        time.sleep(0.5)
-
-        status = _get_quota_status()
-        for tier in status["tiers"]:
-            for p in tier["periods"]:
-                expected_remaining = p["limit_credits_micro"] - p["used_credits_micro"]
-                assert p["remaining_credits_micro"] == expected_remaining, (
-                    f"Stuck reserve in {tier['tier']}/{p['period']}"
-                )
+        assert turns[0]["max_output_tokens_applied"] == 8192
+        # reserve_tokens = estimated input tokens + max_output_tokens_applied
+        assert turns[0]["reserve_tokens"] > 8192

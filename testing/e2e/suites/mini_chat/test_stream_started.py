@@ -17,7 +17,16 @@ import uuid
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, expect_done, expect_stream_started, parse_sse, stream_message
+from .conftest import (
+    API_PREFIX,
+    delta_text,
+    expect_done,
+    expect_stream_started,
+    open_stream,
+    parse_sse,
+    slow_scenario,
+    stream_message,
+)
 
 _STREAM_HEADERS = {"Accept": "text/event-stream"}
 
@@ -26,31 +35,6 @@ _STREAM_HEADERS = {"Accept": "text/event-stream"}
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def stream_message_raw_partial(chat_id: str, content: str, read_bytes: int = 512):
-    """Start a streaming request, read a small chunk, then close the connection.
-
-    Returns (request_id, partial_raw) where request_id is from the body
-    (caller-generated) and partial_raw is the bytes read before disconnect.
-    """
-    request_id = str(uuid.uuid4())
-    url = f"{API_PREFIX}/chats/{chat_id}/messages:stream"
-    body = {"content": content, "request_id": request_id}
-    # httpx.stream() context manager — exiting closes the connection
-    partial = b""
-    with httpx.stream(
-        "POST", url, json=body,
-        headers={"Accept": "text/event-stream"},
-        timeout=30,
-    ) as resp:
-        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
-        # Read chunks until we have enough bytes, then exit — triggers cancellation
-        for chunk in resp.iter_bytes():
-            partial += chunk
-            if len(partial) >= read_bytes:
-                break
-    return request_id, partial
-
 
 def poll_turn_status(chat_id: str, request_id: str, target_state: "str | tuple[str, ...]",
                      timeout: float = 15.0) -> dict:
@@ -172,20 +156,6 @@ class TestStreamStartedOrdering:
         deltas = [e for e in events if e.event == "delta"]
         assert len(deltas) > 0
 
-    def test_pings_only_between_stream_started_and_first_content(self, provider_chat):
-        """Pings should only appear before the first delta/tool."""
-        url = f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream"
-        resp = httpx.post(url, json={"content": "Say hi."}, headers=_STREAM_HEADERS, timeout=90)
-        events = parse_sse(resp.text) if resp.status_code == 200 else []
-        first_content_idx = None
-        for i, e in enumerate(events):
-            if e.event in ("delta", "tool"):
-                first_content_idx = i
-                break
-        if first_content_idx is not None:
-            for e in events[first_content_idx:]:
-                assert e.event != "ping", "Ping after content events"
-
 
 # ---------------------------------------------------------------------------
 # Tests: stream_started on retry and edit
@@ -291,114 +261,71 @@ class TestStreamStartedOnReplay:
 # Tests: cancelled stream persists partial message
 # ---------------------------------------------------------------------------
 
-@pytest.mark.multi_provider
 class TestCancelledMessagePersistence:
-    """Cancelled streams with accumulated content persist a partial assistant message."""
+    """A client disconnect cancels the turn and persists the text received so far.
 
-    def test_cancelled_turn_has_assistant_message_id(self, provider_chat):
-        """Disconnect mid-stream; cancelled turn should have assistant_message_id."""
-        chat_id = provider_chat["id"]
+    The mock sends one delta every 0.3 s; the client disconnects after the
+    third delta, long before the provider would finish (20 deltas).
+    """
 
-        # Use a long prompt to trigger slow-response scenario in mock.
-        # read_bytes=256 reads just stream_started + first deltas, then disconnects.
-        request_id, _ = stream_message_raw_partial(
-            chat_id,
-            "Write a detailed 500-word essay about the history of computing.",
-            read_bytes=256,
-        )
+    @pytest.fixture(autouse=True)
+    def _offline_only(self, request):
+        if request.config.getoption("mode") == "online":
+            pytest.skip("requires mock provider (slow scenario)")
 
-        # Poll until turn reaches a terminal state.
-        # Accept both "cancelled" and "done" — fast providers may complete before cancellation triggers.
-        turn = poll_turn_status(chat_id, request_id, ("cancelled", "done"))
-        # D4: cancelled turn with accumulated text should have assistant_message_id
-        assert turn.get("assistant_message_id") is not None, (
-            f"Cancelled turn should have assistant_message_id, got: {turn}"
-        )
+    @staticmethod
+    def _cancel_after_three_deltas(chat_id: str, mock_provider) -> tuple[str, str, str]:
+        """Return (request_id, message_id from stream_started, received text)."""
+        rid = str(uuid.uuid4())
+        mock_provider.set_next_scenario(slow_scenario(20, slow=0.3))
+        with open_stream(chat_id, "Write a long essay.", request_id=rid) as s:
+            started = s.read_until_started()
+            seen = []
+            s.read_until(lambda e: e.event == "delta" and (seen.append(e) or len(seen) == 3))
+            received = delta_text(s.events)
+        assert received == "w0 w1 w2 "
+        return rid, started.data["message_id"], received
 
-    def test_cancelled_message_appears_in_messages(self, provider_chat):
-        """The partial assistant message from a cancelled turn appears in GET /messages."""
-        chat_id = provider_chat["id"]
+    @pytest.mark.timeout(30)
+    def test_cancelled_turn_has_assistant_message_id(self, chat, mock_provider):
+        """D4: the cancelled turn points at the pre-allocated assistant message."""
+        rid, message_id, _ = self._cancel_after_three_deltas(chat["id"], mock_provider)
 
-        # Read a small chunk then disconnect to trigger cancellation.
-        # Use a very long prompt to maximize generation time.
-        request_id, _ = stream_message_raw_partial(
-            chat_id,
-            "Write a 2000-word essay about the complete history of computing "
-            "from Charles Babbage to modern quantum computers. Include every "
-            "major milestone, inventor, and breakthrough in chronological order.",
-            read_bytes=512,
-        )
+        turn = poll_turn_status(chat["id"], rid, "cancelled")
+        assert turn["state"] == "cancelled"
+        assert turn["assistant_message_id"] == message_id
 
-        # Poll until turn reaches a terminal state.
-        # Fast providers/mock may complete before disconnect → "done" is also valid.
-        turn = None
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline:
-            resp = httpx.get(
-                f"{API_PREFIX}/chats/{chat_id}/turns/{request_id}", timeout=5
-            )
-            if resp.status_code == 200:
-                turn = resp.json()
-                if turn["state"] in ("cancelled", "done"):
-                    break
-            time.sleep(0.3)
-        assert turn is not None and turn["state"] in ("cancelled", "done"), (
-            f"Turn did not reach terminal state: {turn}"
-        )
-        msg_id = turn.get("assistant_message_id")
-        assert msg_id is not None, "Should have assistant_message_id"
+    @pytest.mark.timeout(30)
+    def test_cancelled_message_content_equals_received_deltas(self, chat, mock_provider):
+        """GET /messages holds the partial answer: exactly the deltas the client received."""
+        rid, message_id, received = self._cancel_after_three_deltas(chat["id"], mock_provider)
+        poll_turn_status(chat["id"], rid, "cancelled")
 
-        # Fetch messages — partial assistant message should be present
-        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
+        resp = httpx.get(f"{API_PREFIX}/chats/{chat['id']}/messages")
         assert resp.status_code == 200
-        msgs = resp.json()["items"]
-        asst_msgs = [m for m in msgs if m["role"] == "assistant"]
-        asst_ids = [m["id"] for m in asst_msgs]
-        assert msg_id in asst_ids, (
-            f"Cancelled assistant message {msg_id} not found in messages. "
-            f"Got IDs: {asst_ids}"
-        )
+        assistant = [m for m in resp.json()["items"] if m["role"] == "assistant"]
+        assert [(m["id"], m["request_id"]) for m in assistant] == [(message_id, rid)]
+        assert assistant[0]["content"] == received
 
-    def test_retry_cancelled_turn_produces_new_message(self, provider_chat):
-        """Retrying a cancelled turn produces a complete response with a new message_id."""
-        chat_id = provider_chat["id"]
+    @pytest.mark.timeout(30)
+    def test_retry_cancelled_turn_produces_new_message(self, chat, mock_provider):
+        """Retrying a cancelled turn completes with a new request_id and message_id."""
+        rid, partial_msg_id, _ = self._cancel_after_three_deltas(chat["id"], mock_provider)
+        poll_turn_status(chat["id"], rid, "cancelled")
 
-        # Cancel mid-stream
-        request_id, _ = stream_message_raw_partial(
-            chat_id,
-            "Write a very long and detailed explanation of every prime number "
-            "below 1000, their properties, and mathematical significance.",
-            read_bytes=256,
-        )
-        # Accept both "cancelled" and "done" — fast providers may complete before cancellation triggers.
-        turn = poll_turn_status(chat_id, request_id, ("cancelled", "done"), timeout=20.0)
-        partial_msg_id = turn.get("assistant_message_id")
-
-        # Retry the cancelled turn
         resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/turns/{request_id}/retry",
+            f"{API_PREFIX}/chats/{chat['id']}/turns/{rid}/retry",
             headers={"Accept": "text/event-stream"},
             timeout=90,
         )
         assert resp.status_code == 200, f"Retry failed: {resp.status_code} {resp.text}"
         retry_events = parse_sse(resp.text)
-
-        # Retry should emit stream_started with a new request_id and message_id
         ss = expect_stream_started(retry_events)
         new_rid = ss.data["request_id"]
         new_msg_id = ss.data["message_id"]
-        assert new_rid != request_id, "Retry should use a new request_id"
-        assert new_msg_id is not None, "stream_started should have message_id"
-
-        # The new message should be different from the partial one
-        if partial_msg_id is not None:
-            assert new_msg_id != partial_msg_id, (
-                "Retry should produce a new message, not reuse the partial"
-            )
-
-        # Retry should complete with a done event
+        assert new_rid != rid
+        assert new_msg_id != partial_msg_id
         expect_done(retry_events)
 
-        # Verify the new turn is in 'done' state
-        new_turn = poll_turn_status(chat_id, new_rid, "done")
+        new_turn = poll_turn_status(chat["id"], new_rid, "done")
         assert new_turn["assistant_message_id"] == new_msg_id

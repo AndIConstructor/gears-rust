@@ -4,13 +4,22 @@ These tests hit a real LLM provider — they require valid API keys in .provider
 and a running server (started automatically or via run-server.sh --bg).
 """
 
-import json
 import uuid
 
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, DEFAULT_MODEL, STANDARD_MODEL, expect_done, expect_stream_started, parse_sse
+from .conftest import (
+    API_PREFIX,
+    assert_problem,
+    expect_done,
+    expect_stream_started,
+    parse_sse,
+    slow_scenario,
+)
+
+# A request body that fails JSON deserialization (missing required field,
+# wrong type) is rejected by axum's `Json` extractor before the handler runs.
 
 
 
@@ -96,7 +105,8 @@ class TestStreamBasic:
 class TestStreamDoneEvent:
     """Validate the 'done' event fields per DESIGN.md."""
 
-    def test_done_has_required_fields(self, provider_chat):
+    def test_done_event_contract(self, provider_chat):
+        """`done` carries models, quota decision and usage; no message_id, no internal token fields."""
         resp = httpx.post(
             f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
             json={"content": "Say OK."},
@@ -104,92 +114,17 @@ class TestStreamDoneEvent:
             timeout=90,
         )
         assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        done = expect_done(events)
-        d = done.data
-        assert "effective_model" in d
-        assert "selected_model" in d
-        assert "quota_decision" in d
-        assert d["quota_decision"] in ("allow", "downgrade")
-        usage = d.get("usage", {})
-        assert usage.get("input_tokens", 0) > 0, "done usage must have input_tokens > 0"
-        assert usage.get("output_tokens", 0) > 0, "done usage must have output_tokens > 0"
-
-    def test_done_has_usage(self, provider_chat):
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "Say OK."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        done = expect_done(events)
-        assert "effective_model" in done.data, "done must have effective_model"
-        assert "selected_model" in done.data, "done must have selected_model"
-        assert done.data.get("quota_decision") in ("allow", "downgrade"), f"unexpected quota_decision: {done.data.get('quota_decision')}"
-        usage = done.data.get("usage")
-        assert usage is not None
+        d = expect_done(parse_sse(resp.text)).data
+        assert d["effective_model"] == provider_chat["model"]
+        assert d["selected_model"] == provider_chat["model"]
+        assert d["quota_decision"] == "allow"
+        assert "message_id" not in d, "message_id belongs to stream_started"
+        usage = d["usage"]
         assert usage["input_tokens"] > 0
         assert usage["output_tokens"] > 0
-        # Token breakdown fields (cache_read/write, reasoning) are internal-only
-        # and not exposed in the SSE API.
-        assert "cache_read_input_tokens" not in usage
-        assert "cache_write_input_tokens" not in usage
-        assert "reasoning_tokens" not in usage
-
-    def test_done_does_not_have_message_id(self, provider_chat):
-        """message_id moved to stream_started; done should not carry it."""
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "Say OK."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        done = expect_done(events)
-        assert "effective_model" in done.data, "done must have effective_model"
-        assert "selected_model" in done.data, "done must have selected_model"
-        assert done.data.get("quota_decision") in ("allow", "downgrade"), f"unexpected quota_decision: {done.data.get('quota_decision')}"
-        usage = done.data.get("usage", {})
-        assert usage.get("input_tokens", 0) > 0, "done usage must have input_tokens > 0"
-        assert usage.get("output_tokens", 0) > 0, "done usage must have output_tokens > 0"
-        assert "message_id" not in done.data
-
-    # NOTE: tests stream_started, not done — kept in this class for historical reasons
-    def test_stream_started_has_message_id(self, provider_chat):
-        """message_id is now in stream_started."""
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "Say OK."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        ss = expect_stream_started(events)
-        msg_id = ss.data.get("message_id")
-        assert msg_id is not None
-        uuid.UUID(msg_id)
-
-    def test_done_effective_model_matches_chat(self, provider_chat):
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "Say OK."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        done = expect_done(events)
-        # When no downgrade, effective == selected == chat model
-        assert done.data["quota_decision"] == "allow"
-        assert done.data["effective_model"] == provider_chat["model"]
-        assert done.data["selected_model"] == provider_chat["model"]
-        usage = done.data.get("usage", {})
-        assert usage.get("input_tokens", 0) > 0, "done usage must have input_tokens > 0"
-        assert usage.get("output_tokens", 0) > 0, "done usage must have output_tokens > 0"
+        # Token breakdown fields are internal-only and not exposed in the SSE API.
+        for internal in ("cache_read_input_tokens", "cache_write_input_tokens", "reasoning_tokens"):
+            assert internal not in usage
 
 
 @pytest.mark.multi_provider
@@ -214,25 +149,34 @@ class TestStreamEventOrdering:
         # Nothing after terminal
         assert terminal_idx == len(events) - 1
 
-    def test_ping_only_before_content(self, provider_chat):
-        """Pings should only appear before the first delta/tool."""
+
+
+class TestStreamPing:
+    """`ping` keepalives are sent only while the stream waits for the first content."""
+
+    @pytest.mark.timeout(30)
+    def test_ping_only_before_content(self, request, chat, mock_provider):
+        """The provider stays silent for 6 s (> sse_ping_interval_seconds=5 in base.yaml):
+        at least one ping arrives, and none after the first delta."""
+        if request.config.getoption("mode") == "online":
+            pytest.skip("requires mock provider (delayed scenario)")
+        scenario = slow_scenario(3, slow=0.3)
+        scenario.initial_delay = 6.0
+        mock_provider.set_next_scenario(scenario)
+
         resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "Say hi briefly."},
+            f"{API_PREFIX}/chats/{chat['id']}/messages:stream",
+            json={"content": "Think first."},
             headers={"Accept": "text/event-stream"},
-            timeout=90,
+            timeout=30,
         )
         assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        first_content_idx = None
-        for i, e in enumerate(events):
-            if e.event in ("delta", "tool"):
-                first_content_idx = i
-                break
-        if first_content_idx is not None:
-            for e in events[first_content_idx:]:
-                if e.event == "ping":
-                    pytest.fail("Ping after content events")
+        types = [e.event for e in parse_sse(resp.text)]
+        first_delta = types.index("delta")
+        assert types[0] == "stream_started"
+        assert "ping" in types[1:first_delta], types
+        assert "ping" not in types[first_delta:], types
+        assert types[-1] == "done"
 
 
 @pytest.mark.multi_provider
@@ -240,16 +184,13 @@ class TestStreamPreflightErrors:
     """Pre-stream errors should return JSON, not SSE."""
 
     def test_chat_not_found(self, server):
-        fake_id = str(uuid.uuid4())
         resp = httpx.post(
-            f"{API_PREFIX}/chats/{fake_id}/messages:stream",
+            f"{API_PREFIX}/chats/{uuid.uuid4()}/messages:stream",
             json={"content": "hello"},
             headers={"Accept": "text/event-stream"},
             timeout=10,
         )
-        assert resp.status_code == 404
-        body = resp.json()
-        assert "type" in body and "status" in body and "detail" in body
+        assert_problem(resp, 404, "not_found")
 
     def test_empty_content_rejected(self, provider_chat):
         resp = httpx.post(
@@ -258,45 +199,39 @@ class TestStreamPreflightErrors:
             headers={"Accept": "text/event-stream"},
             timeout=10,
         )
-        assert resp.status_code == 400
-        body = resp.json()
-        assert "type" in body and "status" in body and "detail" in body, f"Error response must be RFC 7807 format: {body}"
+        assert_problem(resp, 400, "invalid_argument", field_reason="EMPTY_CONTENT")
 
     def test_missing_content_rejected(self, provider_chat):
+        """A body that does not match the schema is 422 invalid_argument
+        (platform JSON extractor; malformed JSON would be 400)."""
         resp = httpx.post(
             f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
             json={},
             headers={"Accept": "text/event-stream"},
             timeout=10,
         )
-        assert resp.status_code in (400, 422)
-        if resp.headers.get("content-type", "").startswith("application/json"):
-            body = resp.json()
-            assert "type" in body and "status" in body and "detail" in body
+        assert_problem(resp, 422, "invalid_argument")
 
-    def test_invalid_attachment_id_rejected(self, provider_chat):
-        """04-04: Invalid attachment ID format should be rejected."""
-        chat_id = provider_chat["id"]
+    def test_malformed_attachment_id_rejected(self, provider_chat):
+        """04-04: an attachment id that is not a UUID fails body deserialization: 422."""
         resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
+            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
             json={"content": "Hello", "attachment_ids": ["not-a-uuid"]},
             headers={"Accept": "text/event-stream"},
             timeout=30,
         )
-        assert resp.status_code in (400, 422)
+        assert_problem(resp, 422, "invalid_argument")
 
-    def test_nonexistent_attachment_id_rejected(self, provider_chat):
-        """04-05: Nonexistent attachment ID should be rejected."""
-        import uuid
-        chat_id = provider_chat["id"]
-        fake_id = str(uuid.uuid4())
+    def test_nonexistent_attachment_id_rejected(self, provider_chat, mock_provider):
+        """04-05: an unknown attachment id is 400 invalid_attachment; the provider is not called."""
         resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "Hello", "attachment_ids": [fake_id]},
+            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
+            json={"content": "Hello", "attachment_ids": [str(uuid.uuid4())]},
             headers={"Accept": "text/event-stream"},
             timeout=30,
         )
-        assert resp.status_code == 400
+        assert_problem(resp, 400, "invalid_argument", field_reason="invalid_attachment")
+        assert mock_provider.get_last_request() is None
 
 
 @pytest.mark.multi_provider

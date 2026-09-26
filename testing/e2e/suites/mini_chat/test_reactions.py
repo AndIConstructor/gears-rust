@@ -1,11 +1,10 @@
 """Tests for message reaction endpoints (like/dislike, upsert, remove)."""
 
-import httpx
-import pytest
-from uuid import uuid4
+import uuid
 
-from .conftest import API_PREFIX, parse_sse, expect_done, expect_stream_started, stream_message, DB_PATH
-from .mock_provider.responses import Scenario, MockEvent, Usage
+import httpx
+
+from .conftest import API_PREFIX, assert_problem, expect_done, list_messages, query_db, stream_message
 
 
 def _create_chat_with_assistant_message() -> tuple[str, str, str]:
@@ -35,82 +34,79 @@ def _create_chat_with_assistant_message() -> tuple[str, str, str]:
     return chat_id, user_msg_id, assistant_msg_id
 
 
+def reaction_url(chat_id: str, message_id: str) -> str:
+    return f"{API_PREFIX}/chats/{chat_id}/messages/{message_id}/reaction"
+
+
+def my_reaction(chat_id: str, message_id: str):
+    matching = [m for m in list_messages(chat_id) if m["id"] == message_id]
+    assert len(matching) == 1, f"message {message_id} not listed"
+    return matching[0]["my_reaction"]
+
+
 class TestReactions:
     """PUT/DELETE /chats/{cid}/messages/{msg_id}/reaction"""
 
     def test_set_reaction_like(self, server):
         chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
 
-        resp = httpx.put(
-            f"{API_PREFIX}/chats/{chat_id}/messages/{assistant_msg_id}/reaction",
-            json={"reaction": "like"},
-        )
+        resp = httpx.put(reaction_url(chat_id, assistant_msg_id), json={"reaction": "like"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["message_id"] == assistant_msg_id
         assert body["reaction"] == "like"
         assert "created_at" in body
+        assert my_reaction(chat_id, assistant_msg_id) == "like"
 
-    def test_upsert_reaction_idempotent(self, server):
+    def test_switch_reaction_like_to_dislike(self, server):
         chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
-        url = f"{API_PREFIX}/chats/{chat_id}/messages/{assistant_msg_id}/reaction"
+        url = reaction_url(chat_id, assistant_msg_id)
 
-        # Set like
-        resp1 = httpx.put(url, json={"reaction": "like"})
-        assert resp1.status_code == 200
-        assert resp1.json()["reaction"] == "like"
+        assert httpx.put(url, json={"reaction": "like"}).status_code == 200
+        resp = httpx.put(url, json={"reaction": "dislike"})
+        assert resp.status_code == 200
+        assert resp.json()["reaction"] == "dislike"
+        assert my_reaction(chat_id, assistant_msg_id) == "dislike"
 
-        # Upsert to dislike
-        resp2 = httpx.put(url, json={"reaction": "dislike"})
-        assert resp2.status_code == 200
-        assert resp2.json()["reaction"] == "dislike"
+    def test_put_same_reaction_twice_is_idempotent(self, server):
+        """PUT like twice: both 200, one stored reaction."""
+        chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
+        url = reaction_url(chat_id, assistant_msg_id)
 
-        # Back to like — no error
-        resp3 = httpx.put(url, json={"reaction": "like"})
-        assert resp3.status_code == 200
-        assert resp3.json()["reaction"] == "like"
+        for _ in range(2):
+            resp = httpx.put(url, json={"reaction": "like"})
+            assert resp.status_code == 200
+            assert resp.json()["reaction"] == "like"
+
+        rows = query_db(
+            "SELECT reaction FROM message_reactions WHERE message_id = ?", (assistant_msg_id,),
+        )
+        assert rows == [{"reaction": "like"}]
+        assert my_reaction(chat_id, assistant_msg_id) == "like"
 
     def test_reaction_on_user_message_400(self, server):
         chat_id, user_msg_id, _ = _create_chat_with_assistant_message()
 
-        resp = httpx.put(
-            f"{API_PREFIX}/chats/{chat_id}/messages/{user_msg_id}/reaction",
-            json={"reaction": "like"},
+        resp = httpx.put(reaction_url(chat_id, user_msg_id), json={"reaction": "like"})
+        assert_problem(
+            resp, 400, "failed_precondition",
+            violation_subject="reaction_target", violation_type="STATE",
         )
-        assert resp.status_code == 400, (
-            f"Expected 400 for reaction on user message, got {resp.status_code}: {resp.text}"
-        )
+
+    def test_reaction_on_nonexistent_message_404(self, chat):
+        url = reaction_url(chat["id"], str(uuid.uuid4()))
+        assert_problem(httpx.put(url, json={"reaction": "like"}), 404, "not_found")
+        assert_problem(httpx.delete(url), 404, "not_found")
 
     def test_remove_reaction_204(self, server):
         chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
-        url = f"{API_PREFIX}/chats/{chat_id}/messages/{assistant_msg_id}/reaction"
+        url = reaction_url(chat_id, assistant_msg_id)
 
-        # Set like first
-        resp = httpx.put(url, json={"reaction": "like"})
-        assert resp.status_code == 200
-
-        # Delete reaction
-        del_resp = httpx.delete(url)
-        assert del_resp.status_code == 204
-
-        # Verify reaction is gone via GET messages
-        msgs_resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
-        assert msgs_resp.status_code == 200
-        found = False
-        for m in msgs_resp.json()["items"]:
-            if m["id"] == assistant_msg_id:
-                found = True
-                assert m.get("my_reaction") is None, (
-                    f"Expected my_reaction to be null after deletion, got: {m.get('my_reaction')}"
-                )
-                break
-        assert found, f"Assistant message {assistant_msg_id} not found in messages list"
+        assert httpx.put(url, json={"reaction": "like"}).status_code == 200
+        assert httpx.delete(url).status_code == 204
+        assert my_reaction(chat_id, assistant_msg_id) is None
 
     def test_remove_reaction_idempotent(self, server):
+        """DELETE without a reaction ever set is 204."""
         chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
-
-        # Delete without ever setting a reaction — should be 204
-        resp = httpx.delete(
-            f"{API_PREFIX}/chats/{chat_id}/messages/{assistant_msg_id}/reaction",
-        )
-        assert resp.status_code == 204
+        assert httpx.delete(reaction_url(chat_id, assistant_msg_id)).status_code == 204

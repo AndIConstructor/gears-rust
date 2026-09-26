@@ -1,11 +1,43 @@
 """Tests for chat CRUD operations."""
 
 import uuid
+from datetime import datetime
 
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, DEFAULT_MODEL, STANDARD_MODEL
+from .conftest import (
+    API_PREFIX,
+    DEFAULT_MODEL,
+    DISABLED_MODEL,
+    STANDARD_MODEL,
+    TOKEN_USER_B,
+    assert_problem,
+    auth_headers,
+    expect_done,
+    stream_message,
+)
+
+
+def _ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def list_all_chats(page_size: int, token: str) -> list[str]:
+    """Follow `page_info.next_cursor` to the end; return chat ids in order."""
+    ids: list[str] = []
+    params = {"limit": page_size}
+    for _ in range(1000):
+        resp = httpx.get(f"{API_PREFIX}/chats", params=params, headers=auth_headers(token))
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body["items"]) <= page_size
+        ids.extend(c["id"] for c in body["items"])
+        cursor = body["page_info"].get("next_cursor")
+        if not cursor:
+            return ids
+        params = {"limit": page_size, "cursor": cursor}
+    raise AssertionError("pagination did not terminate")
 
 
 @pytest.mark.multi_provider
@@ -34,9 +66,20 @@ class TestCreateChat:
 
     def test_create_chat_invalid_model(self, server):
         resp = httpx.post(f"{API_PREFIX}/chats", json={"model": "nonexistent-model"})
-        assert resp.status_code in (400, 404)
-        body = resp.json()
-        assert "type" in body and "status" in body and "detail" in body
+        assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_MODEL")
+
+    def test_create_chat_disabled_model(self, server):
+        resp = httpx.post(f"{API_PREFIX}/chats", json={"model": DISABLED_MODEL})
+        assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_MODEL")
+
+    def test_create_chat_title_length_boundary(self, server):
+        """Title of 255 characters is accepted, 256 is rejected."""
+        resp = httpx.post(f"{API_PREFIX}/chats", json={"title": "T" * 255})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["title"] == "T" * 255
+        assert_problem(
+            httpx.post(f"{API_PREFIX}/chats", json={"title": "T" * 256}), 400, "invalid_argument",
+        )
 
 
 @pytest.mark.multi_provider
@@ -56,9 +99,7 @@ class TestGetChat:
     def test_get_chat_not_found(self, server):
         fake_id = str(uuid.uuid4())
         resp = httpx.get(f"{API_PREFIX}/chats/{fake_id}")
-        assert resp.status_code == 404
-        body = resp.json()
-        assert "type" in body and "status" in body and "detail" in body
+        assert_problem(resp, 404, "not_found")
 
 
 @pytest.mark.multi_provider
@@ -75,15 +116,44 @@ class TestListChats:
         assert provider_chat["id"] in [c["id"] for c in body["items"]]
 
     def test_list_chats_pagination(self, server):
-        # Create a few chats
-        for _ in range(3):
-            r = httpx.post(f"{API_PREFIX}/chats", json={})
+        """Following next_cursor visits every chat exactly once, in list order.
+
+        Runs as user B, whose chat list stays short (user A owns hundreds of chats).
+        """
+        headers = auth_headers(TOKEN_USER_B)
+        for _ in range(5):
+            r = httpx.post(f"{API_PREFIX}/chats", json={}, headers=headers)
             assert r.status_code == 201
-        resp = httpx.get(f"{API_PREFIX}/chats", params={"limit": 2})
-        assert resp.status_code == 200
-        body = resp.json()
-        assert "page_info" in body
-        assert len(body["items"]) <= 2
+        full = httpx.get(f"{API_PREFIX}/chats", params={"limit": 100}, headers=headers).json()
+        assert full["page_info"].get("next_cursor") is None, "B's chats must fit in one page"
+        full = full["items"]
+        assert len(full) >= 5
+
+        paged = list_all_chats(page_size=2, token=TOKEN_USER_B)
+        assert len(paged) == len(set(paged)), "duplicate chats across pages"
+        assert paged == [c["id"] for c in full]
+
+    def test_list_chats_unknown_filter_field_400(self, server):
+        resp = httpx.get(f"{API_PREFIX}/chats", params={"$filter": "nosuchfield eq 'x'"})
+        assert_problem(resp, 400, "invalid_argument")
+
+    def test_list_chats_malformed_cursor_400(self, server):
+        resp = httpx.get(f"{API_PREFIX}/chats", params={"cursor": "not-a-cursor"})
+        assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_CURSOR")
+
+    def test_send_moves_older_chat_to_top(self, server):
+        """The list is ordered by activity: sending into an older chat puts it first."""
+        older = httpx.post(f"{API_PREFIX}/chats", json={}).json()["id"]
+        newer = httpx.post(f"{API_PREFIX}/chats", json={}).json()["id"]
+        ids = [c["id"] for c in httpx.get(f"{API_PREFIX}/chats").json()["items"]]
+        assert ids.index(newer) < ids.index(older)
+
+        status, events, _ = stream_message(older, "Say OK.")
+        assert status == 200
+        expect_done(events)
+
+        ids = [c["id"] for c in httpx.get(f"{API_PREFIX}/chats").json()["items"]]
+        assert ids[0] == older
 
 
 @pytest.mark.multi_provider
@@ -91,6 +161,7 @@ class TestUpdateChat:
     """PATCH /v1/chats/{id}"""
 
     def test_update_title(self, provider_chat):
+        """PATCH title is persisted and bumps updated_at."""
         chat_id = provider_chat["id"]
         resp = httpx.patch(
             f"{API_PREFIX}/chats/{chat_id}",
@@ -98,7 +169,10 @@ class TestUpdateChat:
         )
         assert resp.status_code == 200
         assert resp.json()["title"] == "Updated Title"
-        assert "updated_at" in resp.json()
+
+        fetched = httpx.get(f"{API_PREFIX}/chats/{chat_id}").json()
+        assert fetched["title"] == "Updated Title"
+        assert _ts(fetched["updated_at"]) > _ts(provider_chat["updated_at"])
 
     def test_update_not_found(self, server):
         fake_id = str(uuid.uuid4())
@@ -115,16 +189,32 @@ class TestUpdateChat:
             f"{API_PREFIX}/chats/{chat_id}",
             json={"title": "   "},
         )
-        assert resp.status_code in (400, 422), f"Expected 400/422 for whitespace title, got {resp.status_code}"
+        assert_problem(resp, 400, "invalid_argument")
+        assert httpx.get(f"{API_PREFIX}/chats/{chat_id}").json().get("title") == provider_chat.get("title")
 
-    def test_update_title_max_length(self, provider_chat):
-        """02-13: Title exceeding max length should be rejected."""
-        chat_id = provider_chat["id"]
+    def test_update_without_title_is_422(self, provider_chat):
+        """A body that does not match the schema is 422 invalid_argument."""
+        resp = httpx.patch(f"{API_PREFIX}/chats/{provider_chat['id']}", json={})
+        assert_problem(resp, 422, "invalid_argument")
+
+    def test_update_malformed_json_is_400(self, provider_chat):
         resp = httpx.patch(
-            f"{API_PREFIX}/chats/{chat_id}",
-            json={"title": "A" * 1001},
+            f"{API_PREFIX}/chats/{provider_chat['id']}",
+            content=b"{not json",
+            headers={"Content-Type": "application/json"},
         )
-        assert resp.status_code in (400, 422), f"Expected 400/422 for long title, got {resp.status_code}"
+        assert_problem(resp, 400, "invalid_argument")
+
+    def test_update_title_length_boundary(self, provider_chat):
+        """02-13: a 255-character title is accepted, 256 is rejected."""
+        chat_id = provider_chat["id"]
+        resp = httpx.patch(f"{API_PREFIX}/chats/{chat_id}", json={"title": "A" * 255})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["title"] == "A" * 255
+
+        resp = httpx.patch(f"{API_PREFIX}/chats/{chat_id}", json={"title": "A" * 256})
+        assert_problem(resp, 400, "invalid_argument")
+        assert httpx.get(f"{API_PREFIX}/chats/{chat_id}").json()["title"] == "A" * 255
 
 
 @pytest.mark.multi_provider
@@ -136,13 +226,13 @@ class TestDeleteChat:
         resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}")
         assert resp.status_code == 204
 
-        # Verify gone
-        resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}")
-        assert resp.status_code == 404
+        # Verify gone, and a second DELETE is 404
+        assert_problem(httpx.get(f"{API_PREFIX}/chats/{chat_id}"), 404, "not_found")
+        assert_problem(httpx.delete(f"{API_PREFIX}/chats/{chat_id}"), 404, "not_found")
+        ids = [c["id"] for c in httpx.get(f"{API_PREFIX}/chats").json()["items"]]
+        assert chat_id not in ids
 
     def test_delete_not_found(self, server):
         fake_id = str(uuid.uuid4())
         resp = httpx.delete(f"{API_PREFIX}/chats/{fake_id}")
-        assert resp.status_code == 404
-        body = resp.json()
-        assert "type" in body and "status" in body and "detail" in body
+        assert_problem(resp, 404, "not_found")

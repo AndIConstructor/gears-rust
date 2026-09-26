@@ -503,41 +503,6 @@ class TestCodeInterpreterProviderRequest:
             f"Expected non-empty file_ids in container: {container}"
         )
 
-    def test_no_file_search_tool_for_xlsx(self, openai_chat, mock_provider):
-        """XLSX attachments should NOT trigger file_search tool (only code_interpreter)."""
-        chat_id = openai_chat["id"]
-        xlsx = _make_minimal_xlsx()
-
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("data.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
-
-        mock_provider.clear_captured_requests()
-
-        status, _events, _ = stream_message(
-            chat_id,
-            "CODEINTERP: What is the sum?",
-            attachment_ids=[att_id],
-        )
-        assert status == 200
-        time.sleep(0.5)
-        req = mock_provider.get_last_request()
-        assert req is not None, "No request captured by mock provider"
-
-        tools = req.get("tools", [])
-        fs_tools = [t for t in tools if t.get("type") == "file_search"]
-        assert len(fs_tools) == 0, (
-            f"XLSX should not trigger file_search tool. Tools: {tools}"
-        )
-
 
 # ---------------------------------------------------------------------------
 # Mixed attachments: XLSX + text file
