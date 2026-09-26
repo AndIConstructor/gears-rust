@@ -12,7 +12,6 @@ the E2E time budget.
 from __future__ import annotations
 
 import io
-import json
 import time
 import uuid
 
@@ -26,13 +25,16 @@ from .conftest import (
     USER_A_ID,
     assert_no_reserves,
     assert_problem,
+    chat_cleanup_payloads,
     expect_done,
     find_period,
     get_quota_status,
     open_stream,
-    poll_until,
+    outbox_payloads,
+    provider_file_id,
     query_db,
     slow_scenario,
+    wait_cleanup_terminal,
 )
 
 
@@ -68,26 +70,17 @@ def upload_file(
     )
 
 
-def chat_cleanup_payloads(chat_id: str) -> list[dict]:
-    """Chat soft-delete cleanup payloads for `chat_id` in the outbox body table."""
-    rows = query_db(
-        "SELECT payload FROM toolkit_outbox_body WHERE payload LIKE ?", (f"%{chat_id}%",),
-    )
-    payloads = [json.loads(r["payload"]) for r in rows]
-    return [
-        p for p in payloads
-        if p.get("chat_id") == chat_id and p.get("reason") == "chat_soft_delete"
-    ]
+def upload_ready(chat_id: str, content: bytes = b"Hello, world!", filename: str = "test.txt") -> str:
+    """Upload a document; the synchronous upload answers 201 `ready`. Return its id."""
+    resp = upload_file(chat_id, content, filename)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] == "ready", resp.json()
+    return resp.json()["id"]
 
 
 # ---------------------------------------------------------------------------
 # Provider-side cleanup (mock provider, offline only)
 # ---------------------------------------------------------------------------
-
-def _require_offline(request):
-    if request.config.getoption("mode") == "online":
-        pytest.skip("inspects the mock provider (offline mode)")
-
 
 def _wait_for(predicate, what: str, timeout: float = 20.0, interval: float = 0.2):
     """Poll `predicate()` until it returns a truthy value; return that value."""
@@ -118,46 +111,26 @@ def _file_deletes(mock_provider, file_id: str) -> list[str]:
     ]
 
 
-def _provider_file_id(attachment_id: str) -> str:
-    rows = query_db("SELECT provider_file_id FROM attachments WHERE id = ?", (attachment_id,))
-    assert len(rows) == 1 and rows[0]["provider_file_id"], rows
-    return rows[0]["provider_file_id"]
-
-
 def _vector_store_rows(chat_id: str) -> list[dict]:
     return query_db(
         "SELECT vector_store_id FROM chat_vector_stores WHERE chat_id = ?", (chat_id,),
     )
 
 
-
 def _chat_with_ready_docs(model: str, n: int) -> tuple[str, list[str]]:
     chat_id = create_chat(model)["id"]
-    att_ids = []
-    for i in range(n):
-        resp = upload_file(chat_id, f"doc {i}".encode(), f"doc{i}.txt")
-        assert resp.status_code == 201, resp.text
-        att_ids.append(resp.json()["id"])
-        poll_attachment_ready(chat_id, att_ids[-1])
+    att_ids = [upload_ready(chat_id, f"doc {i}".encode(), f"doc{i}.txt") for i in range(n)]
     return chat_id, att_ids
-
-
-def _wait_cleanup_terminal(att_ids: list[str]) -> dict[str, str]:
-    """Wait until every attachment's cleanup_status is terminal; return them."""
-    def statuses():
-        st = {a: _cleanup_status(a) for a in att_ids}
-        return st if all(v in ("done", "failed") for v in st.values()) else None
-    return _wait_for(statuses, "terminal cleanup_status of every attachment")
 
 
 def check_chat_cleanup_404_is_success(mock_provider, model: str) -> None:
     chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
-    file_id = _provider_file_id(att_id)
+    file_id = provider_file_id(att_id)
 
     mock_provider.set_fault("DELETE", f"/files/{file_id}", 404)
     assert delete_chat(chat_id).status_code == 204
 
-    assert _wait_cleanup_terminal([att_id]) == {att_id: "done"}
+    assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
     row = query_db("SELECT cleanup_attempts FROM attachments WHERE id = ?", (att_id,))[0]
     assert row["cleanup_attempts"] == 0, row
     # The one delete that was made got the 404.
@@ -166,7 +139,7 @@ def check_chat_cleanup_404_is_success(mock_provider, model: str) -> None:
 
 def check_attachment_cleanup_404_is_success(mock_provider, model: str) -> None:
     chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
-    file_id = _provider_file_id(att_id)
+    file_id = provider_file_id(att_id)
 
     mock_provider.set_fault("DELETE", f"/files/{file_id}", 404)
     resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
@@ -174,47 +147,46 @@ def check_attachment_cleanup_404_is_success(mock_provider, model: str) -> None:
 
     _wait_for(lambda: _file_deletes(mock_provider, file_id), "the provider file delete", timeout=10.0)
     # The handler marks the row right after the provider answered.
-    _wait_for(
-        lambda: _cleanup_status(att_id) in ("done", "failed"), "terminal cleanup_status",
-        timeout=5.0,
-    )
-    assert _cleanup_status(att_id) == "done"
+    assert wait_cleanup_terminal([att_id], timeout=5.0) == {att_id: "done"}
     assert len(_file_deletes(mock_provider, file_id)) == 1, mock_provider.get_request_paths()
 
 
 def check_vector_store_deleted_after_files(mock_provider, model: str) -> None:
     chat_id, att_ids = _chat_with_ready_docs(model, 2)
+    file_ids = [provider_file_id(a) for a in att_ids]
     vs_rows = _vector_store_rows(chat_id)
     assert len(vs_rows) == 1 and vs_rows[0]["vector_store_id"], vs_rows
     vs_id = vs_rows[0]["vector_store_id"]
 
     mock_provider.clear_captured_requests()
     assert delete_chat(chat_id).status_code == 204
-    assert set(_wait_cleanup_terminal(att_ids).values()) == {"done"}
+    assert set(wait_cleanup_terminal(att_ids).values()) == {"done"}
     _wait_for(lambda: not _vector_store_rows(chat_id), "chat_vector_stores row removal")
 
+    # Only the requests for this chat's files and vector store: the cleanup of
+    # an earlier test's chat may still be running.
     paths = [(m, p.split("?")[0]) for m, p in mock_provider.get_request_paths()]
-    file_deletes = [
-        i for i, (m, p) in enumerate(paths)
-        if m == "DELETE" and "/files/" in p and "/vector_stores/" not in p
-    ]
+    file_deletes = {
+        fid: [
+            i for i, (m, p) in enumerate(paths)
+            if m == "DELETE" and f"/files/{fid}" in p and "/vector_stores/" not in p
+        ]
+        for fid in file_ids
+    }
     vs_deletes = [
         i for i, (m, p) in enumerate(paths)
         if m == "DELETE" and p.rstrip("/").endswith(f"/vector_stores/{vs_id}")
     ]
-    assert len(file_deletes) == 2, paths
+    assert [len(v) for v in file_deletes.values()] == [1, 1], paths
     assert len(vs_deletes) == 1, paths
-    assert max(file_deletes) < vs_deletes[0], paths
+    assert max(i for v in file_deletes.values() for i in v) < vs_deletes[0], paths
 
 
 # Provider-side cleanup for both storage backends (openai, azure).
 
+@pytest.mark.usefixtures("offline_only")
 class TestProviderCleanupOpenAI:
     """Provider-side cleanup of an OpenAI-backed chat (storage_backend = provider id)."""
-
-    @pytest.fixture(autouse=True)
-    def _offline_only(self, request):
-        _require_offline(request)
 
     @pytest.mark.timeout(40)
     def test_chat_cleanup_provider_404_is_success(self, mock_provider):
@@ -224,8 +196,8 @@ class TestProviderCleanupOpenAI:
 
     @pytest.mark.timeout(40)
     def test_vector_store_deleted_after_files(self, mock_provider):
-        """19-04: chat cleanup deletes every provider file before the chat
-        vector store, then removes the chat_vector_stores row."""
+        """19-04: chat cleanup deletes both provider files of the chat before
+        its vector store, then removes the chat_vector_stores row."""
         check_vector_store_deleted_after_files(mock_provider, STANDARD_MODEL)
 
     @pytest.mark.timeout(40)
@@ -235,12 +207,9 @@ class TestProviderCleanupOpenAI:
         check_attachment_cleanup_404_is_success(mock_provider, STANDARD_MODEL)
 
 
+@pytest.mark.usefixtures("offline_only")
 class TestProviderCleanupAzure:
     """The same scenarios for an Azure-backed chat (storage_backend "azure")."""
-
-    @pytest.fixture(autouse=True)
-    def _offline_only(self, request):
-        _require_offline(request)
 
     @pytest.mark.timeout(40)
     def test_chat_cleanup_provider_404_is_success(self, mock_provider):
@@ -262,15 +231,15 @@ class TestProviderCleanupAzure:
 # Tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("offline_only")
 class TestCleanup:
     """Chat deletion — observable effects."""
 
     @pytest.mark.timeout(30)
-    def test_running_turn_completes_and_is_billed_after_chat_delete(self, request, mock_provider):
+    def test_running_turn_completes_and_is_billed_after_chat_delete(self, mock_provider):
         """19-16 (DESIGN, chat deletion): a turn running when its chat is
         deleted is not cancelled: the stream ends with `done`, the turn is
         completed and its usage is charged."""
-        _require_offline(request)
         chat_id = create_chat()["id"]  # azure-gpt-4.1
         rid = str(uuid.uuid4())
         used_before = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
@@ -290,13 +259,9 @@ class TestCleanup:
         assert used_after - used_before == cost
 
     def test_deleted_chat_hides_chat_and_attachment(self, server):
-        """After DELETE chat, the chat and its attachment return 404."""
-        chat = create_chat()
-        chat_id = chat["id"]
-
-        upload_resp = upload_file(chat_id)
-        assert upload_resp.status_code == 201
-        attachment_id = upload_resp.json()["id"]
+        """After DELETE chat, the chat, its attachment and its messages return 404."""
+        chat_id = create_chat()["id"]
+        attachment_id = upload_ready(chat_id)
         att_url = f"{API_PREFIX}/chats/{chat_id}/attachments/{attachment_id}"
         assert httpx.get(att_url, timeout=10).status_code == 200
 
@@ -310,25 +275,8 @@ class TestCleanup:
 
 
 # ---------------------------------------------------------------------------
-# DB helpers for cleanup worker scenarios
+# Cleanup worker E2E scenarios
 # ---------------------------------------------------------------------------
-
-def poll_attachment_ready(chat_id: str, attachment_id: str, timeout: float = 30.0):
-    """Poll until an attachment is ready; fail fast if upload failed."""
-    resp = poll_until(
-        lambda: httpx.get(
-            f"{API_PREFIX}/chats/{chat_id}/attachments/{attachment_id}",
-            timeout=10,
-        ),
-        until=lambda r: r.json()["status"] in ("ready", "failed"),
-        timeout=timeout,
-    )
-    body = resp.json()
-    assert body["status"] == "ready", (
-        f"Attachment {attachment_id} upload failed (expected ready): {body}"
-    )
-    return resp
-
 
 def get_attachment_rows(chat_id: str) -> list[dict]:
     """Query all attachment rows for a chat from DB."""
@@ -339,205 +287,83 @@ def get_attachment_rows(chat_id: str) -> list[dict]:
     )
 
 
-def get_outbox_messages(queue_name: str, limit: int = 50) -> list[dict]:
-    """Query outbox messages for a given queue.
-
-    Checks both incoming (not yet sequenced) and outgoing (sequenced) tables
-    because the sequencer runs asynchronously.
-
-    ToolKit outbox schema:
-    - toolkit_outbox_partitions: queue -> partition_id mapping
-    - toolkit_outbox_incoming / toolkit_outbox_outgoing: id, partition_id, body_id
-    - toolkit_outbox_body: id, payload, payload_type, created_at
-    """
-    # Query both incoming (not yet sequenced) and outgoing (sequenced).
-    outgoing = query_db(
-        """
-        SELECT b.payload, b.payload_type, b.created_at
-        FROM toolkit_outbox_outgoing o
-        JOIN toolkit_outbox_body b ON o.body_id = b.id
-        JOIN toolkit_outbox_partitions p ON o.partition_id = p.id
-        WHERE p.queue = ?
-        ORDER BY b.created_at DESC LIMIT ?
-        """,
-        (queue_name, limit),
-    )
-    incoming = query_db(
-        """
-        SELECT b.payload, b.payload_type, b.created_at
-        FROM toolkit_outbox_incoming i
-        JOIN toolkit_outbox_body b ON i.body_id = b.id
-        JOIN toolkit_outbox_partitions p ON i.partition_id = p.id
-        WHERE p.queue = ?
-        ORDER BY b.created_at DESC LIMIT ?
-        """,
-        (queue_name, limit),
-    )
-    return outgoing + incoming
-
-
-# ---------------------------------------------------------------------------
-# Cleanup worker E2E scenarios
-# ---------------------------------------------------------------------------
-
 class TestCleanupWorkerDB:
-    """Cleanup worker — verify DB state transitions.
+    """Cleanup worker — DB state and outbox payloads.
 
-    These tests inspect the database directly to verify that:
-    - Chat deletion marks attachments as cleanup_status = 'pending'
-    - Chat cleanup outbox event is enqueued
+    - Chat deletion ends the cleanup of each attachment in `done`
+    - Chat deletion enqueues one chat cleanup event (also for an empty chat)
     - Attachment deletion enqueues a per-attachment cleanup event
     """
 
     def test_chat_deletion_marks_attachments_for_cleanup(self, server):
         """DELETE chat → the attachment's cleanup ends in `done` after one
         successful provider delete (cleanup_attempts stays 0)."""
-        chat = create_chat()
-        chat_id = chat["id"]
-
-        upload_resp = upload_file(chat_id)
-        assert upload_resp.status_code == 201
-        att_id = upload_resp.json()["id"]
-        poll_attachment_ready(chat_id, att_id)
+        chat_id = create_chat()["id"]
+        att_id = upload_ready(chat_id)
         assert _cleanup_status(att_id) is None
 
         assert delete_chat(chat_id).status_code == 204
 
-        assert _wait_cleanup_terminal([att_id]) == {att_id: "done"}
+        assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
         rows = get_attachment_rows(chat_id)
         assert [(r["cleanup_status"], r["cleanup_attempts"]) for r in rows] == [("done", 0)], rows
 
     def test_chat_deletion_enqueues_chat_cleanup_event(self, server):
-        """DELETE chat → chat_cleanup outbox message is enqueued."""
-        chat = create_chat()
-        chat_id = chat["id"]
+        """DELETE chat → one chat cleanup outbox payload with the chat's
+        tenant, deletion time and a system request id."""
+        chat_id = create_chat()["id"]
+        upload_ready(chat_id)  # work for the cleanup handler
 
-        # Upload an attachment (so there's work for the cleanup handler)
-        upload_resp = upload_file(chat_id)
-        assert upload_resp.status_code == 201
-        att_id = upload_resp.json()["id"]
-        poll_attachment_ready(chat_id, att_id)
+        assert delete_chat(chat_id).status_code == 204
 
-        # Delete the chat
-        del_resp = delete_chat(chat_id)
-        assert del_resp.status_code == 204
-
-        # The outbox body table stores ALL enqueued payloads durably,
-        # regardless of processing state. Query it directly.
-        import json
-        all_bodies = query_db(
-            "SELECT payload FROM toolkit_outbox_body ORDER BY id DESC LIMIT 50"
-        )
-        found = False
-        for row in all_bodies:
-            try:
-                payload = json.loads(row["payload"])
-                if payload.get("chat_id") == chat_id and payload.get("reason") == "chat_soft_delete":
-                    found = True
-                    assert "system_request_id" in payload
-                    assert "chat_deleted_at" in payload
-                    assert "tenant_id" in payload
-                    break
-            except (json.JSONDecodeError, KeyError):
-                continue
-        assert found, (
-            f"No chat_cleanup body found for chat_id={chat_id}. "
-            f"Total bodies: {len(all_bodies)}"
-        )
+        payloads = chat_cleanup_payloads(chat_id)
+        assert len(payloads) == 1, payloads
+        for key in ("system_request_id", "chat_deleted_at", "tenant_id"):
+            assert key in payloads[0], payloads[0]
 
     def test_attachment_deletion_enqueues_cleanup_event(self, server):
-        """DELETE attachment → per-attachment cleanup outbox event is enqueued."""
-        chat = create_chat()
-        chat_id = chat["id"]
+        """DELETE attachment → one per-attachment cleanup outbox payload."""
+        chat_id = create_chat()["id"]
+        att_id = upload_ready(chat_id)
 
-        # Upload and wait for ready
-        upload_resp = upload_file(chat_id)
-        assert upload_resp.status_code == 201
-        att_id = upload_resp.json()["id"]
-        poll_attachment_ready(chat_id, att_id)
+        resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+        assert resp.status_code == 204
 
-        # Delete the individual attachment
-        del_resp = httpx.delete(
-            f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}",
-            timeout=10,
-        )
-        assert del_resp.status_code == 204
-
-        # Query outbox body table directly (durable, unaffected by handler processing).
-        import json
-        all_bodies = query_db(
-            "SELECT payload FROM toolkit_outbox_body ORDER BY id DESC LIMIT 50"
-        )
-        found = False
-        for row in all_bodies:
-            try:
-                payload = json.loads(row["payload"])
-                if payload.get("attachment_id") == att_id:
-                    found = True
-                    assert payload["event_type"] == "attachment_deleted"
-                    assert payload["chat_id"] == chat_id
-                    assert "provider_file_id" in payload
-                    assert "storage_backend" in payload
-                    break
-            except (json.JSONDecodeError, KeyError):
-                continue
-        assert found, (
-            f"No attachment_cleanup body found for attachment_id={att_id}. "
-            f"Total bodies: {len(all_bodies)}"
-        )
+        payloads = [p for p in outbox_payloads(att_id) if p.get("attachment_id") == att_id]
+        assert len(payloads) == 1, payloads
+        payload = payloads[0]
+        assert payload["event_type"] == "attachment_deleted"
+        assert payload["chat_id"] == chat_id
+        assert "provider_file_id" in payload
+        assert "storage_backend" in payload
 
     def test_chat_deletion_with_multiple_attachments(self, server):
         """DELETE chat with 3 attachments → the cleanup of each one ends in `done`."""
-        chat = create_chat()
-        chat_id = chat["id"]
+        chat_id = create_chat()["id"]
+        att_ids = [
+            upload_ready(chat_id, f"File content {i}".encode(), f"test_{i}.txt")
+            for i in range(3)
+        ]
 
-        att_ids = []
-        for i in range(3):
-            resp = upload_file(
-                chat_id,
-                content=f"File content {i}".encode(),
-                filename=f"test_{i}.txt",
-            )
-            assert resp.status_code == 201
-            att_ids.append(resp.json()["id"])
+        assert delete_chat(chat_id).status_code == 204
 
-        # Wait for all to be ready
-        for att_id in att_ids:
-            poll_attachment_ready(chat_id, att_id)
-
-        # Delete chat
-        del_resp = delete_chat(chat_id)
-        assert del_resp.status_code == 204
-
-        # Every attachment's cleanup ends in `done`.
-        assert _wait_cleanup_terminal(att_ids) == {a: "done" for a in att_ids}
+        assert wait_cleanup_terminal(att_ids) == {a: "done" for a in att_ids}
 
     def test_second_delete_chat_404_single_cleanup_event(self, server):
         """A second DELETE of a chat is 404 and enqueues no second cleanup event."""
-        chat = create_chat()
-        chat_id = chat["id"]
-        assert upload_file(chat_id).status_code == 201
+        chat_id = create_chat()["id"]
+        upload_ready(chat_id)
 
         assert delete_chat(chat_id).status_code == 204
         assert_problem(delete_chat(chat_id), 404, "not_found")
         assert len(chat_cleanup_payloads(chat_id)) == 1
 
     def test_chat_without_attachments_still_enqueues(self, server):
-        """DELETE empty chat → cleanup event still enqueued (handler handles gracefully)."""
-        chat = create_chat()
-        chat_id = chat["id"]
+        """DELETE of an empty chat still enqueues one chat cleanup event
+        (reason `chat_soft_delete`)."""
+        chat_id = create_chat()["id"]
 
-        del_resp = delete_chat(chat_id)
-        assert del_resp.status_code == 204
+        assert delete_chat(chat_id).status_code == 204
 
-        # Query outbox body table directly.
-        import json
-        all_bodies = query_db(
-            "SELECT payload FROM toolkit_outbox_body ORDER BY id DESC LIMIT 50"
-        )
-        found = any(
-            json.loads(row["payload"]).get("chat_id") == chat_id
-            for row in all_bodies
-            if row["payload"]
-        )
-        assert found, "Chat cleanup event should be enqueued even for empty chat"
+        payloads = chat_cleanup_payloads(chat_id)
+        assert [p["reason"] for p in payloads] == ["chat_soft_delete"], payloads

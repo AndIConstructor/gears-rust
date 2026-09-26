@@ -8,7 +8,6 @@ code_interpreter_calls counter and reserves in the DB.
 
 from __future__ import annotations
 
-import io
 import uuid
 from datetime import datetime, timezone
 
@@ -17,26 +16,10 @@ import httpx
 
 from .conftest import (
     API_PREFIX, PROVIDER_DEFAULT_MODEL, USER_A_ID,
-    assert_no_reserves, expect_done, poll_until, query_db, stream_message,
+    assert_no_reserves, expect_done, find_period, get_quota_status, query_db, stream_message,
 )
+from .test_attachments import _upload_ready
 from .test_code_interpreter import XLSX_CONTENT_TYPE, _make_minimal_xlsx
-
-
-# ── Quota endpoint helpers ───────────────────────────────────────────────
-
-def _get_quota_status() -> dict:
-    resp = httpx.get(f"{API_PREFIX}/quota/status", timeout=10)
-    assert resp.status_code == 200
-    return resp.json()
-
-
-def _find_period(tiers: list, tier_name: str, period_name: str) -> dict | None:
-    for t in tiers:
-        if t["tier"] == tier_name:
-            for p in t["periods"]:
-                if p["period"] == period_name:
-                    return p
-    return None
 
 
 # ── DB helpers (quota_usage tool counters are not exposed via REST) ─────
@@ -75,31 +58,17 @@ def xlsx_chat(provider):
     chat = resp.json()
     chat_id = chat["id"]
 
-    xlsx = _make_minimal_xlsx()
-    resp = httpx.post(
-        f"{API_PREFIX}/chats/{chat_id}/attachments",
-        files={"file": ("data.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-        timeout=60,
-    )
-    assert resp.status_code == 201
-    att_id = resp.json()["id"]
-    resp = poll_until(
-        lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-        until=lambda r: r.json()["status"] in ("ready", "failed"),
-    )
-    assert resp.json()["status"] == "ready", "Attachment did not become ready"
+    att_id = _upload_ready(chat_id, "data.xlsx", _make_minimal_xlsx(), XLSX_CONTENT_TYPE)
 
     return {"chat_id": chat_id, "att_id": att_id, "model": model}
 
 
 @pytest.mark.multi_provider
+@pytest.mark.usefixtures("offline_only")
 class TestCodeInterpreterUsageAccounting:
-    """Verify that code interpreter turns produce correct quota and message records."""
+    """Verify that code interpreter turns produce correct quota and message records.
 
-    @pytest.fixture(autouse=True)
-    def _offline_only(self, request):
-        if request.config.getoption("mode") == "online":
-            pytest.skip("literal credit amounts depend on the mock's fixed usage")
+    Offline only: the literal credit amounts depend on the mock's fixed usage."""
 
     def test_code_interpreter_usage_correct(self, provider, server, xlsx_chat):
         """Single CI turn: verify credits, messages, tool events, and turn state."""
@@ -107,9 +76,7 @@ class TestCodeInterpreterUsageAccounting:
         att_id = xlsx_chat["att_id"]
 
         # Snapshot quota before
-        before = _get_quota_status()
-        before_td = _find_period(before["tiers"], "total", "daily")
-        spent_before = before_td["used_credits_micro"]
+        spent_before = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
 
         rid = str(uuid.uuid4())
         status, events, _ = stream_message(
@@ -162,8 +129,7 @@ class TestCodeInterpreterUsageAccounting:
         # ── Verify credits via quota endpoint ──
         assert sse_usage == EXPECTED_USAGE
         assert_no_reserves(USER_A_ID)
-        after = _get_quota_status()
-        spent_after = _find_period(after["tiers"], "total", "daily")["used_credits_micro"]
+        spent_after = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
         assert spent_after - spent_before == EXPECTED_CREDITS[provider]
 
     def test_code_interpreter_calls_tracked_in_db(self, provider, server, xlsx_chat):

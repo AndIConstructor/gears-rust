@@ -296,6 +296,57 @@ def uuid_from_db(value) -> str | None:
     return str(value)
 
 
+def turn_count(chat_id: str) -> int:
+    """Number of chat_turns rows of a chat (soft-deleted rows included)."""
+    return query_db(
+        "SELECT COUNT(*) AS n FROM chat_turns WHERE chat_id = ?", (chat_id,),
+    )[0]["n"]
+
+
+def provider_file_id(attachment_id: str) -> str:
+    """The provider file id stored for an attachment (never exposed over REST)."""
+    rows = query_db("SELECT provider_file_id FROM attachments WHERE id = ?", (attachment_id,))
+    assert len(rows) == 1 and rows[0]["provider_file_id"], rows
+    return rows[0]["provider_file_id"]
+
+
+def outbox_payloads(needle: str) -> list[dict]:
+    """JSON payloads of the outbox body table that contain `needle`."""
+    rows = query_db(
+        "SELECT payload FROM toolkit_outbox_body WHERE payload LIKE ?", (f"%{needle}%",),
+    )
+    return [json.loads(r["payload"]) for r in rows]
+
+
+def chat_cleanup_payloads(chat_id: str) -> list[dict]:
+    """Chat soft-delete cleanup payloads of `chat_id` in the outbox body table."""
+    return [
+        p for p in outbox_payloads(chat_id)
+        if p.get("chat_id") == chat_id and p.get("reason") == "chat_soft_delete"
+    ]
+
+
+def wait_cleanup_terminal(attachment_ids: list[str], timeout: float = 20.0) -> dict[str, str]:
+    """Poll until the cleanup_status of every attachment is `done` or `failed`;
+    return {attachment_id: cleanup_status}."""
+    def statuses() -> dict[str, str]:
+        out = {}
+        for att_id in attachment_ids:
+            rows = query_db("SELECT cleanup_status FROM attachments WHERE id = ?", (att_id,))
+            assert len(rows) == 1, rows
+            out[att_id] = rows[0]["cleanup_status"]
+        return out
+
+    deadline = time.monotonic() + timeout
+    current = statuses()
+    while not all(v in ("done", "failed") for v in current.values()):
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"cleanup not terminal within {timeout}s: {current}")
+        time.sleep(0.2)
+        current = statuses()
+    return current
+
+
 def reserved_credits_total(user_id: str = USER_A_ID) -> int:
     """SUM(quota_usage.reserved_credits_micro) over all rows of a user."""
     rows = query_db(
@@ -740,7 +791,11 @@ def pytest_configure(config):
     """Register mini-chat markers."""
     config.addinivalue_line("markers", "openai: Tests targeting OpenAI provider")
     config.addinivalue_line("markers", "azure: Tests targeting Azure OpenAI provider")
-    config.addinivalue_line("markers", "multi_provider: Tests requiring multiple providers")
+    config.addinivalue_line(
+        "markers",
+        "multi_provider: Tests parameterized over the OpenAI and Azure providers "
+        "(`provider` / `provider_chat` fixtures) or using a chat of each provider",
+    )
     config.addinivalue_line("markers", "online_only: Tests that require real cloud (skipped in offline mode)")
 
 
@@ -1006,6 +1061,14 @@ def _await_oagw_upstreams(server, headers, expected, timeout=60.0):
             return
         time.sleep(0.5)
     print(f"[e2e] WARN: OAGW upstreams did not reach >= {expected} within {timeout:.0f}s")
+
+
+@pytest.fixture
+def offline_only(request):
+    """Skip the test in online mode: it drives or inspects the mock provider
+    (in online mode `mock_provider` is a no-op that records nothing)."""
+    if request.config.getoption("mode") == "online":
+        pytest.skip("requires the mock provider (offline mode)")
 
 
 @pytest.fixture(scope="session")

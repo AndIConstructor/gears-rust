@@ -20,10 +20,10 @@ from .conftest import (
     expect_done,
     expect_stream_started,
     parse_sse,
-    poll_until,
     query_db,
     stream_message,
 )
+from .test_attachments import _upload_ready
 
 
 @pytest.fixture
@@ -124,10 +124,11 @@ class TestXlsxUploadAccepted:
         assert body["content_type"] == XLSX_CONTENT_TYPE
         assert body["kind"] == "document"
 
+    @pytest.mark.usefixtures("offline_only")
     def test_xlsx_rejected_without_code_interpreter(self, chat_with_model, mock_provider):
         """An XLSX is only usable by code_interpreter: on a model without it
         (gpt-5-nano) the upload is 400 invalid_argument and nothing is stored
-        or sent to the provider."""
+        or sent to the provider (offline only: checks the mock's traffic)."""
         chat_id = chat_with_model("gpt-5-nano")["id"]
         mock_provider.clear_captured_requests()
 
@@ -143,20 +144,9 @@ class TestXlsxUploadAccepted:
 
     def test_xlsx_reaches_ready(self, openai_chat):
         chat_id = openai_chat["id"]
-        xlsx = _make_minimal_xlsx()
+        att_id = _upload_ready(chat_id, "report.xlsx", _make_minimal_xlsx(), XLSX_CONTENT_TYPE)
 
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("report.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-
-        detail = poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        ).json()
+        detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10).json()
         assert detail["status"] == "ready"
         assert detail.get("doc_summary") is None, "XLSX (code_interpreter) should not have doc_summary"
 
@@ -185,17 +175,7 @@ class TestXlsxPurposeRouting:
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("data.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        att_id = _upload_ready(chat_id, "data.xlsx", xlsx, XLSX_CONTENT_TYPE)
 
         mock_provider.clear_captured_requests()
         status, events, _ = stream_message(
@@ -219,17 +199,7 @@ class TestXlsxPurposeRouting:
         """TXT attachment should produce file_search tool, not code_interpreter."""
         chat_id = openai_chat["id"]
 
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("notes.txt", io.BytesIO(b"plain text content"), "text/plain")},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        att_id = _upload_ready(chat_id, "notes.txt", b"plain text content", "text/plain")
 
         mock_provider.clear_captured_requests()
         status, events, _ = stream_message(
@@ -287,68 +257,12 @@ class TestXlsxOctetStreamInference:
 class TestCodeInterpreterToolEvents:
     """XLSX attachment + message → code_interpreter tool events in SSE."""
 
-    def test_code_interpreter_tool_events_in_stream(self, openai_chat):
-        chat_id = openai_chat["id"]
-        xlsx = _make_minimal_xlsx()
-
-        # Upload XLSX
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("sales.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        detail = poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        ).json()
-        assert detail["status"] == "ready"
-
-        # Send message with the XLSX attachment
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "CODEINTERP: Analyze the data in the spreadsheet.", "attachment_ids": [att_id]},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        status = resp.status_code
-        raw = resp.text
-        events = parse_sse(raw) if status == 200 else []
-        assert status == 200, f"Stream failed: {status} {raw[:500]}"
-        expect_done(events)
-        ss = expect_stream_started(events)
-        assert "request_id" in ss.data
-        assert "message_id" in ss.data
-
-        # Verify code_interpreter tool events appeared
-        tool_events = [e for e in events if e.event == "tool"]
-        ci_tools = [
-            t for t in tool_events
-            if isinstance(t.data, dict) and t.data.get("name") == "code_interpreter"
-        ]
-        assert len(ci_tools) >= 1, (
-            f"Expected code_interpreter tool events. "
-            f"Tool events: {[t.data for t in tool_events]}. "
-            f"All event types: {[e.event for e in events]}"
-        )
-
     def test_code_interpreter_has_start_and_done(self, openai_chat):
         """code_interpreter tool events should have both 'start' and 'done' phases."""
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("analysis.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        att_id = _upload_ready(chat_id, "analysis.xlsx", xlsx, XLSX_CONTENT_TYPE)
 
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",
@@ -380,17 +294,7 @@ class TestCodeInterpreterToolEvents:
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("metrics.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        att_id = _upload_ready(chat_id, "metrics.xlsx", xlsx, XLSX_CONTENT_TYPE)
 
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",
@@ -425,17 +329,7 @@ class TestCodeInterpreterToolEvents:
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("data.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        att_id = _upload_ready(chat_id, "data.xlsx", xlsx, XLSX_CONTENT_TYPE)
 
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",
@@ -485,17 +379,7 @@ class TestCodeInterpreterProviderRequest:
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("data.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        att_id = _upload_ready(chat_id, "data.xlsx", xlsx, XLSX_CONTENT_TYPE)
 
         mock_provider.clear_captured_requests()
 
@@ -548,31 +432,11 @@ class TestMixedAttachments:
         chat_id = openai_chat["id"]
 
         # Upload text file (file_search purpose)
-        resp_txt = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("report.txt", io.BytesIO(b"Revenue report: Q1 was strong."), "text/plain")},
-            timeout=60,
-        )
-        assert resp_txt.status_code == 201
-        txt_id = resp_txt.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{txt_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        txt_id = _upload_ready(chat_id, "report.txt", b"Revenue report: Q1 was strong.", "text/plain")
 
         # Upload XLSX file (code_interpreter purpose)
         xlsx = _make_minimal_xlsx()
-        resp_xlsx = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("data.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp_xlsx.status_code == 201
-        xlsx_id = resp_xlsx.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{xlsx_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        xlsx_id = _upload_ready(chat_id, "data.xlsx", xlsx, XLSX_CONTENT_TYPE)
 
         mock_provider.clear_captured_requests()
 
@@ -611,17 +475,7 @@ class TestCodeInterpreterEventOrdering:
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("data.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        )
+        att_id = _upload_ready(chat_id, "data.xlsx", xlsx, XLSX_CONTENT_TYPE)
 
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",
@@ -659,18 +513,7 @@ class TestCodeInterpreterOnline:
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("data.xlsx", io.BytesIO(xlsx), XLSX_CONTENT_TYPE)},
-            timeout=60,
-        )
-        assert resp.status_code == 201
-        att_id = resp.json()["id"]
-        detail = poll_until(
-            lambda: httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10),
-            until=lambda r: r.json()["status"] in ("ready", "failed"),
-        ).json()
-        assert detail["status"] == "ready"
+        att_id = _upload_ready(chat_id, "data.xlsx", xlsx, XLSX_CONTENT_TYPE)
 
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",
