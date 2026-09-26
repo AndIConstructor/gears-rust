@@ -48,6 +48,7 @@ pub(super) enum ProviderEvent {
     ResponseWebSearchCallSearching,
     ResponseWebSearchCallCompleted,
     ResponseCodeInterpreterCallInProgress,
+    /// `response.output_item.done` of a `code_interpreter_call` item.
     ResponseCodeInterpreterCallCompleted {
         /// Concatenated text from all `logs` output items.
         output: String,
@@ -130,13 +131,22 @@ impl RawUsage {
     }
 }
 
-/// Provider error payload from `response.failed` event.
+/// Provider error payload (`response.failed`, `error` event, HTTP error body).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct ProviderErrorPayload {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     code: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     message: String,
+}
+
+/// `OpenAI` sends `"code": null` in some error bodies and events.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// `OpenAI` wraps errors in `{"error": {...}}`.
@@ -233,6 +243,10 @@ pub struct Annotation {
     pub url: Option<String>,
     #[serde(default)]
     pub file_id: Option<String>,
+    /// Present on `file_citation` (the provider-side filename). A real
+    /// `file_citation` has no title, text or range, only a position `index`.
+    #[serde(default)]
+    pub filename: Option<String>,
     #[serde(default)]
     pub start_index: Option<usize>,
     #[serde(default)]
@@ -266,10 +280,44 @@ struct ResponseCompletedData {
     response: ResponseObject,
 }
 
+/// Payload of `response.failed` and of the `error` event.
+///
+/// `response.failed` carries the error in `response.error`; the `error`
+/// event is flat (`{"type":"error","code","message"}`). A top-level
+/// `{"error":{...}}` is accepted as a fallback for both.
 #[derive(Deserialize)]
-struct ResponseFailedData {
+struct ErrorEventData {
     #[serde(default)]
-    error: ProviderErrorPayload,
+    response: Option<FailedResponse>,
+    #[serde(default)]
+    error: Option<ProviderErrorPayload>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FailedResponse {
+    #[serde(default)]
+    error: Option<ProviderErrorPayload>,
+}
+
+impl ErrorEventData {
+    fn into_error(self) -> Option<ProviderErrorPayload> {
+        let Self {
+            response,
+            error,
+            code,
+            message,
+        } = self;
+        response.and_then(|r| r.error).or(error).or_else(|| {
+            (code.is_some() || message.is_some()).then(|| ProviderErrorPayload {
+                code: code.unwrap_or_default(),
+                message: message.unwrap_or_default(),
+            })
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -277,20 +325,49 @@ struct ResponseIncompleteData {
     response: ResponseObject,
 }
 
-/// A single output item from `response.code_interpreter_call.completed`.
+/// One entry of a `code_interpreter_call` item's `outputs`.
 #[derive(Deserialize)]
 struct CodeInterpreterOutputItem {
     #[serde(default, rename = "type")]
     output_type: String,
     /// Present when `output_type == "logs"`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     logs: String,
 }
 
 #[derive(Deserialize)]
-struct CodeInterpreterCompletedData {
+struct OutputItemDoneData {
     #[serde(default)]
+    item: OutputItemDoneItem,
+}
+
+/// The item of `response.output_item.done`; only `code_interpreter_call`
+/// items are read. `outputs` is `null` unless the request has
+/// `include: ["code_interpreter_call.outputs"]`.
+#[derive(Deserialize, Default)]
+struct OutputItemDoneItem {
+    #[serde(default, rename = "type")]
+    item_type: String,
+    #[serde(default, deserialize_with = "null_as_default")]
     outputs: Vec<CodeInterpreterOutputItem>,
+}
+
+/// Join the `logs` outputs, capped at [`MAX_CODE_INTERPRETER_OUTPUT_CHARS`].
+fn code_interpreter_logs(outputs: Vec<CodeInterpreterOutputItem>) -> String {
+    let mut output = outputs
+        .into_iter()
+        .filter(|o| o.output_type == "logs")
+        .map(|o| o.logs)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if output.chars().count() > MAX_CODE_INTERPRETER_OUTPUT_CHARS {
+        output = output
+            .chars()
+            .take(MAX_CODE_INTERPRETER_OUTPUT_CHARS)
+            .collect::<String>();
+        output.push_str("...[truncated]");
+    }
+    output
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -348,33 +425,29 @@ impl FromServerEvent for ProviderEvent {
                 Ok(ProviderEvent::ResponseCodeInterpreterCallInProgress)
             }
 
-            "response.code_interpreter_call.interpreting" => {
-                // Intermediate event — no client-visible update needed.
-                Ok(ProviderEvent::Unknown {
-                    event_name: event_name.to_owned(),
-                })
-            }
+            // `.completed` carries no outputs (only item_id, output_index,
+            // sequence_number); they arrive in the `response.output_item.done`
+            // that follows, which ends the tool call.
+            "response.code_interpreter_call.interpreting"
+            | "response.code_interpreter_call.completed" => Ok(ProviderEvent::Unknown {
+                event_name: event_name.to_owned(),
+            }),
 
-            "response.code_interpreter_call.completed" => {
-                let data: CodeInterpreterCompletedData = serde_json::from_str(&event.data)
-                    .map_err(|e| StreamingError::ServerEventsParse {
-                        detail: format!("failed to parse code interpreter completed: {e}"),
-                    })?;
-                let mut output = data
-                    .outputs
-                    .into_iter()
-                    .filter(|o| o.output_type == "logs")
-                    .map(|o| o.logs)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if output.chars().count() > MAX_CODE_INTERPRETER_OUTPUT_CHARS {
-                    output = output
-                        .chars()
-                        .take(MAX_CODE_INTERPRETER_OUTPUT_CHARS)
-                        .collect::<String>();
-                    output.push_str("...[truncated]");
+            "response.output_item.done" => {
+                let data: OutputItemDoneData = serde_json::from_str(&event.data).map_err(|e| {
+                    StreamingError::ServerEventsParse {
+                        detail: format!("failed to parse output item done: {e}"),
+                    }
+                })?;
+                if data.item.item_type == "code_interpreter_call" {
+                    Ok(ProviderEvent::ResponseCodeInterpreterCallCompleted {
+                        output: code_interpreter_logs(data.item.outputs),
+                    })
+                } else {
+                    Ok(ProviderEvent::Unknown {
+                        event_name: event_name.to_owned(),
+                    })
                 }
-                Ok(ProviderEvent::ResponseCodeInterpreterCallCompleted { output })
             }
 
             "response.completed" => {
@@ -390,12 +463,14 @@ impl FromServerEvent for ProviderEvent {
             }
 
             "response.failed" => {
-                let data: ResponseFailedData = serde_json::from_str(&event.data).map_err(|e| {
+                let data: ErrorEventData = serde_json::from_str(&event.data).map_err(|e| {
                     StreamingError::ServerEventsParse {
                         detail: format!("failed to parse response failed: {e}"),
                     }
                 })?;
-                Ok(ProviderEvent::ResponseFailed { error: data.error })
+                Ok(ProviderEvent::ResponseFailed {
+                    error: data.into_error().unwrap_or_default(),
+                })
             }
 
             "response.incomplete" => {
@@ -411,23 +486,17 @@ impl FromServerEvent for ProviderEvent {
             }
 
             "error" => {
-                // OpenAI sends `event: error` with the actual error details.
-                // Try nested `{"error": {...}}` shape first, then flat shape.
+                // Flat `{"type":"error","code","message"}`; the nested shapes
+                // are accepted too. Unparseable data becomes the message.
                 let sanitized_data = crate::infra::llm::sanitize_provider_message(&event.data);
                 tracing::warn!(data = %sanitized_data, "provider error SSE event");
-                let error =
-                    if let Ok(data) = serde_json::from_str::<ResponseFailedData>(&event.data) {
-                        data.error
-                    } else if let Ok(payload) =
-                        serde_json::from_str::<ProviderErrorPayload>(&event.data)
-                    {
-                        payload
-                    } else {
-                        ProviderErrorPayload {
-                            code: String::new(),
-                            message: event.data.clone(),
-                        }
-                    };
+                let error = serde_json::from_str::<ErrorEventData>(&event.data)
+                    .ok()
+                    .and_then(ErrorEventData::into_error)
+                    .unwrap_or_else(|| ProviderErrorPayload {
+                        code: String::new(),
+                        message: event.data.clone(),
+                    });
                 Ok(ProviderEvent::ResponseFailed { error })
             }
 
@@ -622,13 +691,22 @@ pub(super) fn extract_citations(
                         };
 
                         let is_file = annotation.r#type == "file_citation";
+                        // A real `file_citation` has `filename` and no `title`,
+                        // text or range: its snippet is empty and it has no
+                        // span. `map_citation_ids` replaces the title with the
+                        // attachment filename.
+                        let title = if annotation.title.is_empty() {
+                            annotation.filename.clone().unwrap_or_default()
+                        } else {
+                            annotation.title.clone()
+                        };
                         Citation {
                             source: if is_file {
                                 CitationSource::File
                             } else {
                                 CitationSource::Web
                             },
-                            title: annotation.title.clone(),
+                            title,
                             url: if is_file {
                                 None
                             } else {
@@ -791,6 +869,15 @@ fn build_request_body<M>(request: &LlmRequest<M>, stream: bool) -> serde_json::V
         .collect();
     if !tools.is_empty() {
         body["tools"] = serde_json::Value::Array(tools);
+    }
+    // Without it the provider sends `outputs: null` and the tool `done`
+    // event has an empty output.
+    if request
+        .tools
+        .iter()
+        .any(|t| matches!(t, LlmTool::CodeInterpreter { .. }))
+    {
+        body["include"] = serde_json::json!(["code_interpreter_call.outputs"]);
     }
 
     // Inference params from the typed model-policy channel. The Responses API

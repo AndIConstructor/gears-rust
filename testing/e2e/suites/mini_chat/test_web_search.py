@@ -91,7 +91,9 @@ class TestWebSearchCitations:
         assert len(citation_events[0]["items"]) == 1, citation_events
 
     def test_citation_has_required_fields(self, provider_chat):
-        """The citation carries source `web`, the title and the snippet."""
+        """The citation carries source `web`, the title and the snippet. The
+        OpenAI `url_citation` has no text: the snippet is the cited range
+        [0, 9) of the answer, "Searching"."""
         events = stream_search(provider_chat["id"], "SEARCH: when was the Eiffel Tower built")
         (citations,) = [e.data for e in events if e.event == "citations"]
         (c,) = citations["items"]

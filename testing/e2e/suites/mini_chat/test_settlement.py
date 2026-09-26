@@ -239,6 +239,37 @@ class TestSettlement:
         assert poll_turn(chat["id"], rid)["state"] == "error"
         assert_estimated_settlement(rid, used_before, "failed", "This should fail.")
 
+    def test_incomplete_response_is_done_and_settled_on_actual_usage(self, request, chat):
+        """A provider `response.incomplete` (mock `TRUNCATE`, reason
+        max_output_tokens) ends in `done`, not `error`: the turn is completed
+        with no error code, the truncated text is persisted, and it is settled
+        on the actual usage of `response.usage` (DESIGN, response.incomplete)."""
+        _require_offline(request)
+        rid = str(uuid.uuid4())
+        used_before = total_daily_used()
+        status, events, raw = stream_message(chat["id"], "TRUNCATE", request_id=rid)
+        assert status == 200, raw
+        usage = expect_done(events).data["usage"]
+        assert usage["output_tokens"] == 100, usage
+
+        assert poll_turn(chat["id"], rid)["state"] == "done"
+        rows = query_db(
+            "SELECT t.state, t.error_code, m.content FROM chat_turns t "
+            "JOIN messages m ON m.id = t.assistant_message_id WHERE t.request_id = ?",
+            (rid,),
+        )
+        assert rows == [{"state": "completed", "error_code": None, "content": "Truncated text"}], rows
+
+        assert_no_reserves(USER_A_ID)
+        # azure-gpt-4.1 (base.yaml): 3 and 15 credits_micro per token.
+        cost = usage["input_tokens"] * 3 + usage["output_tokens"] * 15
+        (event,) = usage_events(rid)
+        assert (
+            event["terminal_state"], event["billing_outcome"], event["settlement_method"],
+        ) == ("completed", "completed", "actual"), event
+        assert event["actual_credits_micro"] == cost, event
+        assert total_daily_used() - used_before == cost
+
     def test_one_usage_outbox_event_per_turn(self, chat):
         """A completed turn enqueues exactly one usage event, even after a
         replay (the replay itself succeeds: `done`, `is_new_turn` false)."""

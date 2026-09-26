@@ -1016,17 +1016,18 @@ class TestFileCitationMapping:
     def test_file_citation_maps_to_attachment_id(self, request, chat, mock_provider):
         """05-07: a `file_citation` for the provider file of an attachment is sent
         as `{source: file, attachment_id: <attachment UUID>, title: <filename>}`;
-        a citation of an unknown provider file is dropped; no provider file id
-        appears in the stream."""
+        the OpenAI `file_citation` has no text or range, so `snippet` is empty
+        and there is no `span`. A citation of an unknown provider file is
+        dropped; no provider file id appears in the stream."""
         _require_offline(request)
         chat_id = chat["id"]
         att_id = _upload_ready(chat_id, "zembla.txt", b"Zembla notes.", "text/plain")
         file_id = provider_file_id(att_id)
         mock_provider.set_next_scenario(_file_search_scenario([
-            {"type": "file_citation", "file_id": file_id, "title": "provider-name.txt",
-             "start_index": 0, "end_index": 13, "text": "Based on docs"},
+            {"type": "file_citation", "file_id": file_id,
+             "filename": "provider-name.txt", "index": 13},
             {"type": "file_citation", "file_id": "file-unknown-0123456789",
-             "title": "other.txt", "start_index": 0, "end_index": 5, "text": "Based"},
+             "filename": "other.txt", "index": 5},
         ]))
 
         resp = httpx.post(
@@ -1042,8 +1043,7 @@ class TestFileCitationMapping:
             "source": "file",
             "title": "zembla.txt",
             "attachment_id": att_id,
-            "snippet": "Based on docs",
-            "span": {"start": 0, "end": 13},
+            "snippet": "",
         }]}]
         assert file_id not in resp.text
 
@@ -1060,10 +1060,8 @@ class TestFileCitationMapping:
         assert resp.status_code == 204
 
         mock_provider.set_next_scenario(_file_search_scenario([
-            {"type": "file_citation", "file_id": deleted_file, "title": "old.txt",
-             "start_index": 0, "end_index": 5, "text": "Based"},
-            {"type": "file_citation", "file_id": kept_file, "title": "new.txt",
-             "start_index": 0, "end_index": 13, "text": "Based on docs"},
+            {"type": "file_citation", "file_id": deleted_file, "filename": "old.txt", "index": 5},
+            {"type": "file_citation", "file_id": kept_file, "filename": "new.txt", "index": 13},
         ]))
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",

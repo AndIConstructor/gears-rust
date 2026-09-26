@@ -53,12 +53,15 @@ class _Handler(BaseHTTPRequestHandler):
 
         if self._inject_fault():
             return
+        # Vector-store paths first: `/vector_stores/{id}/files` also contains "/files".
         if "responses" in self.path:
             self._handle_responses(raw)
-        elif "/files" in self.path and "/content" not in self.path:
-            self._handle_file_upload(raw)
+        elif "/vector_stores/" in self.path and "/files" in self.path:
+            self._handle_vector_store_file_add(raw)
         elif "/vector_stores" in self.path:
             self._handle_vector_store_create(raw)
+        elif "/files" in self.path and "/content" not in self.path:
+            self._handle_file_upload(raw)
         else:
             self.send_error(404, "Not found")
 
@@ -66,12 +69,14 @@ class _Handler(BaseHTTPRequestHandler):
         self._log_path()
         if self._inject_fault():
             return
-        if "/files/" in self.path and "/content" in self.path:
+        if "/vector_stores/" in self.path and "/files/" in self.path:
+            self._handle_vector_store_file_get()
+        elif "/vector_stores/" in self.path:
+            self._handle_vector_store_get()
+        elif "/files/" in self.path and "/content" in self.path:
             self._handle_file_content()
         elif "/files/" in self.path:
             self._handle_file_get()
-        elif "/vector_stores/" in self.path:
-            self._handle_vector_store_get()
         else:
             self.send_error(404, "Not found")
 
@@ -79,10 +84,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._log_path()
         if self._inject_fault():
             return
-        if "/files/" in self.path:
-            self._handle_file_delete()
+        if "/vector_stores/" in self.path and "/files/" in self.path:
+            self._handle_vector_store_file_delete()
         elif "/vector_stores/" in self.path:
             self._handle_vector_store_delete()
+        elif "/files/" in self.path:
+            self._handle_file_delete()
         else:
             self.send_error(404, "Not found")
 
@@ -235,6 +242,65 @@ class _Handler(BaseHTTPRequestHandler):
         with server._state_lock:
             deleted = server._vector_stores.pop(vs_id, None) is not None
         self._json_response(200, {"id": vs_id, "object": "vector_store", "deleted": deleted})
+
+    def _vector_store_file_ids(self) -> tuple[str, str | None]:
+        """(vs_id, file_id) from `/…/vector_stores/{vs_id}/files[/{file_id}]`."""
+        parts = self.path.split("?")[0].rstrip("/").split("/")
+        i = parts.index("vector_stores")
+        vs_id = parts[i + 1]
+        file_id = parts[i + 3] if len(parts) > i + 3 else None
+        return vs_id, file_id
+
+    def _vector_store_file_obj(self, vs_id: str, file_id: str) -> dict:
+        return {
+            "id": file_id,
+            "object": "vector_store.file",
+            "vector_store_id": vs_id,
+            "status": "completed",
+            "created_at": int(time.time()),
+        }
+
+    def _handle_vector_store_file_add(self, raw: bytes):
+        """POST /v1/vector_stores/{vs_id}/files — attach a file to a vector store."""
+        server: MockProviderServer = self.server  # type: ignore[assignment]
+        vs_id, _ = self._vector_store_file_ids()
+        try:
+            file_id = json.loads(raw).get("file_id", "")
+        except (json.JSONDecodeError, AttributeError):
+            file_id = ""
+        with server._state_lock:
+            vs_obj = server._vector_stores.get(vs_id)
+            if vs_obj is not None:
+                vs_obj.setdefault("file_ids", []).append(file_id)
+        if vs_obj is None:
+            self._json_response(404, {"error": {"message": f"No such vector_store: {vs_id}"}})
+            return
+        self._json_response(200, self._vector_store_file_obj(vs_id, file_id))
+
+    def _handle_vector_store_file_get(self):
+        """GET /v1/vector_stores/{vs_id}/files/{file_id}."""
+        server: MockProviderServer = self.server  # type: ignore[assignment]
+        vs_id, file_id = self._vector_store_file_ids()
+        with server._state_lock:
+            vs_obj = server._vector_stores.get(vs_id)
+            found = vs_obj is not None and file_id in vs_obj.get("file_ids", [])
+        if found:
+            self._json_response(200, self._vector_store_file_obj(vs_id, file_id))
+        else:
+            self._json_response(404, {"error": {"message": f"No such vector_store file: {file_id}"}})
+
+    def _handle_vector_store_file_delete(self):
+        """DELETE /v1/vector_stores/{vs_id}/files/{file_id} — detach, keep the file."""
+        server: MockProviderServer = self.server  # type: ignore[assignment]
+        vs_id, file_id = self._vector_store_file_ids()
+        with server._state_lock:
+            vs_obj = server._vector_stores.get(vs_id)
+            deleted = vs_obj is not None and file_id in vs_obj.get("file_ids", [])
+            if deleted:
+                vs_obj["file_ids"].remove(file_id)
+        self._json_response(
+            200, {"id": file_id, "object": "vector_store.file.deleted", "deleted": deleted},
+        )
 
     # ── Helpers ─────────────────────────────────────────────────────────
 

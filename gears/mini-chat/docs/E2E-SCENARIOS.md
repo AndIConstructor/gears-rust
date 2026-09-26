@@ -144,15 +144,15 @@ toggled per test.
 | 05-02 | stream_started: is_new_turn=true on Send | test_stream_started.py | TestStreamStartedOnSend::test_stream_started_is_first_event |
 | 05-03 | stream_started: is_new_turn=false on Replay | test_stream_started.py | TestStreamStartedOnReplay::test_replay_emits_stream_started_with_is_new_turn_false |
 | 05-04 | Delta Events: type=text, content=string     | test_streaming.py      | TestStreamBasic::test_stream_has_delta_events, TestStreamBasic::test_stream_assembled_text_nonempty |
-| 05-05 | Tool Events: phase/name/details (web search: `web_search` `start` then `done`; code interpreter: `start`, `done` with output) | test_web_search.py | TestWebSearchBasic::test_web_search_tool_events_name_and_phases; test_code_interpreter.py TestCodeInterpreterToolEvents::test_code_interpreter_has_start_and_done, TestCodeInterpreterToolEvents::test_code_interpreter_done_has_output |
+| 05-05 | Tool Events: phase/name/details (web search: `web_search` `start` then `done`; code interpreter: `start`, then `done` with the logs output from `response.output_item.done`, exact value offline) | test_web_search.py | TestWebSearchBasic::test_web_search_tool_events_name_and_phases; test_code_interpreter.py TestCodeInterpreterToolEvents::test_code_interpreter_has_start_and_done, TestCodeInterpreterToolEvents::test_code_interpreter_done_has_output |
 | 05-06 | Citations Event: items Array | test_web_search.py | TestWebSearchCitations; TestWebSearchOnline::test_citations_structure_if_present (online only) |
-| 05-07 | File Citation → `attachment_id` and Filename, No Provider File ID; Unknown File Dropped | test_attachments.py | TestFileCitationMapping::test_file_citation_maps_to_attachment_id; TestUploadSearchCitationFlow::test_upload_search_citation_flow (online only) |
+| 05-07 | File Citation (OpenAI shape: `file_id`, `filename`, `index`) → `attachment_id` and Filename, Empty `snippet`, No `span`, No Provider File ID; Unknown File Dropped | test_attachments.py | TestFileCitationMapping::test_file_citation_maps_to_attachment_id; TestUploadSearchCitationFlow::test_upload_search_citation_flow (online only) |
 | 05-08 | Done Event: Core Fields                     | test_streaming.py      | TestStreamDoneEvent::test_done_event_contract                |
 | 05-09 | Done Event: Usage Tokens (no internal token fields) | test_streaming.py | TestStreamDoneEvent::test_done_event_contract               |
 | 05-10 | Done Event: quota_warnings Array            | test_quota_status.py   | TestQuotaWarningsInDoneEvent::test_done_event_has_quota_warnings |
 | 05-11 | Done Event: Downgrade Fields                | test_quota_policy.py   | TestDowngrade                                                |
 | 05-12 | Done Event: message_id NOT in done          | test_streaming.py      | TestStreamDoneEvent::test_done_event_contract                |
-| 05-13 | Error Event: Terminal with Code             | test_error_mapping.py  | TestErrorMapping::test_post_stream_sse_error_event           |
+| 05-13 | Error Event: Terminal with Code and the Provider Message (`response.failed` with `response.error`; flat SSE `error` event) | test_error_mapping.py | TestErrorMapping::test_post_stream_sse_error_event, TestErrorMapping::test_error_event_keeps_provider_message |
 | 05-14 | Error: Provider Details Sanitized           | test_error_mapping.py  | TestErrorMapping::test_error_message_no_provider_ids         |
 | 05-15 | Ping Events only before the first content (ADR-0010) | test_streaming.py | TestStreamPing::test_ping_only_before_content              |
 | 05-16 | Event Ordering Grammar: one `stream_started` first, then `ping`/`delta`, one terminal `done` last; `citations` right before `done`; tool events before `done` | test_stream_started.py | TestStreamStartedOrdering::test_stream_started_before_deltas_before_done; test_web_search.py TestWebSearchEventOrdering |
@@ -268,7 +268,7 @@ still works but is not required (ADR-0007).
 | 10-29 | Deleted Document Excluded from file_search   | test_attachments.py      | N/A — not implemented (ADR-0007): `file_search` runs without attribute filters, so a deleted document stays searchable until the cleanup handler deletes its provider file. Citations of a deleted document are omitted: TestFileCitationMapping::test_citation_of_deleted_attachment_dropped |
 | 10-30 | XLSX Upload Accepted and Ready               | test_code_interpreter.py | TestXlsxUploadAccepted::test_xlsx_upload_accepted, TestXlsxUploadAccepted::test_xlsx_reaches_ready |
 | 10-31 | Code Interpreter Tool Events in Stream       | test_code_interpreter.py | TestCodeInterpreterToolEvents, TestCodeInterpreterEventOrdering::test_tool_events_before_done |
-| 10-32 | code_interpreter Tool with container.file_ids (the XLSX provider file) in Provider Request | test_code_interpreter.py | TestCodeInterpreterProviderRequest::test_code_interpreter_tool_in_request |
+| 10-32 | code_interpreter Tool with container.file_ids (the XLSX provider file) and `include: ["code_interpreter_call.outputs"]` in Provider Request (no `include` without code_interpreter: TestXlsxPurposeRouting::test_txt_triggers_file_search_not_code_interpreter) | test_code_interpreter.py | TestCodeInterpreterProviderRequest::test_code_interpreter_tool_in_request |
 | 10-33 | Code Interpreter Real Answer                 | test_code_interpreter.py | TestCodeInterpreterOnline::test_xlsx_code_interpreter_produces_answer (online only) |
 | 10-34 | Image Sent to the Model as `input_image`; Recognized by the Model | test_attachments.py | TestImageInProviderRequest::test_image_sent_as_input_image; TestImageRecognition::test_image_recognition_cat (online only) |
 | 10-35 | Per-Provider Send with Attachment; Medium File Pipeline | test_attachments.py | TestProviderSendMessageWithAttachment::test_send_message_with_attachment (online only), TestUploadStreamingPipeline::test_medium_file_upload_and_stream (online only) |
@@ -370,6 +370,7 @@ still works but is not required (ADR-0007).
 | 15-14 | Completed Turn Releases Reserve          | test_settlement.py | TestSettlement::test_completed_turn_releases_reserve            |
 | 15-15 | Settlement with Real Provider Token Counts | test_settlement.py | TestSettlementPerProvider::test_completed_settlement_per_provider (online only) |
 | 15-16 | Finalization Failure → SSE `error` (`finalization_failed` / `message_persistence_failed`), not `done` | — | unit tests: gears/mini-chat/mini-chat/src/domain/service/stream_service/mod.rs |
+| 15-17 | Provider `response.incomplete` → `done`, Turn `completed` with No Error Code, Truncated Text Persisted, Actual Settlement on `response.usage` | test_settlement.py | TestSettlement::test_incomplete_response_is_done_and_settled_on_actual_usage |
 
 ## 16 — Context Assembly
 

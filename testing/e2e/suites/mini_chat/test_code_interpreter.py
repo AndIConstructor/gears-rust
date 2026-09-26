@@ -218,6 +218,7 @@ class TestXlsxPurposeRouting:
         assert "code_interpreter" not in tool_types, (
             f"TXT should not trigger code_interpreter: {tool_types}"
         )
+        assert "include" not in req, req.get("include")
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +290,10 @@ class TestCodeInterpreterToolEvents:
         assert "start" in phases, f"Missing 'start' phase. Phases: {phases}"
         assert "done" in phases, f"Missing 'done' phase. Phases: {phases}"
 
-    def test_code_interpreter_done_has_output(self, openai_chat):
-        """code_interpreter 'done' event should include output details."""
+    def test_code_interpreter_done_has_output(self, request, openai_chat):
+        """The code_interpreter `done` event carries the logs output. The
+        provider sends it in `response.output_item.done`; offline, the mock
+        `CODEINTERP:*` logs are "Total: 42\nAverage: 7.0"."""
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
@@ -323,6 +326,13 @@ class TestCodeInterpreterToolEvents:
         assert "output" in details, (
             f"code_interpreter done event missing 'output' in details: {details}"
         )
+        if request.config.getoption("mode") != "online":
+            phases = [
+                t.data["phase"] for t in events
+                if t.event == "tool" and t.data.get("name") == "code_interpreter"
+            ]
+            assert phases == ["start", "done"], phases
+            assert details == {"output": "Total: 42\nAverage: 7.0"}, details
 
     def test_code_interpreter_stream_has_deltas(self, openai_chat):
         """Stream with code_interpreter should still have delta text events."""
@@ -410,6 +420,8 @@ class TestCodeInterpreterProviderRequest:
             "SELECT provider_file_id FROM attachments WHERE id = ?", (att_id,),
         )[0]["provider_file_id"]
         assert container.get("file_ids") == [provider_file_id], container
+        # Without it the provider sends no code_interpreter_call outputs.
+        assert req.get("include") == ["code_interpreter_call.outputs"], req.get("include")
 
 
 # ---------------------------------------------------------------------------

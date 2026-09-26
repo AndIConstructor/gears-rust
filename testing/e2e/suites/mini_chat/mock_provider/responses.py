@@ -63,44 +63,58 @@ SCENARIOS: dict[str, Scenario] = {
             MockEvent("response.output_text.done", {"text": "Searching...found results"}),
         ],
         usage=Usage(input_tokens=80, output_tokens=15),
+        # OpenAI url_citation: no text; the snippet comes from the text range.
         citations=[{
             "type": "url_citation",
             "url": "https://example.com",
             "title": "Mock Search Result",
             "start_index": 0,
             "end_index": 9,
-            "text": "Searching",
         }],
     ),
     "FILESEARCH:*": Scenario(
         events=[
             MockEvent("response.file_search_call.searching", {}),
+            # OpenAI sends no results in this event.
             MockEvent("response.file_search_call.completed", {
-                "results": [
-                    {"file_id": "file_mock_1", "filename": "doc.pdf", "score": 0.95, "text": "Mock content"},
-                ],
+                "item_id": "fs_mock_1", "output_index": 0,
             }),
             MockEvent("response.output_text.delta", {"delta": "Based on docs"}),
             MockEvent("response.output_text.done", {"text": "Based on docs"}),
         ],
         usage=Usage(input_tokens=200, output_tokens=10),
+        # OpenAI file_citation: file_id, filename and a position; no text or range.
         citations=[{
             "type": "file_citation",
             "file_id": "file_mock_1",
-            "title": "doc.pdf",
-            "start_index": 0,
-            "end_index": 13,
-            "text": "Based on docs",
+            "filename": "doc.pdf",
+            "index": 13,
         }],
     ),
     "CODEINTERP:*": Scenario(
         events=[
-            MockEvent("response.code_interpreter_call.in_progress", {}),
-            MockEvent("response.code_interpreter_call.interpreting", {}),
+            MockEvent("response.code_interpreter_call.in_progress", {
+                "item_id": "ci_mock_1", "output_index": 0,
+            }),
+            MockEvent("response.code_interpreter_call.interpreting", {
+                "item_id": "ci_mock_1", "output_index": 0,
+            }),
+            # No outputs here; they come in response.output_item.done, and
+            # only when the request has include: ["code_interpreter_call.outputs"].
             MockEvent("response.code_interpreter_call.completed", {
-                "outputs": [
-                    {"type": "logs", "logs": "Total: 42\nAverage: 7.0"},
-                ],
+                "item_id": "ci_mock_1", "output_index": 0,
+            }),
+            MockEvent("response.output_item.done", {
+                "output_index": 0,
+                "item": {
+                    "type": "code_interpreter_call",
+                    "id": "ci_mock_1",
+                    "status": "completed",
+                    "code": "print(total, average)",
+                    "outputs": [
+                        {"type": "logs", "logs": "Total: 42\nAverage: 7.0"},
+                    ],
+                },
             }),
             MockEvent("response.output_text.delta", {"delta": "The spreadsheet "}),
             MockEvent("response.output_text.delta", {"delta": "analysis shows "}),
@@ -233,6 +247,9 @@ def has_tool(body: dict, tool_type: str) -> bool:
 def should_include_tool_event(event: MockEvent, body: dict) -> bool:
     """Check if a tool event should be included based on request tools."""
     et = event.event_type
+    item = event.data.get("item")
+    if isinstance(item, dict) and isinstance(item.get("type"), str):
+        et = item["type"]
     if "web_search" in et:
         return has_tool(body, "web_search")
     if "file_search" in et:

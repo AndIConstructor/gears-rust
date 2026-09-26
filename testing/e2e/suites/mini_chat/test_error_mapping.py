@@ -47,7 +47,9 @@ class TestErrorMapping:
             pytest.skip("requires mock provider (offline mode)")
 
     def test_post_stream_sse_error_event(self, chat, mock_provider):
-        """A `response.failed` mid-stream is an SSE error `provider_error`; the turn fails."""
+        """A `response.failed` mid-stream (error in `response.error`, as OpenAI
+        sends it) is an SSE error `provider_error` with the provider message;
+        the turn fails."""
         mock_provider.set_next_scenario(Scenario(
             terminal="failed",
             error={"code": "server_error", "message": "Mock fail"},
@@ -55,7 +57,24 @@ class TestErrorMapping:
         ))
         data, rid = _stream_error(chat["id"])
         assert data["code"] == "provider_error"
-        assert isinstance(data["message"], str) and data["message"]
+        assert data["message"] == "Mock fail", data
+        assert poll_turn(chat["id"], rid)["state"] == "error"
+
+    def test_error_event_keeps_provider_message(self, chat, mock_provider):
+        """A flat SSE `error` event (`{"type":"error","code","message"}`) is an
+        SSE error `provider_error` with the provider message; the turn fails."""
+        mock_provider.set_next_scenario(Scenario(
+            events=[
+                MockEvent("response.output_text.delta", {"delta": "Partial"}),
+                MockEvent("error", {
+                    "type": "error", "code": "server_error",
+                    "message": "Mock error event", "param": None,
+                }),
+            ],
+        ))
+        data, rid = _stream_error(chat["id"])
+        assert data["code"] == "provider_error"
+        assert data["message"] == "Mock error event", data
         assert poll_turn(chat["id"], rid)["state"] == "error"
 
     def test_provider_504_is_provider_error(self, chat, mock_provider):
