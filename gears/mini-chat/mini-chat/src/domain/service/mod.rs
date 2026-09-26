@@ -50,7 +50,7 @@ pub(crate) use model_service::ModelService;
 pub(crate) use quota_service::QuotaService;
 pub(crate) use reaction_service::ReactionService;
 pub(crate) use stream_service::{StreamError, StreamService};
-pub(crate) use turn_service::{MutationError, MutationResult, TurnService};
+pub(crate) use turn_service::{MutationError, TurnService};
 
 /// Extract the W3C trace ID from the current tracing span.
 ///

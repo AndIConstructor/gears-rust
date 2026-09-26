@@ -96,12 +96,7 @@ pub(crate) async fn retry_turn(
     Extension(svc): Extension<Arc<AppServices>>,
     Path((chat_id, request_id)): Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Response {
-    let mutation = match svc.turns.retry(&ctx, chat_id, request_id).await {
-        Ok(m) => m,
-        Err(e) => return CanonicalError::from(e).into_response(),
-    };
-
-    start_mutation_stream(&svc, ctx, chat_id, mutation).await
+    start_mutation_stream(&svc, ctx, chat_id, request_id, None).await
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -130,40 +125,68 @@ pub(crate) async fn edit_turn(
             .into_response();
     }
 
-    let mutation = match svc
-        .turns
-        .edit(&ctx, chat_id, request_id, body.content)
-        .await
-    {
-        Ok(m) => m,
-        Err(e) => return CanonicalError::from(e).into_response(),
-    };
-
-    start_mutation_stream(&svc, ctx, chat_id, mutation).await
+    start_mutation_stream(&svc, ctx, chat_id, request_id, Some(body.content)).await
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 // Shared helpers
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Retry (`new_content = None`) or edit a turn and stream the new answer.
+///
+/// Order matters: the quota preflight runs before the mutation commits, so a
+/// rejection returns a JSON error and leaves the previous turn untouched.
 #[allow(clippy::cognitive_complexity)]
 async fn start_mutation_stream(
     svc: &AppServices,
     ctx: SecurityContext,
     chat_id: uuid::Uuid,
-    mutation: crate::domain::service::MutationResult,
+    request_id: uuid::Uuid,
+    new_content: Option<String>,
 ) -> Response {
-    let chat_model = mutation.chat_model.clone();
+    let preview = match svc
+        .turns
+        .preview_mutation(&ctx, chat_id, request_id, new_content.clone())
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => return CanonicalError::from(e).into_response(),
+    };
+
     let resolved = match svc
         .models
-        .resolve_chat_model(ctx.subject_id(), &mutation.chat_model)
+        .resolve_chat_model(ctx.subject_id(), &preview.chat_model)
         .await
     {
         Ok(r) => r,
         Err(e) => {
-            warn!(error = %e, model = %chat_model, "model resolution failed for mutation stream");
+            warn!(error = %e, model = %preview.chat_model, "model resolution failed for mutation stream");
             return CanonicalError::from(e).into_response();
         }
+    };
+
+    let preflight = match svc
+        .stream
+        .preflight_mutation(
+            &ctx,
+            chat_id,
+            &preview.user_content,
+            &resolved,
+            preview.web_search_enabled,
+        )
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => return CanonicalError::from(e).into_response(),
+    };
+
+    let mutation = match new_content {
+        Some(content) => svc.turns.edit(&ctx, chat_id, request_id, content).await,
+        None => svc.turns.retry(&ctx, chat_id, request_id).await,
+    };
+    let mutation = match mutation {
+        Ok(m) => m,
+        Err(e) => return CanonicalError::from(e).into_response(),
     };
 
     let capacity = svc.stream.channel_capacity();
@@ -189,6 +212,7 @@ async fn start_mutation_stream(
             resolved,
             mutation.web_search_enabled,
             mutation.snapshot_boundary,
+            preflight,
             cancel.clone(),
             tx,
         )

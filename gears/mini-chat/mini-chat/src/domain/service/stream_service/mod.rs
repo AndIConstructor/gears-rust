@@ -35,6 +35,22 @@ use types::{
     check_input_token_limit, flatten_preflight, requester_type_from_str,
 };
 
+/// Quota preflight computed for a retry/edit before its mutation commits.
+pub struct MutationPreflight {
+    computed: super::quota_service::PreflightComputed,
+    pf: PreflightResult,
+    ready_doc_count: i64,
+    ci_file_ids: Vec<String>,
+}
+
+/// Everything needed to start the provider task for a mutation turn.
+struct PreparedMutationStream<TR: TurnRepository + 'static, MR: MessageRepository + 'static> {
+    message_id: Uuid,
+    summary_info: Option<ThreadSummaryInfo>,
+    finalization_ctx: FinalizationCtx<TR, MR>,
+    task_config: provider_task::ProviderTaskConfig,
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // StreamService
 // ════════════════════════════════════════════════════════════════════════════
@@ -544,70 +560,6 @@ impl<
             (Vec::new(), false)
         };
 
-        // ── Single transaction: reserve + user message + turn ──
-        let requester_type = ctx.subject_type().unwrap_or("user").to_owned();
-        let turn_id = self
-            .reserve_and_create_turn(
-                &scope,
-                &pf,
-                computed,
-                tenant_id,
-                user_id,
-                chat_id,
-                request_id,
-                requester_type,
-                content.clone(),
-                attachment_ids,
-                web_search_enabled,
-            )
-            .await?;
-
-        // Metrics: quota reserve committed (one per period)
-        if has_reserve_buckets {
-            for (period_type, _) in &period_starts {
-                let label = match period_type {
-                    crate::infra::db::entity::quota_usage::PeriodType::Daily => period::DAILY,
-                    crate::infra::db::entity::quota_usage::PeriodType::Monthly => period::MONTHLY,
-                };
-                self.metrics.record_quota_reserve(label);
-            }
-        }
-
-        // Pre-generate assistant message ID (sent in StreamStartedData and used in CAS)
-        let message_id = Uuid::new_v4();
-
-        let mut finalization_ctx = FinalizationCtx {
-            finalization_svc: Arc::clone(&self.finalization),
-            db: Arc::clone(&self.db),
-            turn_repo: Arc::clone(&self.turn_repo),
-            scope,
-            turn_id,
-            tenant_id,
-            chat_id,
-            request_id,
-            user_id,
-            requester_type: requester_type_from_str(ctx.subject_type()),
-            message_id,
-            effective_model: pf.effective_model.clone(),
-            selected_model: selected_model.clone(),
-            reserve_tokens: pf.reserve_tokens,
-            max_output_tokens_applied: pf.max_output_tokens_applied,
-            reserved_credits_micro: pf.reserved_credits_micro,
-            policy_version_applied: pf.policy_version_applied,
-            minimal_generation_floor_applied: pf.minimal_generation_floor_applied,
-            quota_decision: pf.quota_decision,
-            downgrade_from: pf.downgrade_from,
-            downgrade_reason: pf.downgrade_reason,
-            period_starts,
-            context_window: pf.context_window,
-            assembled_context_tokens: 0, // updated after context assembly
-            messages_truncated: false,   // updated after context assembly
-            provider_id: provider_id.clone(),
-            metrics: Arc::clone(&self.metrics),
-            quota_warnings_provider: Arc::clone(&self.quota)
-                as Arc<dyn crate::domain::service::quota_settler::QuotaWarningsProvider>,
-        };
-
         // ── Context assembly ──
         let token_budget = Some(super::context_assembly::TokenBudget {
             context_window: pf.context_window,
@@ -644,9 +596,6 @@ impl<
             )
             .await?;
 
-        finalization_ctx.assembled_context_tokens = assembled.estimated_context_tokens;
-        finalization_ctx.messages_truncated = assembled.messages_truncated;
-
         // Record image metrics
         if num_images > 0 {
             self.metrics.record_image_inputs_per_turn(num_images);
@@ -665,6 +614,72 @@ impl<
             .api_path
             .replace("{model}", &effective_provider_model_id);
         let proxy_path = format!("{}{api_path}", resolved_provider.upstream_alias);
+
+        // ── Single transaction: reserve + user message + turn ──
+        // Runs after every fallible pre-provider step so an error before this
+        // point leaves no running turn and no quota reserve behind.
+        let requester_type = ctx.subject_type().unwrap_or("user").to_owned();
+        let turn_id = self
+            .reserve_and_create_turn(
+                &scope,
+                &pf,
+                computed,
+                tenant_id,
+                user_id,
+                chat_id,
+                request_id,
+                requester_type,
+                content.clone(),
+                attachment_ids,
+                web_search_enabled,
+            )
+            .await?;
+
+        // Metrics: quota reserve committed (one per period)
+        if has_reserve_buckets {
+            for (period_type, _) in &period_starts {
+                let label = match period_type {
+                    crate::infra::db::entity::quota_usage::PeriodType::Daily => period::DAILY,
+                    crate::infra::db::entity::quota_usage::PeriodType::Monthly => period::MONTHLY,
+                };
+                self.metrics.record_quota_reserve(label);
+            }
+        }
+
+        // Pre-generate assistant message ID (sent in StreamStartedData and used in CAS)
+        let message_id = Uuid::new_v4();
+
+        let finalization_ctx = FinalizationCtx {
+            finalization_svc: Arc::clone(&self.finalization),
+            db: Arc::clone(&self.db),
+            turn_repo: Arc::clone(&self.turn_repo),
+            scope,
+            turn_id,
+            tenant_id,
+            chat_id,
+            request_id,
+            user_id,
+            requester_type: requester_type_from_str(ctx.subject_type()),
+            message_id,
+            effective_model: pf.effective_model.clone(),
+            selected_model: selected_model.clone(),
+            reserve_tokens: pf.reserve_tokens,
+            max_output_tokens_applied: pf.max_output_tokens_applied,
+            reserved_credits_micro: pf.reserved_credits_micro,
+            policy_version_applied: pf.policy_version_applied,
+            minimal_generation_floor_applied: pf.minimal_generation_floor_applied,
+            quota_decision: pf.quota_decision,
+            downgrade_from: pf.downgrade_from,
+            downgrade_reason: pf.downgrade_reason,
+            period_starts,
+            context_window: pf.context_window,
+            assembled_context_tokens: assembled.estimated_context_tokens,
+            messages_truncated: assembled.messages_truncated,
+            provider_id: provider_id.clone(),
+            metrics: Arc::clone(&self.metrics),
+            quota_warnings_provider: Arc::clone(&self.quota)
+                as Arc<dyn crate::domain::service::quota_settler::QuotaWarningsProvider>,
+        };
 
         emit_stream_started(&tx, request_id, message_id, summary_info).await;
 
@@ -1040,55 +1055,39 @@ impl<
         Ok((assembled, summary_info))
     }
 
-    /// Run streaming for an already-created turn (used by retry/edit mutations).
+    /// Quota preflight for a retry/edit, run **before** the mutation commits.
     ///
-    /// The mutation transaction has already created the turn (state=running) and
-    /// user message. This method does quota preflight, writes reserves, resolves
-    /// the provider, and spawns the streaming task.
-    ///
-    /// Per design D3: mutation transaction commits first, streaming runs post-commit.
-    #[allow(
-        clippy::too_many_arguments,
-        clippy::too_many_lines,
-        clippy::cognitive_complexity
-    )]
-    pub(crate) async fn run_stream_for_mutation(
+    /// Read-only: a rejection (quota, kill switch, input too long) returns
+    /// before the previous turn is soft-deleted, so the user keeps their last
+    /// answer and the chat is not blocked by a running turn.
+    pub(crate) async fn preflight_mutation(
         &self,
-        ctx: SecurityContext,
+        ctx: &SecurityContext,
         chat_id: Uuid,
-        request_id: Uuid,
-        turn_id: Uuid,
-        content: String,
-        resolved_model: ResolvedModel,
+        content: &str,
+        resolved_model: &ResolvedModel,
         web_search_enabled: bool,
-        snapshot_boundary: Option<SnapshotBoundary>,
-        cancel: CancellationToken,
-        tx: mpsc::Sender<StreamEvent>,
-    ) -> Result<tokio::task::JoinHandle<StreamOutcome>, StreamError> {
-        let model = resolved_model.model_id;
-        let provider_id = resolved_model.provider_id;
+    ) -> Result<MutationPreflight, StreamError> {
         let tenant_id = ctx.subject_tenant_id();
         let user_id = ctx.subject_id();
         let scope = AccessScope::for_tenant(tenant_id);
 
-        // ── Pre-preflight attachment queries (for surcharge estimation) ──
         let conn = self
             .db
             .conn()
             .map_err(|e| StreamError::TurnCreationFailed {
                 source: DomainError::from(e),
             })?;
-        let pre_ready_doc_count = self
+        let ready_doc_count = self
             .attachment_repo
             .count_ready_documents(&conn, &scope, chat_id)
             .await
             .map_err(|e| StreamError::TurnCreationFailed { source: e })?;
-        let pre_ci_file_ids = self
+        let ci_file_ids = self
             .attachment_repo
             .get_code_interpreter_file_ids(&conn, &scope, chat_id)
             .await
             .map_err(|e| StreamError::TurnCreationFailed { source: e })?;
-
         let prior_context_tokens = self
             .message_repo
             .last_assistant_token_counts(&conn, &scope, chat_id)
@@ -1100,8 +1099,7 @@ impl<
                     .saturating_add(u64::try_from(out.max(0)).unwrap_or(0))
             });
 
-        // ── Preflight quota evaluate ────────────────────────────────────
-        let selected_model = model;
+        let selected_model = resolved_model.model_id.clone();
         let computed = self
             .quota
             .preflight_evaluate(crate::domain::model::quota::PreflightInput {
@@ -1110,9 +1108,9 @@ impl<
                 selected_model: selected_model.clone(),
                 utf8_bytes: content.len() as u64,
                 num_images: 0,
-                tools_enabled: pre_ready_doc_count > 0,
+                tools_enabled: ready_doc_count > 0,
                 web_search_enabled,
-                code_interpreter_enabled: !pre_ci_file_ids.is_empty(),
+                code_interpreter_enabled: !ci_file_ids.is_empty(),
                 max_output_tokens_cap: self.streaming_config.max_output_tokens,
                 prior_context_tokens,
             })
@@ -1126,45 +1124,110 @@ impl<
         self.record_preflight_metrics(&computed, &selected_model);
 
         let pf = flatten_preflight(computed.decision.clone())?;
+        check_input_token_limit(content, &pf)?;
 
-        // ── Input token limit check ──
-        // The turn is already committed (created by mutate_for_stream). If the
-        // message exceeds max_input_tokens we mark it Failed before returning so
-        // the turn does not stay stuck in Running state.
-        if let Err(too_long) = check_input_token_limit(&content, &pf) {
-            let detail = match &too_long {
-                StreamError::InputTooLong {
-                    estimated_tokens,
-                    max_input_tokens,
-                } => Some(format!(
-                    "estimated {estimated_tokens} tokens, limit {max_input_tokens}"
-                )),
-                _ => None,
-            };
-            if let Err(e) = self
-                .turn_repo
-                .cas_update_state(
-                    &conn,
-                    &scope,
-                    CasTerminalParams {
-                        turn_id,
-                        state: TurnState::Failed,
-                        error_code: Some("input_too_long".to_owned()),
-                        error_detail: detail,
-                        assistant_message_id: None,
-                        provider_response_id: None,
-                    },
-                )
-                .await
-            {
-                warn!(
-                    %turn_id,
-                    error = %e,
-                    "failed to mark turn as Failed after InputTooLong check"
-                );
+        Ok(MutationPreflight {
+            computed,
+            pf,
+            ready_doc_count,
+            ci_file_ids,
+        })
+    }
+
+    /// Run streaming for an already-created turn (used by retry/edit mutations).
+    ///
+    /// The mutation transaction has already created the turn (state=running)
+    /// and user message; `preflight` was computed before it committed. Context
+    /// assembly and provider resolution run first and the quota reserve is
+    /// written last, so any failure here only has to mark the new turn
+    /// `failed` — there is no reserve to release.
+    ///
+    /// Per design D3: mutation transaction commits first, streaming runs post-commit.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn run_stream_for_mutation(
+        &self,
+        ctx: SecurityContext,
+        chat_id: Uuid,
+        request_id: Uuid,
+        turn_id: Uuid,
+        content: String,
+        resolved_model: ResolvedModel,
+        web_search_enabled: bool,
+        snapshot_boundary: Option<SnapshotBoundary>,
+        preflight: MutationPreflight,
+        cancel: CancellationToken,
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<tokio::task::JoinHandle<StreamOutcome>, StreamError> {
+        let scope = AccessScope::for_tenant(ctx.subject_tenant_id());
+        match self
+            .prepare_mutation_stream(
+                &ctx,
+                chat_id,
+                request_id,
+                turn_id,
+                content,
+                resolved_model,
+                web_search_enabled,
+                snapshot_boundary,
+                preflight,
+            )
+            .await
+        {
+            Ok(prepared) => {
+                emit_stream_started(&tx, request_id, prepared.message_id, prepared.summary_info)
+                    .await;
+                Ok(provider_task::spawn_provider_task(
+                    ctx,
+                    prepared.task_config,
+                    cancel,
+                    tx,
+                    Some(prepared.finalization_ctx),
+                ))
             }
-            return Err(too_long);
+            Err(e) => {
+                self.fail_unstarted_turn(&scope, turn_id, &e).await;
+                Err(e)
+            }
         }
+    }
+
+    /// Fallible post-commit part of [`Self::run_stream_for_mutation`]. The
+    /// quota reserve is the last step: nothing after it can fail.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity
+    )]
+    async fn prepare_mutation_stream(
+        &self,
+        ctx: &SecurityContext,
+        chat_id: Uuid,
+        request_id: Uuid,
+        turn_id: Uuid,
+        content: String,
+        resolved_model: ResolvedModel,
+        web_search_enabled: bool,
+        snapshot_boundary: Option<SnapshotBoundary>,
+        preflight: MutationPreflight,
+    ) -> Result<PreparedMutationStream<TR, MR>, StreamError> {
+        let selected_model = resolved_model.model_id;
+        let provider_id = resolved_model.provider_id;
+        let tenant_id = ctx.subject_tenant_id();
+        let user_id = ctx.subject_id();
+        let scope = AccessScope::for_tenant(tenant_id);
+        let MutationPreflight {
+            computed,
+            pf,
+            ready_doc_count,
+            ci_file_ids: pre_ci_file_ids,
+        } = preflight;
+
+        let conn = self
+            .db
+            .conn()
+            .map_err(|e| StreamError::TurnCreationFailed {
+                source: DomainError::from(e),
+            })?;
 
         // Metrics: estimated tokens (only on allow/downgrade)
         #[allow(clippy::cast_precision_loss)]
@@ -1175,83 +1238,7 @@ impl<
         let file_search_disabled = computed.kill_switches.disable_file_search;
         let disable_code_interpreter = computed.kill_switches.disable_code_interpreter;
 
-        // ── Persist preflight fields + write quota reserves atomically ──
-        // Both must be visible together so the orphan watchdog can settle
-        // quota correctly if the pod crashes after this point.
-        let quota_repo = Arc::clone(&self.quota.repo);
-        let turn_repo_tx = Arc::clone(&self.turn_repo);
-        let computed_for_tx = computed;
-        let has_reserves = !computed_for_tx.buckets.is_empty();
-        let preflight_params = crate::domain::repos::UpdatePreflightParams {
-            turn_id,
-            reserve_tokens: pf.reserve_tokens,
-            max_output_tokens_applied: pf.max_output_tokens_applied,
-            reserved_credits_micro: pf.reserved_credits_micro,
-            policy_version_applied: pf.policy_version_applied,
-            effective_model: pf.effective_model.clone(),
-            minimal_generation_floor_applied: pf.minimal_generation_floor_applied,
-        };
-        let scope_for_tx = scope.clone();
-
-        {
-            self.db
-                .transaction(|txn| {
-                    use crate::domain::repos::IncrementReserveParams;
-                    Box::pin(async move {
-                        // 1. Backfill preflight fields on the turn row.
-                        turn_repo_tx
-                            .update_preflight_fields(txn, &scope_for_tx, preflight_params)
-                            .await
-                            .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
-
-                        // 2. Write quota reserves.
-                        let reserve_scope = AccessScope::for_tenant(computed_for_tx.tenant_id);
-                        for bucket in &computed_for_tx.buckets {
-                            for (period_type, period_start) in &computed_for_tx.periods {
-                                quota_repo
-                                    .increment_reserve(
-                                        txn,
-                                        &reserve_scope,
-                                        IncrementReserveParams {
-                                            tenant_id: computed_for_tx.tenant_id,
-                                            user_id: computed_for_tx.user_id,
-                                            period_type: period_type.clone(),
-                                            period_start: *period_start,
-                                            bucket: bucket.clone(),
-                                            amount_micro: computed_for_tx.reserved_credits_micro,
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        toolkit_db::DbError::Other(anyhow::Error::new(e))
-                                    })?;
-                            }
-                        }
-                        Ok(())
-                    })
-                })
-                .await
-                .map_err(|e| StreamError::TurnCreationFailed {
-                    source: DomainError::database(e.to_string()),
-                })?;
-
-            // Metrics: quota reserve committed (one per period, only when reserves exist)
-            if has_reserves {
-                for (period_type, _) in &period_starts {
-                    let label = match period_type {
-                        crate::infra::db::entity::quota_usage::PeriodType::Daily => period::DAILY,
-                        crate::infra::db::entity::quota_usage::PeriodType::Monthly => {
-                            period::MONTHLY
-                        }
-                    };
-                    self.metrics.record_quota_reserve(label);
-                }
-            }
-        }
-
         // ── Retrieval mode determination ──
-        let ready_doc_count = pre_ready_doc_count;
-
         let retrieval_mode = crate::domain::retrieval::determine_retrieval_mode(
             file_search_disabled,
             ready_doc_count,
@@ -1316,41 +1303,6 @@ impl<
                 (Vec::new(), false)
             };
 
-        // ── Build finalization context + resolve provider + spawn ────────
-        let message_id = Uuid::new_v4();
-
-        let mut finalization_ctx = FinalizationCtx {
-            finalization_svc: Arc::clone(&self.finalization),
-            db: Arc::clone(&self.db),
-            turn_repo: Arc::clone(&self.turn_repo),
-            scope: scope.clone(),
-            turn_id,
-            tenant_id,
-            chat_id,
-            request_id,
-            user_id,
-            requester_type: requester_type_from_str(ctx.subject_type()),
-            message_id,
-            effective_model: pf.effective_model.clone(),
-            selected_model: selected_model.clone(),
-            reserve_tokens: pf.reserve_tokens,
-            max_output_tokens_applied: pf.max_output_tokens_applied,
-            reserved_credits_micro: pf.reserved_credits_micro,
-            policy_version_applied: pf.policy_version_applied,
-            minimal_generation_floor_applied: pf.minimal_generation_floor_applied,
-            quota_decision: pf.quota_decision,
-            downgrade_from: pf.downgrade_from,
-            downgrade_reason: pf.downgrade_reason,
-            period_starts,
-            context_window: pf.context_window,
-            assembled_context_tokens: 0, // updated after context assembly
-            messages_truncated: false,   // updated after context assembly
-            provider_id: provider_id.clone(),
-            metrics: Arc::clone(&self.metrics),
-            quota_warnings_provider: Arc::clone(&self.quota)
-                as Arc<dyn crate::domain::service::quota_settler::QuotaWarningsProvider>,
-        };
-
         // ── Context assembly ──
         let token_budget = Some(super::context_assembly::TokenBudget {
             context_window: pf.context_window,
@@ -1384,9 +1336,6 @@ impl<
             )
             .await?;
 
-        finalization_ctx.assembled_context_tokens = assembled.estimated_context_tokens;
-        finalization_ctx.messages_truncated = assembled.messages_truncated;
-
         let tenant_id_str = tenant_id.to_string();
         let resolved_provider = self
             .provider_resolver
@@ -1400,11 +1349,112 @@ impl<
             .replace("{model}", &effective_provider_model_id);
         let proxy_path = format!("{}{api_path}", resolved_provider.upstream_alias);
 
-        emit_stream_started(&tx, request_id, message_id, summary_info).await;
+        // ── Persist preflight fields + write quota reserves atomically ──
+        // Both must be visible together so the orphan watchdog can settle
+        // quota correctly if the pod crashes after this point.
+        let quota_repo = Arc::clone(&self.quota.repo);
+        let turn_repo_tx = Arc::clone(&self.turn_repo);
+        let has_reserves = !computed.buckets.is_empty();
+        let preflight_params = crate::domain::repos::UpdatePreflightParams {
+            turn_id,
+            reserve_tokens: pf.reserve_tokens,
+            max_output_tokens_applied: pf.max_output_tokens_applied,
+            reserved_credits_micro: pf.reserved_credits_micro,
+            policy_version_applied: pf.policy_version_applied,
+            effective_model: pf.effective_model.clone(),
+            minimal_generation_floor_applied: pf.minimal_generation_floor_applied,
+        };
+        let scope_for_tx = scope.clone();
 
-        Ok(provider_task::spawn_provider_task(
-            ctx,
-            provider_task::ProviderTaskConfig {
+        self.db
+            .transaction(|txn| {
+                use crate::domain::repos::IncrementReserveParams;
+                Box::pin(async move {
+                    // 1. Backfill preflight fields on the turn row.
+                    turn_repo_tx
+                        .update_preflight_fields(txn, &scope_for_tx, preflight_params)
+                        .await
+                        .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
+
+                    // 2. Write quota reserves.
+                    let reserve_scope = AccessScope::for_tenant(computed.tenant_id);
+                    for bucket in &computed.buckets {
+                        for (period_type, period_start) in &computed.periods {
+                            quota_repo
+                                .increment_reserve(
+                                    txn,
+                                    &reserve_scope,
+                                    IncrementReserveParams {
+                                        tenant_id: computed.tenant_id,
+                                        user_id: computed.user_id,
+                                        period_type: period_type.clone(),
+                                        period_start: *period_start,
+                                        bucket: bucket.clone(),
+                                        amount_micro: computed.reserved_credits_micro,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|e| StreamError::TurnCreationFailed {
+                source: DomainError::database(e.to_string()),
+            })?;
+
+        // Metrics: quota reserve committed (one per period, only when reserves exist)
+        if has_reserves {
+            for (period_type, _) in &period_starts {
+                let label = match period_type {
+                    crate::infra::db::entity::quota_usage::PeriodType::Daily => period::DAILY,
+                    crate::infra::db::entity::quota_usage::PeriodType::Monthly => period::MONTHLY,
+                };
+                self.metrics.record_quota_reserve(label);
+            }
+        }
+
+        // ── Build finalization context ──
+        let message_id = Uuid::new_v4();
+        let finalization_ctx = FinalizationCtx {
+            finalization_svc: Arc::clone(&self.finalization),
+            db: Arc::clone(&self.db),
+            turn_repo: Arc::clone(&self.turn_repo),
+            scope,
+            turn_id,
+            tenant_id,
+            chat_id,
+            request_id,
+            user_id,
+            requester_type: requester_type_from_str(ctx.subject_type()),
+            message_id,
+            effective_model: pf.effective_model.clone(),
+            selected_model,
+            reserve_tokens: pf.reserve_tokens,
+            max_output_tokens_applied: pf.max_output_tokens_applied,
+            reserved_credits_micro: pf.reserved_credits_micro,
+            policy_version_applied: pf.policy_version_applied,
+            minimal_generation_floor_applied: pf.minimal_generation_floor_applied,
+            quota_decision: pf.quota_decision,
+            downgrade_from: pf.downgrade_from,
+            downgrade_reason: pf.downgrade_reason,
+            period_starts,
+            context_window: pf.context_window,
+            assembled_context_tokens: assembled.estimated_context_tokens,
+            messages_truncated: assembled.messages_truncated,
+            provider_id,
+            metrics: Arc::clone(&self.metrics),
+            quota_warnings_provider: Arc::clone(&self.quota)
+                as Arc<dyn crate::domain::service::quota_settler::QuotaWarningsProvider>,
+        };
+
+        Ok(PreparedMutationStream {
+            message_id,
+            summary_info,
+            finalization_ctx,
+            task_config: provider_task::ProviderTaskConfig {
                 llm: resolved_provider.adapter,
                 upstream_alias: proxy_path,
                 messages: assembled.messages,
@@ -1421,10 +1471,38 @@ impl<
                 anthropic_file_ids,
                 knowledge_search: self.build_knowledge_search_params(&tenant_id_str),
             },
-            cancel,
-            tx,
-            Some(finalization_ctx),
-        ))
+        })
+    }
+
+    /// Marks a turn that never reached the provider as `failed`. Used after a
+    /// post-commit setup error; no quota reserve exists yet at that point.
+    async fn fail_unstarted_turn(&self, scope: &AccessScope, turn_id: Uuid, err: &StreamError) {
+        let error_code = match err {
+            StreamError::ContextBudgetExceeded { .. } => "context_length_exceeded",
+            _ => "turn_setup_failed",
+        };
+        let result = match self.db.conn() {
+            Ok(conn) => self
+                .turn_repo
+                .cas_update_state(
+                    &conn,
+                    scope,
+                    CasTerminalParams {
+                        turn_id,
+                        state: TurnState::Failed,
+                        error_code: Some(error_code.to_owned()),
+                        error_detail: None,
+                        assistant_message_id: None,
+                        provider_response_id: None,
+                    },
+                )
+                .await
+                .map(|_| ()),
+            Err(e) => Err(DomainError::from(e)),
+        };
+        if let Err(e) = result {
+            warn!(%turn_id, error = %e, "failed to mark unstarted turn as Failed");
+        }
     }
 }
 
@@ -5647,16 +5725,22 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
+        let content: String = "retry question".into();
+        let preflight = svc
+            .preflight_mutation(&ctx, chat_id, &content, &test_resolved_model(), false)
+            .await
+            .expect("preflight should allow the mutation");
         let result = svc
             .run_stream_for_mutation(
                 ctx,
                 chat_id,
                 request_id,
                 turn_id,
-                "retry question".into(),
+                content,
                 test_resolved_model(),
                 false,
                 None,
+                preflight,
                 cancel,
                 tx,
             )
@@ -5694,16 +5778,22 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
+        let content: String = "retry without docs".into();
+        let preflight = svc
+            .preflight_mutation(&ctx, chat_id, &content, &test_resolved_model(), false)
+            .await
+            .expect("preflight should allow the mutation");
         let result = svc
             .run_stream_for_mutation(
                 ctx,
                 chat_id,
                 request_id,
                 turn_id,
-                "retry without docs".into(),
+                content,
                 test_resolved_model(),
                 false,
                 None,
+                preflight,
                 cancel,
                 tx,
             )
@@ -5762,16 +5852,22 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(32);
         let cancel = CancellationToken::new();
 
+        let content: String = "retry with kill switch".into();
+        let preflight = svc
+            .preflight_mutation(&ctx, chat_id, &content, &test_resolved_model(), false)
+            .await
+            .expect("preflight should allow the mutation");
         let result = svc
             .run_stream_for_mutation(
                 ctx,
                 chat_id,
                 request_id,
                 turn_id,
-                "retry with kill switch".into(),
+                content,
                 test_resolved_model(),
                 false,
                 None,
+                preflight,
                 cancel,
                 tx,
             )
@@ -6204,45 +6300,35 @@ mod tests {
         assert_eq!(metrics.stream_total_latency_ms.load(Ordering::Relaxed), 1);
     }
 
-    /// `run_stream_for_mutation` returns `InputTooLong` for oversized content
-    /// and marks the already-committed turn as `Failed` so it does not stay
-    /// stuck in `Running` state.
+    /// Oversized content is rejected by `preflight_mutation`, i.e. before the
+    /// mutation transaction runs, so no turn is touched.
     ///
     /// Setup: model catalog has `context_window = max_input_tokens = 500`.
     /// Content: 1500 ASCII bytes → ~523 estimated tokens > 500 → `InputTooLong`.
     #[tokio::test]
-    async fn run_stream_for_mutation_input_too_long_marks_turn_failed() {
+    async fn preflight_mutation_rejects_input_too_long() {
         let db = mock_db_provider(inmem_db().await);
         let tenant_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
         let chat_id = Uuid::new_v4();
-        let request_id = Uuid::new_v4();
-        let turn_id = Uuid::new_v4();
         insert_test_chat(&db, tenant_id, user_id, chat_id).await;
-        insert_running_turn(&db, tenant_id, user_id, chat_id, request_id, turn_id).await;
 
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&[]));
-        let svc = build_stream_service_with_context_window(db.clone(), provider, 500);
-
+        let svc = build_stream_service_with_context_window(db, provider, 500);
         let ctx = test_security_ctx_with_id(tenant_id, user_id);
-        let (tx, _rx) = mpsc::channel(32);
-        let cancel = CancellationToken::new();
 
-        let err = svc
-            .run_stream_for_mutation(
-                ctx,
+        let Err(err) = svc
+            .preflight_mutation(
+                &ctx,
                 chat_id,
-                request_id,
-                turn_id,
-                "a".repeat(1500),
-                test_resolved_model(),
+                &"a".repeat(1500),
+                &test_resolved_model(),
                 false,
-                None,
-                cancel,
-                tx,
             )
             .await
-            .expect_err("should be InputTooLong");
+        else {
+            panic!("oversized content should be rejected by preflight");
+        };
 
         match err {
             StreamError::InputTooLong {
@@ -6257,24 +6343,68 @@ mod tests {
             }
             other => panic!("expected InputTooLong, got: {other:?}"),
         }
+    }
 
-        // The pre-committed turn must be marked Failed, not left in Running.
+    /// A setup failure after the mutation committed marks the new turn
+    /// `Failed` and leaves no quota reserve, so the chat is not blocked.
+    #[tokio::test]
+    async fn run_stream_for_mutation_setup_failure_marks_turn_failed() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        insert_running_turn(&db, tenant_id, user_id, chat_id, request_id, turn_id).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service(db.clone(), provider);
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, _rx) = mpsc::channel(32);
+
+        // A provider the resolver does not know makes provider resolution fail.
+        let model = ResolvedModel {
+            provider_id: "unknown-provider".to_owned(),
+            ..test_resolved_model()
+        };
+        let content = "retry question".to_owned();
+        let preflight = svc
+            .preflight_mutation(&ctx, chat_id, &content, &model, false)
+            .await
+            .expect("preflight should allow the mutation");
+        let err = svc
+            .run_stream_for_mutation(
+                ctx,
+                chat_id,
+                request_id,
+                turn_id,
+                content,
+                model,
+                false,
+                None,
+                preflight,
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect_err("provider resolution should fail");
+        assert!(
+            matches!(err, StreamError::TurnCreationFailed { .. }),
+            "expected TurnCreationFailed, got: {err:?}"
+        );
+
         let conn = db.conn().unwrap();
-        let scope = AccessScope::allow_all();
         let turn = TurnRepo
-            .find_by_chat_and_request_id(&conn, &scope, chat_id, request_id)
+            .find_by_chat_and_request_id(&conn, &AccessScope::allow_all(), chat_id, request_id)
             .await
             .expect("DB query should succeed")
             .expect("turn must exist");
-        assert_eq!(
-            turn.state,
-            TurnState::Failed,
-            "turn should be marked Failed after InputTooLong"
-        );
-        assert_eq!(
-            turn.error_code.as_deref(),
-            Some("input_too_long"),
-            "error_code should be set to input_too_long"
+        assert_eq!(turn.state, TurnState::Failed);
+        assert_eq!(turn.error_code.as_deref(), Some("turn_setup_failed"));
+        assert!(
+            turn.reserve_tokens.is_none(),
+            "no quota reserve may be written for a turn that never started"
         );
     }
 }

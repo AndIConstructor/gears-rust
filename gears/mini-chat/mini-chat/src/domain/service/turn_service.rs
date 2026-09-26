@@ -102,6 +102,15 @@ impl From<EnforcerError> for MutationError {
 // Results
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Inputs for the quota preflight of a retry/edit, read before it commits.
+#[domain_model]
+#[derive(Debug)]
+pub struct MutationPreview {
+    pub user_content: String,
+    pub chat_model: String,
+    pub web_search_enabled: bool,
+}
+
 /// Returned from retry/edit. Contains everything the handler needs to
 /// set up streaming via `StreamService::run_stream_for_mutation()`.
 #[domain_model]
@@ -113,9 +122,6 @@ pub struct MutationResult {
     /// Snapshot boundary computed before the new user message was persisted.
     /// Ensures deterministic context assembly (DESIGN `§ContextPlan` Determinism P1).
     pub snapshot_boundary: Option<crate::domain::repos::SnapshotBoundary>,
-    /// Chat model carried from the mutation transaction so the handler can
-    /// resolve the provider without a redundant DB round-trip.
-    pub chat_model: String,
     /// Whether web search was enabled on the original turn.
     pub web_search_enabled: bool,
 }
@@ -378,6 +384,66 @@ impl<
         Ok(result)
     }
 
+    // ── Mutation preview ────────────────────────────────────────────────
+
+    /// Validates a retry (`new_content = None`) or edit without mutating
+    /// anything and returns the inputs the quota preflight needs. The same
+    /// checks run again inside the mutation transaction.
+    pub async fn preview_mutation(
+        &self,
+        ctx: &SecurityContext,
+        chat_id: Uuid,
+        request_id: Uuid,
+        new_content: Option<String>,
+    ) -> Result<MutationPreview, MutationError> {
+        let action = if new_content.is_some() {
+            actions::EDIT_TURN
+        } else {
+            actions::RETRY_TURN
+        };
+        let chat_scope = self
+            .enforcer
+            .access_scope(ctx, &resources::CHAT, action, Some(chat_id))
+            .await?
+            .ensure_owner(ctx.subject_id());
+
+        let conn = self.db.conn().map_err(|e| MutationError::Internal {
+            message: e.to_string(),
+        })?;
+        let (scope, target, chat_model) = validate_mutation(
+            &*self.chat_repo,
+            &*self.turn_repo,
+            &chat_scope,
+            ctx,
+            &conn,
+            chat_id,
+            request_id,
+        )
+        .await?;
+
+        let user_content = match new_content {
+            Some(content) => content,
+            None => {
+                self.message_repo
+                    .find_user_message_by_request_id(&conn, &scope, chat_id, request_id)
+                    .await
+                    .map_err(|e| MutationError::Internal {
+                        message: e.to_string(),
+                    })?
+                    .ok_or_else(|| MutationError::Internal {
+                        message: format!("User message not found for turn {request_id}"),
+                    })?
+                    .content
+            }
+        };
+
+        Ok(MutationPreview {
+            user_content,
+            chat_model,
+            web_search_enabled: target.web_search_enabled,
+        })
+    }
+
     // ── Shared retry/edit transaction ────────────────────────────────────
 
     async fn mutate_for_stream(
@@ -400,11 +466,11 @@ impl<
         let scope_tx = chat_scope.clone();
         let ctx_clone = ctx.clone();
 
-        let (user_content, snapshot_boundary, chat_model, web_search_enabled, wake) = self
+        let (user_content, snapshot_boundary, web_search_enabled, wake) = self
             .db
             .transaction(|tx| {
                 Box::pin(async move {
-                    let (scope, target, chat_model) = validate_mutation(
+                    let (scope, target, _chat_model) = validate_mutation(
                         &*chat_repo,
                         &*turn_repo,
                         &scope_tx,
@@ -540,7 +606,7 @@ impl<
                         .await
                         .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
 
-                    Ok((user_content, boundary, chat_model, web_search_enabled, wake))
+                    Ok((user_content, boundary, web_search_enabled, wake))
                 })
             })
             .await
@@ -552,7 +618,6 @@ impl<
                 new_turn_id,
                 user_content,
                 snapshot_boundary,
-                chat_model,
                 web_search_enabled,
             },
             wake,
