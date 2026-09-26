@@ -429,8 +429,9 @@ pub fn admit_neighborhood(
 /// before it parses them (`toolkit::api::odata`), and a query built
 /// in-process arrives already parsed, so those budgets never saw it. The same
 /// budgets are applied here to what the tree carries -- identifiers, function
-/// names and string values -- which is a lower bound on the text that would
-/// have spelled it, so nothing REST admits is refused.
+/// names and string values, and the node and field counts -- which is a lower
+/// bound on the text that would have spelled it, so nothing REST admits is
+/// refused.
 pub fn admit_projection(
     cfg: &GraphStorageConfig,
     type_patterns: &[String],
@@ -458,14 +459,32 @@ pub fn admit_projection(
             cfg.projection_max_page
         )));
     }
+    // The REST extractor bounds each option twice, by text length and by
+    // count (`MAX_NODES`, `MAX_ORDER_FIELDS`, `MAX_SELECT_FIELDS`), and the
+    // counts are the bound a tree of one-character names would slip past
+    // on bytes alone. Both are applied here; the six constants are the
+    // extractor's own.
     if let Some(filter) = filter {
-        let bytes = filter_bytes(filter);
+        let (bytes, nodes) = filter_shape(filter);
         if bytes > toolkit::api::odata::MAX_FILTER_LEN {
             return Err(exceeded(format!(
                 "$filter carries {bytes} bytes of names and values; the bound is {}",
                 toolkit::api::odata::MAX_FILTER_LEN
             )));
         }
+        if nodes > toolkit::api::odata::MAX_NODES {
+            return Err(exceeded(format!(
+                "$filter has {nodes} nodes; the bound is {}",
+                toolkit::api::odata::MAX_NODES
+            )));
+        }
+    }
+    if order.0.len() > toolkit::api::odata::MAX_ORDER_FIELDS {
+        return Err(exceeded(format!(
+            "$orderby names {} fields; the bound is {}",
+            order.0.len(),
+            toolkit::api::odata::MAX_ORDER_FIELDS
+        )));
     }
     let order_bytes: usize = order.0.iter().map(|key| key.field.len()).sum();
     if order_bytes > toolkit::api::odata::MAX_ORDERBY_LEN {
@@ -475,6 +494,13 @@ pub fn admit_projection(
         )));
     }
     if let Some(select) = select {
+        if select.len() > toolkit::api::odata::MAX_SELECT_FIELDS {
+            return Err(exceeded(format!(
+                "$select names {} fields; the bound is {}",
+                select.len(),
+                toolkit::api::odata::MAX_SELECT_FIELDS
+            )));
+        }
         let select_bytes: usize = select.iter().map(String::len).sum();
         if select_bytes > toolkit::api::odata::MAX_SELECT_LEN {
             return Err(exceeded(format!(
@@ -486,15 +512,18 @@ pub fn admit_projection(
     Ok(())
 }
 
-/// What a parsed `$filter` carries: every identifier, function name and
-/// string value, plus one byte per operator so a tree of nothing but
-/// operators is not free. Walked with an explicit stack; a caller building
-/// the tree in-process can nest it as deeply as it likes.
-fn filter_bytes(root: &toolkit_odata::ast::Expr) -> usize {
+/// What a parsed `$filter` carries, as `(bytes, nodes)`: every identifier,
+/// function name and string value, plus one byte per operator so a tree of
+/// nothing but operators is not free; and one node per expression, counted
+/// the way the REST extractor counts them for `MAX_NODES`. Walked with an
+/// explicit stack; a caller building the tree in-process can nest it as
+/// deeply as it likes.
+fn filter_shape(root: &toolkit_odata::ast::Expr) -> (usize, usize) {
     use toolkit_odata::ast::{Expr, Value};
-    let mut bytes = 0usize;
+    let (mut bytes, mut nodes) = (0usize, 0usize);
     let mut stack = vec![root];
     while let Some(expr) = stack.pop() {
+        nodes = nodes.saturating_add(1);
         match expr {
             Expr::And(left, right) | Expr::Or(left, right) | Expr::Compare(left, _, right) => {
                 bytes = bytes.saturating_add(1);
@@ -519,7 +548,7 @@ fn filter_bytes(root: &toolkit_odata::ast::Expr) -> usize {
             Expr::Value(_) => bytes = bytes.saturating_add(1),
         }
     }
-    bytes
+    (bytes, nodes)
 }
 
 /// A type registration, and the migrations filed with it.
@@ -766,34 +795,53 @@ mod tests {
             type_id: type_id.to_owned(),
             schema: serde_json::json!({}),
         };
-        let migration = |type_id: &str, from: &str| MigrationSpec {
+        let migration = |type_id: &str, step: MigrationStep| MigrationSpec {
             type_id: type_id.to_owned(),
-            steps: vec![MigrationStep::Rename {
-                from: from.to_owned(),
-                to: "/payload/b".to_owned(),
-            }],
+            steps: vec![step],
         };
-        let type_query = |cursor: &str| TypeQuery {
+        let rename = |from: &str, to: &str| MigrationStep::Rename {
+            from: from.to_owned(),
+            to: to.to_owned(),
+        };
+        let default = |path: &str| MigrationStep::Default {
+            path: path.to_owned(),
+            value: serde_json::json!(1),
+        };
+        let drop = |path: &str| MigrationStep::Drop {
+            path: path.to_owned(),
+        };
+        let type_query = |pattern: Option<&str>, cursor: Option<&str>| TypeQuery {
             kind: None,
-            pattern: None,
+            pattern: pattern.map(str::to_owned),
             top: None,
-            cursor: Some(cursor.to_owned()),
+            cursor: cursor.map(str::to_owned),
         };
 
         let admitted = [
             admit_ingest(&cfg, &ingest(vec![node(&fits)], vec![edge(&fits)])),
-            admit_type_query(&cfg, &type_query(&fits)),
+            admit_type_query(&cfg, &type_query(Some(&fits), Some(&fits))),
             admit_projection(
                 &cfg,
                 std::slice::from_ref(&fits),
                 &toolkit_odata::ODataQuery::default(),
             ),
-            admit_registration(&cfg, &[registration(&fits)], &[migration(&fits, &fits)]),
+            admit_registration(
+                &cfg,
+                &[registration(&fits)],
+                &[
+                    migration(&fits, rename(&fits, &fits)),
+                    migration(&fits, default(&fits)),
+                    migration(&fits, drop(&fits)),
+                ],
+            ),
         ];
         for outcome in admitted {
             outcome.expect("at the ceiling every identifier is admitted");
         }
 
+        // One case per identifier-bearing field, and the list is the
+        // reviewer's checklist: a field with no over-the-ceiling case here is
+        // a bound that can be dropped without a test noticing.
         let refused = [
             (
                 "node[0] type_id",
@@ -803,7 +851,14 @@ mod tests {
                 "edge[0] type_id",
                 admit_ingest(&cfg, &ingest(Vec::new(), vec![edge(&over)])),
             ),
-            ("cursor", admit_type_query(&cfg, &type_query(&over))),
+            (
+                "cursor",
+                admit_type_query(&cfg, &type_query(None, Some(&over))),
+            ),
+            (
+                "pattern",
+                admit_type_query(&cfg, &type_query(Some(&over), None)),
+            ),
             (
                 "type_patterns[0]",
                 admit_projection(
@@ -818,11 +873,27 @@ mod tests {
             ),
             (
                 "migrations[0].type_id",
-                admit_registration(&cfg, &[], &[migration(&over, "/payload/a")]),
+                admit_registration(
+                    &cfg,
+                    &[],
+                    &[migration(&over, rename("/payload/a", "/payload/b"))],
+                ),
             ),
             (
                 "migrations[0].steps[0].from",
-                admit_registration(&cfg, &[], &[migration("t", &over)]),
+                admit_registration(&cfg, &[], &[migration("t", rename(&over, "/payload/b"))]),
+            ),
+            (
+                "migrations[0].steps[0].to",
+                admit_registration(&cfg, &[], &[migration("t", rename("/payload/a", &over))]),
+            ),
+            (
+                "migrations[0].steps[0].path",
+                admit_registration(&cfg, &[], &[migration("t", default(&over))]),
+            ),
+            (
+                "migrations[0].steps[0].path",
+                admit_registration(&cfg, &[], &[migration("t", drop(&over))]),
             ),
         ];
         for (field, outcome) in refused {
@@ -854,5 +925,46 @@ mod tests {
             &toolkit_odata::ODataQuery::default().with_filter(narrow),
         )
         .expect("a filter REST would admit is admitted");
+
+        // And the counts, which bytes alone would not see: one-character
+        // names that stay far inside the byte budgets.
+        let mut deep = Expr::Identifier("a".to_owned());
+        for _ in 0..toolkit::api::odata::MAX_NODES.div_euclid(2) {
+            deep = deep.and(Expr::Identifier("a".to_owned()));
+        }
+        let refused = admit_projection(
+            &cfg,
+            &[],
+            &toolkit_odata::ODataQuery::default().with_filter(deep),
+        )
+        .expect_err("a filter with more nodes than REST admits is refused");
+        assert!(refused.to_string().contains("nodes"), "{refused}");
+
+        let many_keys = toolkit_odata::ODataOrderBy(
+            (0..=toolkit::api::odata::MAX_ORDER_FIELDS)
+                .map(|_| toolkit_odata::OrderKey {
+                    field: "f".to_owned(),
+                    dir: toolkit_odata::SortDir::Asc,
+                })
+                .collect(),
+        );
+        let refused = admit_projection(
+            &cfg,
+            &[],
+            &toolkit_odata::ODataQuery::default().with_order(many_keys),
+        )
+        .expect_err("more order fields than REST admits are refused");
+        assert!(refused.to_string().contains("$orderby names"), "{refused}");
+
+        let many_fields: Vec<String> = (0..=toolkit::api::odata::MAX_SELECT_FIELDS)
+            .map(|_| "s".to_owned())
+            .collect();
+        let query = toolkit_odata::ODataQuery {
+            select: Some(many_fields),
+            ..toolkit_odata::ODataQuery::default()
+        };
+        let refused = admit_projection(&cfg, &[], &query)
+            .expect_err("more select fields than REST admits are refused");
+        assert!(refused.to_string().contains("$select names"), "{refused}");
     }
 }
