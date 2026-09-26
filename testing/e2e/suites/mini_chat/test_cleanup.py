@@ -190,9 +190,20 @@ CLEANUP_MAX_ATTEMPTS = 5
 def _dead_letters(chat_id: str) -> list[dict]:
     """Dead-lettered outbox messages whose payload mentions `chat_id`."""
     return query_db(
-        "SELECT payload, last_error FROM toolkit_outbox_dead_letters WHERE payload LIKE ?",
+        "SELECT partition_id, seq, payload, last_error FROM toolkit_outbox_dead_letters "
+        "WHERE payload LIKE ?",
         (f"%{chat_id}%",),
     )
+
+
+def _processed_seq(partition_id: int) -> int:
+    """The outbox processor's committed offset of a partition: messages with
+    `seq` up to it are never delivered again."""
+    (row,) = query_db(
+        "SELECT processed_seq FROM toolkit_outbox_processor WHERE partition_id = ?",
+        (partition_id,),
+    )
+    return row["processed_seq"]
 
 
 def check_attachment_cleanup_403_ends_failed(mock_provider, model: str) -> None:
@@ -238,9 +249,15 @@ def check_vector_store_delete_500_is_dead_lettered(mock_provider, model: str) ->
     assert _vs_deletes(mock_provider, vs_id) == CLEANUP_MAX_ATTEMPTS, (
         mock_provider.get_request_paths()
     )
-    # The row stays for a dead-letter replay; no further deliveries.
+    # The row stays for a dead-letter replay.
     assert len(_vector_store_rows(chat_id)) == 1
-    time.sleep(2.0)
+    # Not retried again: the processor delivers only messages past its
+    # partition offset, and it moves the offset past a rejected message in
+    # the transaction that writes the dead letter (toolkit-db outbox,
+    # strategy.rs `HandlerResult::Reject`). With the offset past the message
+    # no later delivery can exist, so the delete count is final; no wait on
+    # a retry backoff is needed.
+    assert _processed_seq(dead[0]["partition_id"]) >= dead[0]["seq"], dead
     assert _vs_deletes(mock_provider, vs_id) == CLEANUP_MAX_ATTEMPTS
 
 

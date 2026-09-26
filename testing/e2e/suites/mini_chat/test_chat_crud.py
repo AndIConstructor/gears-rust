@@ -196,10 +196,15 @@ class TestListChats:
         assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_LIMIT")
 
     def test_list_chats_orderby_with_cursor_400(self, server):
+        """A cursor combined with `$orderby` is rejected. The test creates
+        the two chats that make a `limit=1` page have a next cursor."""
+        for _ in range(2):
+            r = httpx.post(f"{API_PREFIX}/chats", json={})
+            assert r.status_code == 201, r.text
         first = httpx.get(f"{API_PREFIX}/chats", params={"limit": 1})
         assert first.status_code == 200, first.text
-        cursor = first.json()["page_info"].get("next_cursor")
-        assert cursor, "user A must own more than one chat"
+        cursor = first.json()["page_info"]["next_cursor"]
+        assert cursor, first.json()
         resp = httpx.get(
             f"{API_PREFIX}/chats", params={"cursor": cursor, "$orderby": "updated_at desc"},
         )

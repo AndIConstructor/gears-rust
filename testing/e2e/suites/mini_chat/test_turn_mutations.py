@@ -243,9 +243,10 @@ class TestTurnEdit:
 
     @pytest.mark.usefixtures("offline_only")
     def test_edit_content_over_context_budget_400(self, chat_with_model, mock_provider):
-        """Edit content of 6000 bytes on gpt-4.1-mini-tiny-ctx passes
-        max_input_tokens but, with the system prompt, exceeds the context
-        budget (see test_streaming.py TestStreamInputLimits). Context assembly
+        """Edit content of 6000 bytes on gpt-4.1-mini-tiny-ctx (2200 tokens)
+        passes max_input_tokens but, with the system prompt (587 tokens),
+        exceeds the context budget min(3000, 4096 - 1024) - 500 = 2500 (see
+        test_streaming.py TestStreamInputLimits). Context assembly
         runs after the edit committed (DESIGN §3.9, preflight-before-mutation
         order): 400 out_of_range CONTEXT_BUDGET_EXCEEDED, the provider is not
         called, the old turn is replaced and the new turn fails with
@@ -269,7 +270,7 @@ class TestTurnEdit:
         assert httpx.get(turn_url(chat_id, rid)).status_code == 404
         turn = poll_turn(chat_id, new_rid)
         assert (turn["state"], turn["error_code"]) == ("error", "context_length_exceeded"), turn
-        assert "assistant_message_id" not in turn, turn
+        assert turn.get("assistant_message_id") is None, turn
         assert [(m["role"], m["content"], m["request_id"]) for m in list_messages(chat_id)] == [
             ("user", content, new_rid),
         ]
