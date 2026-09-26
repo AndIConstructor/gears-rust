@@ -87,6 +87,9 @@ impl From<DomainError> for CanonicalError {
                 .with_format(message)
                 .create(),
 
+            // Same wire shape as `OData` errors raised by the query extractor.
+            DomainError::OData(e) => CanonicalError::from(e),
+
             DomainError::Forbidden => MiniChatChatError::permission_denied()
                 .with_reason("AUTHZ_DENIED")
                 .create(),
@@ -643,6 +646,54 @@ mod tests {
             "expected format string to carry the validation message, got {:?}",
             p.context,
         );
+    }
+
+    #[test]
+    fn odata_errors_use_the_canonical_odata_mapping() {
+        const ODATA_GTS: &str = gts_id!("cf.core.odata.query.v1~");
+        for (err, field, reason) in [
+            (
+                toolkit_odata::Error::InvalidFilter("unknown field `nope`".into()),
+                "$filter",
+                "INVALID_FILTER",
+            ),
+            (
+                toolkit_odata::Error::InvalidOrderByField("nope".into()),
+                "$orderby",
+                "INVALID_ORDERBY_FIELD",
+            ),
+            (
+                toolkit_odata::Error::FilterMismatch,
+                "cursor",
+                "FILTER_MISMATCH",
+            ),
+            (
+                toolkit_odata::Error::OrderMismatch,
+                "cursor",
+                "ORDER_MISMATCH",
+            ),
+            (
+                toolkit_odata::Error::InvalidCursor,
+                "cursor",
+                "INVALID_CURSOR",
+            ),
+            (
+                toolkit_odata::Error::CursorInvalidJson,
+                "cursor",
+                "INVALID_CURSOR",
+            ),
+            (toolkit_odata::Error::InvalidLimit, "$top", "INVALID_LIMIT"),
+        ] {
+            let p: Problem = DomainError::OData(err).into_test_problem();
+            assert_eq!(p.status, Some(400), "{reason}");
+            assert_eq!(p.problem_type, INVALID_ARGUMENT_TYPE, "{reason}");
+            assert_eq!(p.context["resource_type"], ODATA_GTS, "{reason}");
+            let v = p.context["field_violations"]
+                .as_array()
+                .expect("field_violations must be present");
+            assert_eq!(v[0]["field"], field, "{reason}");
+            assert_eq!(v[0]["reason"], reason);
+        }
     }
 
     #[test]

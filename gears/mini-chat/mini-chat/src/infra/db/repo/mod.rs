@@ -30,7 +30,7 @@ pub(crate) fn odata_err(e: toolkit_odata::Error) -> DomainError {
         | E::CursorInvalidVersion
         | E::CursorInvalidKeys
         | E::CursorInvalidFields
-        | E::CursorInvalidDirection) => DomainError::validation(client.to_string()),
+        | E::CursorInvalidDirection) => DomainError::OData(client),
     }
 }
 

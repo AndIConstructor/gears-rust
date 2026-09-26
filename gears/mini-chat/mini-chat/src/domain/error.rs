@@ -36,6 +36,13 @@ pub enum DomainError {
     #[error("Validation failed: {message}")]
     Validation { message: String },
 
+    /// A client-side `OData` query error (bad `$filter`, `$orderby`, `limit`
+    /// or cursor). `Db` / `ParsingUnavailable` are mapped to `Database`
+    /// instead. The REST layer renders it through the canonical `OData`
+    /// mapping so clients get the `field_violations[].reason` codes.
+    #[error(transparent)]
+    OData(toolkit_odata::Error),
+
     #[error("Database error: {message}")]
     Database { message: String },
 

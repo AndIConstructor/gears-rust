@@ -1323,7 +1323,7 @@ async fn create_turn_persists_web_search_enabled() {
 }
 
 #[test]
-fn odata_client_errors_map_to_validation() {
+fn odata_client_errors_keep_the_odata_error() {
     use crate::domain::error::DomainError;
     use crate::infra::db::repo::odata_err;
 
@@ -1334,14 +1334,19 @@ fn odata_client_errors_map_to_validation() {
         toolkit_odata::Error::FilterMismatch,
     ] {
         assert!(
-            matches!(odata_err(e.clone()), DomainError::Validation { .. }),
+            matches!(odata_err(e.clone()), DomainError::OData(_)),
             "{e} must be a client error"
         );
     }
-    assert!(matches!(
-        odata_err(toolkit_odata::Error::Db("boom".to_owned())),
-        DomainError::Database { .. }
-    ));
+    for e in [
+        toolkit_odata::Error::Db("boom".to_owned()),
+        toolkit_odata::Error::ParsingUnavailable("no parser"),
+    ] {
+        assert!(
+            matches!(odata_err(e.clone()), DomainError::Database { .. }),
+            "{e} must be a database error"
+        );
+    }
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ from .conftest import (
     API_PREFIX,
     DEFAULT_MODEL,
     DISABLED_MODEL,
+    RESOURCE_ODATA,
     STANDARD_MODEL,
     TOKEN_USER_B,
     assert_problem,
@@ -151,15 +152,58 @@ class TestListChats:
 
     def test_list_chats_unknown_filter_field_400(self, server):
         resp = httpx.get(f"{API_PREFIX}/chats", params={"$filter": "nosuchfield eq 'x'"})
-        assert_problem(resp, 400, "invalid_argument")
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="INVALID_FILTER", resource_type=RESOURCE_ODATA,
+        )
 
     def test_list_chats_unknown_orderby_field_400(self, server):
         resp = httpx.get(f"{API_PREFIX}/chats", params={"$orderby": "nosuchfield desc"})
-        assert_problem(resp, 400, "invalid_argument")
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="INVALID_ORDERBY_FIELD", resource_type=RESOURCE_ODATA,
+        )
 
     def test_list_chats_malformed_cursor_400(self, server):
         resp = httpx.get(f"{API_PREFIX}/chats", params={"cursor": "not-a-cursor"})
         assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_CURSOR")
+
+    def test_list_chats_cursor_with_other_filter_400(self, server):
+        """A cursor issued for one `$filter` is rejected under another."""
+        tag = f"fm-{uuid.uuid4().hex}"
+        for _ in range(2):
+            r = httpx.post(f"{API_PREFIX}/chats", json={"title": f"{tag} chat"})
+            assert r.status_code == 201, r.text
+        first = httpx.get(
+            f"{API_PREFIX}/chats",
+            params={"limit": 1, "$filter": f"contains(title, '{tag}')"},
+        )
+        assert first.status_code == 200, first.text
+        cursor = first.json()["page_info"].get("next_cursor")
+        assert cursor, first.json()
+
+        resp = httpx.get(
+            f"{API_PREFIX}/chats",
+            params={"limit": 1, "cursor": cursor, "$filter": "contains(title, 'other')"},
+        )
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="FILTER_MISMATCH", resource_type=RESOURCE_ODATA,
+        )
+
+    def test_list_chats_zero_limit_400(self, server):
+        resp = httpx.get(f"{API_PREFIX}/chats", params={"limit": 0})
+        assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_LIMIT")
+
+    def test_list_chats_orderby_with_cursor_400(self, server):
+        first = httpx.get(f"{API_PREFIX}/chats", params={"limit": 1})
+        assert first.status_code == 200, first.text
+        cursor = first.json()["page_info"].get("next_cursor")
+        assert cursor, "user A must own more than one chat"
+        resp = httpx.get(
+            f"{API_PREFIX}/chats", params={"cursor": cursor, "$orderby": "updated_at desc"},
+        )
+        assert_problem(resp, 400, "invalid_argument", field_reason="ORDER_WITH_CURSOR")
 
     def test_send_moves_older_chat_to_top(self, server):
         """The list is ordered by activity: sending into an older chat puts it first."""

@@ -82,7 +82,7 @@ toggled per test.
 | 02-13 | Update Title — 255 chars → 200, 256 → 400        | test_chat_crud.py     | TestUpdateChat::test_update_title_length_boundary            |
 | 02-14 | Create Chat with Disabled Model → 400 `invalid_argument` (`INVALID_MODEL`) | test_chat_crud.py | TestCreateChat::test_create_chat_disabled_model |
 | 02-15 | Create Title — 255 chars → 201, 256 → 400        | test_chat_crud.py     | TestCreateChat::test_create_chat_title_length_boundary       |
-| 02-16 | List Chats — Unknown `$filter` Field → 400 `invalid_argument` | test_chat_crud.py | TestListChats::test_list_chats_unknown_filter_field_400 |
+| 02-16 | List Chats — Unknown `$filter` Field → 400 `invalid_argument` (`INVALID_FILTER`) | test_chat_crud.py | TestListChats::test_list_chats_unknown_filter_field_400 |
 | 02-17 | List Chats — Malformed Cursor → 400 (`INVALID_CURSOR`) | test_chat_crud.py | TestListChats::test_list_chats_malformed_cursor_400          |
 | 02-18 | List Ordered by Activity (send moves chat to top) | test_chat_crud.py    | TestListChats::test_send_moves_older_chat_to_top             |
 | 02-19 | Update Without Title (schema-invalid) → 422 `invalid_argument` | test_chat_crud.py | TestUpdateChat::test_update_without_title_is_422     |
@@ -91,7 +91,10 @@ toggled per test.
 | 02-22 | Create Title — Whitespace-Only → 400 `invalid_argument` | test_chat_crud.py | TestCreateChat::test_create_chat_whitespace_title_rejected |
 | 02-23 | Create with Schema-Invalid Body (`model: 123`) → 422 `invalid_argument` | test_chat_crud.py | TestCreateChat::test_create_chat_schema_invalid_is_422 |
 | 02-24 | Create with Malformed JSON → 400 `invalid_argument` | test_chat_crud.py | TestCreateChat::test_create_chat_malformed_json_is_400 |
-| 02-25 | List Chats — Unknown `$orderby` Field → 400 `invalid_argument` | test_chat_crud.py | TestListChats::test_list_chats_unknown_orderby_field_400 |
+| 02-25 | List Chats — Unknown `$orderby` Field → 400 `invalid_argument` (`INVALID_ORDERBY_FIELD`) | test_chat_crud.py | TestListChats::test_list_chats_unknown_orderby_field_400 |
+| 02-26 | List Chats — Cursor Reused with Another `$filter` → 400 `invalid_argument` (`FILTER_MISMATCH`) | test_chat_crud.py | TestListChats::test_list_chats_cursor_with_other_filter_400 |
+| 02-27 | List Chats — `limit=0` → 400 `invalid_argument` (`INVALID_LIMIT`) | test_chat_crud.py | TestListChats::test_list_chats_zero_limit_400 |
+| 02-28 | List Chats — `cursor` with `$orderby` → 400 `invalid_argument` (`ORDER_WITH_CURSOR`) | test_chat_crud.py | TestListChats::test_list_chats_orderby_with_cursor_400 |
 
 ## 03 — Messages API
 
@@ -105,12 +108,15 @@ toggled per test.
 | 03-06 | Attachments Array Always Present           | test_messages.py  | TestMessages::test_attachments_array_present       |
 | 03-07 | my_reaction Field on Assistant Messages    | test_messages.py  | TestMessages::test_my_reaction_field               |
 | 03-08 | User + Assistant Messages Share request_id (every turn pair; each turn its own) | test_messages.py | TestMessages::test_request_id_shared_per_turn |
-| 03-09 | Unknown `$filter` Field → 400 `invalid_argument` | test_messages.py | TestMessages::test_unknown_filter_field_400    |
+| 03-09 | Unknown `$filter` Field → 400 `invalid_argument` (`INVALID_FILTER`) | test_messages.py | TestMessages::test_unknown_filter_field_400    |
 | 03-10 | Messages of Nonexistent Chat → 404 `not_found` | test_messages.py | TestMessages::test_messages_of_nonexistent_chat_404 |
 | 03-11 | Chat `message_count`: 0 for a new chat, +2 per turn (two turns) | test_multi_turn.py | TestMultiTurn::test_message_count_increments |
 | 03-12 | Messages Ordered Chronologically (two completed turns: content and request_id in order) | test_multi_turn.py | TestMultiTurn::test_messages_ordered_chronologically |
-| 03-13 | Unknown `$orderby` Field → 400 `invalid_argument` | test_messages.py | TestMessages::test_unknown_orderby_field_400 |
+| 03-13 | Unknown `$orderby` Field → 400 `invalid_argument` (`INVALID_ORDERBY_FIELD`) | test_messages.py | TestMessages::test_unknown_orderby_field_400 |
 | 03-14 | Malformed Cursor → 400 `invalid_argument` (`INVALID_CURSOR`) | test_messages.py | TestMessages::test_malformed_cursor_400 |
+| 03-15 | Cursor Reused with Another `$filter` → 400 `invalid_argument` (`FILTER_MISMATCH`) | test_messages.py | TestMessages::test_cursor_with_other_filter_400 |
+| 03-16 | `limit=0` → 400 `invalid_argument` (`INVALID_LIMIT`) | test_messages.py | TestMessages::test_zero_limit_400 |
+| 03-17 | `cursor` with `$orderby` → 400 `invalid_argument` (`ORDER_WITH_CURSOR`) | test_messages.py | TestMessages::test_orderby_with_cursor_400 |
 
 ## 04 — Streaming: Send Message
 

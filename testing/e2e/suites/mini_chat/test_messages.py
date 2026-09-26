@@ -3,7 +3,7 @@
 import httpx
 from uuid import uuid4
 
-from .conftest import API_PREFIX, assert_problem, expect_done, stream_message
+from .conftest import API_PREFIX, RESOURCE_ODATA, assert_problem, expect_done, stream_message
 
 
 def _create_chat_with_messages(count: int = 1) -> str:
@@ -116,17 +116,52 @@ class TestMessages:
         resp = httpx.get(
             f"{API_PREFIX}/chats/{chat['id']}/messages", params={"$filter": "nosuchfield eq 'x'"},
         )
-        assert_problem(resp, 400, "invalid_argument")
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="INVALID_FILTER", resource_type=RESOURCE_ODATA,
+        )
 
     def test_unknown_orderby_field_400(self, chat):
         resp = httpx.get(
             f"{API_PREFIX}/chats/{chat['id']}/messages", params={"$orderby": "nosuchfield desc"},
         )
-        assert_problem(resp, 400, "invalid_argument")
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="INVALID_ORDERBY_FIELD", resource_type=RESOURCE_ODATA,
+        )
 
     def test_malformed_cursor_400(self, chat):
         resp = httpx.get(f"{API_PREFIX}/chats/{chat['id']}/messages", params={"cursor": "not-a-cursor"})
         assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_CURSOR")
+
+    def test_cursor_with_other_filter_400(self, server):
+        """A cursor issued for one `$filter` is rejected under another."""
+        chat_id = _create_chat_with_messages(1)
+        url = f"{API_PREFIX}/chats/{chat_id}/messages"
+        first = httpx.get(url, params={"limit": 1, "$filter": "role ne 'system'"})
+        assert first.status_code == 200, first.text
+        cursor = first.json()["page_info"].get("next_cursor")
+        assert cursor, first.json()
+
+        resp = httpx.get(url, params={"limit": 1, "cursor": cursor, "$filter": "role eq 'user'"})
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="FILTER_MISMATCH", resource_type=RESOURCE_ODATA,
+        )
+
+    def test_zero_limit_400(self, chat):
+        resp = httpx.get(f"{API_PREFIX}/chats/{chat['id']}/messages", params={"limit": 0})
+        assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_LIMIT")
+
+    def test_orderby_with_cursor_400(self, server):
+        chat_id = _create_chat_with_messages(1)
+        url = f"{API_PREFIX}/chats/{chat_id}/messages"
+        first = httpx.get(url, params={"limit": 1})
+        assert first.status_code == 200, first.text
+        cursor = first.json()["page_info"].get("next_cursor")
+        assert cursor, first.json()
+        resp = httpx.get(url, params={"cursor": cursor, "$orderby": "created_at desc"})
+        assert_problem(resp, 400, "invalid_argument", field_reason="ORDER_WITH_CURSOR")
 
     def test_messages_of_nonexistent_chat_404(self, server):
         resp = httpx.get(f"{API_PREFIX}/chats/{uuid4()}/messages")

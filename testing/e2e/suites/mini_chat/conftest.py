@@ -193,6 +193,8 @@ RESOURCE_CHAT = "cf.core.mini_chat.chat.v1~"
 RESOURCE_MESSAGE = "cf.core.mini_chat.message.v1~"
 RESOURCE_TURN = "cf.core.mini_chat.turn.v1~"
 RESOURCE_ATTACHMENT = "cf.core.mini_chat.attachment.v1~"
+# `$filter` / `$orderby` / `limit` / cursor errors (libs/toolkit-odata/src/errors.rs).
+RESOURCE_ODATA = "cf.core.odata.query.v1~"
 
 
 def assert_problem(
