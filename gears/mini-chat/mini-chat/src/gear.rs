@@ -288,12 +288,13 @@ impl Gear for MiniChatGear {
                 Arc<dyn crate::domain::ports::VectorStoreProvider>,
             ) = match entry.storage_kind {
                 crate::config::StorageKind::Azure => {
-                    let api_version = entry.api_version.clone().unwrap_or_else(|| {
-                        panic!(
-                            "provider '{provider_id}': storage_kind is 'azure' \
-                             but api_version is not set"
+                    // `ProviderEntry::validate` already rejects this at the top of `init`.
+                    let api_version = entry.api_version.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "providers config: provider '{provider_id}': storage_kind is \
+                             'azure' but api_version is not set"
                         )
-                    });
+                    })?;
                     (
                         Arc::new(
                             crate::infra::llm::providers::azure_file_storage::AzureFileStorage::new(

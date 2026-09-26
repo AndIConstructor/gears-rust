@@ -258,6 +258,17 @@ impl ProviderEntry {
         if self.port == Some(0) {
             return Err(format!("provider '{provider_id}': port must not be 0"));
         }
+        // Azure RAG storage appends `?api-version=…` to every request.
+        if self.storage_kind == StorageKind::Azure
+            && self
+                .api_version
+                .as_deref()
+                .is_none_or(|v| v.trim().is_empty())
+        {
+            return Err(format!(
+                "provider '{provider_id}': storage_kind is 'azure' but api_version is not set"
+            ));
+        }
         for (tid, tenant_override) in &self.tenant_overrides {
             if let Some(h) = &tenant_override.host
                 && h.trim().is_empty()
@@ -1184,6 +1195,46 @@ mod tests {
         with_override(ovr(None, None, Some("apikey")))
             .validate("p")
             .expect_err("auth-only override rejected");
+    }
+
+    #[test]
+    fn azure_storage_requires_api_version() {
+        let entry = |api_version: Option<&str>| ProviderEntry {
+            kind: ProviderKind::OpenAiResponses,
+            upstream_alias: None,
+            host: "my-azure.openai.azure.com".to_owned(),
+            port: None,
+            use_http: false,
+            api_path: default_api_path(),
+            auth_plugin_type: None,
+            auth_config: None,
+            storage_backend: None,
+            supports_file_search_filters: true,
+            storage_kind: StorageKind::Azure,
+            api_version: api_version.map(str::to_owned),
+            rag_provider: None,
+            tenant_overrides: HashMap::new(),
+        };
+
+        for missing in [None, Some(""), Some("  ")] {
+            let err = entry(missing)
+                .validate("azure_openai")
+                .expect_err("azure without api_version must be rejected");
+            assert_eq!(
+                err,
+                "provider 'azure_openai': storage_kind is 'azure' but api_version is not set"
+            );
+        }
+        entry(Some("2025-03-01-preview"))
+            .validate("azure_openai")
+            .expect("azure with api_version is valid");
+
+        // OpenAI storage ignores api_version.
+        let mut openai = entry(None);
+        openai.storage_kind = StorageKind::OpenAi;
+        openai
+            .validate("openai")
+            .expect("openai without api_version is valid");
     }
 
     #[test]
