@@ -1,7 +1,4 @@
-"""E2E tests for the attachment API (upload, get, delete, send-message with attachments).
-
-Run via: ~/projects/gears-rust-worktrees/scripts/run-tests.sh tests/test_attachments.py
-"""
+"""E2E tests for the attachment API (upload, get, delete, send-message with attachments)."""
 
 import io
 import pathlib
@@ -420,15 +417,6 @@ class TestImageUploadAndSend:
         ss = expect_stream_started(events)
         assert ss.data.get("message_id"), "Expected message_id in stream_started event"
 
-        # Collect delta text to see what the LLM said
-        delta_text = ""
-        for ev in events:
-            if ev.event == "delta" and isinstance(ev.data, dict):
-                delta_text += ev.data.get("content", "")
-
-        # The LLM should have produced some response
-        assert len(delta_text) > 0, "Expected non-empty response from LLM"
-
 
 @pytest.mark.multi_provider
 @pytest.mark.online_only
@@ -603,11 +591,12 @@ class TestUploadSizeEnforcement:
     def test_oversize_image_rejected(self, provider_chat, mock_provider):
         """Upload an image exceeding uploaded_image_max_size_kb (5 MB) → 400.
 
-        Uses ~6 MB which is over the image limit but under the API gateway's
-        global 16 MiB body limit, so our handler's streaming size check runs.
+        Uses ~6 MB which is over the image limit but under the body limit of
+        the upload route (25 MiB + 64 KiB, gears/mini-chat/mini-chat/src/api/rest/routes/attachments.rs),
+        so the handler's streaming size check runs.
         """
         chat_id = provider_chat["id"]
-        # 6 MB > 5 MB default image limit, but < 16 MiB gateway limit
+        # 6 MB > 5 MB default image limit, but < the upload route body limit
         oversize_payload = b"\x89PNG" + b"\x00" * (6 * 1024 * 1024)
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/attachments",

@@ -145,32 +145,30 @@ class TestSettlement:
         assert snapshot() == {**expected, "state": "completed"}
         assert_no_reserves(USER_A_ID)
 
-    def test_web_search_surcharge_in_reserve(self, request, chat):
-        """14-12: the same message with web search reserves more tokens and
-        credits than without it (web_search_surcharge_tokens).
+    def test_web_search_surcharge_in_reserve(self, request, chat, chat_with_model):
+        """14-12: web search adds exactly `web_search_surcharge_tokens` to the
+        reserve of the same first message.
 
-        The web-search turn runs first: the second turn also reserves the first
-        turn's tokens as prior context, which only narrows the difference.
+        Each turn is the first message of its own azure-gpt-4.1 chat, so
+        neither has prior context. The surcharge is added after the safety
+        margin (gears/mini-chat/mini-chat/src/domain/service/token_estimator.rs,
+        `estimate_tokens`), and the output part of the reserve is the same:
+          "SEARCH: weather" is 15 bytes: ceil(15 / 4) = 4
+          -> (4 + 500) * 110 / 100 = 554.4 -> 555 estimated input tokens
+          plain:      reserve_tokens = 555 + 8192 = 8747,
+                      credits = 555 * 3 + 8192 * 15 = 124545
+          web search: +500 web_search_surcharge_tokens (base.yaml) ->
+                      reserve_tokens = 9247, credits = 124545 + 500 * 3 = 126045
         """
         _require_offline(request)
-        chat_id = chat["id"]  # web_search-capable default model
         content = "SEARCH: weather"
 
-        rid_ws = str(uuid.uuid4())
-        status, events, raw = stream_message(
-            chat_id, content, request_id=rid_ws, web_search={"enabled": True},
-        )
-        assert status == 200, raw
-        expect_done(events)
-        poll_turn(chat_id, rid_ws, ("done",))
-
-        rid_plain = str(uuid.uuid4())
-        status, events, raw = stream_message(chat_id, content, request_id=rid_plain)
-        assert status == 200, raw
-        expect_done(events)
-        poll_turn(chat_id, rid_plain, ("done",))
-
-        def reserve(rid: str) -> dict:
+        def reserve(chat_id: str, **extra) -> dict:
+            rid = str(uuid.uuid4())
+            status, events, raw = stream_message(chat_id, content, request_id=rid, **extra)
+            assert status == 200, raw
+            expect_done(events)
+            poll_turn(chat_id, rid, ("done",))
             rows = query_db(
                 "SELECT reserve_tokens, reserved_credits_micro FROM chat_turns "
                 "WHERE request_id = ?", (rid,),
@@ -178,9 +176,10 @@ class TestSettlement:
             assert len(rows) == 1, rows
             return rows[0]
 
-        ws, plain = reserve(rid_ws), reserve(rid_plain)
-        assert ws["reserve_tokens"] > plain["reserve_tokens"], (ws, plain)
-        assert ws["reserved_credits_micro"] > plain["reserved_credits_micro"], (ws, plain)
+        ws = reserve(chat["id"], web_search={"enabled": True})
+        plain = reserve(chat_with_model("azure-gpt-4.1")["id"])
+        assert plain == {"reserve_tokens": 8747, "reserved_credits_micro": 124_545}, plain
+        assert ws == {"reserve_tokens": 9247, "reserved_credits_micro": 126_045}, ws
 
     @pytest.mark.timeout(30)
     def test_cancelled_with_content(self, request, chat, mock_provider):

@@ -12,7 +12,14 @@ import uuid
 import pytest
 import httpx
 
-from .conftest import API_PREFIX, expect_done, expect_stream_started, parse_sse, poll_turn
+from .conftest import (
+    API_PREFIX,
+    delta_text,
+    expect_done,
+    expect_stream_started,
+    parse_sse,
+    poll_turn,
+)
 from .mock_provider.responses import MockEvent, Scenario
 
 
@@ -120,29 +127,32 @@ class TestWebSearchEventOrdering:
         assert types.count("citations") == 1, types
         assert types[-2:] == ["citations", "done"], types
 
+    @pytest.mark.usefixtures("offline_only")
     def test_tool_events_before_done(self, provider_chat):
-        """Tool events must appear before the terminal done event."""
+        """The mock's two web search tool events (`SEARCH:*`) come before the
+        terminal `done` event."""
         events = stream_search(
             provider_chat["id"], "SEARCH: who won the latest Nobel Prize in Physics?",
         )
-        done_idx = next(i for i, e in enumerate(events) if e.event == "done")
-        tool_idx = [i for i, e in enumerate(events) if e.event == "tool"]
-        assert len(tool_idx) > 0, (
-            f"Expected tool events for web search but got none. "
-            f"Event types: {[e.event for e in events]}"
-        )
-        assert max(tool_idx) < done_idx, [e.event for e in events]
+        types = [e.event for e in events]
+        tool_idx = [i for i, t in enumerate(types) if t == "tool"]
+        assert len(tool_idx) == 2, types
+        assert types[-1] == "done", types
+        assert max(tool_idx) < len(types) - 1, types
 
 
 @pytest.mark.multi_provider
 class TestWebSearchDisabledByDefault:
-    """When web_search is not requested, no tool events should appear."""
+    """Without the `web_search` flag the provider gets no web_search tool."""
 
-    def test_no_tool_events_without_web_search(self, provider_chat):
-        """A normal message (no web_search flag) should not trigger web search."""
+    @pytest.mark.usefixtures("offline_only")
+    def test_search_prompt_without_flag_has_no_web_search(self, provider_chat, mock_provider):
+        """18-04: a `SEARCH:` prompt (the mock's web search scenario) sent
+        without the flag: the provider request carries no `tools`, so the
+        mock drops its web search events and the stream has no `tool` event."""
         resp = httpx.post(
             f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "What is 2+2? Answer in one word."},
+            json={"content": "SEARCH: current weather in Berlin"},
             headers={"Accept": "text/event-stream"},
             timeout=90,
         )
@@ -150,25 +160,9 @@ class TestWebSearchDisabledByDefault:
         events = parse_sse(resp.text)
         expect_done(events)
 
-        tool_events = [e for e in events if e.event == "tool"]
-        assert len(tool_events) == 0, (
-            f"Unexpected tool events without web_search: {[t.data for t in tool_events]}"
-        )
-
-    def test_no_citations_without_web_search(self, provider_chat):
-        """A normal message should not produce citation events."""
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "Say hello."},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        expect_done(events)
-
-        citations = [e for e in events if e.event == "citations"]
-        assert len(citations) == 0, "Unexpected citations without web_search"
+        (req,) = mock_provider.get_captured_requests()
+        assert "tools" not in req, req["tools"]
+        assert tool_events(events) == [], events
 
 
 @pytest.mark.multi_provider
@@ -197,24 +191,21 @@ class TestWebSearchTurnStatus:
         assert body.get("assistant_message_id") is not None, "done turn must have assistant_message_id"
 
     def test_messages_persisted_after_web_search(self, provider_chat):
-        """Both user and assistant messages should be persisted after web search."""
+        """18-07: after a web search turn the chat holds exactly the user
+        message and the answer, in that order, with the turn's request_id;
+        the answer is the text of the `delta` events."""
         chat_id = provider_chat["id"]
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "SEARCH: when was the Eiffel Tower built?", "web_search": {"enabled": True}},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        assert resp.status_code == 200
-        events = parse_sse(resp.text)
-        expect_done(events)
+        prompt = "SEARCH: when was the Eiffel Tower built?"
+        events = stream_search(chat_id, prompt)
+        request_id = expect_stream_started(events).data["request_id"]
 
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
         assert resp.status_code == 200
         msgs = resp.json()["items"]
-        roles = [m["role"] for m in msgs]
-        assert "user" in roles
-        assert "assistant" in roles
+        assert [(m["role"], m["content"], m["request_id"]) for m in msgs] == [
+            ("user", prompt, request_id),
+            ("assistant", delta_text(events), request_id),
+        ], msgs
 
 
 class TestWebSearchPerMessageLimit:

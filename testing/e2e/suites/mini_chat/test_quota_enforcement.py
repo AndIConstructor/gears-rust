@@ -77,7 +77,9 @@ class TestQuotaEnforcement:
         assert premium_after == premium_before
 
     def test_policy_version_persisted_per_turn(self, chat):
-        """After completing a turn, policy_version_applied is set in the DB."""
+        """The completed turn records `policy_version_applied` 1: the only
+        version of the static model policy plugin (`SUPPORTED_POLICY_VERSION`
+        in gears/mini-chat/mini-chat/src/infra/plugins/static_model_policy/service.rs)."""
         request_id = str(uuid.uuid4())
         status, events, _ = stream_message(chat["id"], "Say OK.", request_id=request_id)
         assert status == 200
@@ -88,6 +90,4 @@ class TestQuotaEnforcement:
             "SELECT policy_version_applied FROM chat_turns WHERE request_id = ?",
             (request_id,),
         )
-        assert len(rows) == 1
-        assert rows[0]["policy_version_applied"] is not None
-        assert rows[0]["policy_version_applied"] > 0
+        assert rows == [{"policy_version_applied": 1}], rows

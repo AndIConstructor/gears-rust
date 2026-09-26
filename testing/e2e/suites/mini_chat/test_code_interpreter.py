@@ -258,8 +258,10 @@ class TestXlsxOctetStreamInference:
 class TestCodeInterpreterToolEvents:
     """XLSX attachment + message → code_interpreter tool events in SSE."""
 
+    @pytest.mark.usefixtures("offline_only")
     def test_code_interpreter_has_start_and_done(self, openai_chat):
-        """code_interpreter tool events should have both 'start' and 'done' phases."""
+        """The mock's one code interpreter call (`CODEINTERP:*`) is sent as two
+        `code_interpreter` tool events: phase `start`, then `done`."""
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
@@ -280,19 +282,13 @@ class TestCodeInterpreterToolEvents:
         assert "request_id" in ss.data
         assert "message_id" in ss.data
 
-        ci_tools = [
-            t for t in events
-            if t.event == "tool"
-            and isinstance(t.data, dict)
-            and t.data.get("name") == "code_interpreter"
-        ]
-        phases = [t.data.get("phase") for t in ci_tools]
-        assert "start" in phases, f"Missing 'start' phase. Phases: {phases}"
-        assert "done" in phases, f"Missing 'done' phase. Phases: {phases}"
+        tools = [(t.data["name"], t.data["phase"]) for t in events if t.event == "tool"]
+        assert tools == [("code_interpreter", "start"), ("code_interpreter", "done")], tools
 
-    def test_code_interpreter_done_has_output(self, request, openai_chat):
+    @pytest.mark.usefixtures("offline_only")
+    def test_code_interpreter_done_has_output(self, openai_chat):
         """The code_interpreter `done` event carries the logs output. The
-        provider sends it in `response.output_item.done`; offline, the mock
+        provider sends it in `response.output_item.done`; the mock
         `CODEINTERP:*` logs are "Total: 42\nAverage: 7.0"."""
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
@@ -315,24 +311,12 @@ class TestCodeInterpreterToolEvents:
         assert "message_id" in ss.data
 
         done_events = [
-            t for t in events
-            if t.event == "tool"
-            and isinstance(t.data, dict)
-            and t.data.get("name") == "code_interpreter"
-            and t.data.get("phase") == "done"
+            t.data for t in events
+            if t.event == "tool" and t.data["phase"] == "done"
         ]
-        assert len(done_events) >= 1, "No code_interpreter done event"
-        details = done_events[0].data.get("details", {})
-        assert "output" in details, (
-            f"code_interpreter done event missing 'output' in details: {details}"
-        )
-        if request.config.getoption("mode") != "online":
-            phases = [
-                t.data["phase"] for t in events
-                if t.event == "tool" and t.data.get("name") == "code_interpreter"
-            ]
-            assert phases == ["start", "done"], phases
-            assert details == {"output": "Total: 42\nAverage: 7.0"}, details
+        assert len(done_events) == 1, [e.event for e in events]
+        assert done_events[0]["name"] == "code_interpreter", done_events
+        assert done_events[0]["details"] == {"output": "Total: 42\nAverage: 7.0"}, done_events
 
     def test_code_interpreter_stream_has_deltas(self, openai_chat):
         """Stream with code_interpreter should still have delta text events."""
@@ -483,7 +467,9 @@ class TestMixedAttachments:
 class TestCodeInterpreterEventOrdering:
     """SSE event ordering: tool events must appear before done."""
 
+    @pytest.mark.usefixtures("offline_only")
     def test_tool_events_before_done(self, openai_chat):
+        """The mock's code interpreter tool events (`CODEINTERP:*`) come before `done`."""
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
@@ -501,14 +487,10 @@ class TestCodeInterpreterEventOrdering:
         assert status == 200
         expect_done(events)
 
-        tool_events = [e for e in events if e.event == "tool"]
-        assert len(tool_events) > 0, "Expected tool events for ordering check"
-        done_idx = next(i for i, e in enumerate(events) if e.event == "done")
-        for i, e in enumerate(events):
-            if e.event == "tool":
-                assert i < done_idx, (
-                    f"tool event at index {i} should be before done at {done_idx}"
-                )
+        tool_idx = [i for i, e in enumerate(events) if e.event == "tool"]
+        assert len(tool_idx) == 2, [e.event for e in events]
+        assert events[-1].event == "done", [e.event for e in events]
+        assert max(tool_idx) < len(events) - 1, [e.event for e in events]
 
 
 # ---------------------------------------------------------------------------

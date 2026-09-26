@@ -107,17 +107,25 @@ def _call(method: str, path: str, ids: dict, headers: dict) -> httpx.Response:
 
 
 class TestAuthentication:
-    """Every operation requires a valid bearer token."""
+    """Every operation requires a valid bearer token. The API gateway answers
+    401 `unauthenticated` with an RFC 6750 challenge
+    (gears/system/api-gateway/src/middleware/auth.rs, `authn_middleware`)."""
 
     @pytest.mark.parametrize(("method", "path"), OPERATIONS)
     def test_missing_token_is_401(self, owned, method, path):
+        """No Authorization header: reason `MISSING_BEARER`, challenge with
+        `realm` only."""
         resp = _call(method, path, owned, NO_AUTH)
-        assert resp.status_code == 401, f"{method} {path}: {resp.status_code} {resp.text}"
+        assert_problem(resp, 401, "unauthenticated", reason="MISSING_BEARER")
+        assert resp.headers.get_list("www-authenticate") == ['Bearer realm="api"']
 
     @pytest.mark.parametrize(("method", "path"), OPERATIONS)
     def test_unknown_token_is_401(self, owned, method, path):
+        """A token the static authn plugin does not know: reason
+        `AUTHN_FAILED`, challenge `invalid_token`."""
         resp = _call(method, path, owned, auth_headers("not-a-valid-token"))
-        assert resp.status_code == 401, f"{method} {path}: {resp.status_code} {resp.text}"
+        assert_problem(resp, 401, "unauthenticated", reason="AUTHN_FAILED")
+        assert resp.headers.get_list("www-authenticate") == ['Bearer error="invalid_token"']
 
 
 # Operations on A's resources that another user must see as 404.
@@ -169,8 +177,8 @@ class TestIsolation:
         messages_after = list_messages(owned["chat_id"])
         assert messages_after == messages_before
         # The foreign PUT /reaction set no reaction on A's answer.
-        assistant = [m for m in messages_after if m["role"] == "assistant"]
-        assert [m["my_reaction"] for m in assistant] == [None]
+        answer = [m for m in messages_after if m["id"] == owned["message_id"]]
+        assert [(m["role"], m["my_reaction"]) for m in answer] == [("assistant", None)]
 
         turn = httpx.get(f"{chat_url}/turns/{owned['request_id']}")
         assert turn.status_code == 200
@@ -184,9 +192,10 @@ class TestIsolation:
 class TestQuotaIsolation:
     """Usage is accounted per user."""
 
-    def test_other_user_usage_is_not_charged(self, owned):
+    def test_other_user_usage_is_not_charged(self, chat):
         """A's turn is charged to A (total daily grows by the turn's cost) and
-        leaves B's usage unchanged."""
+        leaves B's usage unchanged. The turn runs in a chat of its own, so
+        the module chat of TestIsolation stays at one turn."""
         def used(token: str) -> int:
             resp = httpx.get(f"{API_PREFIX}/quota/status", headers=auth_headers(token))
             assert resp.status_code == 200, resp.text
@@ -199,7 +208,7 @@ class TestQuotaIsolation:
 
         before_a = used_total_daily(TOKEN_USER_A)
         before_b = used(TOKEN_USER_B)
-        status, events, _ = stream_message(owned["chat_id"], "Say OK again.")
+        status, events, _ = stream_message(chat["id"], "Say OK again.")
         assert status == 200
         usage = expect_done(events).data["usage"]
         assert_no_reserves(USER_A_ID)

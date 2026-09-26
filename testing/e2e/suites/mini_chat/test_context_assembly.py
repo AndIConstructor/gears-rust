@@ -50,19 +50,11 @@ class TestSystemPrompt:
     """The catalog system prompt is delivered to the provider as `instructions`."""
 
     def test_system_prompt_sent_as_instructions(self, request, provider_chat, mock_provider):
-        """Offline: the captured provider request carries the catalog system prompt."""
-        if request.config.getoption("mode") == "online":
-            pytest.skip("inspects the mock provider's captured request")
-        _resp = httpx.post(
-            f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
-            json={"content": "Hello"},
-            headers={"Accept": "text/event-stream"},
-            timeout=90,
-        )
-        expect_done(parse_sse(_resp.text))
-
-        instructions = mock_provider.get_last_request()["instructions"]
-        assert CATALOG_SYSTEM_PROMPT in instructions
+        """16-01: without tools the provider `instructions` are exactly the
+        catalog system prompt (no guard is appended)."""
+        _require_offline(request)
+        body = _send_and_capture(mock_provider, provider_chat["id"], "Hello")
+        assert body["instructions"] == CATALOG_SYSTEM_PROMPT
 
     @pytest.mark.online_only
     def test_ping_pong_proves_system_prompt(self, provider_chat):

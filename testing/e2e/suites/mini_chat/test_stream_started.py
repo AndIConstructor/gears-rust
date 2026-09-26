@@ -242,7 +242,7 @@ class TestCancelledMessagePersistence:
 
     @pytest.mark.timeout(30)
     def test_cancelled_turn_has_assistant_message_id(self, chat, mock_provider):
-        """D4: the cancelled turn points at the pre-allocated assistant message."""
+        """The cancelled turn points at the pre-allocated assistant message."""
         rid, message_id, _ = self._cancel_after_three_deltas(chat["id"], mock_provider)
 
         turn = poll_turn(chat["id"], rid, ("cancelled",))
@@ -250,8 +250,10 @@ class TestCancelledMessagePersistence:
         assert turn["assistant_message_id"] == message_id
 
     @pytest.mark.timeout(30)
-    def test_cancelled_message_content_equals_received_deltas(self, chat, mock_provider):
-        """GET /messages holds the partial answer: exactly the deltas the client received."""
+    def test_cancelled_message_content_starts_with_received_deltas(self, chat, mock_provider):
+        """GET /messages holds the partial answer: it starts with the deltas the
+        client received and is a prefix of the full scenario text (the gear may
+        read a few more deltas than the client before it sees the cancel)."""
         rid, message_id, received = self._cancel_after_three_deltas(chat["id"], mock_provider)
         poll_turn(chat["id"], rid, ("cancelled",))
 
@@ -259,7 +261,10 @@ class TestCancelledMessagePersistence:
         assert resp.status_code == 200
         assistant = [m for m in resp.json()["items"] if m["role"] == "assistant"]
         assert [(m["id"], m["request_id"]) for m in assistant] == [(message_id, rid)]
-        assert assistant[0]["content"] == received
+        content = assistant[0]["content"]
+        full_text = "".join(f"w{i} " for i in range(20))
+        assert content.startswith(received), (content, received)
+        assert full_text.startswith(content), content
 
     @pytest.mark.timeout(30)
     def test_retry_cancelled_turn_produces_new_message(self, chat, mock_provider):

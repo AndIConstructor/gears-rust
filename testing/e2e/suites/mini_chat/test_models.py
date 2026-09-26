@@ -42,12 +42,24 @@ class TestListModels:
         assert {m["model_id"] for m in resp.json()["items"]} == expected
 
     def test_model_has_required_fields(self, server):
+        """Every model has the required fields; `multiplier_display` is the
+        catalog value of config/base.yaml."""
         resp = httpx.get(f"{API_PREFIX}/models")
-        for m in resp.json()["items"]:
+        assert resp.status_code == 200
+        items = resp.json()["items"]
+        for m in items:
             assert "model_id" in m
             assert "display_name" in m
             assert "tier" in m, "model must have tier"
             assert "context_window" in m, "model must have context_window"
+        assert {m["model_id"]: m["multiplier_display"] for m in items} == {
+            "gpt-5.2": "1x",
+            "gpt-5-mini": "1x",
+            "gpt-5-nano": "0.5x",
+            "azure-gpt-4.1": "3x",
+            "gpt-5-bare": "0.5x",
+            "gpt-4.1-mini-tiny-ctx": "0.5x",
+        }
 
 
 class TestGetModel:

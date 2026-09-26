@@ -202,8 +202,9 @@ gears:
       # idle phase before the first delta.
       streaming:
         sse_ping_interval_seconds: 5
-      # Orphan watchdog: use minimum allowed timeout (90s) and frequent scans
-      # to make e2e orphan detection tests feasible (default 300s is too slow).
+      # Orphan watchdog: minimum allowed timeout (90s) and frequent scans. No
+      # E2E test waits for it (90s does not fit the test budget); orphan
+      # handling is unit-tested (E2E-SCENARIOS.md 19-06).
       orphan_watchdog:
         enabled: true
         scan_interval_secs: 2

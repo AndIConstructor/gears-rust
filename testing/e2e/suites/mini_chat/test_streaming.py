@@ -11,6 +11,7 @@ from .conftest import (
     DEFAULT_MODEL,
     TINY_CTX_MODEL,
     assert_problem,
+    delta_text,
     expect_done,
     expect_stream_started,
     parse_sse,
@@ -277,34 +278,32 @@ class TestMessages:
     """Verify messages are persisted after streaming."""
 
     def test_messages_persisted_after_stream(self, provider_chat):
+        """04-09: after `done` the chat holds exactly the user message and the
+        answer, in that order, both with the turn's request_id and an
+        attachments array; the answer is the text of the `delta` events."""
         chat_id = provider_chat["id"]
+        prompt = "Say exactly: PONG"
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",
-            json={"content": "Say exactly: PONG"},
+            json={"content": prompt},
             headers={"Accept": "text/event-stream"},
             timeout=90,
         )
         assert resp.status_code == 200
         events = parse_sse(resp.text)
-        assert any(e.event == "done" for e in events)
+        expect_done(events)
+        request_id = expect_stream_started(events).data["request_id"]
 
-        # Fetch messages
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
         assert resp.status_code == 200
         msgs = resp.json()["items"]
-        roles = [m["role"] for m in msgs]
-        assert "user" in roles
-        assert "assistant" in roles
-
-        user_msg = next(m for m in msgs if m["role"] == "user")
-        assert user_msg.get("request_id") is not None, "request_id must be non-null"
-        assert isinstance(user_msg.get("attachments"), list), "attachments must be an array"
-
-        asst_msg = next(m for m in msgs if m["role"] == "assistant")
-        assert asst_msg.get("request_id") is not None, "request_id must be non-null"
-        assert isinstance(asst_msg.get("attachments"), list), "attachments must be an array"
+        assert [(m["role"], m["content"], m["request_id"], m["attachments"]) for m in msgs] == [
+            ("user", prompt, request_id, []),
+            ("assistant", delta_text(events), request_id, []),
+        ], msgs
 
     def test_user_message_content_matches(self, provider_chat):
+        """04-09: the user message is stored with the content that was sent."""
         prompt = "Say exactly: TEST_ECHO"
         chat_id = provider_chat["id"]
         resp = httpx.post(
@@ -314,12 +313,12 @@ class TestMessages:
             timeout=90,
         )
         assert resp.status_code == 200
+        expect_done(parse_sse(resp.text))
 
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
         assert resp.status_code == 200
-        msgs = resp.json()["items"]
-        user_msgs = [m for m in msgs if m["role"] == "user"]
-        assert any(prompt in m["content"] for m in user_msgs)
+        user_msgs = [m["content"] for m in resp.json()["items"] if m["role"] == "user"]
+        assert user_msgs == [prompt]
 
     def test_assistant_message_has_tokens(self, provider_chat):
         """The assistant message stores the token counts of the turn's `done` usage."""
