@@ -155,3 +155,26 @@ fn gateway_internal_maps_to_provider_error() {
         _ => panic!("expected ProviderError"),
     }
 }
+
+#[test]
+fn provider_429_response_is_rate_limited() {
+    let (parts, ()) = http::Response::builder()
+        .status(http::StatusCode::TOO_MANY_REQUESTS)
+        .header(http::header::RETRY_AFTER, "7")
+        .body(())
+        .unwrap()
+        .into_parts();
+    assert!(matches!(
+        rate_limited_from_status(&parts),
+        Some(LlmProviderError::RateLimited {
+            retry_after_secs: Some(7)
+        })
+    ));
+
+    let (parts, ()) = http::Response::builder()
+        .status(http::StatusCode::BAD_GATEWAY)
+        .body(())
+        .unwrap()
+        .into_parts();
+    assert!(rate_limited_from_status(&parts).is_none());
+}

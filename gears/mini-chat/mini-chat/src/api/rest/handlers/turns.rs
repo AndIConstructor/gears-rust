@@ -118,7 +118,7 @@ pub(crate) async fn edit_turn(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<AppServices>>,
     Path((chat_id, request_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-    Json(body): Json<EditTurnRequest>,
+    extract::Json(body): extract::Json<EditTurnRequest>,
 ) -> Response {
     if body.content.trim().is_empty() {
         return MiniChatChatError::invalid_argument()

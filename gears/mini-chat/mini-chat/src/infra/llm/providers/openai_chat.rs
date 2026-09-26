@@ -684,7 +684,10 @@ impl crate::infra::llm::LlmProvider for OpenAiChatProvider {
                 Ok(ProviderStream::new(translated, cancel))
             }
             ServerEventsResponse::Response(resp) => {
-                let (_parts, body) = resp.into_parts();
+                let (parts, body) = resp.into_parts();
+                if let Some(e) = crate::infra::llm::rate_limited_from_status(&parts) {
+                    return Err(e);
+                }
                 match body.into_bytes().await {
                     Ok(bytes) => {
                         if let Ok(error_payload) =

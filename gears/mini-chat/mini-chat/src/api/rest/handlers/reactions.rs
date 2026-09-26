@@ -14,7 +14,7 @@ pub(crate) async fn put_reaction(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<AppServices>>,
     Path((chat_id, msg_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-    Json(req_body): Json<SetReactionReq>,
+    extract::Json(req_body): extract::Json<SetReactionReq>,
 ) -> ApiResult<JsonBody<ReactionDto>> {
     let result = svc
         .reactions

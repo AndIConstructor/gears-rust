@@ -42,6 +42,7 @@ Chosen option: "Adopt the canonical `Problem` for REST, and keep `{code, message
 | Chat, message, turn, attachment or model not found (including another user's resource) | `not_found` | 404 | resource scoped by `type` |
 | Unknown or disabled model on `POST /chats` | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
 | Validation error (empty title, empty content, bad OData `$filter`/`$orderby`/cursor) | `invalid_argument` | 400 | `detail` |
+| Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | platform JSON extractor (`toolkit::api::rest::extract::Json`) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` (was 415) |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` (was 415) |
 | Invalid, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment]` |

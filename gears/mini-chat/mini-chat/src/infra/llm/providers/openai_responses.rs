@@ -936,6 +936,9 @@ impl crate::infra::llm::LlmProvider for OpenAiResponsesProvider {
             ServerEventsResponse::Response(resp) => {
                 // Non-SSE response — parse as JSON error
                 let (parts, body) = resp.into_parts();
+                if let Some(e) = crate::infra::llm::rate_limited_from_status(&parts) {
+                    return Err(e);
+                }
                 tracing::warn!(status = %parts.status, "provider returned non-SSE response");
                 match body.into_bytes().await {
                     Ok(bytes) => {

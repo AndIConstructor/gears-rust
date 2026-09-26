@@ -1112,6 +1112,9 @@ impl crate::infra::llm::LlmProvider for AnthropicMessagesProvider {
             }
             ServerEventsResponse::Response(resp) => {
                 let (parts, resp_body) = resp.into_parts();
+                if let Some(e) = crate::infra::llm::rate_limited_from_status(&parts) {
+                    return Err(e);
+                }
                 match resp_body.into_bytes().await {
                     Ok(bytes) => {
                         log_anthropic_error_response(

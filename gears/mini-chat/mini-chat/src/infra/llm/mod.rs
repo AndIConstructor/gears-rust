@@ -138,6 +138,21 @@ static RE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s,\]
 static RE_CRED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(sk-[A-Za-z0-9]{10,}|Bearer\s+[A-Za-z0-9._\-]+)").unwrap());
 
+/// A provider's own HTTP 429 (passed through by OAGW as a non-SSE response)
+/// is a rate limit, not a generic provider error. `Retry-After` in seconds is
+/// forwarded when present.
+pub(crate) fn rate_limited_from_status(parts: &http::response::Parts) -> Option<LlmProviderError> {
+    if parts.status != http::StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
+    let retry_after_secs = parts
+        .headers
+        .get(http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    Some(LlmProviderError::RateLimited { retry_after_secs })
+}
+
 /// Regex-based scrubbing of provider response/file/vector-store IDs, URLs,
 /// and credential fragments.
 pub(crate) fn sanitize_provider_message(msg: &str) -> String {

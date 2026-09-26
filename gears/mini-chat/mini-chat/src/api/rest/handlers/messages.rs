@@ -47,7 +47,7 @@ pub(crate) async fn stream_message(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<AppServices>>,
     Path(chat_id): Path<uuid::Uuid>,
-    Json(body): Json<StreamMessageRequest>,
+    extract::Json(body): extract::Json<StreamMessageRequest>,
 ) -> Response {
     // ── Pre-stream validation ──────────────────────────────────────────
     if body.content.trim().is_empty() {
