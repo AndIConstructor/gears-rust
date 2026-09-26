@@ -63,8 +63,9 @@ pub trait MiniChatModelPolicyPluginClientV1: Send + Sync {
 /// Plugin API trait for mini-chat audit event publishing.
 ///
 /// Plugins implement this trait to receive audit events from the mini-chat
-/// gear. The mini-chat gear discovers plugins via GTS types-registry and
-/// dispatches audit events to all registered implementations.
+/// gear. The gear lists the plugin instances in the GTS types-registry and
+/// selects one of them by the configured `vendor`; events go only to that
+/// instance. If no instance matches, audit events are dropped.
 ///
 /// # Caller contract
 ///

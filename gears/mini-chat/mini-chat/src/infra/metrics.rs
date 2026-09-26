@@ -162,7 +162,8 @@ pub struct MiniChatMetricsMeter {
     #[allow(dead_code)]
     quota_image_commit: Counter<u64>,
 
-    // ── P3: Idempotent replay (deferred: idempotent replay not implemented) ──
+    // ── Idempotent replay: replay is implemented (domain/service/replay.rs),
+    // but nothing records this counter yet ──
     #[allow(dead_code)]
     stream_replay: Counter<u64>,
 
@@ -541,7 +542,7 @@ impl MiniChatMetricsMeter {
                 .with_description("Image quota commits")
                 .build(),
 
-            // deferred: idempotent replay not implemented
+            // replay is implemented; this counter is not recorded yet
             stream_replay: meter
                 .u64_counter(format!("{prefix}_stream_replay"))
                 .with_description("Stream replay events")

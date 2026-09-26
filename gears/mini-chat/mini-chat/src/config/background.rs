@@ -55,14 +55,15 @@ fn default_orphan_timeout() -> u64 {
     300
 }
 
-/// Thread summary background worker — claims and executes pending thread
-/// summary tasks. Requires leader election.
+/// Thread summary tasks. Tasks are enqueued at turn finalization and run by
+/// the outbox handler on the `outbox.thread_summary_queue_name` queue; no
+/// leader election is involved.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSummaryWorkerConfig {
-    /// Enable the thread summary worker. Default: `true`.
+    /// Enqueue thread summary tasks at turn finalization. Default: `true`.
     #[serde(default = "super::default_true")]
     pub enabled: bool,
-    /// Maximum interval between reconciliation scans. Default: 60s.
+    /// Deprecated: has no effect (see ADR-0010).
     #[serde(default = "default_ts_reconcile_interval")]
     pub reconcile_interval_secs: u64,
     /// Outbox lease for one summary task: the handler is cancelled and the
@@ -150,28 +151,30 @@ fn default_message_content_limit() -> usize {
     4000
 }
 
-/// Cleanup worker — removes provider resources for soft-deleted chats.
+/// Cleanup of provider resources for deleted attachments and chats.
 ///
-/// Target design: this worker does not require leader election because row
-/// claiming is intended to be concurrent-safe via `SELECT … FOR UPDATE SKIP LOCKED`.
+/// The work runs as outbox handlers on the `outbox.cleanup_queue_name` and
+/// `outbox.chat_cleanup_queue_name` queues; there is no polling worker. Only
+/// `max_attempts` is used.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanupWorkerConfig {
-    /// Enable the cleanup worker. Default: `true`.
+    /// Deprecated: has no effect (see ADR-0010). Cleanup handlers always run.
     #[serde(default = "super::default_true")]
     pub enabled: bool,
-    /// Poll interval in seconds. Default: 60.
+    /// Deprecated: has no effect (see ADR-0010).
     #[serde(default = "default_cleanup_poll_interval")]
     pub poll_interval_secs: u64,
-    /// Maximum interval between reconciliation scans for stuck rows. Default: 300s.
+    /// Deprecated: has no effect (see ADR-0010).
     #[serde(default = "default_cleanup_reconcile_interval")]
     pub reconcile_interval_secs: u64,
-    /// Timeout for stale `in_progress` rows. Default: 900s.
+    /// Deprecated: has no effect (see ADR-0010).
     #[serde(default = "default_cleanup_stale_timeout")]
     pub stale_in_progress_timeout_secs: u64,
-    /// Max attachments claimed per poll cycle. Default: 32.
+    /// Deprecated: has no effect (see ADR-0010).
     #[serde(default = "default_cleanup_batch_size")]
     pub batch_size: u32,
-    /// Max retry attempts per attachment. Default: 5.
+    /// Max cleanup attempts per attachment before the outbox message is
+    /// dead-lettered. Default: 5.
     #[serde(default = "default_cleanup_max_attempts")]
     pub max_attempts: u32,
 }

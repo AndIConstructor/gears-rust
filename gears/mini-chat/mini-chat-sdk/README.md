@@ -11,7 +11,7 @@ The `cf-gears-mini-chat-sdk` crate provides:
 - **Domain models** — `PolicySnapshot`, `ModelCatalogEntry`, `UserLimits`, `KillSwitches`, `ModelTier`
 - **Error type** — `MiniChatModelPolicyPluginError`
 
-Plugin implementations (e.g. `cf-gears-static-model-policy-plugin`) depend on this crate and register via `inventory`.
+Plugin implementations depend on this crate and register via `inventory`. The mini-chat crate ships static implementations of both plugin specs (`MiniChatModelPolicyPluginSpecV1`, `MiniChatAuditPluginSpecV1`) in `mini-chat/src/infra/plugins/`.
 
 ## Usage
 
