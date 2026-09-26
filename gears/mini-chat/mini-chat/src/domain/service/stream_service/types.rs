@@ -410,6 +410,8 @@ pub(super) struct PreflightResult {
     pub(super) tool_support: mini_chat_sdk::ModelToolSupport,
     pub(super) api_params: mini_chat_sdk::ModelApiParams,
     pub(super) web_search_context_size: mini_chat_sdk::models::WebSearchContextSize,
+    /// Whether the effective model accepts image input.
+    pub(super) vision_input: bool,
 }
 
 /// Convert a `PreflightDecision` into a flat `PreflightResult` or a `StreamError`.
@@ -435,6 +437,7 @@ pub(super) fn flatten_preflight(
             tool_support,
             api_params,
             web_search_context_size,
+            vision_input,
             ..
         } => Ok(PreflightResult {
             effective_model,
@@ -456,6 +459,7 @@ pub(super) fn flatten_preflight(
             tool_support,
             api_params,
             web_search_context_size,
+            vision_input,
         }),
         PreflightDecision::Downgrade {
             effective_model,
@@ -476,6 +480,7 @@ pub(super) fn flatten_preflight(
             tool_support,
             api_params,
             web_search_context_size,
+            vision_input,
             ..
         } => Ok(PreflightResult {
             effective_model,
@@ -497,6 +502,7 @@ pub(super) fn flatten_preflight(
             tool_support,
             api_params,
             web_search_context_size,
+            vision_input,
         }),
         PreflightDecision::Reject {
             error_code,

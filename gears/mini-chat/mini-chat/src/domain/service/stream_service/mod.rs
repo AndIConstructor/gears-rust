@@ -293,10 +293,6 @@ impl<
         cancel: CancellationToken,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<tokio::task::JoinHandle<StreamOutcome>, StreamError> {
-        let has_vision_input = resolved_model
-            .multimodal_capabilities
-            .iter()
-            .any(|c| c == "VISION_INPUT");
         let ResolvedModel {
             model_id: model,
             provider_id,
@@ -437,7 +433,7 @@ impl<
         check_input_token_limit(&content, &pf)?;
 
         // ── Post-preflight image guards (kill switches + vision capability) ──
-        check_image_support(num_images, &computed.kill_switches, has_vision_input)?;
+        check_image_support(num_images, &computed.kill_switches, pf.vision_input)?;
 
         // Metrics: estimated tokens (only on allow/downgrade)
         #[allow(clippy::cast_precision_loss)]
@@ -1214,11 +1210,7 @@ impl<
 
         let pf = flatten_preflight(computed.decision.clone())?;
         check_input_token_limit(content, &pf)?;
-        let has_vision_input = resolved_model
-            .multimodal_capabilities
-            .iter()
-            .any(|c| c == "VISION_INPUT");
-        check_image_support(num_images, &computed.kill_switches, has_vision_input)?;
+        check_image_support(num_images, &computed.kill_switches, pf.vision_input)?;
 
         Ok(MutationPreflight {
             computed,
@@ -1610,13 +1602,9 @@ impl<
     }
 }
 
-/// Post-preflight image guards: the images kill switch and the model's
-/// vision capability.
-///
-/// DESIGN §2.2: P1 requires every enabled model to support `VISION_INPUT`,
-/// so a quota downgrade cannot land on a non-vision model and checking the
-/// selected model is sufficient; the check is defensive against catalog
-/// misconfiguration.
+/// Post-preflight image guards: the images kill switch and the vision
+/// capability of the effective model (after any quota downgrade), which is
+/// the model the images are sent to.
 fn check_image_support(
     num_images: u32,
     kill_switches: &mini_chat_sdk::KillSwitches,
@@ -2422,7 +2410,7 @@ mod tests {
                         is_default: true,
                         input_tokens_credit_multiplier_micro: 1_000_000,
                         output_tokens_credit_multiplier_micro: 1_000_000,
-                        multimodal_capabilities: vec![],
+                        multimodal_capabilities: vec!["VISION_INPUT".to_owned()],
                         context_window: 128_000,
                         max_output_tokens: 4096,
                         description: String::new(),
@@ -3095,6 +3083,7 @@ mod tests {
                 reasoning_effort: None,
             },
             web_search_context_size: mini_chat_sdk::models::WebSearchContextSize::Low,
+            vision_input: true,
         };
 
         let result = flatten_preflight(decision).expect("Allow should produce Ok");
@@ -3161,6 +3150,7 @@ mod tests {
                 reasoning_effort: None,
             },
             web_search_context_size: mini_chat_sdk::models::WebSearchContextSize::Low,
+            vision_input: true,
         };
 
         let result = flatten_preflight(decision).expect("Downgrade should produce Ok");

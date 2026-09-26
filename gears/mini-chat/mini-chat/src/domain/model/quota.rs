@@ -36,6 +36,8 @@ pub enum PreflightDecision {
         api_params: ModelApiParams,
         /// Web search context size hint (from `ModelCatalogEntry`).
         web_search_context_size: WebSearchContextSize,
+        /// Whether the effective model accepts image input (`VISION_INPUT`).
+        vision_input: bool,
     },
     Downgrade {
         effective_model: String,
@@ -66,6 +68,8 @@ pub enum PreflightDecision {
         api_params: ModelApiParams,
         /// Web search context size hint (from `ModelCatalogEntry`).
         web_search_context_size: WebSearchContextSize,
+        /// Whether the effective model accepts image input (`VISION_INPUT`).
+        vision_input: bool,
     },
     Reject {
         error_code: String,

@@ -733,6 +733,10 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                     tool_support: eff_entry.general_config.tool_support.clone(),
                                     api_params: eff_entry.general_config.api_params.clone(),
                                     web_search_context_size: eff_entry.web_search_context_size,
+                                    vision_input: eff_entry
+                                        .multimodal_capabilities
+                                        .iter()
+                                        .any(|c| c == "VISION_INPUT"),
                                 },
                                 CascadeDecision::Downgrade {
                                     downgrade_from,
@@ -759,6 +763,10 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                     tool_support: eff_entry.general_config.tool_support.clone(),
                                     api_params: eff_entry.general_config.api_params.clone(),
                                     web_search_context_size: eff_entry.web_search_context_size,
+                                    vision_input: eff_entry
+                                        .multimodal_capabilities
+                                        .iter()
+                                        .any(|c| c == "VISION_INPUT"),
                                 },
                                 CascadeDecision::Reject => unreachable!(),
                             };
@@ -1985,6 +1993,39 @@ mod tests {
             } => {
                 assert_eq!(effective_model, "gpt-5-mini");
                 assert_eq!(max_output_tokens_applied, 2048); // standard model's value
+            }
+            other => panic!("expected Downgrade, got {other:?}"),
+        }
+    }
+
+    // The vision flag describes the effective model: a downgrade to a model
+    // without VISION_INPUT reports false even if the selected model has it.
+    #[tokio::test]
+    async fn preflight_vision_flag_follows_effective_model() {
+        let db = mock_db_provider(inmem_db().await);
+        let mut snapshot = default_snapshot();
+        for entry in &mut snapshot.model_catalog {
+            entry.multimodal_capabilities = if entry.tier == ModelTier::Premium {
+                vec!["VISION_INPUT".to_owned()]
+            } else {
+                vec![]
+            };
+        }
+        snapshot.kill_switches.force_standard_tier = true;
+        let svc = make_test_service(Arc::clone(&db), snapshot, 1.10);
+
+        match svc
+            .preflight_reserve(preflight_input("gpt-5"))
+            .await
+            .unwrap()
+        {
+            PreflightDecision::Downgrade {
+                vision_input,
+                effective_model,
+                ..
+            } => {
+                assert_eq!(effective_model, "gpt-5-mini");
+                assert!(!vision_input);
             }
             other => panic!("expected Downgrade, got {other:?}"),
         }
