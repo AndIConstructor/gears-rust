@@ -2323,6 +2323,15 @@ its chunks, its labels and its provenance stay in place.
 5. **Vector and full-text indexes are not reconciled at delete time.** The
    tombstone filter removes the row from every result before ranking, so a stale
    index entry can never surface; index maintenance happens at purge.
+6. **A tombstoned edge is revived by the next upsert that names it.** This is
+   the one place the two kinds differ, and it is a decision, not an omission.
+   An edge's key is derived from its endpoints, its type and its discriminator,
+   so a producer re-declaring a relationship -- which every scope replacement
+   does for its whole snapshot -- would otherwise meet a conflict it cannot
+   clear before purge, for a row that reads as absent. Deleting an edge is an
+   assertion about now; the fence against re-declaration is the node's (rule 4),
+   and deleting the node takes its edges with it (rule 2). Held by
+   `a_deleted_edge_is_revived_by_the_next_upsert` against both stores.
 
 Undelete and a retention job that hard-deletes past a configurable window are
 p2. They are separated deliberately: the tombstone is reversible and cheap,
