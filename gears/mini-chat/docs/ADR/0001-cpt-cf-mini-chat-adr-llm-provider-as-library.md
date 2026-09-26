@@ -38,8 +38,8 @@ Chosen option: "Library crate", because `llm_provider` has no independent lifecy
 
 ### Confirmation
 
-* Code review: `llm_provider` is a Rust crate with `mini_chat_service` as its only dependent
-* No `Dockerfile`, no `main.rs`, no health endpoint in the `llm_provider` crate
+* Code review: `llm_provider` is the in-crate module `mini-chat/src/infra/llm` (one adapter per provider kind, see `cpt-cf-mini-chat-adr-multi-provider-adapters`) and is used only by the Mini Chat gear
+* No `Dockerfile`, no `main.rs`, no health endpoint for `llm_provider`
 * Cancellation integration test: verify `CancellationToken` propagates from `mini_chat_service` to `llm_provider`'s HTTP client abort
 
 ## Pros and Cons of the Options

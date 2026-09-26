@@ -40,10 +40,10 @@ Chosen option: "HTTP with SSE passthrough", because OAGW already speaks HTTP, Op
 
 ### Confirmation
 
-* Code review: `llm_provider` uses `reqwest` HTTP client, not a gRPC client
+* Code review: `llm_provider` sends HTTP requests through the in-process OAGW client (`oagw_sdk::ServiceGatewayClientV1::proxy_request`, resolved from ClientHub) and consumes the SSE response; no gRPC client is used
 * Integration test: verify OAGW preserves SSE streaming semantics (no buffering) and that `llm_provider` can parse provider SSE and translate it to the stable client SSE contract
 * Cancellation test: verify HTTP connection abort propagates through OAGW within 200 ms
-* Ops check: verify active streams and connection pressure are observable (for example `mini_chat_active_streams{instance}` and instance-level FD monitoring)
+* Ops check: verify active streams and connection pressure are observable (for example `mini_chat_active_streams` and instance-level FD monitoring)
 * Infrastructure validation: confirm proxy buffering is disabled for SSE passthrough on both OAGW and `api_gateway`
 
 ## Pros and Cons of the Options
