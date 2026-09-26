@@ -301,6 +301,44 @@ pub fn mock_enforcer() -> PolicyEnforcer {
     PolicyEnforcer::new(authz)
 }
 
+/// `MockAuthZResolver` that records the action of every evaluation and
+/// denies one action, if set.
+pub struct RecordingAuthZResolver {
+    pub actions: Mutex<Vec<String>>,
+    deny_action: Option<&'static str>,
+}
+
+#[async_trait]
+impl AuthZResolverApi for RecordingAuthZResolver {
+    async fn evaluate(
+        &self,
+        ctx: PlatformSecurityContext,
+        request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, CanonicalError> {
+        let action = request.action.name.clone();
+        self.actions.lock().unwrap().push(action.clone());
+        if self.deny_action == Some(action.as_str()) {
+            return Ok(EvaluationResponse {
+                decision: false,
+                context: EvaluationResponseContext::default(),
+            });
+        }
+        MockAuthZResolver.evaluate(ctx, request).await
+    }
+}
+
+/// An enforcer backed by `RecordingAuthZResolver`, and the resolver.
+pub fn recording_enforcer(
+    deny_action: Option<&'static str>,
+) -> (PolicyEnforcer, Arc<RecordingAuthZResolver>) {
+    let resolver = Arc::new(RecordingAuthZResolver {
+        actions: Mutex::new(Vec::new()),
+        deny_action,
+    });
+    let authz: Arc<dyn AuthZResolverApi> = resolver.clone();
+    (PolicyEnforcer::new(authz), resolver)
+}
+
 /// Tenant-only `AuthZ` resolver for services that mix owned and `no_owner` entities.
 ///
 /// Returns `OWNER_TENANT_ID` constraint only (no `OWNER_ID`).

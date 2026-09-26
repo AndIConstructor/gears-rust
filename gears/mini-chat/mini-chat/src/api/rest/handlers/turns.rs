@@ -161,9 +161,19 @@ async fn start_mutation_stream(
         Err(e) => return CanonicalError::from(e).into_response(),
     };
 
+    // The preview already authorized this retry/edit; reuse its scope.
+    let chat_scope = preview.chat_scope;
     let mutation = match new_content {
-        Some(content) => svc.turns.edit(&ctx, chat_id, request_id, content).await,
-        None => svc.turns.retry(&ctx, chat_id, request_id).await,
+        Some(content) => {
+            svc.turns
+                .edit_in_scope(&ctx, chat_scope, chat_id, request_id, content)
+                .await
+        }
+        None => {
+            svc.turns
+                .retry_in_scope(&ctx, chat_scope, chat_id, request_id)
+                .await
+        }
     };
     let mutation = match mutation {
         Ok(m) => m,

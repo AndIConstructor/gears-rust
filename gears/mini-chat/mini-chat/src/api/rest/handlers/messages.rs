@@ -66,15 +66,14 @@ pub(crate) async fn stream_message(
     tracing::Span::current().record("turn_request_id", tracing::field::display(request_id));
 
     // ── Resolve model + provider from chat ─────────────────────────────
-    let chat = match svc.chats.get_chat(&ctx, chat_id).await {
-        Ok(c) => c,
+    let selected_model = match svc.chats.chat_model_for_send(&ctx, chat_id).await {
+        Ok(model) => model,
         Err(e) => {
             warn!(error = %e, "failed to fetch chat for stream");
             return CanonicalError::from(e).into_response();
         }
     };
 
-    let selected_model = chat.model;
     let resolved = match svc
         .models
         .resolve_chat_model(ctx.subject_id(), &selected_model)

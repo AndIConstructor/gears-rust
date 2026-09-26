@@ -1213,3 +1213,32 @@ fn enforcer_evaluation_failure_maps_to_forbidden() {
     );
     assert!(matches!(MutationError::from(e), MutationError::Forbidden));
 }
+
+// The handler authorizes a retry once: `preview_mutation` asks the PDP and
+// `retry_in_scope` reuses its scope.
+#[tokio::test]
+async fn retry_via_preview_asks_the_pdp_once() {
+    use crate::domain::service::actions;
+
+    let (mut svc, ctx, chat_id, tenant_id) = setup().await;
+    let (enforcer, resolver) = recording_enforcer(None);
+    svc.enforcer = enforcer;
+    let request_id = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+
+    let preview = svc
+        .preview_mutation(&ctx, chat_id, request_id, None)
+        .await
+        .unwrap();
+    svc.retry_in_scope(&ctx, preview.chat_scope, chat_id, request_id)
+        .await
+        .unwrap();
+    assert_eq!(*resolver.actions.lock().unwrap(), [actions::RETRY_TURN]);
+}

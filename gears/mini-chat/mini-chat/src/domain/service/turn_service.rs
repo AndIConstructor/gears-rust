@@ -105,6 +105,9 @@ impl From<EnforcerError> for MutationError {
 #[domain_model]
 #[derive(Debug)]
 pub struct MutationPreview {
+    /// Scope authorized for this retry/edit; `retry_in_scope` and
+    /// `edit_in_scope` reuse it so the PDP is asked once.
+    pub chat_scope: AccessScope,
     /// The turn's original user message; its attachments are carried over.
     pub source_message_id: Uuid,
     pub user_content: String,
@@ -312,19 +315,34 @@ impl<
 
     // ── Retry ───────────────────────────────────────────────────────────
 
+    /// Authorizes and runs the retry in one call. Test convenience: the
+    /// handler uses `preview_mutation` and `retry_in_scope`.
+    #[cfg(test)]
     pub async fn retry(
         &self,
         ctx: &SecurityContext,
         chat_id: Uuid,
         request_id: Uuid,
     ) -> Result<MutationResult, MutationError> {
-        info!(%chat_id, %request_id, "turn retry");
-
         let chat_scope = self
             .enforcer
             .access_scope(ctx, &resources::CHAT, actions::RETRY_TURN, Some(chat_id))
             .await?
             .ensure_owner(ctx.subject_id());
+        self.retry_in_scope(ctx, chat_scope, chat_id, request_id)
+            .await
+    }
+
+    /// Retry with a scope already authorized for `retry_turn` on this chat
+    /// (from `preview_mutation`).
+    pub async fn retry_in_scope(
+        &self,
+        ctx: &SecurityContext,
+        chat_scope: AccessScope,
+        chat_id: Uuid,
+        request_id: Uuid,
+    ) -> Result<MutationResult, MutationError> {
+        info!(%chat_id, %request_id, "turn retry");
 
         let start = std::time::Instant::now();
         // Capture trace_id before the transaction closure.
@@ -347,6 +365,9 @@ impl<
 
     // ── Edit ────────────────────────────────────────────────────────────
 
+    /// Authorizes and runs the edit in one call. Test convenience: the
+    /// handler uses `preview_mutation` and `edit_in_scope`.
+    #[cfg(test)]
     pub async fn edit(
         &self,
         ctx: &SecurityContext,
@@ -354,13 +375,26 @@ impl<
         request_id: Uuid,
         new_content: String,
     ) -> Result<MutationResult, MutationError> {
-        info!(%chat_id, %request_id, "turn edit");
-
         let chat_scope = self
             .enforcer
             .access_scope(ctx, &resources::CHAT, actions::EDIT_TURN, Some(chat_id))
             .await?
             .ensure_owner(ctx.subject_id());
+        self.edit_in_scope(ctx, chat_scope, chat_id, request_id, new_content)
+            .await
+    }
+
+    /// Edit with a scope already authorized for `edit_turn` on this chat
+    /// (from `preview_mutation`).
+    pub async fn edit_in_scope(
+        &self,
+        ctx: &SecurityContext,
+        chat_scope: AccessScope,
+        chat_id: Uuid,
+        request_id: Uuid,
+        new_content: String,
+    ) -> Result<MutationResult, MutationError> {
+        info!(%chat_id, %request_id, "turn edit");
 
         let start = std::time::Instant::now();
         // Capture trace_id before the transaction closure.
@@ -437,6 +471,7 @@ impl<
             })?;
 
         Ok(MutationPreview {
+            chat_scope,
             source_message_id: original_msg.id,
             user_content: new_content.map_or(original_msg.content, str::to_owned),
             chat_model,
