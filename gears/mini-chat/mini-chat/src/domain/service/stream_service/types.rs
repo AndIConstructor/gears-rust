@@ -213,6 +213,8 @@ pub(super) struct FinalizationCtx<TR: TurnRepository + 'static, MR: MessageRepos
     )>,
     /// Context window size of the effective model (tokens) — for summary trigger.
     pub(super) context_window: u32,
+    /// Input token limit of the effective model — for summary trigger.
+    pub(super) max_input_tokens: u32,
     /// Estimated input tokens from context assembly (all messages + system prompt).
     pub(super) assembled_context_tokens: u64,
     /// `true` when context assembly dropped older messages due to budget.
@@ -273,6 +275,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
             code_interpreter_calls,
             file_search_calls,
             context_window: self.context_window,
+            max_input_tokens: self.max_input_tokens,
             assembled_context_tokens: self.assembled_context_tokens,
             messages_truncated: self.messages_truncated,
             ttft_ms,

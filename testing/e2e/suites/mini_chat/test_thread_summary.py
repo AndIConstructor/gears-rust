@@ -2,9 +2,10 @@
 
 The chat uses the small-context catalog model (config/base.yaml,
 `gpt-4.1-mini-tiny-ctx`: context_window 4096, max_output_tokens 1024,
-fixed_overhead_tokens 500). The trigger fires when the estimated context
-reaches compression_threshold_pct (60, base.yaml) of
-context_window - max_output_tokens = 3072, that is 1843 tokens. Each message
+max_input_tokens 3000, fixed_overhead_tokens 500). The trigger fires when
+the estimated context reaches compression_threshold_pct (60, base.yaml) of
+min(max_input_tokens, context_window - max_output_tokens) = 3000, that is
+1800 tokens. Each message
 is estimated at about 550 tokens and the system prompt at about 590, so the
 first turn (about 1140) stays below and the second (about 2250) reaches it.
 
@@ -151,14 +152,13 @@ class TestThreadSummary:
         captured = [r for r in mock_provider.get_captured_requests() if r.get("stream") is not False]
         assert len(captured) == 1, captured
         assert captured[0]["instructions"] == CATALOG_SYSTEM_PROMPT
-        sent = provider_input(captured[0])
-        # Summary first, the new question last. The second turn is not
-        # summarized; what of it fits is decided by context truncation on this
-        # small-context model. The first turn is only in the summary.
-        assert sent[0] == ("user", SUMMARY_PREAMBLE + summary["summary_text"])
-        assert sent[-1] == ("user", "Third question.")
-        assert ("user", "First question.") not in sent
-        assert ("assistant", messages[3]["content"]) in sent
+        # The second turn is not summarized, and on this small-context model
+        # it does not fit next to the summary: truncation drops it as a whole
+        # turn (question and answer), never an answer without its question.
+        assert provider_input(captured[0]) == [
+            ("user", SUMMARY_PREAMBLE + summary["summary_text"]),
+            ("user", "Third question."),
+        ]
 
     @pytest.mark.timeout(60)
     def test_retry_after_summary_does_not_resend_replaced_answer(

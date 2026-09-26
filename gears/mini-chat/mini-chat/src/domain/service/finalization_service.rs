@@ -73,6 +73,7 @@ fn should_trigger_summary(
     assembled_context_tokens: u64,
     max_output_tokens_applied: i32,
     context_window: u32,
+    max_input_tokens: u32,
     compression_threshold_pct: u32,
     messages_truncated: bool,
     has_existing_summary: bool,
@@ -88,7 +89,11 @@ fn should_trigger_summary(
         return false;
     }
     let estimated_input = i64::try_from(assembled_context_tokens).unwrap_or(i64::MAX);
-    let effective_budget = i64::from(context_window) - i64::from(max_output_tokens_applied);
+    // Same input budget as context assembly: min(max_input_tokens, ctx - out).
+    let mut effective_budget = i64::from(context_window) - i64::from(max_output_tokens_applied);
+    if max_input_tokens > 0 {
+        effective_budget = effective_budget.min(i64::from(max_input_tokens));
+    }
     if effective_budget <= 0 || estimated_input <= 0 {
         return false;
     }
@@ -396,6 +401,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                                 input.assembled_context_tokens,
                                 input.max_output_tokens_applied,
                                 input.context_window,
+                                input.max_input_tokens,
                                 summary_config.compression_threshold_pct,
                                 false, // messages_truncated already checked above
                                 false, // optimistic: assume no summary for threshold check
@@ -414,6 +420,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                             input.assembled_context_tokens,
                             input.max_output_tokens_applied,
                             input.context_window,
+                            input.max_input_tokens,
                             summary_config.compression_threshold_pct,
                             input.messages_truncated,
                             summary.is_some(),
@@ -956,36 +963,55 @@ mod trigger_tests {
     #[test]
     fn proactive_fires_above_threshold_no_summary() {
         // 2000 tokens, budget=3072 (4096-1024), 60% threshold=1843
-        assert!(should_trigger_summary(2000, 1024, 4096, 60, false, false));
+        assert!(should_trigger_summary(
+            2000, 1024, 4096, 0, 60, false, false
+        ));
     }
 
     #[test]
     fn proactive_skipped_below_threshold() {
         // 1000 tokens < 1843 threshold
-        assert!(!should_trigger_summary(1000, 1024, 4096, 60, false, false));
+        assert!(!should_trigger_summary(
+            1000, 1024, 4096, 0, 60, false, false
+        ));
     }
 
     #[test]
     fn proactive_suppressed_when_summary_exists() {
         // Above threshold but summary already exists — skip
-        assert!(!should_trigger_summary(2000, 1024, 4096, 60, false, true));
+        assert!(!should_trigger_summary(
+            2000, 1024, 4096, 0, 60, false, true
+        ));
     }
 
     #[test]
     fn urgent_fires_when_truncated_even_with_summary() {
         // messages_truncated=true overrides everything
-        assert!(should_trigger_summary(500, 1024, 4096, 60, true, true));
+        assert!(should_trigger_summary(500, 1024, 4096, 0, 60, true, true));
     }
 
     #[test]
     fn non_positive_budget_returns_false() {
         // max_output >= context_window → effective_budget <= 0
-        assert!(!should_trigger_summary(1000, 5000, 4096, 60, false, false));
+        assert!(!should_trigger_summary(
+            1000, 5000, 4096, 0, 60, false, false
+        ));
     }
 
     #[test]
     fn zero_tokens_returns_false() {
-        assert!(!should_trigger_summary(0, 1024, 4096, 60, false, false));
+        assert!(!should_trigger_summary(0, 1024, 4096, 0, 60, false, false));
+    }
+
+    #[test]
+    fn trigger_budget_capped_by_max_input_tokens() {
+        // ctx - out = 3072 (threshold 60% = 1843); max_input 2000 → threshold 1200.
+        assert!(!should_trigger_summary(
+            1500, 1024, 4096, 0, 60, false, false
+        ));
+        assert!(should_trigger_summary(
+            1500, 1024, 4096, 2000, 60, false, false
+        ));
     }
 }
 
@@ -1261,6 +1287,7 @@ mod tests {
             code_interpreter_calls: 0,
             file_search_calls: 0,
             context_window: 128_000,
+            max_input_tokens: 0,
             assembled_context_tokens: 0,
             messages_truncated: false,
             ttft_ms: None,

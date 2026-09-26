@@ -59,6 +59,9 @@ pub struct FinalizationInput {
 
     /// Context window size of the effective model (tokens) — for summary trigger.
     pub context_window: u32,
+    /// Input token limit of the effective model (`max_input_tokens`, 0 = none)
+    /// — caps the summary trigger budget like the context assembly budget.
+    pub max_input_tokens: u32,
     /// Estimated input tokens from context assembly (all messages + system prompt).
     pub assembled_context_tokens: u64,
     /// `true` when context assembly dropped older messages due to budget.
