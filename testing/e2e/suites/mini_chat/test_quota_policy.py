@@ -49,6 +49,7 @@ from .conftest import (
     poll_turn,
     query_db,
     stream_message,
+    turn_count,
 )
 from .test_code_interpreter import XLSX_CONTENT_TYPE, _make_minimal_xlsx
 
@@ -160,12 +161,6 @@ def user3(request):
     yield from _make_user(TOKEN_QUOTA_USER_3, QUOTA_USER_3_ID)
 
 
-def turn_count(chat_id: str) -> int:
-    return query_db(
-        "SELECT COUNT(*) AS n FROM chat_turns WHERE chat_id = ?", (chat_id,),
-    )[0]["n"]
-
-
 class TestQuotaExhaustion:
     """All tiers exhausted: the request is rejected before anything is written."""
 
@@ -209,6 +204,28 @@ class TestQuotaExhaustion:
         new_rid, _ = user1.complete_turn(chat_id, "Quota is back.")
         roles = [(m["role"], m["request_id"]) for m in list_messages(chat_id, token=user1.token)]
         assert roles == [("user", rid), ("assistant", rid), ("user", new_rid), ("assistant", new_rid)]
+
+    def test_edit_while_exhausted_keeps_old_turn(self, user1, mock_provider):
+        """An edit rejected by the quota preflight (429 resource_exhausted,
+        `tokens`) changes nothing: same messages, the turn stays `done`, no
+        new turn, the provider is not called."""
+        chat_id = user1.create_chat(DEFAULT_MODEL)
+        rid, _ = user1.complete_turn(chat_id, "Keep my question.")
+        messages_before = list_messages(chat_id, token=user1.token)
+        user1.seed_spent(total=TOTAL_DAILY_LIMIT, premium=PREMIUM_DAILY_LIMIT)
+
+        mock_provider.clear_captured_requests()
+        resp = httpx.patch(
+            f"{API_PREFIX}/chats/{chat_id}/turns/{rid}", json={"content": "Edited."},
+            headers={"Accept": "text/event-stream", **user1.headers}, timeout=30,
+        )
+        assert_problem(resp, 429, "resource_exhausted", violation_subject="tokens")
+        assert mock_provider.get_captured_requests() == []
+
+        assert list_messages(chat_id, token=user1.token) == messages_before
+        assert poll_turn(chat_id, rid, token=user1.token)["state"] == "done"
+        assert turn_count(chat_id) == 1
+        assert_no_reserves(user1.user_id)
 
 
 class TestPeriodsCheckedSeparately:

@@ -106,6 +106,17 @@ class TestReactions:
         ) == []
         assert my_reaction(chat_id, assistant_msg_id) is None
 
+    def test_reaction_body_errors(self, server):
+        """A body without `reaction` (schema-invalid) is 422 invalid_argument;
+        malformed JSON is 400 invalid_argument. Nothing is stored."""
+        chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
+        url = reaction_url(chat_id, assistant_msg_id)
+
+        assert_problem(httpx.put(url, json={}), 422, "invalid_argument")
+        resp = httpx.put(url, content=b"{not json", headers={"Content-Type": "application/json"})
+        assert_problem(resp, 400, "invalid_argument", field_reason="json_syntax_error")
+        assert my_reaction(chat_id, assistant_msg_id) is None
+
     def test_reaction_on_nonexistent_message_404(self, chat):
         url = reaction_url(chat["id"], str(uuid.uuid4()))
         assert_problem(httpx.put(url, json={"reaction": "like"}), 404, "not_found")

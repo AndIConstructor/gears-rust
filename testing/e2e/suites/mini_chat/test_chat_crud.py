@@ -40,7 +40,6 @@ def list_all_chats(page_size: int, token: str) -> list[str]:
     raise AssertionError("pagination did not terminate")
 
 
-@pytest.mark.multi_provider
 class TestCreateChat:
     """POST /v1/chats"""
 
@@ -81,11 +80,28 @@ class TestCreateChat:
             httpx.post(f"{API_PREFIX}/chats", json={"title": "T" * 256}), 400, "invalid_argument",
         )
 
+    def test_create_chat_whitespace_title_rejected(self, server):
+        """A whitespace-only title is 400 invalid_argument."""
+        resp = httpx.post(f"{API_PREFIX}/chats", json={"title": "   "})
+        assert_problem(resp, 400, "invalid_argument")
 
-@pytest.mark.multi_provider
+    def test_create_chat_schema_invalid_is_422(self, server):
+        """A body that does not match the schema (`model` is not a string) is 422."""
+        resp = httpx.post(f"{API_PREFIX}/chats", json={"model": 123})
+        assert_problem(resp, 422, "invalid_argument")
+
+    def test_create_chat_malformed_json_is_400(self, server):
+        resp = httpx.post(
+            f"{API_PREFIX}/chats", content=b"{not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert_problem(resp, 400, "invalid_argument", field_reason="json_syntax_error")
+
+
 class TestGetChat:
     """GET /v1/chats/{id}"""
 
+    @pytest.mark.multi_provider
     def test_get_chat(self, provider_chat):
         chat_id = provider_chat["id"]
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}")
@@ -102,10 +118,10 @@ class TestGetChat:
         assert_problem(resp, 404, "not_found")
 
 
-@pytest.mark.multi_provider
 class TestListChats:
     """GET /v1/chats"""
 
+    @pytest.mark.multi_provider
     def test_list_chats(self, provider_chat):
         resp = httpx.get(f"{API_PREFIX}/chats")
         assert resp.status_code == 200
@@ -137,6 +153,10 @@ class TestListChats:
         resp = httpx.get(f"{API_PREFIX}/chats", params={"$filter": "nosuchfield eq 'x'"})
         assert_problem(resp, 400, "invalid_argument")
 
+    def test_list_chats_unknown_orderby_field_400(self, server):
+        resp = httpx.get(f"{API_PREFIX}/chats", params={"$orderby": "nosuchfield desc"})
+        assert_problem(resp, 400, "invalid_argument")
+
     def test_list_chats_malformed_cursor_400(self, server):
         resp = httpx.get(f"{API_PREFIX}/chats", params={"cursor": "not-a-cursor"})
         assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_CURSOR")
@@ -156,10 +176,10 @@ class TestListChats:
         assert ids[0] == older
 
 
-@pytest.mark.multi_provider
 class TestUpdateChat:
     """PATCH /v1/chats/{id}"""
 
+    @pytest.mark.multi_provider
     def test_update_title(self, provider_chat):
         """PATCH title is persisted and bumps updated_at."""
         chat_id = provider_chat["id"]
@@ -180,8 +200,9 @@ class TestUpdateChat:
             f"{API_PREFIX}/chats/{fake_id}",
             json={"title": "Nope"},
         )
-        assert resp.status_code == 404
+        assert_problem(resp, 404, "not_found")
 
+    @pytest.mark.multi_provider
     def test_update_whitespace_title_rejected(self, provider_chat):
         """02-12: Whitespace-only title should be rejected."""
         chat_id = provider_chat["id"]
@@ -192,11 +213,13 @@ class TestUpdateChat:
         assert_problem(resp, 400, "invalid_argument")
         assert httpx.get(f"{API_PREFIX}/chats/{chat_id}").json().get("title") == provider_chat.get("title")
 
+    @pytest.mark.multi_provider
     def test_update_without_title_is_422(self, provider_chat):
         """A body that does not match the schema is 422 invalid_argument."""
         resp = httpx.patch(f"{API_PREFIX}/chats/{provider_chat['id']}", json={})
         assert_problem(resp, 422, "invalid_argument")
 
+    @pytest.mark.multi_provider
     def test_update_malformed_json_is_400(self, provider_chat):
         resp = httpx.patch(
             f"{API_PREFIX}/chats/{provider_chat['id']}",
@@ -205,6 +228,7 @@ class TestUpdateChat:
         )
         assert_problem(resp, 400, "invalid_argument")
 
+    @pytest.mark.multi_provider
     def test_update_title_length_boundary(self, provider_chat):
         """02-13: a 255-character title is accepted, 256 is rejected."""
         chat_id = provider_chat["id"]
@@ -217,10 +241,10 @@ class TestUpdateChat:
         assert httpx.get(f"{API_PREFIX}/chats/{chat_id}").json()["title"] == "A" * 255
 
 
-@pytest.mark.multi_provider
 class TestDeleteChat:
     """DELETE /v1/chats/{id}"""
 
+    @pytest.mark.multi_provider
     def test_delete_chat(self, provider_chat):
         chat_id = provider_chat["id"]
         resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}")

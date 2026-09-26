@@ -21,6 +21,7 @@ from .conftest import (
     TOKEN_USER_B,
     USER_A_ID,
     assert_no_reserves,
+    assert_problem,
     auth_headers,
     expect_done,
     expect_stream_started,
@@ -132,12 +133,19 @@ class TestIsolation:
     """User B (same tenant) and user C (other tenant) cannot reach A's chat."""
 
     @pytest.mark.parametrize(("method", "path"), FOREIGN_OPERATIONS)
-    def test_foreign_resource_is_404(self, owned, mock_provider, token, method, path):
+    def test_foreign_resource_is_404(self, owned, token, method, path):
         resp = _call(method, path, owned, auth_headers(token))
-        assert resp.status_code == 404, f"{method} {path}: {resp.status_code} {resp.text}"
-        assert mock_provider.get_last_request() is None, (
-            f"{method} {path} must not reach the provider"
-        )
+        assert_problem(resp, 404, "not_found")
+
+    @pytest.mark.usefixtures("offline_only")
+    @pytest.mark.parametrize(("method", "path"), FOREIGN_OPERATIONS)
+    def test_foreign_resource_not_sent_to_provider(self, owned, mock_provider, token, method, path):
+        """A rejected foreign request neither calls the model nor uploads a
+        file: the mock sees no POST. (Background cleanup of earlier tests may
+        still send DELETEs.)"""
+        assert _call(method, path, owned, auth_headers(token)).status_code == 404
+        posts = [p for m, p in mock_provider.get_request_paths() if m == "POST"]
+        assert posts == [], f"{method} {path} must not reach the provider"
 
     def test_foreign_chat_not_listed(self, owned, token):
         resp = httpx.get(f"{API_PREFIX}/chats", headers=auth_headers(token))
@@ -153,12 +161,16 @@ class TestIsolation:
 
         for method, path in FOREIGN_MUTATIONS:
             resp = _call(method, path, owned, auth_headers(token))
-            assert resp.status_code == 404, f"{method} {path}: {resp.status_code} {resp.text}"
+            assert_problem(resp, 404, "not_found")
 
         chat = httpx.get(chat_url)
         assert chat.status_code == 200
         assert chat.json()["title"] == "owned by A"
-        assert list_messages(owned["chat_id"]) == messages_before
+        messages_after = list_messages(owned["chat_id"])
+        assert messages_after == messages_before
+        # The foreign PUT /reaction set no reaction on A's answer.
+        assistant = [m for m in messages_after if m["role"] == "assistant"]
+        assert [m["my_reaction"] for m in assistant] == [None]
 
         turn = httpx.get(f"{chat_url}/turns/{owned['request_id']}")
         assert turn.status_code == 200
@@ -167,9 +179,6 @@ class TestIsolation:
         att = httpx.get(f"{chat_url}/attachments/{owned['attachment_id']}")
         assert att.status_code == 200
         assert att.json()["status"] == "ready"
-
-        assistant = [m for m in messages_before if m["role"] == "assistant"]
-        assert {m["my_reaction"] for m in assistant} == {None}
 
 
 class TestQuotaIsolation:

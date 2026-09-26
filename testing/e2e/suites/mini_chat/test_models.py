@@ -1,12 +1,28 @@
 """Tests for the models endpoint."""
 
-import pytest
+import re
+
 import httpx
 
-from .conftest import API_PREFIX, DEFAULT_MODEL, DISABLED_MODEL, STANDARD_MODEL, assert_problem
+from .conftest import API_PREFIX, DEFAULT_MODEL, DISABLED_MODEL, MODULE_DIR, assert_problem
 
 
-@pytest.mark.multi_provider
+def enabled_catalog_model_ids() -> set[str]:
+    """Ids of the `model_catalog` entries of config/base.yaml (the rig's
+    static model policy catalog) with `enabled: true`."""
+    text = (MODULE_DIR / "config" / "base.yaml").read_text()
+    catalog = text[text.index("model_catalog:"):]
+    catalog = catalog[:catalog.index("\n  static-mini-chat-audit-plugin:")]
+    entries = re.split(r"\n\s+- id: ", catalog)[1:]
+    ids = set()
+    for entry in entries:
+        model_id = entry.split("\n", 1)[0].strip().strip('"')
+        flag = re.search(r"\n\s+enabled: (true|false)\n", entry).group(1)
+        if flag == "true":
+            ids.add(model_id)
+    return ids
+
+
 class TestListModels:
     """GET /v1/models"""
 
@@ -19,11 +35,11 @@ class TestListModels:
         assert DEFAULT_MODEL in [m["model_id"] for m in body["items"]]
 
     def test_catalog_models_present(self, server):
-        """All models from mini-chat.yaml catalog should appear."""
+        """11-02: the list holds exactly the enabled catalog models of config/base.yaml."""
+        expected = enabled_catalog_model_ids()
         resp = httpx.get(f"{API_PREFIX}/models")
-        model_ids = {m["model_id"] for m in resp.json()["items"]}
-        assert DEFAULT_MODEL in model_ids
-        assert STANDARD_MODEL in model_ids
+        assert resp.status_code == 200
+        assert {m["model_id"] for m in resp.json()["items"]} == expected
 
     def test_model_has_required_fields(self, server):
         resp = httpx.get(f"{API_PREFIX}/models")
@@ -34,7 +50,6 @@ class TestListModels:
             assert "context_window" in m, "model must have context_window"
 
 
-@pytest.mark.multi_provider
 class TestGetModel:
     """GET /v1/models/{model_id}"""
 
@@ -43,10 +58,11 @@ class TestGetModel:
         assert_problem(resp, 404, "not_found")
 
     def test_internal_fields_not_exposed(self, server):
-        """11-06: Internal fields must not be in model response."""
+        """11-04, 11-06: GET returns the requested model without internal fields."""
         resp = httpx.get(f"{API_PREFIX}/models/{DEFAULT_MODEL}")
         assert resp.status_code == 200
         body = resp.json()
+        assert body["model_id"] == DEFAULT_MODEL
         for field in (
             "provider_id",
             "provider_model_id",
@@ -60,6 +76,7 @@ class TestGetModel:
         resp = httpx.get(f"{API_PREFIX}/models/{DEFAULT_MODEL}")
         assert resp.status_code == 200
         body = resp.json()
+        assert body["model_id"] == DEFAULT_MODEL
         for field in ("context_window", "tier", "multimodal_capabilities", "description"):
             assert field in body, f"Extended field '{field}' missing from model response"
 

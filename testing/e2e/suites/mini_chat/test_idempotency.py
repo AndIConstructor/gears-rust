@@ -17,9 +17,9 @@ from .conftest import (
     open_stream,
     parse_sse,
     poll_turn,
-    query_db,
     slow_scenario,
     stream_message,
+    turn_count,
 )
 from .mock_provider.responses import MockEvent, Scenario
 
@@ -37,12 +37,6 @@ def post_stream(chat_id: str, body: dict) -> httpx.Response:
         stream_url(chat_id), json=body,
         headers={"Accept": "text/event-stream"}, timeout=30,
     )
-
-
-def turn_count(chat_id: str) -> int:
-    return query_db(
-        "SELECT COUNT(*) AS n FROM chat_turns WHERE chat_id = ?", (chat_id,),
-    )[0]["n"]
 
 
 def total_daily_used() -> int:
@@ -125,6 +119,22 @@ class TestIdempotency:
         assert_problem(post_stream(chat_id, body), 409, "aborted", reason="request_id_conflict")
         assert turn_count(chat_id) == 2
 
+    def test_request_id_of_deleted_turn_409(self, chat):
+        """The request_id of a turn removed by DELETE /turns/{request_id} is
+        neither replayed nor reused: 409 request_id_conflict, no new turn."""
+        chat_id = chat["id"]
+        body = {"content": "Delete me.", "request_id": str(uuid.uuid4())}
+        status, events, _ = stream_message(chat_id, body["content"], request_id=body["request_id"])
+        assert status == 200
+        expect_done(events)
+        poll_turn(chat_id, body["request_id"], ("done",))
+
+        resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/turns/{body['request_id']}", timeout=10)
+        assert resp.status_code == 204
+
+        assert_problem(post_stream(chat_id, body), 409, "aborted", reason="request_id_conflict")
+        assert turn_count(chat_id) == 1
+
     @pytest.mark.timeout(30)
     def test_replay_priority_over_parallel_check(self, request, chat, mock_provider):
         """Replay of a completed turn returns 200 even while another turn is running."""
@@ -146,8 +156,10 @@ class TestIdempotency:
             assert delta_text(replay_events) == delta_text(events_a)
             expect_done(b.drain())
 
+    @pytest.mark.usefixtures("offline_only")
     def test_replay_does_not_modify_quota_or_call_provider(self, chat, mock_provider):
-        """Replaying a completed turn changes neither quota nor provider traffic."""
+        """Replaying a completed turn changes neither quota nor provider traffic
+        (offline only: provider traffic is what the mock saw)."""
         chat_id = chat["id"]
         rid = str(uuid.uuid4())
         status, events, _ = stream_message(chat_id, "Say OK.", request_id=rid)

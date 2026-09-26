@@ -118,6 +118,16 @@ class TestMessages:
         )
         assert_problem(resp, 400, "invalid_argument")
 
+    def test_unknown_orderby_field_400(self, chat):
+        resp = httpx.get(
+            f"{API_PREFIX}/chats/{chat['id']}/messages", params={"$orderby": "nosuchfield desc"},
+        )
+        assert_problem(resp, 400, "invalid_argument")
+
+    def test_malformed_cursor_400(self, chat):
+        resp = httpx.get(f"{API_PREFIX}/chats/{chat['id']}/messages", params={"cursor": "not-a-cursor"})
+        assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_CURSOR")
+
     def test_messages_of_nonexistent_chat_404(self, server):
         resp = httpx.get(f"{API_PREFIX}/chats/{uuid4()}/messages")
         assert_problem(resp, 404, "not_found")
@@ -140,16 +150,12 @@ class TestMessages:
 
     def test_request_id_shared_per_turn(self, server):
         """03-08: User and assistant messages in same turn share request_id."""
-        chat_id = _create_chat_with_messages()
+        chat_id = _create_chat_with_messages(2)
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
         assert resp.status_code == 200
         items = resp.json()["items"]
-        # Find pairs by position (user, assistant alternating)
-        validated = 0
-        for i in range(0, len(items) - 1, 2):
-            if items[i]["role"] == "user" and items[i+1]["role"] == "assistant":
-                assert items[i]["request_id"] == items[i+1]["request_id"], (
-                    f"Turn pair request_ids don't match: {items[i]['request_id']} vs {items[i+1]['request_id']}"
-                )
-                validated += 1
-        assert validated >= 1, f"No user+assistant pairs found to validate. Items: {[m['role'] for m in items]}"
+        assert [m["role"] for m in items] == ["user", "assistant"] * 2
+        pairs = [(items[i]["request_id"], items[i + 1]["request_id"]) for i in (0, 2)]
+        for user_rid, assistant_rid in pairs:
+            assert user_rid == assistant_rid, pairs
+        assert pairs[0][0] != pairs[1][0], "each turn has its own request_id"

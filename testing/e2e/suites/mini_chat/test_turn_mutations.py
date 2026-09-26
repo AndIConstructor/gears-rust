@@ -8,6 +8,7 @@ import pytest
 
 from .conftest import (
     API_PREFIX,
+    TINY_CTX_MODEL,
     OpenStream,
     assert_problem,
     delta_text,
@@ -206,6 +207,39 @@ class TestTurnEdit:
 
         assert_problem(edit(chat_id, rid, ""), 400, "invalid_argument", field_reason="EMPTY_CONTENT")
         assert list_messages(chat_id) == before
+
+    def test_edit_body_errors(self, chat):
+        """A body without `content` (schema-invalid) is 422 invalid_argument;
+        malformed JSON is 400 invalid_argument. The turn is kept."""
+        chat_id = chat["id"]
+        rid = complete_turn(chat_id, "Question.")
+        before = list_messages(chat_id)
+
+        resp = httpx.patch(turn_url(chat_id, rid), json={}, timeout=30)
+        assert_problem(resp, 422, "invalid_argument")
+        resp = httpx.patch(
+            turn_url(chat_id, rid), content=b"{not json",
+            headers={"Content-Type": "application/json"}, timeout=30,
+        )
+        assert_problem(resp, 400, "invalid_argument", field_reason="json_syntax_error")
+        assert list_messages(chat_id) == before
+
+    @pytest.mark.usefixtures("offline_only")
+    def test_edit_content_over_max_input_tokens_400(self, chat_with_model, mock_provider):
+        """Edit content of 12000 bytes on gpt-4.1-mini-tiny-ctx is estimated at
+        (3000 + 500) * 1.1 = 3850 tokens > max_input_tokens 3000 (see
+        test_streaming.py TestStreamInputLimits): 400 out_of_range
+        INPUT_TOO_LONG; the turn is kept and the provider is not called."""
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        rid = complete_turn(chat_id, "Question.")
+        before = list_messages(chat_id)
+
+        mock_provider.clear_captured_requests()
+        resp = edit(chat_id, rid, "x" * 12_000)
+        assert_problem(resp, 400, "out_of_range", field_reason="INPUT_TOO_LONG")
+        assert mock_provider.get_captured_requests() == []
+        assert list_messages(chat_id) == before
+        assert poll_turn(chat_id, rid)["state"] == "done"
 
     def test_edit_non_latest_turn_409(self, chat):
         chat_id = chat["id"]
