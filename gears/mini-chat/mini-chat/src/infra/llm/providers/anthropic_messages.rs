@@ -658,9 +658,9 @@ fn build_request_body<M>(request: &LlmRequest<M>, stream: bool) -> serde_json::V
     }
 
     // WebSearch and CodeInterpreter map to Anthropic's native server-side
-    // tools; Function tools pass through. FileSearch is silently dropped —
-    // RAG on Anthropic is delivered via a custom function tool, not a native
-    // server tool.
+    // tools; Function tools pass through. FileSearch is dropped: Anthropic
+    // has no native file search, and the planned `search_files`/`load_files`
+    // function tools are not implemented (ADR-0007).
     let tools: Vec<serde_json::Value> = request
         .tools
         .iter()
@@ -683,7 +683,7 @@ fn build_request_body<M>(request: &LlmRequest<M>, stream: bool) -> serde_json::V
                 "name": "code_execution"
             })),
             LlmTool::FileSearch { .. } => {
-                debug!("Anthropic adapter: skipping FileSearch (handled via custom function tool)");
+                debug!("Anthropic adapter: skipping FileSearch (not supported on Anthropic)");
                 None
             }
         })

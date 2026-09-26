@@ -429,7 +429,8 @@ impl toolkit_db::outbox::LeasedMessageHandler for UsageEventHandler {
 /// - `Transient` → `Retry`
 /// - `Permanent` → `Reject` (dead-letter)
 /// - Deserialization failure → `Reject` (corrupt payload)
-/// - Plugin not configured → `Ok` (audit is optional; skip silently)
+/// - Plugin not configured → `Ok` (audit is optional; the gateway logs a
+///   warning once and the event is dropped)
 /// - Plugin resolution error → `Retry` (transient; plugin may not be ready yet)
 pub struct AuditEventHandler {
     pub(crate) audit_gateway: Arc<AuditGateway>,
