@@ -44,6 +44,35 @@ impl ThreadSummaryHandler {
 impl LeasedMessageHandler for ThreadSummaryHandler {
     #[tracing::instrument(name = "worker", skip_all, fields(worker = "thread_summary"))]
     async fn handle(&self, msg: &OutboxMessage) -> MessageResult {
+        let result = self.process(msg).await;
+        let bounded = bound_retries(result, msg.attempts, self.deps.config.max_attempts);
+        if matches!(bounded, MessageResult::Reject(_)) {
+            warn!(
+                partition_id = msg.partition_id,
+                seq = msg.seq,
+                attempts = msg.attempts,
+                "thread summary: task rejected"
+            );
+        }
+        bounded
+    }
+}
+
+/// `Retry` blocks the rest of the partition, so a task that keeps failing is
+/// dead-lettered once this delivery is its `max_attempts`-th.
+fn bound_retries(result: MessageResult, attempts: i16, max_attempts: u32) -> MessageResult {
+    let this_attempt = u32::try_from(attempts).unwrap_or(0).saturating_add(1);
+    match result {
+        MessageResult::Retry if this_attempt >= max_attempts => {
+            MessageResult::Reject(format!("max attempts ({max_attempts}) reached"))
+        }
+        other => other,
+    }
+}
+
+impl ThreadSummaryHandler {
+    #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
+    async fn process(&self, msg: &OutboxMessage) -> MessageResult {
         // 1. Deserialize payload
         let payload: ThreadSummaryTaskPayload = match serde_json::from_slice(&msg.payload) {
             Ok(p) => p,
@@ -735,6 +764,26 @@ mod tests {
             config: crate::config::background::ThreadSummaryWorkerConfig::default(),
         });
         (deps, db)
+    }
+
+    #[test]
+    fn bound_retries_rejects_on_last_attempt() {
+        assert!(matches!(
+            bound_retries(MessageResult::Retry, 0, 3),
+            MessageResult::Retry
+        ));
+        assert!(matches!(
+            bound_retries(MessageResult::Retry, 1, 3),
+            MessageResult::Retry
+        ));
+        assert!(matches!(
+            bound_retries(MessageResult::Retry, 2, 3),
+            MessageResult::Reject(_)
+        ));
+        assert!(matches!(
+            bound_retries(MessageResult::Ok, 5, 3),
+            MessageResult::Ok
+        ));
     }
 
     #[tokio::test]

@@ -617,6 +617,13 @@ impl RunnableCapability for MiniChatGear {
                         ),
                     ),
                 )
+                // The summary handler makes a non-streaming LLM call (with
+                // prompt-too-long retries); the default 30s lease would cancel
+                // and redeliver it mid-call.
+                .lease(LeaseConfig {
+                    duration: Duration::from_secs(od.thread_summary_config.claim_timeout_secs),
+                    ..LeaseConfig::default()
+                })
                 .queue(&od.outbox_config.audit_queue_name, partitions)
                 .leased(AuditEventHandler {
                     audit_gateway: Arc::clone(&od.audit_gateway),

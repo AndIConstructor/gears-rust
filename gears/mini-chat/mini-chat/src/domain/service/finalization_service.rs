@@ -734,7 +734,11 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                         file_search_calls: input.file_search_completed_count,
                         timestamp: now,
                         requester_type: "user".to_owned(),
-                        dedupe_key: None,
+                        dedupe_key: Some(turn_dedupe_key(
+                            input.tenant_id,
+                            input.turn_id,
+                            input.request_id,
+                        )),
                         system_task_type: None,
                     };
                     wake += outbox_enqueuer
@@ -907,9 +911,24 @@ fn build_usage_event(
         file_search_calls: input.file_search_calls,
         timestamp: time::OffsetDateTime::now_utc(),
         requester_type: "user".to_owned(),
-        dedupe_key: None,
+        dedupe_key: Some(turn_dedupe_key(
+            input.tenant_id,
+            input.turn_id,
+            input.request_id,
+        )),
         system_task_type: None,
     }
+}
+
+/// Idempotency key consumers use to drop redelivered usage events for the
+/// same turn finalization (`{tenant_id}/{turn_id}/{request_id}`).
+fn turn_dedupe_key(tenant_id: Uuid, turn_id: Uuid, request_id: Uuid) -> String {
+    format!(
+        "{}/{}/{}",
+        tenant_id.as_simple(),
+        turn_id.as_simple(),
+        request_id.as_simple()
+    )
 }
 
 /// Internal error type to distinguish message persistence failure
@@ -1942,6 +1961,18 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 42);
         assert_eq!(usage.cache_write_input_tokens, 17);
         assert_eq!(usage.reasoning_tokens, 88);
+        assert_eq!(
+            usage_events[0].dedupe_key.as_deref(),
+            Some(
+                format!(
+                    "{}/{}/{}",
+                    tenant_id.as_simple(),
+                    turn_id.as_simple(),
+                    request_id.as_simple()
+                )
+                .as_str()
+            ),
+        );
         drop(usage_events);
 
         // ── Verify audit event ──

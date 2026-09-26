@@ -425,31 +425,35 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                                     accumulated_text.push_str(content);
                                 }
 
-                                // Throttled progress timestamp update for orphan detection.
-                                // Timer resets only on success — retry sooner on transient
-                                // failures to avoid stale last_progress_at triggering false
-                                // orphan detection.
-                                if let Some(ref fctx) = fin_ctx
-                                    && last_progress_update.elapsed() >= PROGRESS_UPDATE_INTERVAL
-                                {
-                                    let ok = match fctx.db.conn() {
-                                        Ok(conn) => {
-                                            match fctx.turn_repo.update_progress_at(&conn, &fctx.scope, fctx.turn_id).await {
-                                                Ok(_) => true,
-                                                Err(e) => {
-                                                    warn!(turn_id = %fctx.turn_id, error = %e, "failed to update progress timestamp");
-                                                    false
-                                                }
+                            }
+
+                            // Throttled progress timestamp update for orphan detection on
+                            // any provider progress (text or tool events), so a long tool
+                            // phase is not mistaken for an orphan.
+                            // Timer resets only on success — retry sooner on transient
+                            // failures to avoid stale last_progress_at triggering false
+                            // orphan detection.
+                            if matches!(client_event, ClientSseEvent::Delta { .. } | ClientSseEvent::Tool { .. })
+                                && let Some(ref fctx) = fin_ctx
+                                && last_progress_update.elapsed() >= PROGRESS_UPDATE_INTERVAL
+                            {
+                                let ok = match fctx.db.conn() {
+                                    Ok(conn) => {
+                                        match fctx.turn_repo.update_progress_at(&conn, &fctx.scope, fctx.turn_id).await {
+                                            Ok(_) => true,
+                                            Err(e) => {
+                                                warn!(turn_id = %fctx.turn_id, error = %e, "failed to update progress timestamp");
+                                                false
                                             }
                                         }
-                                        Err(e) => {
-                                            warn!(turn_id = %fctx.turn_id, error = %e, "failed to get DB connection for progress update");
-                                            false
-                                        }
-                                    };
-                                    if ok {
-                                        last_progress_update = std::time::Instant::now();
                                     }
+                                    Err(e) => {
+                                        warn!(turn_id = %fctx.turn_id, error = %e, "failed to get DB connection for progress update");
+                                        false
+                                    }
+                                };
+                                if ok {
+                                    last_progress_update = std::time::Instant::now();
                                 }
                             }
 

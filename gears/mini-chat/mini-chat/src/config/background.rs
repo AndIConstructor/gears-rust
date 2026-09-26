@@ -65,10 +65,11 @@ pub struct ThreadSummaryWorkerConfig {
     /// Maximum interval between reconciliation scans. Default: 60s.
     #[serde(default = "default_ts_reconcile_interval")]
     pub reconcile_interval_secs: u64,
-    /// Abandonment timeout for a `claimed` task. Default: 300s.
+    /// Outbox lease for one summary task: the handler is cancelled and the
+    /// task redelivered after this. Must be at least 5s. Default: 300s.
     #[serde(default = "default_ts_claim_timeout")]
     pub claim_timeout_secs: u64,
-    /// Max claim/execution attempts per task. Default: 3.
+    /// Attempts per task before it is dead-lettered. Default: 3.
     #[serde(default = "default_ts_max_attempts")]
     pub max_attempts: u32,
     /// Compression threshold: summary triggered when estimated input tokens
@@ -109,8 +110,8 @@ impl ThreadSummaryWorkerConfig {
         if self.reconcile_interval_secs == 0 {
             return Err("thread_summary_worker.reconcile_interval_secs must be > 0".to_owned());
         }
-        if self.claim_timeout_secs == 0 {
-            return Err("thread_summary_worker.claim_timeout_secs must be > 0".to_owned());
+        if self.claim_timeout_secs < 5 {
+            return Err("thread_summary_worker.claim_timeout_secs must be >= 5".to_owned());
         }
         if self.max_attempts == 0 {
             return Err("thread_summary_worker.max_attempts must be > 0".to_owned());
