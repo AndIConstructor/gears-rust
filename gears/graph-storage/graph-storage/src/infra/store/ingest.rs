@@ -1507,9 +1507,27 @@ async fn lost_write(
         Err(error) => return map_scope_err(error),
     };
     let owner = row.and_then(|row| row.scope_attribute.zip(row.scope_value));
+    lost_write_verdict(
+        edge_key,
+        owner
+            .as_ref()
+            .map(|(attribute, value)| (attribute.as_str(), value.as_str())),
+        declaring,
+    )
+}
+
+/// What an edge write that matched nothing answers, from what the re-read
+/// found: a row now owned by another scope is a claim lost, and no row (or
+/// a row this scope owns) is a row removed. Pure, so both arms are pinned by
+/// a unit case rather than by a race.
+fn lost_write_verdict(
+    edge_key: &str,
+    owner: Option<(&str, &str)>,
+    declaring: Option<(&str, &str)>,
+) -> GraphStoreError {
     match (owner, declaring) {
         (Some((attribute, value)), Some((declaring_attribute, declaring_value)))
-            if (attribute.as_str(), value.as_str()) != (declaring_attribute, declaring_value) =>
+            if (attribute, value) != (declaring_attribute, declaring_value) =>
         {
             GraphStoreError::Conflict {
                 reason: format!(
@@ -2140,6 +2158,57 @@ async fn replay_receipt(
     let mut outcome = outcome_from_json(&receipt.response)?;
     outcome.replayed = true;
     Ok(Some(outcome))
+}
+
+#[cfg(test)]
+mod lost_write_verdict_tests {
+    use super::{GraphStoreError, lost_write_verdict};
+
+    fn reason(error: GraphStoreError) -> String {
+        match error {
+            GraphStoreError::Conflict { reason } => reason,
+            other => panic!("a lost write is a conflict, got {other:?}"),
+        }
+    }
+
+    /// The row is now another scope's: the claim was lost, and the answer
+    /// names who got there first and what a move would take.
+    #[test]
+    fn a_row_now_owned_by_another_scope_is_a_lost_claim() {
+        let text = reason(lost_write_verdict(
+            "e",
+            Some(("repository", "acme/infra")),
+            Some(("component", "auth")),
+        ));
+        assert!(
+            text.contains("claimed by scope `repository=acme/infra`"),
+            "{text}"
+        );
+        assert!(text.contains("under `component=auth`"), "{text}");
+    }
+
+    /// No row: it was removed, and the key is free, so the answer is to
+    /// re-ingest -- for a scoped write and an unscoped one alike.
+    #[test]
+    fn a_missing_row_is_a_removed_row() {
+        for declaring in [None, Some(("repository", "acme/infra"))] {
+            let text = reason(lost_write_verdict("e", None, declaring));
+            assert!(text.contains("was removed"), "{text}");
+            assert!(text.contains("re-ingest it"), "{text}");
+        }
+    }
+
+    /// A row this scope already owns cannot have refused this scope's write
+    /// by ownership, so whatever matched nothing, it was not a claim lost.
+    #[test]
+    fn a_row_owned_by_the_declaring_scope_is_not_a_lost_claim() {
+        let text = reason(lost_write_verdict(
+            "e",
+            Some(("repository", "acme/infra")),
+            Some(("repository", "acme/infra")),
+        ));
+        assert!(text.contains("was removed"), "{text}");
+    }
 }
 
 #[cfg(test)]
