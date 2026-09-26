@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use axum::extract::Path;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -14,6 +13,7 @@ use tokio::time::{Interval, interval};
 use tokio_util::sync::CancellationToken;
 use toolkit::api::canonical_prelude::*;
 use toolkit::api::odata::OData;
+use toolkit::api::rest::extract::Path;
 use toolkit_security::SecurityContext;
 use tracing::{Instrument, debug, info, warn};
 

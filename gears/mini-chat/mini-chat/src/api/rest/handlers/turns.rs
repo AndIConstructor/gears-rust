@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::Path;
 use axum::response::sse::KeepAlive;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::{Extension, Json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use toolkit::api::canonical_prelude::*;
+use toolkit::api::rest::extract::Path;
 use toolkit_security::SecurityContext;
 use tracing::{Instrument, info, warn};
 

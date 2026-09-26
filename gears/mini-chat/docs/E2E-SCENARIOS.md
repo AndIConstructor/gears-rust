@@ -414,7 +414,7 @@ still works but is not required (ADR-0007).
 | 17-09 | Malformed JSON → 400 `invalid_argument` (`json_syntax_error`) | test_chat_crud.py | TestUpdateChat::test_update_malformed_json_is_400, TestCreateChat::test_create_chat_malformed_json_is_400; test_streaming.py TestStreamPreflightErrors::test_malformed_json_rejected; test_reactions.py TestReactions::test_reaction_body_errors; test_turn_mutations.py TestTurnEdit::test_edit_body_errors |
 | 17-10 | Provider HTTP 504 → provider_error (not provider_timeout) | test_error_mapping.py | TestErrorMapping::test_provider_504_is_provider_error |
 | 17-11 | Provider `function_call` Output Item While No Function Tool Is Offered (knowledge search not configured) → SSE `error` `unexpected_tool_use`, turn `error` with that code | test_error_mapping.py | TestErrorMapping::test_function_call_without_knowledge_search_is_unexpected_tool_use |
-| 17-12 | Path Parameter Not a UUID (chat id, turn request_id, attachment id) → 400 | — | GAP — product bug: the handlers use `axum::extract::Path`, so the rejection is a generic `about:blank` Problem without a canonical category; the toolkit `Path` extractor (libs/toolkit/src/api/rest/extract/path.rs) would give `invalid_argument` with reason `invalid_path_params` |
+| 17-12 | Path Parameter Not a UUID (chat id, turn request_id, attachment id) → 400 `invalid_argument`, `field_violations[].reason = invalid_path_params` | test_chat_crud.py | TestPathParameters::test_non_uuid_path_parameter_400 |
 
 ## 18 — Web Search
 

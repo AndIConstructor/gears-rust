@@ -304,3 +304,16 @@ class TestDeleteChat:
         fake_id = str(uuid.uuid4())
         resp = httpx.delete(f"{API_PREFIX}/chats/{fake_id}")
         assert_problem(resp, 404, "not_found")
+
+
+class TestPathParameters:
+    """17-12: a path parameter that is not a UUID is a canonical 400."""
+
+    @pytest.mark.parametrize("path", [
+        "/chats/not-a-uuid",
+        "/chats/{chat_id}/turns/not-a-uuid",
+        "/chats/{chat_id}/attachments/not-a-uuid",
+    ])
+    def test_non_uuid_path_parameter_400(self, chat, path):
+        resp = httpx.get(API_PREFIX + path.format(chat_id=chat["id"]))
+        assert_problem(resp, 400, "invalid_argument", field_reason="invalid_path_params")

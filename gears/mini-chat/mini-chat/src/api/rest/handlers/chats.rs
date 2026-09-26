@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use crate::domain::models::{ChatPatch, NewChat};
 use axum::Extension;
-use axum::extract::Path;
 use toolkit::api::canonical_prelude::*;
 use toolkit::api::odata::OData;
+use toolkit::api::rest::extract::Path;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
