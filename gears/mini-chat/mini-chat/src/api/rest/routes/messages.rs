@@ -54,6 +54,8 @@ pub(super) fn register_message_routes(
             "SSE stream of chat response events",
         )
         .standard_errors(openapi)
+        .error_422(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     router

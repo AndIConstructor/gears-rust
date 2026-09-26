@@ -27,6 +27,7 @@ pub(super) fn register_attachment_routes(
     // DefaultBodyLimit overrides the gateway's global 16 MiB limit for this route.
     router = OperationBuilder::post(format!("{prefix}/v1/chats/{{id}}/attachments"))
         .operation_id("mini_chat.upload_attachment")
+        .multipart_file_request("file", Some("File to upload"))
         .summary("Upload an attachment to a chat")
         .tag(API_TAG)
         .authenticated()
@@ -39,6 +40,7 @@ pub(super) fn register_attachment_routes(
             "Attachment uploaded and processed",
         )
         .standard_errors(openapi)
+        .error_503(openapi)
         .register(router, openapi)
         .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT));
 
@@ -74,7 +76,7 @@ pub(super) fn register_attachment_routes(
     .path_param("id", "Chat UUID")
     .path_param("attachment_id", "Attachment UUID")
     .handler(handlers::attachments::delete_attachment)
-    .json_response(http::StatusCode::NO_CONTENT, "Attachment deleted")
+    .no_content_response(http::StatusCode::NO_CONTENT, "Attachment deleted")
     .error_409(openapi)
     .standard_errors(openapi)
     .register(router, openapi);

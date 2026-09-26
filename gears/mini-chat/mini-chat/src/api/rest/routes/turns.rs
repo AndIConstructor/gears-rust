@@ -53,6 +53,7 @@ pub(super) fn register_turn_routes(
         "SSE stream of the regenerated response",
     )
     .standard_errors(openapi)
+    .error_503(openapi)
     .register(router, openapi);
 
     // PATCH {prefix}/v1/chats/{id}/turns/{request_id}
@@ -71,6 +72,8 @@ pub(super) fn register_turn_routes(
             "SSE stream of the regenerated response",
         )
         .standard_errors(openapi)
+        .error_422(openapi)
+        .error_503(openapi)
         .register(router, openapi);
 
     // DELETE {prefix}/v1/chats/{id}/turns/{request_id}
@@ -83,7 +86,7 @@ pub(super) fn register_turn_routes(
         .path_param("id", "Chat UUID")
         .path_param("request_id", "Turn request UUID")
         .handler(handlers::turns::delete_turn)
-        .json_response(http::StatusCode::NO_CONTENT, "Turn deleted")
+        .no_content_response(http::StatusCode::NO_CONTENT, "Turn deleted")
         .standard_errors(openapi)
         .register(router, openapi);
 

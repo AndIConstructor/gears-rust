@@ -45,6 +45,7 @@ pub(super) fn register_chat_routes(
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
+        .error_422(openapi)
         .register(router, openapi);
 
     // GET {prefix}/v1/chats
@@ -116,6 +117,7 @@ pub(super) fn register_chat_routes(
         .error_403(openapi)
         .error_404(openapi)
         .error_500(openapi)
+        .error_422(openapi)
         .register(router, openapi);
 
     // DELETE {prefix}/v1/chats/{id}
@@ -127,7 +129,7 @@ pub(super) fn register_chat_routes(
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")
         .handler(handlers::chats::delete_chat)
-        .json_response(http::StatusCode::NO_CONTENT, "Chat deleted")
+        .no_content_response(http::StatusCode::NO_CONTENT, "Chat deleted")
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
