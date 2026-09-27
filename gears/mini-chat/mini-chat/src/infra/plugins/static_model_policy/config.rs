@@ -30,6 +30,34 @@ pub struct StaticMiniChatPolicyPluginConfig {
     pub default_premium_limits: TierLimits,
 }
 
+impl StaticMiniChatPolicyPluginConfig {
+    /// Every catalog entry must price usage: both credit multipliers in
+    /// `1..=MAX_MULT` (a zero multiplier would make usage free).
+    pub fn validate(&self) -> Result<(), String> {
+        use crate::domain::service::credit_arithmetic::MAX_MULT;
+        for entry in &self.model_catalog {
+            for (name, value) in [
+                (
+                    "input_tokens_credit_multiplier_micro",
+                    entry.input_tokens_credit_multiplier_micro,
+                ),
+                (
+                    "output_tokens_credit_multiplier_micro",
+                    entry.output_tokens_credit_multiplier_micro,
+                ),
+            ] {
+                if value == 0 || value > MAX_MULT {
+                    return Err(format!(
+                        "model '{}': {name} must be 1..={MAX_MULT}, got {value}",
+                        entry.id
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for StaticMiniChatPolicyPluginConfig {
     fn default() -> Self {
         Self {

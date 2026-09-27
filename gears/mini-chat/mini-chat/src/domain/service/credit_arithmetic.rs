@@ -16,6 +16,8 @@ pub enum CreditOverflowError {
     TokensOverflow(u64),
     #[error("multiplier {0} exceeds MAX_MULT {MAX_MULT}")]
     MultiplierOverflow(u64),
+    #[error("credit multiplier must be > 0")]
+    ZeroMultiplier,
     #[error("arithmetic overflow in checked_mul")]
     ArithmeticOverflow,
 }
@@ -54,6 +56,10 @@ pub fn credits_micro_checked(
     if output_tokens > MAX_TOKENS {
         return Err(CreditOverflowError::TokensOverflow(output_tokens));
     }
+    // A zero multiplier would make usage free; the catalog must price it.
+    if input_mult == 0 || output_mult == 0 {
+        return Err(CreditOverflowError::ZeroMultiplier);
+    }
     if input_mult > MAX_MULT {
         return Err(CreditOverflowError::MultiplierOverflow(input_mult));
     }
@@ -83,6 +89,18 @@ pub fn credits_micro_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_multiplier_rejected() {
+        assert!(matches!(
+            credits_micro_checked(10, 10, 0, 1_000_000),
+            Err(CreditOverflowError::ZeroMultiplier)
+        ));
+        assert!(matches!(
+            credits_micro_checked(10, 10, 1_000_000, 0),
+            Err(CreditOverflowError::ZeroMultiplier)
+        ));
+    }
 
     #[test]
     fn normal_computation() {

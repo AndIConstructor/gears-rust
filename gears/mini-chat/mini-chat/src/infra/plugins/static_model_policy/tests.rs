@@ -233,3 +233,24 @@ async fn user_limits_reflect_custom_config() {
     assert_eq!(limits.standard.limit_daily_credits_micro, 42);
     assert_eq!(limits.premium.limit_monthly_credits_micro, 99);
 }
+
+#[test]
+fn config_rejects_zero_credit_multiplier() {
+    let mut entry = make_entry("m", ModelTier::Standard);
+    let cfg = StaticMiniChatPolicyPluginConfig {
+        model_catalog: vec![entry.clone()],
+        ..StaticMiniChatPolicyPluginConfig::default()
+    };
+    cfg.validate().unwrap();
+
+    entry.output_tokens_credit_multiplier_micro = 0;
+    let cfg = StaticMiniChatPolicyPluginConfig {
+        model_catalog: vec![entry],
+        ..StaticMiniChatPolicyPluginConfig::default()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("output_tokens_credit_multiplier_micro"),
+        "{err}"
+    );
+}
