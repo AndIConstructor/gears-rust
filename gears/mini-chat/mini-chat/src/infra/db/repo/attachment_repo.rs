@@ -29,6 +29,83 @@ fn db_err(e: impl std::fmt::Display) -> DomainError {
 /// Repository for attachment persistence operations.
 pub struct AttachmentRepository;
 
+// ── Upload reaper (system scope, background worker) ─────────────────────
+
+impl AttachmentRepository {
+    /// `pending` / `uploaded` rows not updated since `cutoff`, oldest first.
+    pub async fn find_stale_uploads<C: DBRunner>(
+        &self,
+        runner: &C,
+        cutoff: OffsetDateTime,
+        limit: u64,
+    ) -> Result<Vec<AttachmentModel>, DomainError> {
+        Entity::find()
+            .filter(
+                Condition::all()
+                    .add(
+                        Column::Status
+                            .is_in([AttachmentStatus::Pending, AttachmentStatus::Uploaded]),
+                    )
+                    .add(Column::DeletedAt.is_null())
+                    .add(Column::UpdatedAt.lt(cutoff)),
+            )
+            .secure()
+            .scope_with(&AccessScope::allow_all())
+            .order_by(Column::UpdatedAt, sea_orm::Order::Asc)
+            .limit(limit)
+            .all(runner)
+            .await
+            .map_err(db_err)
+    }
+
+    /// CAS `from` → `failed` with `error_code = upload_abandoned`, only while
+    /// the row is still stale. With `schedule_cleanup` the row also gets
+    /// `cleanup_status = pending`, so the attachment cleanup handler can mark
+    /// it done after deleting the provider file. Returns rows affected.
+    pub async fn cas_abandon_upload<C: DBRunner>(
+        &self,
+        runner: &C,
+        id: Uuid,
+        from: AttachmentStatus,
+        cutoff: OffsetDateTime,
+        schedule_cleanup: bool,
+    ) -> Result<u64, DomainError> {
+        let now = OffsetDateTime::now_utc();
+        let mut update = Entity::update_many()
+            .col_expr(Column::Status, Expr::value(AttachmentStatus::Failed))
+            .col_expr(
+                Column::ErrorCode,
+                Expr::value(Some(UPLOAD_ABANDONED.to_owned())),
+            )
+            .col_expr(Column::UpdatedAt, Expr::value(now));
+        if schedule_cleanup {
+            update = update
+                .col_expr(
+                    Column::CleanupStatus,
+                    Expr::value(Some(CleanupStatus::Pending)),
+                )
+                .col_expr(Column::CleanupUpdatedAt, Expr::value(Some(now)));
+        }
+        let result = update
+            .filter(
+                Condition::all()
+                    .add(Column::Id.eq(id))
+                    .add(Column::Status.eq(from))
+                    .add(Column::DeletedAt.is_null())
+                    .add(Column::UpdatedAt.lt(cutoff)),
+            )
+            .secure()
+            .scope_with(&AccessScope::allow_all())
+            .exec(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(result.rows_affected)
+    }
+}
+
+/// `error_code` of an attachment reaped by the upload reaper.
+pub const UPLOAD_ABANDONED: &str = "upload_abandoned";
+
 #[async_trait]
 impl crate::domain::repos::AttachmentRepository for AttachmentRepository {
     async fn insert<C: DBRunner>(

@@ -188,6 +188,13 @@ pub trait MiniChatMetricsPort: Send + Sync {
     /// `{prefix}_orphan_scan_duration_seconds` — histogram
     fn record_orphan_scan_duration_seconds(&self, seconds: f64);
 
+    /// `{prefix}_attachment_upload_abandoned` — counter
+    /// `from_status`: `pending`, `uploaded`
+    fn record_upload_abandoned(&self, from_status: &str);
+
+    /// `{prefix}_upload_reaper_scan_duration_seconds` — histogram
+    fn record_upload_reaper_scan_duration_seconds(&self, seconds: f64);
+
     // ── P1: Thread Summary Health (4 metrics) ──────────────────────────
 
     /// `{prefix}_thread_summary_trigger` — counter
@@ -269,6 +276,8 @@ impl MiniChatMetricsPort for NoopMetrics {
     fn record_orphan_detected(&self, _: &str) {}
     fn record_orphan_finalized(&self, _: &str) {}
     fn record_orphan_scan_duration_seconds(&self, _: f64) {}
+    fn record_upload_abandoned(&self, _: &str) {}
+    fn record_upload_reaper_scan_duration_seconds(&self, _: f64) {}
     fn record_thread_summary_trigger(&self, _: &str) {}
     fn record_thread_summary_execution(&self, _: &str) {}
     fn record_thread_summary_cas_conflict(&self) {}

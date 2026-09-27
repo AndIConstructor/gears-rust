@@ -10,7 +10,9 @@ use crate::infra::llm::ProviderKind;
 use oagw_sdk::APIKEY_AUTH_PLUGIN_ID;
 
 pub mod background;
-pub use background::{CleanupWorkerConfig, OrphanWatchdogConfig, ThreadSummaryWorkerConfig};
+pub use background::{
+    CleanupWorkerConfig, OrphanWatchdogConfig, ThreadSummaryWorkerConfig, UploadReaperConfig,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, toolkit_macros::ExpandVars)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +48,10 @@ pub struct MiniChatConfig {
     /// Orphan watchdog background worker.
     #[serde(default)]
     pub orphan_watchdog: OrphanWatchdogConfig,
+    /// Upload reaper background worker (abandoned `pending` / `uploaded`
+    /// attachments).
+    #[serde(default)]
+    pub upload_reaper: UploadReaperConfig,
     /// Thread summary background worker.
     #[serde(default)]
     pub thread_summary_worker: ThreadSummaryWorkerConfig,
@@ -450,6 +456,7 @@ impl Default for MiniChatConfig {
             metrics: MetricsConfig::default(),
             providers: default_providers(),
             orphan_watchdog: OrphanWatchdogConfig::default(),
+            upload_reaper: UploadReaperConfig::default(),
             thread_summary_worker: ThreadSummaryWorkerConfig::default(),
             cleanup_worker: CleanupWorkerConfig::default(),
             thumbnail: ThumbnailConfig::default(),

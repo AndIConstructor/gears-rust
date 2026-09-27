@@ -1402,6 +1402,8 @@ impl crate::domain::ports::MiniChatMetricsPort for TestMetrics {
     fn record_orphan_detected(&self, _: &str) {}
     fn record_orphan_finalized(&self, _: &str) {}
     fn record_orphan_scan_duration_seconds(&self, _: f64) {}
+    fn record_upload_abandoned(&self, _: &str) {}
+    fn record_upload_reaper_scan_duration_seconds(&self, _: f64) {}
     fn record_thread_summary_trigger(&self, result: &str) {
         self.thread_summary_trigger
             .lock()

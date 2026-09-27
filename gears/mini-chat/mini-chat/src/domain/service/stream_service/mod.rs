@@ -6490,6 +6490,8 @@ mod tests {
         fn record_orphan_detected(&self, _: &str) {}
         fn record_orphan_finalized(&self, _: &str) {}
         fn record_orphan_scan_duration_seconds(&self, _: f64) {}
+        fn record_upload_abandoned(&self, _: &str) {}
+        fn record_upload_reaper_scan_duration_seconds(&self, _: f64) {}
         fn record_code_interpreter_calls(&self, _: &str, _: u32) {}
         fn record_cleanup_completed(&self, _: &str) {}
         fn record_cleanup_failed(&self, _: &str) {}

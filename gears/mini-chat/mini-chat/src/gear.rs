@@ -151,6 +151,9 @@ impl Gear for MiniChatGear {
         cfg.orphan_watchdog
             .validate()
             .map_err(|e| anyhow::anyhow!("orphan_watchdog config: {e}"))?;
+        cfg.upload_reaper
+            .validate()
+            .map_err(|e| anyhow::anyhow!("upload_reaper config: {e}"))?;
         cfg.thread_summary_worker
             .validate()
             .map_err(|e| anyhow::anyhow!("thread_summary_worker config: {e}"))?;
@@ -462,6 +465,7 @@ impl Gear for MiniChatGear {
         self.worker_configs
             .set(WorkerConfigs {
                 orphan_watchdog: cfg.orphan_watchdog,
+                upload_reaper: cfg.upload_reaper,
             })
             .map_err(|_| anyhow::anyhow!("{} worker_configs already set", Self::MODULE_NAME))?;
 
@@ -689,8 +693,36 @@ impl RunnableCapability for MiniChatGear {
             None
         };
 
-        let (handles, worker_cancel) =
-            background_workers::spawn_workers(wc, &cancel, leader_elector.as_ref(), orphan_deps)?;
+        // The reaper enqueues attachment cleanup events, so it needs the
+        // outbox pipeline set up above.
+        let reaper_deps = if wc.upload_reaper.enabled {
+            let services = self.service.get().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} not initialized - init() must run before start()",
+                    Self::MODULE_NAME
+                )
+            })?;
+            let od = self
+                .outbox_deferred
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("{} outbox not initialized", Self::MODULE_NAME))?;
+            Some(crate::infra::workers::upload_reaper::UploadReaperDeps {
+                db: Arc::clone(&services.db),
+                outbox_enqueuer: Arc::clone(&od.enqueuer)
+                    as Arc<dyn crate::domain::repos::OutboxEnqueuer>,
+                metrics: Arc::clone(&services.metrics),
+            })
+        } else {
+            None
+        };
+
+        let (handles, worker_cancel) = background_workers::spawn_workers(
+            wc,
+            &cancel,
+            leader_elector.as_ref(),
+            orphan_deps,
+            reaper_deps,
+        )?;
         self.store_worker_runtime(handles, worker_cancel).await?;
 
         Ok(())

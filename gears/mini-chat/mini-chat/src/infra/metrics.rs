@@ -195,6 +195,10 @@ pub struct MiniChatMetricsMeter {
     orphan_finalized: Counter<u64>,
     orphan_scan_duration: Histogram<f64>,
 
+    // ── P1: Upload Reaper ───────────────────────────────────────────────
+    upload_abandoned: Counter<u64>,
+    upload_reaper_scan_duration: Histogram<f64>,
+
     // ── P1: Thread Summary Health ───────────────────────────────────────
     thread_summary_trigger: Counter<u64>,
     thread_summary_execution: Counter<u64>,
@@ -600,6 +604,18 @@ impl MiniChatMetricsMeter {
                 .with_description("Watchdog scan execution duration")
                 .build(),
 
+            // ── P1: Upload Reaper ───────────────────────────────────────
+            upload_abandoned: meter
+                .u64_counter(format!("{prefix}_attachment_upload_abandoned"))
+                .with_description(
+                    "Attachments stuck in pending/uploaded marked failed by the upload reaper",
+                )
+                .build(),
+            upload_reaper_scan_duration: meter
+                .f64_histogram(format!("{prefix}_upload_reaper_scan_duration_seconds"))
+                .with_description("Upload reaper scan execution duration")
+                .build(),
+
             // ── P1: Thread Summary Health ───────────────────────────────
             thread_summary_trigger: meter
                 .u64_counter(format!("{prefix}_thread_summary_trigger"))
@@ -873,6 +889,17 @@ impl MiniChatMetricsPort for MiniChatMetricsMeter {
 
     fn record_orphan_scan_duration_seconds(&self, seconds: f64) {
         self.orphan_scan_duration.record(seconds, &[]);
+    }
+
+    // ── P1: Upload Reaper ─────────────────────────────────────────────
+
+    fn record_upload_abandoned(&self, from_status: &str) {
+        self.upload_abandoned
+            .add(1, &[KeyValue::new("from_status", from_status.to_owned())]);
+    }
+
+    fn record_upload_reaper_scan_duration_seconds(&self, seconds: f64) {
+        self.upload_reaper_scan_duration.record(seconds, &[]);
     }
 
     // ── P1: Thread Summary Health ────────────────────────────────────

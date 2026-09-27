@@ -51,6 +51,63 @@ impl OrphanWatchdogConfig {
 fn default_orphan_scan_interval() -> u64 {
     60
 }
+
+/// Upload reaper — marks attachments stuck in `pending` / `uploaded` as
+/// `failed` (`upload_abandoned`) and schedules the provider file delete.
+/// Rows get stuck when the upload request is dropped (client disconnect,
+/// api-gateway timeout) before the service records the outcome.
+///
+/// Requires leader election (exactly one active instance per environment).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadReaperConfig {
+    /// Enable the upload reaper. Default: `true`.
+    #[serde(default = "super::default_true")]
+    pub enabled: bool,
+    /// Scan interval in seconds. Default: 60.
+    #[serde(default = "default_upload_reaper_scan_interval")]
+    pub scan_interval_secs: u64,
+    /// A `pending` / `uploaded` row whose `updated_at` is older than this is
+    /// abandoned. Valid range: 60–86400. Default: 300. The minimum is above
+    /// the api-gateway request timeout (30 s), so a live upload is never
+    /// reaped.
+    #[serde(default = "default_upload_reaper_stale_after")]
+    pub stale_after_secs: u64,
+}
+
+impl Default for UploadReaperConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            scan_interval_secs: default_upload_reaper_scan_interval(),
+            stale_after_secs: default_upload_reaper_stale_after(),
+        }
+    }
+}
+
+impl UploadReaperConfig {
+    const MIN_STALE_AFTER_SECS: u64 = 60;
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !(Self::MIN_STALE_AFTER_SECS..=86_400).contains(&self.stale_after_secs) {
+            return Err(format!(
+                "upload_reaper.stale_after_secs must be {}-86400, got {}",
+                Self::MIN_STALE_AFTER_SECS,
+                self.stale_after_secs
+            ));
+        }
+        if self.scan_interval_secs == 0 {
+            return Err("upload_reaper.scan_interval_secs must be > 0".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn default_upload_reaper_scan_interval() -> u64 {
+    60
+}
+fn default_upload_reaper_stale_after() -> u64 {
+    300
+}
 fn default_orphan_timeout() -> u64 {
     300
 }
