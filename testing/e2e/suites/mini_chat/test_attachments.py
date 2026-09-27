@@ -35,6 +35,9 @@ from .mock_provider.responses import SCENARIOS, Scenario
 
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 
+# api-gateway `defaults.body_limit_bytes` (config/base.yaml).
+GATEWAY_BODY_LIMIT_BYTES = 64_000_000
+
 # Storage internals that must never appear in attachment responses.
 INTERNAL_ATTACHMENT_FIELDS = ("provider_file_id", "storage_backend", "vector_store_id")
 
@@ -631,6 +634,24 @@ class TestUploadSizeEnforcement:
         assert _file_upload_calls(mock_provider) == []
         # Rejected before the attachment row is inserted.
         assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
+
+    @pytest.mark.usefixtures("offline_only")
+    @pytest.mark.timeout(60)
+    def test_body_over_gateway_limit_413(self, provider_chat, mock_provider):
+        """A request whose Content-Length is over the api-gateway
+        `body_limit_bytes` (64_000_000, config/base.yaml) is 413 from the
+        gateway before the handler runs: no attachment row, nothing sent to
+        the provider."""
+        chat_id = provider_chat["id"]
+        payload = b"\x00" * (GATEWAY_BODY_LIMIT_BYTES + 1)
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/attachments",
+            files={"file": ("huge.pdf", io.BytesIO(payload), "application/pdf")},
+            timeout=60,
+        )
+        assert resp.status_code == 413, resp.text
+        assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
+        assert _file_upload_calls(mock_provider) == []
 
     def test_document_within_limit_succeeds(self, provider_chat):
         """Upload a document just under the limit → succeeds."""
