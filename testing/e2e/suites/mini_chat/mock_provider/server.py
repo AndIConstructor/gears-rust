@@ -294,12 +294,18 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"mock file content")
 
     def _handle_file_delete(self):
-        """DELETE /v1/files/{file_id}."""
+        """DELETE /v1/files/{file_id}. Like the real API, deleting a file
+        also removes it from every vector store."""
         server: MockProviderServer = self.server  # type: ignore[assignment]
         file_id = self.path.rstrip("/").split("/")[-1]
         file_id = file_id.split("?")[0]
         with server._state_lock:
             deleted = server._files.pop(file_id, None) is not None
+            if deleted:
+                for vs_obj in server._vector_stores.values():
+                    ids = vs_obj.get("file_ids", [])
+                    if file_id in ids:
+                        ids.remove(file_id)
         if not deleted:
             self._json_response(404, _not_found(f"No such File object: {file_id}"))
             return

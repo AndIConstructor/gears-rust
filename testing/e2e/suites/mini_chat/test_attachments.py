@@ -1463,8 +1463,19 @@ class TestUploadVectorStoreIndexing:
 
 
 # Upload reaper (config/base.yaml `upload_reaper`): a `pending` / `uploaded`
-# row not updated for this long is failed with `upload_abandoned`.
+# row not updated for this long is failed with `upload_abandoned`; the scan
+# runs every 2 s.
 UPLOAD_REAPER_STALE_AFTER_SECS = 60
+# Waits of the reaper test, summed into its pytest timeout.
+_REAPER_CLIENT_READ_TIMEOUT = 3
+_REAPER_POLL_CHECK_SECS = 6
+_REAPER_REAP_TIMEOUT = UPLOAD_REAPER_STALE_AFTER_SECS + 30
+_REAPER_DELETE_TIMEOUT = 10
+_REAPER_CLEANUP_TIMEOUT = 20
+_REAPER_TIMEOUT = (
+    _REAPER_CLIENT_READ_TIMEOUT + _REAPER_POLL_CHECK_SECS + _REAPER_REAP_TIMEOUT
+    + _REAPER_DELETE_TIMEOUT + _REAPER_CLEANUP_TIMEOUT + 40  # seeding, uploads
+)
 
 
 @pytest.mark.usefixtures("offline_only")
@@ -1474,39 +1485,53 @@ class TestUploadReaper:
     attachment cleanup deletes the provider file. Slow: the reaper waits
     `stale_after_secs` (60 s, the minimum) after the row's last update."""
 
-    @pytest.mark.timeout(150)
+    @pytest.mark.timeout(_REAPER_TIMEOUT)
     def test_abandoned_upload_failed_and_provider_file_deleted(
         self, chat_with_model, mock_provider,
     ):
-        """The client gives up while the vector store is still indexing the
-        document (indexing held): the server stops polling, the row stays
-        `uploaded`; about 60 s later GET reports `failed` with
-        `upload_abandoned`, the provider file is deleted and the cleanup
-        ends in `done`."""
+        """The chat holds max_documents_per_chat - 1 documents. The client
+        gives up on the next upload while the vector store is still indexing
+        it (indexing held): the server stops polling and the row stays
+        `uploaded` and counts against the limit (one more upload is 429).
+        About 60 s later GET reports `failed` with `upload_abandoned`, the
+        provider file is deleted (and so gone from the chat's vector store),
+        the cleanup ends in `done`, and the failed row no longer counts: a
+        new document upload is `ready`."""
         chat_id = chat_with_model(STANDARD_MODEL)["id"]
+        seed_id = _upload_ready(chat_id, "seed.txt", b"seed document", "text/plain")
+        for _ in range(MAX_DOCUMENTS_PER_CHAT - 2):
+            _clone_attachment(seed_id)
+
         mock_provider.hold_indexing()
         started = time.monotonic()
         with pytest.raises(httpx.ReadTimeout):
             httpx.post(
                 f"{API_PREFIX}/chats/{chat_id}/attachments",
                 files={"file": ("abandoned.txt", io.BytesIO(b"never indexed"), "text/plain")},
-                timeout=httpx.Timeout(10, read=3),
+                timeout=httpx.Timeout(10, read=_REAPER_CLIENT_READ_TIMEOUT),
             )
 
         rows = query_db(
-            "SELECT id, status, provider_file_id FROM attachments WHERE chat_id = ?", (chat_id,),
+            "SELECT id, status, provider_file_id FROM attachments "
+            "WHERE chat_id = ? AND filename = 'abandoned.txt'", (chat_id,),
         )
         assert len(rows) == 1 and rows[0]["status"] == "uploaded", rows
         att_id = uuid_from_db(rows[0]["id"])
         file_id = rows[0]["provider_file_id"]
         vs_id = _vector_store_id(chat_id)
         status_read = ("GET", f"/v1/vector_stores/{vs_id}/files/{file_id}")
+        assert file_id in (mock_provider.vector_store_file_ids(vs_id) or [])
+
+        # The `uploaded` row counts against the document limit.
+        resp = _upload(chat_id, "over-limit.txt", b"over the limit", "text/plain")
+        assert_problem(resp, 429, "resource_exhausted", violation_subject="document_limit")
 
         # The dropped request stops polling the indexing status (the poll
         # interval is at most 2 s).
         time.sleep(1)
         reads = mock_provider.get_request_paths().count(status_read)
-        time.sleep(5)
+        assert reads > 0, "the upload never polled the indexing status"
+        time.sleep(_REAPER_POLL_CHECK_SECS - 1)
         assert mock_provider.get_request_paths().count(status_read) == reads, (
             "the upload kept polling after the client disconnected"
         )
@@ -1519,7 +1544,7 @@ class TestUploadReaper:
 
         body = wait_for(
             detail, "the reaper to fail the abandoned upload",
-            timeout=UPLOAD_REAPER_STALE_AFTER_SECS + 40, interval=1,
+            timeout=_REAPER_REAP_TIMEOUT, interval=1,
         )
         assert (body["status"], body["error_code"]) == ("failed", "upload_abandoned"), body
         # Not before the row was stale.
@@ -1527,9 +1552,18 @@ class TestUploadReaper:
 
         wait_for(
             lambda: ("DELETE", f"/v1/files/{file_id}") in mock_provider.get_request_paths(),
-            "the delete of the provider file",
+            "the delete of the provider file", timeout=_REAPER_DELETE_TIMEOUT,
         )
-        assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
+        assert wait_cleanup_terminal([att_id], timeout=_REAPER_CLEANUP_TIMEOUT) == {
+            att_id: "done",
+        }
+        assert file_id not in (mock_provider.vector_store_file_ids(vs_id) or []), (
+            mock_provider.vector_store_file_ids(vs_id)
+        )
+
+        # The failed row no longer counts: the chat has room for a document.
+        mock_provider.hold_indexing(False)
+        _upload_ready(chat_id, "after-reap.txt", b"room again", "text/plain")
 
 
 @pytest.mark.usefixtures("offline_only")
