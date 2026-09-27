@@ -201,6 +201,9 @@ RESOURCE_ATTACHMENT = "cf.core.mini_chat.attachment.v1~"
 RESOURCE_MODEL = "cf.core.mini_chat.model.v1~"
 # `$filter` / `$orderby` / `limit` / cursor errors (libs/toolkit-odata/src/errors.rs).
 RESOURCE_ODATA = "cf.core.odata.query.v1~"
+# Path / query extraction errors of the platform extractors
+# (libs/toolkit/src/api/rest/extract/error.rs).
+RESOURCE_HTTP_REQUEST = "cf.core.http.request.v1~"
 
 
 def assert_problem(

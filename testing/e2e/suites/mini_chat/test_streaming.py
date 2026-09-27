@@ -173,6 +173,21 @@ class TestStreamPreflightErrors:
         )
         assert_problem(resp, 400, "invalid_argument", field_reason="EMPTY_CONTENT")
 
+    def test_whitespace_only_content_rejected(self, chat):
+        """Content of only whitespace is empty after trimming: 400
+        invalid_argument EMPTY_CONTENT on `content`, no turn."""
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat['id']}/messages:stream",
+            json={"content": "  \n\t "},
+            headers={"Accept": "text/event-stream"},
+            timeout=10,
+        )
+        body = assert_problem(
+            resp, 400, "invalid_argument", field_reason="EMPTY_CONTENT", resource_type=RESOURCE_CHAT,
+        )
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["content"], body
+        assert turn_count(chat["id"]) == 0
+
     @pytest.mark.multi_provider
     def test_missing_content_rejected(self, provider_chat):
         """A body that does not match the schema is 422 invalid_argument

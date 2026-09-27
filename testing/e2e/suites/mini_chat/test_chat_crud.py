@@ -10,12 +10,15 @@ from .conftest import (
     API_PREFIX,
     DEFAULT_MODEL,
     DISABLED_MODEL,
+    RESOURCE_HTTP_REQUEST,
     RESOURCE_ODATA,
+    USER_A_ID,
     STANDARD_MODEL,
     TOKEN_USER_B,
     assert_problem,
     auth_headers,
     expect_done,
+    query_db,
     stream_message,
 )
 
@@ -204,6 +207,43 @@ class TestListChats:
         resp = httpx.get(f"{API_PREFIX}/chats", params={"limit": 0})
         assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_LIMIT")
 
+    def test_list_chats_limit_above_100_is_clamped(self, chat):
+        """`limit=500` is not rejected: the page size is clamped to 100
+        (LimitCfg max of the chat repository, gear.rs)."""
+        resp = httpx.get(f"{API_PREFIX}/chats", params={"limit": 500})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["page_info"]["limit"] == 100, body["page_info"]
+        (row,) = query_db(
+            "SELECT COUNT(*) AS n FROM chats WHERE user_id = ? AND deleted_at IS NULL",
+            (USER_A_ID,),
+        )
+        assert len(body["items"]) == min(row["n"], 100), (row, len(body["items"]))
+
+    @pytest.mark.parametrize(("params", "field", "reason"), [
+        pytest.param({"$select": "id,id"}, "$select", "INVALID_SELECT", id="duplicate_select"),
+        pytest.param({"$skip": "1"}, "$skip", "UNSUPPORTED_QUERY_PARAM", id="skip"),
+        pytest.param(
+            {"$filter": "title eq '" + "a" * (8 * 1024) + "'"}, "$filter", "FILTER_TOO_LONG",
+            id="filter_over_8_kib",
+        ),
+        # 501 comparisons joined with `or`: 4 * 501 - 1 = 2003 nodes, over
+        # the 2000-node limit (libs/toolkit/src/api/odata.rs), in 8012 bytes.
+        pytest.param(
+            {"$filter": " or ".join(["title eq 'a'"] * 501)}, "$filter", "FILTER_TOO_COMPLEX",
+            id="filter_over_2000_nodes",
+        ),
+        pytest.param({"limit": "abc"}, "query", "INVALID_QUERY_PARAMS", id="limit_not_a_number"),
+    ])
+    def test_list_chats_invalid_query_400(self, server, params, field, reason):
+        """The OData query options are validated by the platform extractor:
+        400 invalid_argument with one violation on the option."""
+        resp = httpx.get(f"{API_PREFIX}/chats", params=params)
+        body = assert_problem(
+            resp, 400, "invalid_argument", field_reason=reason, resource_type=RESOURCE_ODATA,
+        )
+        assert [v["field"] for v in body["context"]["field_violations"]] == [field], body
+
     def test_list_chats_orderby_with_cursor_400(self, server):
         """A cursor combined with `$orderby` is rejected. The test creates
         the two chats that make a `limit=1` page have a next cursor."""
@@ -341,3 +381,36 @@ class TestPathParameters:
             method, f"{API_PREFIX}/chats/{chat['id']}/messages/not-a-uuid/reaction", json=body,
         )
         assert_problem(resp, 400, "invalid_argument", field_reason="invalid_path_params")
+
+    @pytest.mark.parametrize(("method", "path", "kwargs"), [
+        pytest.param("DELETE", "/chats/not-a-uuid", {}, id="delete_chat"),
+        pytest.param("PATCH", "/chats/not-a-uuid", {"json": {"title": "T"}}, id="update_chat"),
+        pytest.param("GET", "/chats/not-a-uuid/messages", {}, id="list_messages"),
+        pytest.param(
+            "POST", "/chats/not-a-uuid/messages:stream", {"json": {"content": "Hi"}}, id="send",
+        ),
+        pytest.param("POST", "/chats/{chat_id}/turns/not-a-uuid/retry", {}, id="retry"),
+        pytest.param(
+            "PATCH", "/chats/{chat_id}/turns/not-a-uuid", {"json": {"content": "Hi"}}, id="edit",
+        ),
+        pytest.param("DELETE", "/chats/{chat_id}/turns/not-a-uuid", {}, id="delete_turn"),
+        pytest.param("POST", "/chats/not-a-uuid/turns/{turn_id}/retry", {}, id="retry_chat_id"),
+        pytest.param(
+            "DELETE", "/chats/{chat_id}/attachments/not-a-uuid", {}, id="delete_attachment",
+        ),
+        pytest.param(
+            "POST", "/chats/not-a-uuid/attachments",
+            {"files": {"file": ("a.txt", b"x", "text/plain")}}, id="upload",
+        ),
+    ])
+    def test_non_uuid_path_parameter_on_mutations_400(self, chat, method, path, kwargs):
+        """17-12 for the other operations: the path is rejected before the
+        body is read, with one violation on `path` (the HTTP request
+        resource of the platform extractor, libs/toolkit/src/api/rest/extract)."""
+        url = API_PREFIX + path.format(chat_id=chat["id"], turn_id=uuid.uuid4())
+        resp = httpx.request(method, url, timeout=10, **kwargs)
+        body = assert_problem(
+            resp, 400, "invalid_argument", field_reason="invalid_path_params",
+            resource_type=RESOURCE_HTTP_REQUEST,
+        )
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["path"], body

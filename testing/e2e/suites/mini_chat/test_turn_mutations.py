@@ -214,6 +214,21 @@ class TestTurnEdit:
         assert list_messages(chat_id) == before
 
     @pytest.mark.timeout(30)
+    def test_edit_whitespace_only_content_400(self, chat):
+        """Edit content of only whitespace is empty after trimming: 400
+        invalid_argument EMPTY_CONTENT on `content`; the turn is kept."""
+        chat_id = chat["id"]
+        rid = complete_turn(chat_id, "Question.")
+        before = list_messages(chat_id)
+
+        body = assert_problem(
+            edit(chat_id, rid, "  \n\t "), 400, "invalid_argument", field_reason="EMPTY_CONTENT",
+        )
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["content"], body
+        assert list_messages(chat_id) == before
+        assert poll_turn(chat_id, rid)["state"] == "done"
+
+    @pytest.mark.timeout(30)
     def test_edit_body_errors(self, chat):
         """A body without `content` (schema-invalid) is 422 invalid_argument;
         malformed JSON is 400 invalid_argument. The turn is kept."""

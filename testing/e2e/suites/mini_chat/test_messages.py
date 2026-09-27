@@ -194,6 +194,30 @@ class TestMessages:
             field_reason="FILTER_TOO_LONG", resource_type=RESOURCE_ODATA,
         )
 
+    def test_filter_too_complex_400(self, chat):
+        """A `$filter` of more than 2000 nodes (MAX_NODES,
+        libs/toolkit/src/api/odata.rs) within the length limit: 501
+        comparisons joined with `or` are 4 * 501 - 1 = 2003 nodes in 7511
+        bytes → 400 invalid_argument FILTER_TOO_COMPLEX."""
+        complex_filter = " or ".join(["role eq 'a'"] * 501)
+        resp = httpx.get(
+            f"{API_PREFIX}/chats/{chat['id']}/messages", params={"$filter": complex_filter},
+        )
+        assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="FILTER_TOO_COMPLEX", resource_type=RESOURCE_ODATA,
+        )
+
+    def test_limit_not_a_number_400(self, chat):
+        """`limit=abc` does not deserialize: 400 invalid_argument
+        INVALID_QUERY_PARAMS on `query`."""
+        resp = httpx.get(f"{API_PREFIX}/chats/{chat['id']}/messages", params={"limit": "abc"})
+        body = assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="INVALID_QUERY_PARAMS", resource_type=RESOURCE_ODATA,
+        )
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["query"], body
+
     def test_orderby_with_cursor_400(self, server):
         chat_id = _create_chat_with_messages(1)
         url = f"{API_PREFIX}/chats/{chat_id}/messages"
