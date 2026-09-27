@@ -1199,7 +1199,7 @@ Superseded statuses: 413 `file_too_large`, 415 `unsupported_file_type` / `unsupp
 |------|---------|
 | `provider_error` | Provider returned an error, an invalid response, a stream error, or is unavailable |
 | `provider_timeout` | Provider request timed out: a gateway timeout, or the gateway's own HTTP 504 `deadline_exceeded` Problem (a provider's own 504 is `provider_error`) |
-| `rate_limited` | Provider throttling (provider 429) |
+| `rate_limited` | Provider throttling (provider 429); the message includes the retry delay (`retry in {N}s`) when the provider sent a numeric `Retry-After` |
 | `web_search_calls_exceeded` | Per-turn web search call limit exceeded |
 | `code_interpreter_calls_exceeded` | Per-turn code interpreter call limit exceeded |
 | `agentic_iterations_exceeded` | Tool-use iteration cap exceeded |
