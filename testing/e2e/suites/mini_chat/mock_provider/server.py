@@ -364,6 +364,12 @@ class MockProviderServer(ThreadingHTTPServer):
         with self._capture_lock:
             return list(self._request_paths)
 
+    def get_post_paths(self) -> list[str]:
+        """Paths of the POST requests (uploads, vector store writes, Responses
+        calls) since the last clear. Leaves out the DELETEs of a background
+        cleanup that an earlier test started, which may still be running."""
+        return [p for m, p in self.get_request_paths() if m == "POST"]
+
     def clear_captured_requests(self) -> None:
         """Clear all captured request bodies and request paths."""
         with self._capture_lock:
@@ -444,6 +450,9 @@ class _DummyMockProvider:
         return []
 
     def get_request_paths(self) -> list[tuple[str, str]]:
+        return []
+
+    def get_post_paths(self) -> list[str]:
         return []
 
     def clear_captured_requests(self) -> None:

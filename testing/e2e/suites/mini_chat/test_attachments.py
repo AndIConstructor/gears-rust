@@ -402,7 +402,7 @@ class TestImageUploadAndSend:
         detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10).json()
         assert detail["img_thumbnail"] is not None, "ready image must have a thumbnail"
         # An image is not indexed for file_search: no vector store is created.
-        vector_store_calls = [p for p in mock_provider.get_request_paths() if "/vector_stores" in p[1]]
+        vector_store_calls = [p for p in mock_provider.get_post_paths() if "/vector_stores" in p]
         assert vector_store_calls == []
 
         # Send a message referencing the image
@@ -1145,7 +1145,7 @@ class TestUploadChatModelLeftCatalog:
         )
         assert body["context"]["field_violations"][0]["field"] == "model", body
         assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
-        assert mock_provider.get_request_paths() == []
+        assert mock_provider.get_post_paths() == []
 
 
 class TestDeleteMissingAttachment:
@@ -1226,7 +1226,7 @@ class TestUploadMultipartErrors:
             resource_type=RESOURCE_ATTACHMENT,
         )
         assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
-        assert mock_provider.get_request_paths() == []
+        assert mock_provider.get_post_paths() == []
 
 
 @pytest.mark.usefixtures("offline_only")

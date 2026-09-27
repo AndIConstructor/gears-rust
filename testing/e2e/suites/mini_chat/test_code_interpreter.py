@@ -143,7 +143,7 @@ class TestXlsxUploadAccepted:
         body = assert_problem(resp, 400, "invalid_argument")
         assert body["detail"] == "Code interpreter is currently unavailable", body
         assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
-        assert mock_provider.get_request_paths() == []
+        assert mock_provider.get_post_paths() == []
 
     def test_xlsx_reaches_ready(self, openai_chat):
         chat_id = openai_chat["id"]
