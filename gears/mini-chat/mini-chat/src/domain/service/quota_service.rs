@@ -511,6 +511,9 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
         //    input_tokens + output_tokens from the last completed turn, i.e.
         //    the context that will be re-sent to the LLM on this request.
         //    Budgets come from the catalog entry of each cascade candidate.
+        //    Tool surcharges count only for tools the turn would send with
+        //    that model: its `tool_support` and the kill switches gate them,
+        //    as they gate the tools and the context budget on the send path.
         let floor = self.estimation_budgets.minimal_generation_floor;
         let estimate_input_tokens = {
             let (utf8_bytes, num_images, tools_enabled, web, ci, prior) = (
@@ -521,14 +524,18 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                 input.code_interpreter_enabled,
                 input.prior_context_tokens,
             );
-            move |budgets: &EstimationBudgets| {
+            let ks = snapshot.kill_switches.clone();
+            move |budgets: &EstimationBudgets, entry: &ModelCatalogEntry| {
+                let ts = &entry.general_config.tool_support;
                 token_estimator::estimate_tokens(
                     &EstimationInput {
                         utf8_bytes,
                         num_images,
-                        tools_enabled,
-                        web_search_enabled: web,
-                        code_interpreter_enabled: ci,
+                        tools_enabled: tools_enabled && ts.file_search && !ks.disable_file_search,
+                        web_search_enabled: web && ts.web_search,
+                        code_interpreter_enabled: ci
+                            && ts.code_interpreter
+                            && !ks.disable_code_interpreter,
                     },
                     budgets,
                 )
@@ -556,7 +563,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
         let max_output_tokens_cap = input.max_output_tokens_cap;
         let candidate_reserve = move |entry: &ModelCatalogEntry| -> i64 {
             credits_micro_checked(
-                estimate_input_tokens(&catalog_budgets(Some(entry), floor)),
+                estimate_input_tokens(&catalog_budgets(Some(entry), floor), entry),
                 u64::from(std::cmp::min(
                     entry.max_output_tokens,
                     max_output_tokens_cap,
@@ -728,7 +735,8 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                             // Recompute the estimate with the effective model's
                             // budgets, and credits with its multipliers and max_output.
                             let model_estimation_budgets = catalog_budgets(Some(eff_entry), floor);
-                            let estimated_input = estimate_input_tokens(&model_estimation_budgets);
+                            let estimated_input =
+                                estimate_input_tokens(&model_estimation_budgets, eff_entry);
                             let final_reserved = credits_micro_checked(
                                 estimated_input,
                                 max_output_tokens_applied as u64,
@@ -1927,6 +1935,46 @@ mod tests {
             max_output_tokens_cap: 4096,
             prior_context_tokens: 0,
         }
+    }
+
+    async fn standard_reserve_tokens(
+        tools: bool,
+        file_search_supported: bool,
+        kill_file_search: bool,
+    ) -> i64 {
+        let db = mock_db_provider(inmem_db().await);
+        let mut snapshot = default_snapshot();
+        for entry in &mut snapshot.model_catalog {
+            entry.general_config.tool_support.file_search = file_search_supported;
+        }
+        snapshot.kill_switches.disable_file_search = kill_file_search;
+        let svc = make_test_service(Arc::clone(&db), snapshot, 1.10);
+        let mut input = preflight_input("gpt-5-mini");
+        input.tools_enabled = tools;
+        match svc.preflight_reserve(input).await.unwrap() {
+            PreflightDecision::Allow { reserve_tokens, .. } => reserve_tokens,
+            other => panic!("expected Allow, got {other:?}"),
+        }
+    }
+
+    // The file_search surcharge is reserved only when the tool is sent:
+    // the model supports it and the kill switch is off.
+    #[tokio::test]
+    async fn preflight_tool_surcharge_follows_tool_gating() {
+        let without_tools = standard_reserve_tokens(false, true, false).await;
+        let with_tools = standard_reserve_tokens(true, true, false).await;
+        assert!(
+            with_tools > without_tools,
+            "surcharge applies when file_search is sent"
+        );
+        assert_eq!(
+            standard_reserve_tokens(true, false, false).await,
+            without_tools
+        );
+        assert_eq!(
+            standard_reserve_tokens(true, true, true).await,
+            without_tools
+        );
     }
 
     #[tokio::test]
