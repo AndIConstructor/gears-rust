@@ -128,6 +128,22 @@ class TestReactions:
             body = assert_problem(resp, 404, "not_found", resource_type=RESOURCE_MESSAGE)
             assert body["context"]["resource_name"] == msg_id, body
 
+    def test_reaction_on_answer_of_deleted_turn_404(self, server):
+        """The answer of a turn removed by DELETE /turns/{request_id} is
+        gone: PUT and DELETE of its reaction are 404 (message resource)."""
+        chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
+        (answer,) = [m for m in list_messages(chat_id) if m["id"] == assistant_msg_id]
+        resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/turns/{answer['request_id']}")
+        assert resp.status_code == 204, resp.text
+
+        url = reaction_url(chat_id, assistant_msg_id)
+        for resp in (httpx.put(url, json={"reaction": "like"}), httpx.delete(url)):
+            body = assert_problem(resp, 404, "not_found", resource_type=RESOURCE_MESSAGE)
+            assert body["context"]["resource_name"] == assistant_msg_id, body
+        assert query_db(
+            "SELECT COUNT(*) AS n FROM message_reactions WHERE message_id = ?", (assistant_msg_id,),
+        ) == [{"n": 0}]
+
     def test_remove_reaction_204(self, server):
         chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
         url = reaction_url(chat_id, assistant_msg_id)
