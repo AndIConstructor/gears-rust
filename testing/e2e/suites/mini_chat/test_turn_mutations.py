@@ -444,8 +444,9 @@ class TestConcurrentRetries:
         other is 409 NOT_LATEST_TURN.
 
         The winner streams a slow answer, so it is still running when the
-        loser is checked. The mutation transactions are serialized (SQLite,
-        one connection): the loser sees the winner's new turn as the latest
+        loser is checked. The rig's SQLite pool has one connection
+        (base.yaml `max_conns: 1`), so the two mutation transactions run one
+        after the other: the loser sees the winner's new turn as the latest
         one. GENERATION_IN_PROGRESS needs two mutation transactions in flight
         at once; only its error mapping is unit-tested (api/rest/error.rs).
         """
@@ -464,6 +465,8 @@ class TestConcurrentRetries:
             t.start()
         for t in threads:
             t.join(timeout=25)
+        assert [t.is_alive() for t in threads] == [False, False], "a retry did not return"
+        assert None not in results, results  # a retry raised in its thread
 
         by_status = sorted(results, key=lambda r: r.status_code)
         assert [r.status_code for r in by_status] == [200, 409], (

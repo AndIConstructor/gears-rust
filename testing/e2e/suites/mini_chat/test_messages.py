@@ -24,45 +24,33 @@ class TestMessages:
     """GET /chats/{cid}/messages with OData query options."""
 
     def test_odata_orderby(self, server):
-        """$orderby=created_at desc should return messages in reverse chronological order."""
+        """`$orderby=created_at desc` returns the four messages of two turns
+        in exactly the reverse of the default (chronological) order."""
         chat_id = _create_chat_with_messages(2)
+        url = f"{API_PREFIX}/chats/{chat_id}/messages"
 
-        resp = httpx.get(
-            f"{API_PREFIX}/chats/{chat_id}/messages",
-            params={"$orderby": "created_at desc"},
-        )
+        default = httpx.get(url)
+        assert default.status_code == 200, default.text
+        ascending = [m["id"] for m in default.json()["items"]]
+        assert len(ascending) == 4, ascending
+        assert [m["role"] for m in default.json()["items"]] == ["user", "assistant"] * 2
+
+        resp = httpx.get(url, params={"$orderby": "created_at desc"})
         assert resp.status_code == 200, f"GET messages failed: {resp.status_code} {resp.text}"
-        body = resp.json()
-        assert "page_info" in body
-        items = body["items"]
-        assert len(items) >= 2, f"Expected at least 2 messages, got {len(items)}"
-
-        # Verify descending order by created_at
-        timestamps = [m["created_at"] for m in items]
-        for i in range(len(timestamps) - 1):
-            assert timestamps[i] >= timestamps[i + 1], (
-                f"Messages not in descending order: {timestamps[i]} < {timestamps[i + 1]} "
-                f"at positions {i}, {i + 1}"
-            )
+        assert [m["id"] for m in resp.json()["items"]] == ascending[::-1], resp.json()
 
     def test_odata_filter_role(self, server):
-        """$filter=role eq 'assistant' should return only assistant messages."""
-        chat_id = _create_chat_with_messages(1)
+        """`$filter=role eq 'assistant'` returns exactly the answers: one
+        per turn, in order."""
+        chat_id = _create_chat_with_messages(2)
+        url = f"{API_PREFIX}/chats/{chat_id}/messages"
+        answers = [m["id"] for m in httpx.get(url).json()["items"] if m["role"] == "assistant"]
+        assert len(answers) == 2, answers
 
-        resp = httpx.get(
-            f"{API_PREFIX}/chats/{chat_id}/messages",
-            params={"$filter": "role eq 'assistant'"},
-        )
+        resp = httpx.get(url, params={"$filter": "role eq 'assistant'"})
         assert resp.status_code == 200, f"GET messages failed: {resp.status_code} {resp.text}"
-        body = resp.json()
-        assert "page_info" in body
-        items = body["items"]
-        assert len(items) >= 1, "Expected at least one assistant message"
-
-        for msg in items:
-            assert msg["role"] == "assistant", (
-                f"Expected only assistant messages, got role={msg['role']}"
-            )
+        items = resp.json()["items"]
+        assert [(m["id"], m["role"]) for m in items] == [(a, "assistant") for a in answers], items
 
     def test_my_reaction_field(self, server):
         """Assistant messages should include a 'my_reaction' field (null when no reaction set)."""

@@ -284,7 +284,7 @@ class TestUpdateChat:
             content=b"{not json",
             headers={"Content-Type": "application/json"},
         )
-        assert_problem(resp, 400, "invalid_argument")
+        assert_problem(resp, 400, "invalid_argument", field_reason="json_syntax_error")
 
     @pytest.mark.multi_provider
     def test_update_title_length_boundary(self, provider_chat):

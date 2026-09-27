@@ -107,8 +107,8 @@ toggled per test.
 |-------|--------------------------------------------|-------------------|----------------------------------------------------|
 | 03-01 | List Messages — Cursor Pagination          | test_messages.py  | TestMessages::test_cursor_pagination               |
 | 03-02 | OData `$select`: accepted and ignored (the page equals the one without it); an invalid value (duplicate field) → 400 `invalid_argument` (`INVALID_SELECT`) | test_messages.py | TestMessages::test_select_accepted_and_ignored, TestMessages::test_invalid_select_400 |
-| 03-03 | OData $orderby                             | test_messages.py  | TestMessages::test_odata_orderby                   |
-| 03-04 | OData $filter                              | test_messages.py  | TestMessages::test_odata_filter_role               |
+| 03-03 | OData `$orderby=created_at desc`: exactly the reversed default order (two turns) | test_messages.py  | TestMessages::test_odata_orderby                   |
+| 03-04 | OData `$filter=role eq 'assistant'`: exactly the answers of two turns, in order | test_messages.py  | TestMessages::test_odata_filter_role               |
 | 03-05 | Message request_id Always Non-Null         | test_messages.py  | TestMessages::test_request_id_non_null             |
 | 03-06 | Attachments Array Always Present           | test_messages.py  | TestMessages::test_attachments_array_present       |
 | 03-07 | my_reaction Field on Assistant Messages    | test_messages.py  | TestMessages::test_my_reaction_field               |
@@ -263,7 +263,7 @@ still works but is not required (ADR-0007).
 | 10-15 | img_thumbnail Present for Ready Images       | test_attachments.py      | TestImageUploadAndSend::test_image_upload_and_send (non-null only; format not checked) |
 | 10-16 | error_code on Failed Status                  | test_attachments.py      | TestUploadProviderFailure::test_upload_failure_marks_attachment_failed |
 | 10-17 | Mid-Stream Size Limit → 400 `out_of_range`   | test_attachments.py      | TestChunkedUpload::test_chunked_oversize_image_rejected     |
-| 10-18 | Upload with Content-Length over the Limit → 400 `out_of_range`, nothing sent to the provider (whether the check runs before the body is read is not observable) | test_attachments.py | TestUploadSizeEnforcement::test_oversize_image_rejected, TestUploadSizeEnforcement::test_oversize_document_rejected |
+| 10-18 | Upload with Content-Length over the Limit → 400 `out_of_range` (`FILE_TOO_LARGE` on field `content_length`: the Content-Length pre-check rejects it before the streaming counter reads the part), nothing sent to the provider | test_attachments.py | TestUploadSizeEnforcement::test_oversize_image_rejected, TestUploadSizeEnforcement::test_oversize_document_rejected |
 | 10-19 | Chunked-Encoding Streaming Counter           | test_attachments.py      | TestChunkedUpload::test_chunked_upload_within_limit_ready   |
 | 10-20 | Images Not Added to Vector Store             | test_attachments.py      | TestImageUploadAndSend::test_image_upload_and_send          |
 | 10-21 | provider_file_id Never Exposed               | test_attachments.py      | TestUploadAndGet::test_provider_storage_fields_not_exposed  |
@@ -316,7 +316,7 @@ still works but is not required (ADR-0007).
 | 12-02 | Reaction Upsert Idempotent     | test_reactions.py | TestReactions::test_put_same_reaction_twice_is_idempotent |
 | 12-03 | Reaction on User Message (PUT and DELETE) → 400 `failed_precondition` (`reaction_target`/`STATE`) | test_reactions.py | TestReactions::test_reaction_on_user_message_400 |
 | 12-04 | Remove Reaction → 204          | test_reactions.py | TestReactions::test_remove_reaction_204                |
-| 12-05 | Remove Reaction Idempotent → 204 | test_reactions.py | TestReactions::test_remove_reaction_idempotent       |
+| 12-05 | Remove Reaction Idempotent → 204 (a second DELETE after the removal; a DELETE with no reaction set), nothing stored | test_reactions.py | TestReactions::test_remove_reaction_idempotent       |
 | 12-06 | Switch Reaction like → dislike | test_reactions.py | TestReactions::test_switch_reaction_like_to_dislike    |
 | 12-07 | Reaction on Nonexistent Message → 404 `not_found` (PUT and DELETE; `resource_type` message, `resource_name` the message id) | test_reactions.py | TestReactions::test_reaction_on_nonexistent_message_404 |
 | 12-08 | Reaction Other Than like/dislike → 400 `invalid_argument`, nothing stored | test_reactions.py | TestReactions::test_invalid_reaction_value_400 |

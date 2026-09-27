@@ -101,7 +101,8 @@ class TestCodeInterpreterUsageAccounting:
             and e.data.get("phase") == "done"
             and e.data.get("name") == "code_interpreter"
         ]
-        assert len(ci_tool_dones) >= 1, (
+        # The CODEINTERP scenario has one code_interpreter call.
+        assert len(ci_tool_dones) == 1, (
             f"Expected code_interpreter done event. "
             f"Tool events: {[t.data for t in tool_events]}"
         )
@@ -118,8 +119,8 @@ class TestCodeInterpreterUsageAccounting:
         assert resp.status_code == 200
         msgs = resp.json()["items"]
         asst_msgs = [m for m in msgs if m["role"] == "assistant"]
-        assert len(asst_msgs) >= 1
-        m = asst_msgs[-1]
+        assert len(asst_msgs) == 1, msgs  # a new chat with one turn
+        m = asst_msgs[0]
         assert m["input_tokens"] == sse_input, (
             f"API input_tokens ({m['input_tokens']}) != SSE ({sse_input})"
         )

@@ -137,6 +137,15 @@ class TestReactions:
         assert my_reaction(chat_id, assistant_msg_id) is None
 
     def test_remove_reaction_idempotent(self, server):
-        """DELETE without a reaction ever set is 204."""
+        """DELETE is idempotent: after a reaction was set and removed, a
+        second DELETE is 204 too and nothing is stored; so is a DELETE when
+        no reaction was ever set."""
+        chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
+        url = reaction_url(chat_id, assistant_msg_id)
+        assert httpx.put(url, json={"reaction": "like"}).status_code == 200
+        assert [httpx.delete(url).status_code for _ in range(2)] == [204, 204]
+        assert my_reaction(chat_id, assistant_msg_id) is None
+
         chat_id, _, assistant_msg_id = _create_chat_with_assistant_message()
         assert httpx.delete(reaction_url(chat_id, assistant_msg_id)).status_code == 204
+        assert my_reaction(chat_id, assistant_msg_id) is None

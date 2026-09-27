@@ -592,38 +592,39 @@ class TestUploadSizeEnforcement:
     def test_oversize_image_rejected(self, provider_chat, mock_provider):
         """Upload an image exceeding uploaded_image_max_size_kb (5 MB) → 400.
 
-        Uses ~6 MB which is over the image limit but under the body limit of
-        the upload route (25 MiB + 64 KiB, gears/mini-chat/mini-chat/src/api/rest/routes/attachments.rs),
-        so the handler's streaming size check runs.
+        httpx sends a Content-Length, so the handler's pre-check rejects the
+        ~6 MB upload from that header (less 64 KiB of multipart framing)
+        before the streaming size counter reads the part: the violation is
+        on `content_length` (handlers/attachments.rs, step 8c). The streaming
+        counter is covered by TestChunkedUpload (no Content-Length).
         """
         chat_id = provider_chat["id"]
-        # 6 MB > 5 MB default image limit, but < the upload route body limit
         oversize_payload = b"\x89PNG" + b"\x00" * (6 * 1024 * 1024)
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/attachments",
             files={"file": ("huge.png", io.BytesIO(oversize_payload), "image/png")},
             timeout=60,
         )
-        assert_problem(resp, 400, "out_of_range", field_reason="FILE_TOO_LARGE")
+        body = assert_problem(resp, 400, "out_of_range", field_reason="FILE_TOO_LARGE")
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["content_length"], body
         assert _file_upload_calls(mock_provider) == []
 
     @pytest.mark.usefixtures("offline_only")
     def test_oversize_document_rejected(self, provider_chat, mock_provider):
-        """Upload a document exceeding the per-kind handler limit (25 MB) → 400.
+        """Upload a document exceeding the per-kind limit (25 MB) → 400.
 
-        Documents are capped at 25 MB by the per-kind handler size check.
-        A 26 MB upload should be rejected by that handler before any further
-        processing occurs.
+        As for the image, the Content-Length pre-check rejects the 26 MB
+        upload before the streaming size counter reads the part.
         """
         chat_id = provider_chat["id"]
-        # 26 MB > 25 MB per-kind handler limit
         oversize_payload = b"\x00" * (26 * 1024 * 1024)
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/attachments",
             files={"file": ("huge.pdf", io.BytesIO(oversize_payload), "application/pdf")},
             timeout=60,
         )
-        assert_problem(resp, 400, "out_of_range", field_reason="FILE_TOO_LARGE")
+        body = assert_problem(resp, 400, "out_of_range", field_reason="FILE_TOO_LARGE")
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["content_length"], body
         assert _file_upload_calls(mock_provider) == []
 
     def test_document_within_limit_succeeds(self, provider_chat):
