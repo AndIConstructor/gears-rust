@@ -1,5 +1,4 @@
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
 use toolkit::api::OpenApiRegistry;
 use toolkit::api::operation_builder::OperationBuilder;
 
@@ -8,23 +7,14 @@ use crate::api::rest::{dto, handlers};
 
 const API_TAG: &str = "Mini Chat Attachments";
 
-/// Coarse outer body-size guard for the upload route.
-///
-/// Set to the largest allowed upload (25 MiB for files) plus 64 KiB for
-/// multipart overhead. The fine-grained per-kind limit is enforced by the
-/// handler's streaming byte counter.
-///
-/// This overrides the API gateway's global `DefaultBodyLimit` (16 MiB)
-/// so that file uploads up to 25 MiB are not rejected by the framework.
-const UPLOAD_BODY_LIMIT: usize = 25 * 1024 * 1024 + 65536;
-
 pub(super) fn register_attachment_routes(
     mut router: Router,
     openapi: &dyn OpenApiRegistry,
     prefix: &str,
 ) -> Router {
     // POST {prefix}/v1/chats/{id}/attachments (multipart/form-data)
-    // DefaultBodyLimit overrides the gateway's global 16 MiB limit for this route.
+    // The request size cap is the api-gateway's `body_limit_bytes`; the
+    // per-kind file limit is the handler's streaming byte counter.
     router = OperationBuilder::post(format!("{prefix}/v1/chats/{{id}}/attachments"))
         .operation_id("mini_chat.upload_attachment")
         .multipart_file_request("file", Some("File to upload"))
@@ -48,8 +38,7 @@ pub(super) fn register_attachment_routes(
         .error_500(openapi)
         .error_503(openapi)
         .response_header(retry_after_header())
-        .register(router, openapi)
-        .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT));
+        .register(router, openapi);
 
     // GET {prefix}/v1/chats/{id}/attachments/{attachment_id}
     router = OperationBuilder::get(format!(
