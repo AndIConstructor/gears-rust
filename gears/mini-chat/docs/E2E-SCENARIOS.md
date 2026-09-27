@@ -290,6 +290,7 @@ still works but is not required (ADR-0007).
 | 10-43 | Provider-Native file_search Counted: `file_search` tool events, `chat_turns.file_search_completed_count` 1, usage event `file_search_calls` 1 | test_attachments.py | TestFileSearchToolEvents::test_file_search_tool_events_and_counter |
 | 10-44 | More Than `code_interpreter_max_calls_per_message` (10) Code Interpreter Calls in One Answer → tool events of the 10 allowed calls, SSE `error` `code_interpreter_calls_exceeded`, turn `error` with that code (mock only) | test_code_interpreter.py | TestCodeInterpreterPerMessageLimit::test_eleventh_code_interpreter_call_fails_the_turn |
 | 10-45 | Azure File Storage Without `api_version` → Gear Fails to Start | — | unit tests: gears/mini-chat/mini-chat/src/config.rs (`azure_storage_requires_api_version`); startup configuration, not reachable from a running rig |
+| 10-46 | DELETE of an Attachment Uploaded by Another User in the Caller's Chat → 404 `not_found` (attachment `resource_type`, same as an unknown id), row not deleted, no cleanup enqueued | — | unit test: gears/mini-chat/mini-chat/src/domain/service/attachment_service_test.rs (`test_delete_attachment_uploaded_by_other_user_not_found`); not reachable: a chat has one owner, and only the owner can upload to it |
 
 ## 11 — Models API
 

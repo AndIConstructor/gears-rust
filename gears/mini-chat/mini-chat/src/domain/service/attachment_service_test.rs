@@ -988,6 +988,70 @@ async fn test_delete_attachment_wrong_user_not_found() {
     );
 }
 
+// The chat owner deletes an attachment whose uploaded_by_user_id is another
+// user: same 404 as a missing attachment, and the row is left alone.
+#[tokio::test]
+async fn test_delete_attachment_uploaded_by_other_user_not_found() {
+    use crate::infra::db::entity::attachment::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use toolkit_db::secure::SecureEntityExt;
+
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let owner_id = Uuid::new_v4();
+    let uploader_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, owner_id).await;
+
+    let mut params =
+        crate::domain::service::test_helpers::InsertTestAttachmentParams::ready_document(
+            tenant_id, chat_id,
+        );
+    params.uploaded_by_user_id = uploader_id;
+    let att_id =
+        crate::domain::service::test_helpers::insert_test_attachment(&db_prov, params).await;
+
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, owner_id);
+    let oagw = MockOagwGateway::with_responses(vec![]);
+    let outbox = Arc::new(RecordingOutboxEnqueuer::new());
+    let outbox_ref = Arc::clone(&outbox);
+    let svc = build_service(
+        db,
+        Arc::clone(&oagw) as _,
+        outbox as _,
+        RagConfig::default(),
+    );
+
+    let err = svc
+        .delete_attachment(&ctx, chat_id, att_id)
+        .await
+        .unwrap_err();
+    match err {
+        crate::domain::error::DomainError::NotFound { entity, id } => {
+            assert_eq!(
+                entity,
+                crate::domain::error::NotFoundEntity::Attachment,
+                "must be attachment_not_found"
+            );
+            assert_eq!(id, att_id);
+        }
+        other => panic!("expected attachment NotFound, got: {other:?}"),
+    }
+    assert!(outbox_ref.cleanup_events.lock().unwrap().is_empty());
+
+    let conn = db_prov.conn().unwrap();
+    let row = Entity::find()
+        .filter(Column::Id.eq(att_id))
+        .secure()
+        .scope_with(&toolkit_security::AccessScope::allow_all())
+        .one(&conn)
+        .await
+        .unwrap()
+        .expect("attachment row exists");
+    assert!(row.deleted_at.is_none(), "row must not be soft-deleted");
+}
+
 // ── Cross-owner isolation (tenant-only authz, ensure_owner defence-in-depth) ──
 
 #[tokio::test]

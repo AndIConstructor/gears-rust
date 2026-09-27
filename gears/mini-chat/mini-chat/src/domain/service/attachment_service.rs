@@ -564,9 +564,11 @@ impl<
             return Err(DomainError::attachment_not_found(attachment_id));
         }
 
-        // Ownership check (explicit since entity uses no_owner)
+        // Ownership check (explicit since entity uses no_owner). Masked as
+        // 404, like every other "not yours" path, so the caller cannot probe
+        // for attachment ids.
         if row.uploaded_by_user_id != ctx.subject_id() {
-            return Err(DomainError::Forbidden);
+            return Err(DomainError::attachment_not_found(attachment_id));
         }
 
         // Idempotent: already deleted → 204
