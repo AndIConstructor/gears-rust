@@ -289,7 +289,7 @@ The system **MUST** register every Mini Chat queue with a `LeasedMessageHandler`
 - Messages are processed in order within a partition under a partition lease.
 - Leases expire so that partitions held by a crashed instance are taken over.
 - Transient failures are retried with backoff; permanent failures are dead-lettered.
-- Dead letters are visible to operators (log at `error!` on `Reject`; audit emits also record `result = reject` in metrics).
+- Dead letters are visible to operators: the usage and audit handlers log at `error!` on `Reject` (audit emits also record `result = reject` in metrics); the cleanup handlers and the thread-summary handler (bounded reject after `max_attempts`) log their rejects at `warn!`.
 
 **Implements**:
 - `cpt-cf-mini-chat-flow-usage-outbox-dispatch`

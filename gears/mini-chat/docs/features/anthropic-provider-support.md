@@ -7,7 +7,7 @@ This document started as the design for Anthropic support. Parts of it are imple
 | Capability | Status | Where |
 |---|---|---|
 | `ProviderKind::AnthropicMessages` adapter (`/v1/messages`, SSE, `complete()`) | Implemented | `infra/llm/providers/anthropic_messages.rs`, `infra/llm/providers/mod.rs` |
-| Native `web_search_20260209` and `code_execution_20250825` tools | Implemented | `anthropic_messages.rs` (tool mapping) |
+| Native `web_search_20260209` and `code_execution_20250825` tools | Implemented. Web search citations are **not implemented**: the adapter returns `citations: vec![]` and does not parse `web_search_tool_result` or citation blocks | `anthropic_messages.rs` (tool mapping) |
 | Function tools (e.g. `search_knowledge`) | Implemented. The function-tool loop runs in `StreamService` (`domain/service/stream_service/provider_task.rs`), not inside the adapter | `provider_task.rs` |
 | `rag_provider` on `ProviderEntry`, `ProviderResolver::resolve_rag_provider()` | Implemented | `config.rs`, `infra/llm/provider_resolver.rs` |
 | Parallel upload to the Anthropic Files API | Implemented for **images only**, 30 s timeout, failure is non-fatal. Documents are not uploaded to Anthropic | `domain/service/attachment_service.rs`, `infra/llm/providers/anthropic_files_client.rs` |
@@ -73,7 +73,7 @@ Given these constraints, file access is split into two custom tools (**not imple
 | Capability | OpenAI (current) | Anthropic (this feature) |
 |-----------|------------------|--------------------------|
 | Text streaming | Native SSE | Native Anthropic SSE |
-| Web search | Native tool | Native `web_search_20260209` (server-side) |
+| Web search | Native tool | Native `web_search_20260209` (server-side). Web citations **not implemented** (no `source: "web"` citations) |
 | Code execution | Native `code_interpreter` | Native `code_execution_20250825` (server-side) |
 | Function calling | Native | Native `tool_use` (Anthropic format) |
 | File search / RAG | Native `file_search` (server-side) | Planned: custom `search_files` tool loop via Azure vector store. **Not implemented** — `FileSearch` is dropped |
@@ -164,11 +164,11 @@ event: message_stop        → Terminal(Completed/Incomplete) or enter tool loop
 | `content_block_start` | `type: "text"` | `Skip` (start text block tracking) |
 | `content_block_start` | `type: "tool_use"` | `Skip` (start accumulating tool input JSON) |
 | `content_block_start` | `type: "server_tool_use"`, name starts with `web_search` | `Sse(Tool { Start, "web_search" })` |
-| `content_block_start` | `type: "server_tool_use"`, name starts with `code_execution` | `Sse(Tool { Start, "code_execution" })` |
+| `content_block_start` | `type: "server_tool_use"`, name starts with `code_execution` | `Sse(Tool { Start, "code_interpreter" })` (shared name, so the code interpreter limit and counters apply) |
 | `content_block_delta` | `type: "text_delta"` | `Sse(Delta { "text", content })` |
 | `content_block_delta` | `type: "input_json_delta"` | `Skip` (append to accumulated tool input) |
 | `content_block_stop` | after web_search block | `Sse(Tool { Done, "web_search" })` |
-| `content_block_stop` | after code_execution block | `Sse(Tool { Done, "code_execution" })` |
+| `content_block_stop` | after code_execution block | `Sse(Tool { Done, "code_interpreter" })` |
 | `content_block_stop` | after text/tool_use block | `Skip` |
 | `message_delta` | `stop_reason: "end_turn"` | `Skip` (prepare Completed) |
 | `message_delta` | `stop_reason: "max_tokens"` | `Skip` (prepare Incomplete) |

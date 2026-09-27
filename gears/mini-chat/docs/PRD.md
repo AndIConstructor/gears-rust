@@ -337,7 +337,7 @@ The system MUST support web search as an LLM tool, explicitly enabled per reques
 
 **System prompt guard**: When the `web_search` tool is sent for a turn, the system prompt MUST instruct the model: *"Use web_search only if the answer cannot be obtained from the provided context or your training data. Never use it for general knowledge questions. At most one web_search call per request."* **Two enforcement layers**: (1) system prompt soft guidance — at most 1 call; (2) `quota_service` hard limit — configurable, default 2 calls per message. The soft constraint reduces unnecessary calls; the hard limit is the backstop. Tests MUST NOT assume exactly 1 call per turn — up to 2 calls are valid under the hard limit.
 
-**Citations**: When web search results contribute to the assistant response, the system MUST include citations with `source: "web"`, `url`, `title`, and `snippet` in the existing SSE `citations` event.
+**Citations**: When web search results contribute to the assistant response, the system MUST include citations with `source: "web"`, `url`, `title`, and `snippet` in the existing SSE `citations` event. **Not implemented for Anthropic chats**: the Anthropic adapter returns no citations (it does not parse `web_search_tool_result` or citation blocks), so web search runs but its results produce no `source: "web"` citations.
 
 **Rationale**: Users need to augment AI responses with up-to-date web information for questions beyond the scope of uploaded documents.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -1165,7 +1165,7 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` (was 415) |
 | Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `detail` |
 | Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
-| Outbox payload built for the request exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail` |
+| `DELETE /chats/{id}`: the chat-cleanup outbox payload exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail`. The same failure on attachment `DELETE` and on turn retry, edit and delete is returned as 500 `internal` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` (was 415) |
 | Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
 | Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` (was 413). A body above api-gateway `defaults.body_limit_bytes` (default 16 MiB) gets 413 from the gateway before it reaches mini-chat |
@@ -1568,7 +1568,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 - [ ] User exceeding premium-tier quota (in any period: daily or monthly) is auto-downgraded to the standard tier; standard-tier models have separate, higher limits; when all tiers are exhausted, the system rejects with HTTP 429 (`resource_exhausted`)
 - [ ] Effective model used for each turn is recorded in `messages.model`, SSE `done` event (`effective_model` + `selected_model` fields), and audit event payload; downgrade decisions are surfaced via optional `quota_decision`/`downgrade_from`/`downgrade_reason` fields
 - [ ] When premium quota is exhausted, `effective_model != selected_model` in the SSE `done` event; the UI can display a downgrade banner based on this metadata
-- [ ] When `web_search.enabled=true` and the `disable_web_search` kill switch is OFF, the provider request includes the `web_search` tool and citations can include web sources (`source: "web"` with `url`, `title`, `snippet`)
+- [ ] When `web_search.enabled=true` and the `disable_web_search` kill switch is OFF, the provider request includes the `web_search` tool and citations can include web sources (`source: "web"` with `url`, `title`, `snippet`); web citations are not implemented for Anthropic chats
 - [ ] When the `disable_web_search` kill switch is ON, requests with `web_search.enabled=true` are rejected with HTTP 400 (`failed_precondition`, `web_search` / `FEATURE_DISABLED`)
 - [ ] Standard-tier usage is bounded by configured per-tier caps (not unlimited); exceeding all tier caps yields HTTP 429 (`resource_exhausted`)
 - [ ] User can select a model from the catalog when creating a chat; the model is locked for the chat lifetime; all turns use the selected model (except system-driven quota downgrades)

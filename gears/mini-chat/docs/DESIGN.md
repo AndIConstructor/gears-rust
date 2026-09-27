@@ -401,7 +401,7 @@ graph TB
   - `vllm_responses` — vLLM Responses API (`vllm_responses.rs`);
   - `anthropic_messages` — Anthropic Messages API (`anthropic_messages.rs`).
 
-  Tool support differs by adapter. The Chat Completions adapter drops `file_search`, `web_search` and `code_interpreter` and keeps function tools (`search_knowledge`). The vLLM Responses adapter drops all tools, including function tools. The Anthropic adapter drops `file_search` and maps `web_search` and `code_interpreter` to its server tools. The domain service does not know the adapter kind: the tool list, the tool guards in the system prompt, the reserve surcharges and the daily web search and code interpreter quota checks are decided before the adapter runs, from the request, the chat's attachments, the kill switches and the catalog `tool_support`. The `web_search` and `file_search` tools are gated by the effective model's catalog `tool_support.web_search` / `tool_support.file_search`; `code_interpreter` by `tool_support.code_interpreter`. On an adapter that drops a tool, the surcharge is still reserved, the guard is still sent and the daily quota is still checked. Operators should set `tool_support` in the catalog to match the adapter.
+  Tool support differs by adapter. The Chat Completions adapter drops `file_search`, `web_search` and `code_interpreter` and keeps function tools (`search_knowledge`). The vLLM Responses adapter drops all tools, including function tools. The Anthropic adapter drops `file_search` and maps `web_search` and `code_interpreter` to its server tools. The domain service does not know the adapter kind: the tool list, the tool guards in the system prompt, the reserve surcharges and the daily web search and code interpreter quota checks are decided before the adapter runs, from the request, the chat's attachments, the kill switches and the catalog `tool_support`. The `web_search` and `file_search` tools are gated by the effective model's catalog `tool_support.web_search` / `tool_support.file_search`; `code_interpreter` by `tool_support.code_interpreter`. The reserve estimate of each cascade candidate counts the file_search, web_search and code_interpreter surcharges only when that model's `tool_support` allows the tool and, for file_search and code_interpreter, the kill switch is off (`estimate_input_tokens` in `quota_service.rs`). `search_knowledge` has no reserve surcharge. The gate is `tool_support`, not the adapter: on an adapter that drops a tool its `tool_support` still allows, the surcharge is still reserved, the guard is still sent and the daily quota is still checked. Operators should set `tool_support` in the catalog to match the adapter.
 
   Each adapter builds the request, parses the provider SSE stream into internal events and maps errors. Requests go through the in-process `oagw_sdk::ServiceGatewayClientV1::proxy_request` to `{alias}{api_path}`. Tenant/user identity and metadata are attached to every chat and thread-summary request; each adapter sends what its protocol supports (see section 4: Provider Request Metadata). The library handles streaming chat and the non-streaming thread-summary call. File and vector-store operations use `DispatchingFileStorage` / `DispatchingVectorStore`, which pick the OpenAI or Azure implementation by the provider's `storage_kind` (or the `rag_provider` entry). When at least one entry uses `anthropic_messages`, `AnthropicFilesClient` is created. For a chat whose model is served by an `anthropic_messages` provider, it uploads a secondary copy of each uploaded image to the Anthropic Files API and deletes it on cleanup. Documents and images larger than `thumbnail.max_decode_bytes` get no copy.
 
@@ -785,15 +785,20 @@ Upload is synchronous: within the request the file is uploaded to the RAG provid
 
 | Condition | HTTP | Category / reason |
 |---|---|---|
+| Unknown chat, another user's chat or a soft-deleted chat (checked before the body is read) | 404 | `not_found`, `context.resource_type = gts.cf.core.mini_chat.chat.v1~` |
 | The chat's model is no longer in the catalog (checked before the body is read) | 400 | `invalid_argument`, `field_violations[model].reason = INVALID_MODEL` |
+| No boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | 400 | `invalid_argument`, `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
 | File larger than `min(rag.uploaded_file_max_size_kb, model max_file_size_mb)` / `min(rag.uploaded_image_max_size_kb, model max_file_size_mb)` | 400 | `out_of_range`, `FILE_TOO_LARGE` |
 | Unsupported MIME type | 400 | `invalid_argument`, `UNSUPPORTED_CONTENT_TYPE` |
 | Code-interpreter-only file (XLSX) while code interpreter is unavailable | 400 | `invalid_argument` |
 | Image upload while `disable_images` is on | 400 | `failed_precondition`, `violations[{subject: images, type: FEATURE_DISABLED}]` |
+| The chat's vector store was created for another provider backend | 409 | `already_exists`, `resource_name = provider_mismatch` |
 | Per-chat document count or total size limit | 429 | `resource_exhausted`, `document_limit` / `storage_limit` |
 | Provider or storage failure (including vector store indexing that fails or does not finish 25 s after the upload started; the row gets `error_code = indexing_failed`), upload concurrency limit | 503 + `Retry-After` | `service_unavailable` |
 | Model-policy plugin failure while resolving the chat's model | 500 | `internal` |
 | Body larger than api-gateway `defaults.body_limit_bytes` | 413 | returned by api-gateway, not by mini-chat |
+
+Errors shared with other endpoints (for example a non-UUID path parameter) are listed in the REST error table under **Error Codes** in [Provider Event Translation](#provider-event-translation).
 
 When the failure happens after the row was inserted, the row stays visible via `GET` with `status: failed` and `error_code`.
 
@@ -972,6 +977,7 @@ The Turn Status API `state: "error"` maps to internal `chat_turns.state = 'faile
 - `error_code: "orphan_timeout"` → Turn stuck in `running` state beyond watchdog timeout; **stream ended without provider terminal event** (billing outcome: **ABORTED**, not FAILED)
 - `error_code: "context_length_exceeded"` → Context budget exceeded after a retry/edit mutation committed (billing outcome: FAILED, pre-provider)
 - `error_code: "turn_setup_failed"` → Another setup step failed after a retry/edit mutation committed, before the provider call (billing outcome: FAILED, pre-provider)
+- `error_code: "quota_exceeded"` → The reserve re-check rejected a retry/edit turn after the mutation committed (`fail_unstarted_turn`); no reserve was taken and no settlement runs
 - Streaming error codes (`rate_limited`, `web_search_calls_exceeded`, ...) — see "Streaming error codes" below
 
 **Support and analytics guidance:**
@@ -987,7 +993,7 @@ The Turn Status API `state: "error"` maps to internal `chat_turns.state = 'faile
 - When actual usage exceeds overshoot tolerance (actual/reserve > `quota.overshoot_tolerance_factor`), the turn remains in `state: "done"` (internal `chat_turns.state = completed`)
 - Billing is capped at reserved credits, but the completed response is delivered to the user
 - The "completed remains completed" rule (see Reserve Overshoot Reconciliation Rule, section 5.8.1) is absolute: a COMPLETED turn MUST remain COMPLETED regardless of overshoot magnitude
-- It does NOT result in `state: "error"` or any error_code visible to the client. P1 has no dedicated metric or log for the capped case: `mini_chat_quota_overshoot_total{period}` counts every actual settlement (completed, or failed/cancelled with provider usage) whose actual tokens exceed the reserve, whether or not the tolerance was exceeded (`mini_chat_quota_overshoot_exceeded_total` is not defined)
+- It does NOT result in `state: "error"` or any error_code visible to the client. P1 has no dedicated metric or log for the capped case: `mini_chat_quota_overshoot_total{period}` counts every actual settlement (completed, or failed with provider usage) whose actual tokens exceed the reserve, whether or not the tolerance was exceeded (`mini_chat_quota_overshoot_exceeded_total` is not defined)
 
 The Turn Status API deliberately hides billing outcomes to keep the client contract simple. Billing settlement details (outcome, settlement method, charged credits) are internal to the system and NOT exposed via this endpoint.
 
@@ -1223,7 +1229,7 @@ The mapping is implemented in `api/rest/error.rs`:
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` (was 415) |
 | Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `detail` |
 | Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
-| Outbox payload built for the request exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail` |
+| `DELETE /chats/{id}`: the chat-cleanup outbox payload exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail`. The same failure on attachment `DELETE` and on turn retry, edit and delete is returned as 500 `internal` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` (was 415) |
 | Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
 | Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` (was 413). A body above api-gateway `defaults.body_limit_bytes` (default 16 MiB) gets 413 from the gateway before it reaches mini-chat |
@@ -1272,7 +1278,7 @@ Codes sent in the SSE `event: error` payload (`{code, message}`) after the strea
 | `finalization_failed` | The finalization transaction failed on a completed or incomplete stream; the turn stays `running` until the orphan watchdog finalizes it. When finalization of a failed stream fails, the client gets the original error code instead | `running` → `failed` (`orphan_timeout`) |
 | `stream_interrupted` | The provider task ended without a terminal event (CAS lost to the orphan watchdog, or a panic); synthesized by the SSE relay | as committed by the CAS winner |
 
-After a client disconnect nothing is sent. Codes that are stored in `chat_turns.error_code` but never sent over SSE: `orphan_timeout` (watchdog), `turn_setup_failed` and `context_length_exceeded` (retry/edit setup failure after the mutation committed; the client receives a JSON error instead).
+After a client disconnect nothing is sent. Codes that are stored in `chat_turns.error_code` but never sent over SSE: `orphan_timeout` (watchdog), `turn_setup_failed`, `context_length_exceeded` and `quota_exceeded` (retry/edit setup failure or reserve re-check rejection after the mutation committed, stored by `fail_unstarted_turn`; the client receives a JSON error instead).
 
 #### Models API — **ID**: `cpt-cf-mini-chat-interface-models-api`
 
@@ -1581,7 +1587,7 @@ sequenceDiagram
         OG->>OAI: Vector Stores API
         OAI-->>OG: vector_store.file (status)
         OG-->>CS: status
-        loop while status = in_progress (250 ms doubling to 2 s, up to 60 s)
+        loop while status = in_progress (250 ms doubling to 2 s, until 25 s after the upload started)
             CS->>OG: GET vector_stores/{id}/files/{file_id}
             OG-->>CS: status
         end
@@ -1610,7 +1616,7 @@ sequenceDiagram
 
 **Description**: File upload flow - synchronous within the request ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). The file is uploaded to the RAG provider (OpenAI or Azure OpenAI, selected by `storage_kind` / `rag_provider`) via OAGW. There is no document-summary step. The subsequent steps depend on the attachment's resolved purposes (derived from MIME type, filtered by kill switches and model capabilities):
 
-- **Document with `file_search` purpose** (most document types): file is added to the chat's vector store (created on first upload) and metadata is persisted locally. `POST vector_stores/{id}/files` returns the file's indexing status. While it is `in_progress`, the upload polls `GET vector_stores/{id}/files/{file_id}`: the first wait is 250 ms, each next one doubles up to 2 s, and polling stops 25 s after the upload started (`UPLOAD_INDEXING_DEADLINE`, not configurable). The upload runs inside the request and api-gateway ends every request after 30 s; the deadline leaves time to record the failure and answer. Each status read is bounded by the same deadline. A response without `status` counts as `completed`. `completed` makes the attachment `ready`, so `file_search` can find the document as soon as the upload returns. A transient read error (provider 5xx, gateway failure) keeps polling. `failed` or `cancelled`, any other status read error, or the deadline mark the attachment `failed` with `error_code = indexing_failed` (a failed `POST vector_stores/{id}/files` sets the same code), and the upload returns HTTP 503 `service_unavailable` with `Retry-After: 10` and the generic `detail` "Service temporarily unavailable"; `indexing_failed` is not in the response body. Status transitions: `pending` -> `uploaded` -> `ready`, or -> `failed`.
+- **Document with `file_search` purpose** (most document types): file is added to the chat's vector store (created on first upload) and metadata is persisted locally. `POST vector_stores/{id}/files` returns the file's indexing status. While it is `in_progress`, the upload polls `GET vector_stores/{id}/files/{file_id}`: the first wait is 250 ms, each next one doubles up to 2 s, and polling stops 25 s after the upload started (`UPLOAD_INDEXING_DEADLINE`, not configurable). The upload runs inside the request and api-gateway ends every request after 30 s; the deadline leaves time to record the failure and answer. Each status read is bounded by the same deadline. A response without `status` counts as `completed`; any status other than `in_progress` or `completed` (`failed`, `cancelled` or an unknown value) counts as failed (`into_status` in `rag_http_client.rs`). `completed` makes the attachment `ready`, so `file_search` can find the document as soon as the upload returns. A transient read error (provider 5xx, gateway failure) keeps polling. A failed status, any other status read error, or the deadline mark the attachment `failed` with `error_code = indexing_failed` (a failed `POST vector_stores/{id}/files` sets the same code), and the upload returns HTTP 503 `service_unavailable` with `Retry-After: 10` and the generic `detail` "Service temporarily unavailable"; `indexing_failed` is not in the response body. Status transitions: `pending` -> `uploaded` -> `ready`, or -> `failed`.
 - **Document with `code_interpreter` purpose only** (XLSX): file is uploaded to the provider via Files API but is NOT added to the vector store. It is available to the `code_interpreter` tool at stream time via `tools[].container.file_ids` in the provider request. Status transitions: `pending` -> `uploaded` -> `ready`, or -> `failed`.
 - **Document with multiple purposes** (future): both the vector store indexing path and other purpose-specific paths execute independently. All matching purpose paths must succeed for the attachment to reach `ready`.
 - **Image** (`attachment_kind=image`): rejected with 400 `FEATURE_DISABLED` while `disable_images` is on. Otherwise the file is uploaded to the provider via Files API but is NOT added to the vector store. After a successful provider upload, the server generates a preview thumbnail using the Rust `image` crate ([https://docs.rs/image/latest/image/](https://docs.rs/image/latest/image/)). Thumbnail generation is a synchronous step during image attachment processing (before transitioning to `ready`). The resulting thumbnail raw bytes are stored in the Mini Chat database (`attachments.img_thumbnail` BYTEA column). Status transitions: `pending` -> `uploaded` -> `ready`, or -> `failed`. The image is available for multimodal input in subsequent Responses API calls via the internally stored `provider_file_id` (never exposed to clients). **Invariant**: `status=ready` implies `provider_file_id` is present AND the provider upload succeeded. If the provider file is deleted or becomes inaccessible (e.g., via cleanup), the attachment status MUST transition away from `ready` (to `failed` or be removed).
@@ -1932,7 +1938,7 @@ Normative rules:
 - Attachment deletion (`DELETE /v1/chats/{chat_id}/attachments/{attachment_id}`) MUST use the transactional outbox mechanism to trigger provider deletion.
 - Chat deletion cleanup MUST be performed only by the outbox-driven soft-delete cleanup path.
 - A failed outbox-driven delete for an attachment whose parent chat is still active MUST remain owned by the attachment-delete path; it MUST NOT be silently picked up by the chat-deletion cleanup path.
-- The two mechanisms MUST NOT both attempt cleanup for the same attachment simultaneously.
+- The two paths are not locked against each other. The attachment cleanup handler checks that the parent chat is not soft-deleted and then deletes the provider file; if the chat is soft-deleted after that check, the chat cleanup handler can delete the same file too. A provider `404 Not Found` counts as success on both paths, so the duplicate delete is harmless.
 - Ownership transfer from the attachment-delete path to the chat-deletion cleanup path occurs only when the chat itself becomes soft-deleted, after which the soft-delete cleanup path exclusively owns provider cleanup for that attachment.
 
 ##### Attachment cleanup state machine
@@ -1953,7 +1959,7 @@ Normative rules:
 - The valid values are `pending`, `done`, `failed` (nullable column). The database does not enforce them with a CHECK constraint; the repositories keep the invariant ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)).
 - `done` and `failed` are terminal states.
 - A provider file `DELETE` that returns 2xx or `404 Not Found` is success. Any other status is a failed attempt: 5xx maps to `Unavailable`, any other 4xx to `Rejected` (`RagHttpClient::delete`); both count the same.
-- On a failed attempt (provider error or infrastructure failure), the handler MUST increment `attachments.cleanup_attempts`, record `last_cleanup_error`, set `cleanup_updated_at = now()`, leave `cleanup_status = 'pending'`, and return control to the shared outbox retry mechanism.
+- On a failed provider delete, the handler MUST increment `attachments.cleanup_attempts`, record `last_cleanup_error`, set `cleanup_updated_at = now()`, leave `cleanup_status = 'pending'`, and return control to the shared outbox retry mechanism. An infrastructure failure (DB error) returns `Retry` without incrementing `cleanup_attempts`.
 - On success, the handler MUST set `cleanup_status = 'done'` and `cleanup_updated_at = now()`.
 - If `attachments.cleanup_attempts` reaches `cleanup_worker.max_attempts` (default 5), the handler MUST set `cleanup_status = 'failed'`, update `last_cleanup_error`, set `cleanup_updated_at = now()`, and treat the attachment as terminal unresolved provider-file debt. `AttachmentCleanupHandler` then returns `Reject` and the attachment cleanup message is dead-lettered; `ChatCleanupHandler` continues with the other attachments of the chat.
 - `failed` is terminal for the row lifecycle, but it MUST NOT be treated as equivalent to cleanup completion for chat-level provider purge semantics.
@@ -2118,7 +2124,7 @@ Tracks idempotency and in-progress generation state for `request_id`. This avoid
 | web_search_enabled | BOOLEAN | Whether the request enabled web search (NOT NULL, default false). Retry/edit reuse it. |
 | web_search_completed_count | INTEGER | Completed `web_search` calls in the turn (NOT NULL, default 0) |
 | code_interpreter_completed_count | INTEGER | Completed `code_interpreter` calls in the turn (NOT NULL, default 0) |
-| file_search_completed_count | INTEGER | Completed file search calls in the turn: provider-native `file_search` calls (tool `done` events) and successful `search_knowledge` retrievals. The two tools are never enabled in the same request. Incremented during the stream so the orphan watchdog can recover it; reported as `file_search_calls` (NOT NULL, default 0) |
+| file_search_completed_count | INTEGER | Completed file search calls in the turn: provider-native `file_search` calls (tool `done` events) and successful `search_knowledge` retrievals. The two tools are never enabled in the same request. Incremented during the stream so the orphan watchdog can recover it; the watchdog reports it as `file_search_calls`. A stream-finalized turn reports the in-memory `knowledge_call_count` instead, which also counts failed `search_knowledge` retrievals, so the two can differ (NOT NULL, default 0) |
 | completed_at | TIMESTAMPTZ | Completion time (nullable) |
 | updated_at | TIMESTAMPTZ | Last update time |
 
@@ -2233,7 +2239,7 @@ Writers MUST populate `chat_id` from the parent message's `messages.chat_id` (no
 **Semantics**:
 - One attachment may be referenced by multiple messages (M:N). This occurs when a turn is retried or edited — the new user message re-links the same attachment(s).
 - Attachments remain owned by the **chat** (`attachments.chat_id`). This table adds per-message association for UI rendering without changing attachment lifecycle or vector store ownership.
-- The `attachments` array in the API `Message` object is derived via a lateral join from `message_attachments` to `attachments` in the `listMessages` query, projecting only the `AttachmentSummary` fields (`attachment_id`, `kind`, `filename`, `status`, `img_thumbnail`).
+- The `attachments` array in the API `Message` object is built by a separate batch query after the message page is loaded (`batch_attachment_summaries` in `message_repo.rs`): an inner join of `message_attachments` to `attachments` for the page's message IDs that excludes soft-deleted attachments (`attachments.deleted_at IS NULL`), projecting only the `AttachmentSummary` fields (`attachment_id`, `kind`, `filename`, `status`, `img_thumbnail`).
 - For assistant and system messages, the join table will have zero rows (empty `attachments` array in API response).
 
 #### Table: thread_summaries
@@ -3386,7 +3392,7 @@ Knowledge search lets the model query an organization-level knowledge base (one 
 - **Tool**: `search_knowledge` is added as a function tool, and `knowledge_search.guard` is appended to the system prompt. The model supplies `query` and optionally `top_k`, which is capped at `knowledge_search.top_k` (default 5). Each chunk is trimmed to `knowledge_search.max_chunk_chars` (default 2000) and returned to the model as a `function_call_output`.
 - **Agentic loop** (`domain/service/stream_service/provider_task.rs`): each `search_knowledge` call ends the current provider request with a tool-use outcome; the gear runs the retrieval, appends the call and its output to the input and issues the next provider request. At most `knowledge_search.max_calls_per_message` (default 3) retrievals run per message; further calls get a "search limit reached" output so the model answers from what it has. The loop is hard-capped at `max_calls_per_message + 2` iterations; exceeding it finalizes the turn as `failed` with SSE `error{code: "agentic_iterations_exceeded"}`. A tool use for any other function name ends the turn with `unexpected_tool_use`.
 - **Mutual exclusion with `file_search`**: when the chat has ready documents and `file_search` is included, the knowledge-search parameters are not built and `search_knowledge` is not offered for that turn (file_search wins, to avoid double retrieval and double billing). The two tools are never sent in the same request.
-- **Accounting**: completed retrievals are counted in `chat_turns.file_search_completed_count` and reported as `file_search_calls` in the usage and audit events. Provider-native `file_search` calls (tool `done` events) update the same counter; the two tools are never enabled in the same request, so the counts do not mix. Only the final provider iteration's usage is settled; billing of the earlier agentic iterations is **not implemented** ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)).
+- **Accounting**: successful retrievals are counted in `chat_turns.file_search_completed_count`. The `file_search_calls` field of the usage and audit events comes from the in-memory `knowledge_call_count`, which is incremented before the retrieval runs, so failed `search_knowledge` retrievals are counted there but not in `file_search_completed_count` (`stream_service/provider_task.rs`); the orphan watchdog reports `file_search_completed_count`. Provider-native `file_search` calls (tool `done` events) update both counters; the two tools are never enabled in the same request, so the counts do not mix. Only the final provider iteration's usage is settled; billing of the earlier agentic iterations is **not implemented** ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)).
 - **Metrics**: `mini_chat_knowledge_search{result}`, `mini_chat_knowledge_search_latency_ms`, `mini_chat_knowledge_search_chunks`.
 
 ### MCP Servers Support
@@ -3450,7 +3456,7 @@ Rate limiting and quota enforcement are split into three ownership tiers with st
 
 | Tier | Owner | What It Controls | Examples |
 |------|-------|-----------------|----------|
-| **Product quota** | `quota_service` (in the domain service) | Per-user credit-based rate limits per model tier (daily, monthly) tracked in real-time; credits are computed from provider tokens via model multipliers; premium models have stricter limits, standard-tier models have separate, higher limits; file_search and web_search call limits; downgrade cascade | "Premium-tier daily/monthly quota exhausted → downgrade to standard tier"; "All tiers exhausted → reject with quota_exceeded" |
+| **Product quota** | `quota_service` (in the domain service) | Per-user credit-based rate limits per model tier (daily, monthly) tracked in real-time; credits are computed from provider tokens via model multipliers; premium models have stricter limits, standard-tier models have separate, higher limits; daily web_search and code_interpreter call quotas (no file_search call limit); downgrade cascade | "Premium-tier daily/monthly quota exhausted → downgrade to standard tier"; "All tiers exhausted → reject with quota_exceeded" |
 | **Platform rate limit** | `api_gateway` middleware | Per-user/per-IP request rate, concurrent stream caps, abuse protection | "20 rps per user"; "Max 5 concurrent SSE streams" |
 | **Provider rate limit** | OAGW | Passes the provider's 429 (with `Retry-After`) through without retrying; circuit breaker and global concurrency cap | "OpenAI 429 -> propagated to Mini Chat -> SSE `rate_limited`" |
 
@@ -4245,9 +4251,9 @@ Contents (logically):
 - `estimation_budgets` (per-model token estimation budgets, on each model catalog entry):
 
   - `image_token_budget` (integer; tokens per image for vision surcharge; see section 5.5.5)
-  - `tool_surcharge_tokens` (integer; fixed token overhead added when the chat has at least one ready document; see section 5.5.6)
-  - `web_search_surcharge_tokens` (integer; fixed token overhead added when the request sets `web_search.enabled = true`; see section 5.5.6)
-  - `code_interpreter_surcharge_tokens` (integer; fixed token overhead added when the chat has at least one ready code-interpreter (XLSX) attachment; see section 5.5.6)
+  - `tool_surcharge_tokens` (integer; fixed token overhead added when the chat has at least one ready document and the model gets `file_search` (its `tool_support.file_search`, kill switch off); see section 5.5.6)
+  - `web_search_surcharge_tokens` (integer; fixed token overhead added when the request sets `web_search.enabled = true` and the model supports `web_search`; see section 5.5.6)
+  - `code_interpreter_surcharge_tokens` (integer; fixed token overhead added when the chat has at least one ready code-interpreter (XLSX) attachment and the model gets `code_interpreter` (its `tool_support.code_interpreter`, kill switch off); see section 5.5.6)
   - `bytes_per_token_conservative` (integer; conservative bytes-per-token ratio for text estimation; see section 5.5.4; e.g. 3)
   - `fixed_overhead_tokens` (integer; constant overhead for protocol/framing tokens; see section 5.5.4)
   - `safety_margin_pct` (integer; percentage safety margin applied to text estimation; see section 5.5.4; e.g. 20 for 20%)
@@ -4521,7 +4527,7 @@ Both rules are enforced: `credits_micro_checked` fails with `ZeroMultiplier` whe
      - At plugin init: the bundled `static_model_policy` plugin validates its catalog (`StaticMiniChatPolicyPluginConfig::validate`); an entry with a multiplier outside `1..=MAX_MULT` fails `init()`. A snapshot from another policy plugin is not validated on load.
      - On every credit computation: `credits_micro_checked` (`domain/service/credit_arithmetic.rs`) checks both token counts against `MAX_TOKENS` and both multipliers against `1..=MAX_MULT` (`ZeroMultiplier`, `MultiplierOverflow`) before multiplying. This covers the reserve at preflight and every settlement.
      - Provider-reported usage is not validated when the provider response is parsed; out-of-range token counts are caught by the credit computation at settlement.
-   - Validation failure rejects the operation before the multiplication (see "Error handling" below)
+   - A validation failure stops the computation before the multiplication; what happens next depends on where it was computed (see "Error handling" below)
 
 2. **Overflow detection (mandatory for production code):**
 
@@ -4590,9 +4596,9 @@ Both rules are enforced: `credits_micro_checked` fails with `ZeroMultiplier` whe
    - Defense against configuration errors (e.g., multiplier typo: 10000000 instead of 10)
    - Forward compatibility for future model scaling
 
-**Error handling:** an overflow is a critical error, mapped to an internal `DomainError`:
-- At preflight (reserve computation) the request fails before the provider call with HTTP 500 `internal_error`.
-- At settlement the finalization transaction fails; the turn is not finalized on that path, a warning is logged with the error (which names the offending token count or multiplier), and the stream ends with SSE `error` code `finalization_failed` instead of `done` (on a failed stream the client gets the original error code).
+**Error handling:** the outcome depends on where the computation fails:
+- At preflight the reserve of each cascade candidate is computed with `credits_micro_checked(...).unwrap_or(i64::MAX)` (`quota_service.rs`). An overflow or a zero multiplier gives a reserve of `i64::MAX`, which does not fit the candidate's buckets, so the candidate counts as unavailable: the cascade downgrades to the next candidate or rejects with 429 `quota_exceeded`. It does not return 500.
+- At settlement the error is mapped to an internal `DomainError` and the finalization transaction fails; the turn is not finalized on that path, a warning is logged with the error (which names the offending token count or multiplier), and the stream ends with SSE `error` code `finalization_failed` instead of `done` (on a failed stream the client gets the original error code).
 - The `mini_chat_credits_overflow` counter is registered in `infra/metrics.rs`, but no code path records it (see the list of unrecorded instruments in the observability section).
 
 #### 5.3.1 Reserve vs Settlement Variables (Canonical Glossary)
@@ -4667,7 +4673,7 @@ The following terms are used throughout sections 5.4–5.9:
 >
 > **P2 Enhancement Option**: Add `chat_turns.provider_request_started_at TIMESTAMPTZ` column for exact crash recovery if operational metrics show meaningful impact.
 
-- **Usage known**: the provider returned actual token counts (`usage.input_tokens`, `usage.output_tokens`) — either via a terminal `response.completed` / `response.incomplete` event or via error metadata. Settlement uses `settlement_method = "actual"`. A `completed` turn (including a provider `incomplete` response) always settles on the actual path with the usage it received: when the provider reported zero or no usage, the turn is charged 0 credits. The "at least one non-zero field" rule below applies only to failed and cancelled turns.
+- **Usage known**: the provider returned actual token counts (`usage.input_tokens`, `usage.output_tokens`) — either via a terminal `response.completed` / `response.incomplete` event or via error metadata. Settlement uses `settlement_method = "actual"`. A `completed` turn (including a provider `incomplete` response) always settles on the actual path with the usage it received: when the provider reported zero or no usage, the turn is charged 0 credits. The "at least one non-zero field" rule below applies only to failed turns; cancelled turns carry no usage and always settle estimated.
 
 > **Canonical provider usage fields (normative)**: the authoritative usage metadata is read from the provider's terminal response event. The canonical field names are `usage.input_tokens` (integer, non-negative) and `usage.output_tokens` (integer, non-negative). OAGW passes provider responses through unchanged. If a provider uses different field names (e.g., `prompt_tokens`, `completion_tokens`), the Mini-Chat provider adapter normalizes them to the internal usage type (`input_tokens`, `output_tokens`, cache and reasoning counts) ([ADR-0005](./ADR/0005-cpt-cf-mini-chat-adr-multi-provider-adapters.md)). If `usage` object is present but either field is missing, treat the missing field as `0`. If the `usage` object is absent entirely, usage is "unknown" (estimated settlement path).
 
@@ -4681,9 +4687,9 @@ The estimate is computed at preflight, before context assembly, so the assembled
 - `estimated_text_tokens` — from the current user message only: `ceil((ceil(utf8_bytes / bytes_per_token_conservative) + fixed_overhead_tokens) * (100 + safety_margin_pct) / 100)` (`estimation_budgets` of the model catalog entry, section 5.2.1)
 - `prior_context_tokens` — `input_tokens + output_tokens` of the most recent non-deleted assistant message in the chat with non-zero token counts; a proxy for the history that will be re-sent
 - `image_surcharge_tokens` — if images present, apply `estimation_budgets.image_token_budget` of the catalog entry per image (section 5.2.1)
-- `tool_surcharge_tokens` — apply `estimation_budgets.tool_surcharge_tokens` if the chat has at least one ready document (section 5.5.6)
-- `web_search_surcharge_tokens` — apply `estimation_budgets.web_search_surcharge_tokens` if web search enabled (section 5.5.6)
-- `code_interpreter_surcharge_tokens` — apply `estimation_budgets.code_interpreter_surcharge_tokens` if the chat has at least one ready code-interpreter (XLSX) attachment (section 5.5.6)
+- `tool_surcharge_tokens` — apply `estimation_budgets.tool_surcharge_tokens` if the chat has at least one ready document, the model's `tool_support.file_search` is set and `disable_file_search` is off (section 5.5.6)
+- `web_search_surcharge_tokens` — apply `estimation_budgets.web_search_surcharge_tokens` if web search is enabled and the model's `tool_support.web_search` is set (section 5.5.6)
+- `code_interpreter_surcharge_tokens` — apply `estimation_budgets.code_interpreter_surcharge_tokens` if the chat has at least one ready code-interpreter (XLSX) attachment, the model's `tool_support.code_interpreter` is set and `disable_code_interpreter` is off (section 5.5.6)
 - `max_output_tokens_applied` — the `max_output_tokens` value used for this turn; persisted on `chat_turns.max_output_tokens_applied` (immutable after insert)
 - model credit multipliers (`in_mult`, `out_mult`) for the chosen model from the policy snapshot. The cascade checks each candidate model with the reserve that model would book: its catalog `estimation_budgets`, its multipliers and `max_output_tokens_applied = min(model.max_output_tokens, streaming.max_output_tokens)`. The booked reserve is the one of the effective model, so it equals the reserve that passed the check ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)).
 
@@ -4936,7 +4942,7 @@ In the normal scheme you should not exceed limits, because:
 
    **Reserve Overshoot Reconciliation Rule (normative for every actual settlement)**:
 
-   When a turn settled on the actual path reports usage that exceeds the reserve, the system MUST apply the following bounded overshoot reconciliation. `QuotaService::settle_actual` applies it to every actual settlement: completed turns, and failed or cancelled turns for which the provider reported usage. Estimated and released settlements never exceed the reserve.
+   When a turn settled on the actual path reports usage that exceeds the reserve, the system MUST apply the following bounded overshoot reconciliation. `QuotaService::settle_actual` applies it to every actual settlement: completed turns, and failed turns for which the provider reported usage (cancelled turns always settle estimated). Estimated and released settlements never exceed the reserve.
 
    ```pseudocode
    // CRITICAL: all values here are token counts (integers from provider or persisted state)
@@ -5474,7 +5480,7 @@ Mini-Chat MUST use the shared outbox pipeline rather than implementing its own S
 4. On transient failure (plugin resolution failure, `PublishError::Transient`), the handler returns `MessageResult::Retry`. Retry backoff, lease handling, reclaim, partition concurrency, sequencer wake-up, and vacuum are then handled by `toolkit-db::outbox` using the queue registration settings.
 5. On a payload that cannot be deserialized or `PublishError::Permanent`, the handler returns `MessageResult::Reject(reason)`. The shared outbox moves the message to its dead-letter store. Operators recover via `dead_letter_*` APIs; Mini-Chat does not define a separate `dead` row state.
 
-The other handlers follow the same contract: the cleanup handlers return `Reject` after `cleanup_worker.max_attempts` (per attachment in `AttachmentCleanupHandler`; per chat cleanup message for a failing vector-store delete in `ChatCleanupHandler`), the thread-summary handler after `thread_summary_worker.max_attempts`, and the audit handler (`AuditEventHandler`) calls the plugin with a 30 s timeout (`AUDIT_PLUGIN_TIMEOUT`; a timeout is `MiniChatAuditPluginError::PluginTimeout`, which is transient) deserializes the payload before it resolves the plugin, and returns `Reject` on a malformed payload (also when no plugin is registered or the plugin cannot be resolved), `Ok` on success or when no audit plugin is registered (the event is dropped; the lookup is repeated on the next delivery), `Retry` on a transient plugin error (`Transient`, `PluginTimeout`), a plugin resolution failure or a resolved instance whose client is missing from ClientHub, and `Reject` on a permanent plugin error (`Permanent`). Every outcome except "no plugin registered" is counted in `mini_chat_audit_emit_total{result}`.
+The other handlers follow the same contract: the cleanup handlers return `Reject` after `cleanup_worker.max_attempts` (per attachment in `AttachmentCleanupHandler`; per chat cleanup message for a failing vector-store delete in `ChatCleanupHandler`), the thread-summary handler after `thread_summary_worker.max_attempts`, and the audit handler (`AuditEventHandler`) calls the plugin with a 30 s timeout (`AUDIT_PLUGIN_TIMEOUT`; a timeout is `MiniChatAuditPluginError::PluginTimeout`, which is transient) deserializes the payload before it resolves the plugin, and returns `Reject` on a malformed payload (whether or not a plugin is registered or can be resolved, since the payload is checked first), `Ok` on success or when no audit plugin is registered and the payload is valid (the event is dropped; the lookup is repeated on the next delivery), `Retry` on a transient plugin error (`Transient`, `PluginTimeout`), a plugin resolution failure or a resolved instance whose client is missing from ClientHub, and `Reject` on a permanent plugin error (`Permanent`). Every outcome except "no plugin registered" is counted in `mini_chat_audit_emit_total{result}`.
 
 **Queue configuration ownership**:
 
@@ -5539,7 +5545,7 @@ Deterministic reconciliation for `ABORTED` and post-provider-start `FAILED` outc
 3. Outbox enqueue (usage and audit events)
 
 The stream terminal paths (completed, incomplete, failed, cancelled) use `FinalizationService::finalize_turn_cas()`. Two paths are separate functions ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)):
-- **Orphan watchdog** — `FinalizationService::finalize_orphan_turn()`: its own CAS (`cas_finalize_orphan`, which re-checks the stale-progress predicate), then the same shared helpers (`derive_billing_outcome`, `settle_in_tx` on the estimated path, the outbox enqueuer). It records `selected_model` = the effective model in the usage and audit events and quota decision `"unknown"` in the audit event, and skips settlement (with a warning) when the turn's reserve fields are NULL. That happens for a retry/edit turn left `running` before `update_preflight_fields` (for example, the pod stopped between the mutation commit and the reserve). The usage event is still enqueued, with `billing_outcome = "aborted"`, `settlement_method = "estimated"`, `actual_credits_micro = 0`, `usage = null`, `effective_model` and `selected_model` = `""` and `policy_version_applied = 0`; no `quota_usage` row changes.
+- **Orphan watchdog** — `FinalizationService::finalize_orphan_turn()`: its own CAS (`cas_finalize_orphan`, which re-checks the stale-progress predicate), then the same shared helpers (`derive_billing_outcome`, `settle_in_tx` on the estimated path, the outbox enqueuer). It records `selected_model` = the effective model in the usage and audit events and quota decision `"unknown"` in the audit event, and skips settlement (with a warning) when the turn's reserve fields or `requester_user_id` are NULL. Reserve fields are NULL for a retry/edit turn left `running` before `update_preflight_fields` (for example, the pod stopped between the mutation commit and the reserve). The usage event is still enqueued, with `billing_outcome = "aborted"`, `settlement_method = "estimated"`, `actual_credits_micro = 0`, `usage = null`, `effective_model` and `selected_model` = `""` and `policy_version_applied = 0`; no `quota_usage` row changes.
 - **Unstarted retry/edit turn** — `StreamService::fail_unstarted_turn()`: when retry/edit setup fails after the mutation committed and before the reserve is taken, a plain CAS moves the turn to `failed` (`turn_setup_failed`, `context_length_exceeded` or, after the reserve re-check, `quota_exceeded`). No reserve exists, so there is no settlement and no outbox event.
 
 The shared parts are the helpers, not one function: billing outcome derivation (`derive_billing_outcome`), quota settlement (`QuotaSettler::settle_in_tx`) and the outbox enqueuer (`OutboxEnqueuer`).
@@ -5794,13 +5800,13 @@ Three subcases:
 
 - **failed_pre_reserve**: error before a quota reserve is taken (validation error, authorization denial, quota preflight rejection — no `chat_turns` row with a reserve exists). No settlement occurs and no quota debit applies. Emitting an outbox message is OPTIONAL (the "exactly one event per reserve" invariant does not apply because no reserve was created). If the system does emit one for observability, the payload MUST use `billing_outcome = "failed"`, `settlement_method = "released"`, `usage = { input_tokens: 0, output_tokens: 0 }`.
 - **failed_post_reserve_pre_provider**: a quota reserve was taken (the `chat_turns` row entered `IN_PROGRESS`) but the provider request was NOT issued (e.g., context assembly error, internal timeout, transient infrastructure failure between successful preflight and the outbound call). The reserve MUST be fully released (`charged_tokens = 0`). A Mini-Chat outbox message MUST be emitted with `billing_outcome = "failed"`, `settlement_method = "released"`, `usage = { input_tokens: 0, output_tokens: 0 }` to satisfy the exactly-once billing event invariant. The reserve release, `chat_turns` state transition to `failed`, and outbox enqueue MUST occur in a single atomic DB transaction. **P1**: no code path reaches this subcase, so no `released` event is emitted. Context assembly and provider resolution run before the reserve, and on retry/edit the reserve is the last setup step (see section 5.8, "Pre-Provider Failure Handling", implementation note). The rule applies if a failure point is added between reserve and provider call. A pod crash in that window is settled by the orphan watchdog as `estimated`.
-- **failed_post_provider_start**: provider call started (stream may have begun), then a terminal error occurs (`provider_error`, `provider_timeout`, or internal error). If the provider reported usage, settle on actual usage. Otherwise settle using a bounded estimate: `charged_tokens = min(reserve_tokens, estimated_input_tokens + minimal_generation_floor_applied)` where `minimal_generation_floor_applied` is read from `chat_turns.minimal_generation_floor_applied`. Emit the outbox message with `billing_outcome = "failed"`, `settlement_method = "actual"` or `"estimated"`, and `usage` reflecting the settled amount.
+- **failed_post_provider_start**: provider call started (stream may have begun), then a terminal error occurs (`provider_error`, `provider_timeout`, or internal error). If the provider reported usage, settle on actual usage. Otherwise settle using a bounded estimate: `charged_tokens = min(reserve_tokens, estimated_input_tokens + minimal_generation_floor_applied)` where `minimal_generation_floor_applied` is read from `chat_turns.minimal_generation_floor_applied`. Emit the outbox message with `billing_outcome = "failed"`, `settlement_method = "actual"` or `"estimated"`, and `usage` set to the provider-reported token counts when known, `null` otherwise (the estimated split is not emitted).
 
 **3) aborted** (client disconnect / pod crash / orphan watchdog):
 
-- If provider usage is known (provider sent a partial usage report before the stream ended), settle on actual usage. **"Usage known" requires a `usage` object with at least one non-zero field** (`input_tokens > 0` OR `output_tokens > 0`; `has_known_usage`). For failed and cancelled turns, a `usage` object present with both fields equal to zero (or missing) is treated as "usage unknown" and MUST follow the estimated path — not the actual path. A completed turn is not subject to this rule (it always settles actual). This prevents zero-charge exploitation: the no-free-cancel rule (§5.4 Settlement Definitions) mandates a non-zero debit whenever the provider request started; the estimated path enforces this via `minimal_generation_floor_applied`.
-- Otherwise settle using the deterministic charged token formula: `charged_tokens = min(reserve_tokens, estimated_input_tokens + minimal_generation_floor_applied)` where `minimal_generation_floor_applied` is read from `chat_turns.minimal_generation_floor_applied` (persisted at preflight from MiniChat ConfigMap, immutable after insert), consistent with the cancel/disconnect rule (see section 3.2) and the aborted-stream reconciliation (section 5.8).
-- Emit the outbox message with `billing_outcome = "aborted"`, `settlement_method = "actual"` or `"estimated"`.
+- An aborted turn always settles `estimated`: the cancel path finalizes with `usage = None` (`stream_service/provider_task.rs`), and the orphan watchdog has no usage either. For failed turns, **"usage known" requires a `usage` object with at least one non-zero field** (`input_tokens > 0` OR `output_tokens > 0`; `has_known_usage`); a `usage` object present with both fields equal to zero (or missing) is treated as "usage unknown" and MUST follow the estimated path — not the actual path. A completed turn is not subject to this rule (it always settles actual). This prevents zero-charge exploitation: the no-free-cancel rule (§5.4 Settlement Definitions) mandates a non-zero debit whenever the provider request started; the estimated path enforces this via `minimal_generation_floor_applied`.
+- Settle using the deterministic charged token formula: `charged_tokens = min(reserve_tokens, estimated_input_tokens + minimal_generation_floor_applied)` where `minimal_generation_floor_applied` is read from `chat_turns.minimal_generation_floor_applied` (persisted at preflight from MiniChat ConfigMap, immutable after insert), consistent with the cancel/disconnect rule (see section 3.2) and the aborted-stream reconciliation (section 5.8).
+- Emit the outbox message with `billing_outcome = "aborted"`, `settlement_method = "estimated"`.
 
 #### Reconciliation backstop
 
@@ -5877,10 +5883,8 @@ stateDiagram-v2
     note right of ABORTED
         Outbox billing_outcome: "aborted"
         Settlement method:
-        - "actual" (if provider sent partial usage
-          before disconnect/abort)
-        - "estimated" (otherwise; all orphan_timeout
-          cases always use estimated)
+        - "estimated" (always; the cancel path and
+          the orphan watchdog carry no usage)
         Estimated charged tokens = min(
           reserve_tokens,
           estimated_input_tokens +
@@ -5888,7 +5892,7 @@ stateDiagram-v2
 
         Maps to internal state:
         - cancelled (client disconnect)
-        - failed (orphan timeout, always estimated)
+        - failed (orphan timeout)
     end note
 ```
 
@@ -5923,7 +5927,7 @@ The orphan watchdog demonstrates this separation:
 | `context_length_exceeded`, `turn_setup_failed` | Retry/edit setup failure after the mutation committed, before the provider call | `FAILED` | `released` |
 | `validation_error`, `input_too_long` | Pre-provider classification (reserved) | `FAILED` | `released` |
 | `orphan_timeout` | Orphan watchdog | `ABORTED` | `estimated` |
-| (none, `state = cancelled`) | Client disconnect / cancel | `ABORTED` | `actual` / `estimated` |
+| (none, `state = cancelled`) | Client disconnect / cancel | `ABORTED` | `estimated` |
 | any other code | Unknown | `FAILED` | `estimated`, flagged `unknown_error_code` |
 
 `finalization_failed` and `stream_interrupted` are SSE-only codes and are never stored (the turn is finalized later by the watchdog or already was by the CAS winner).
@@ -5953,7 +5957,7 @@ The orphan watchdog demonstrates this separation:
 | `state = 'failed'` AND `error_code IN ('provider_error', 'provider_timeout', 'rate_limited')` | `FAILED` | `"failed"` | `"actual"` (if provider reported partial usage) OR `"estimated"` (if no usage available) | Provider terminal error after streaming started |
 | `state = 'failed'` AND `error_code IN ('web_search_calls_exceeded', 'code_interpreter_calls_exceeded', 'agentic_iterations_exceeded', 'unexpected_tool_use', 'message_persistence_failed')` | `FAILED` | `"failed"` | `"actual"` (if provider reported partial usage) OR `"estimated"` (if no usage available) | Per-turn tool call limit breached mid-turn; turn was post-provider-start; mirrors `provider_error` settlement. MUST NOT use `"released"` even if partial usage is unavailable — the provider was already called. |
 | `state = 'failed'` AND `error_code IN ('context_length_exceeded', 'validation_error', 'input_too_long', 'turn_setup_failed')` | `FAILED` | `"failed"` | `"released"` | Pre-provider failure; zero charge. For retry/edit setup failures no reserve exists yet and no settlement runs (`fail_unstarted_turn`). |
-| `state = 'cancelled'` (client disconnect) | `ABORTED` | `"aborted"` | `"actual"` (if provider reported partial usage) OR `"estimated"` (use deterministic formula) | Stream ended without provider terminal event |
+| `state = 'cancelled'` (client disconnect) | `ABORTED` | `"aborted"` | `"estimated"` (deterministic formula; the cancel path passes no usage) | Stream ended without provider terminal event |
 | `state = 'failed'` AND `error_code = 'orphan_timeout'` (watchdog) | `ABORTED` | `"aborted"` | `"estimated"` (MUST use deterministic formula from section 5.8) | Watchdog cleanup; no provider terminal event received |
 
 **Rationale for error code classification (addressing settlement_method="released" correctness)**:
@@ -5970,9 +5974,7 @@ The mapping table uses `error_code` values as predicates to classify pre-provide
 
 **Alternative considered**: Persist `chat_turns.provider_request_started_at` timestamp for perfect crash recovery. Deferred to P2+ due to write latency on critical path (see section 5.4).
 
-**Settlement Method Selection for ABORTED**:
-- If the provider reported partial `usage` before disconnect/timeout, use `settlement_method = "actual"` and charge the reported tokens.
-- Otherwise (no provider usage available), use `settlement_method = "estimated"` and apply the deterministic charged token formula (section 5.8).
+**Settlement Method Selection for ABORTED**: always `settlement_method = "estimated"` with the deterministic charged token formula (section 5.8). The cancel path finalizes with `usage = None` and the orphan watchdog has no usage, so usage the provider reported before the disconnect is not used.
 
 **Enforcement**:
 - This mapping is implemented in one shared function, `derive_billing_outcome` (`domain/model/billing_outcome.rs`), used by the stream finalization (`finalize_turn_cas`: completion, error and disconnect/cancellation) and by the orphan watchdog (`finalize_orphan_turn`).
@@ -6002,12 +6004,6 @@ actual_credits_micro = credits_micro(estimated_input_tokens, charged_output_toke
 
 where `in_mult` and `out_mult` come from the model catalog entry for `chat_turns.effective_model` within the policy snapshot identified by `chat_turns.policy_version_applied`. The system MUST NOT use the current (latest) policy snapshot for settlement of older turns.
 
-**Credit conversion** (actual path): if the provider DID report partial usage before the stream ended (e.g., usage metadata on a partial response), the system MUST prefer actual usage. In this case `charged_output_tokens = actual_output_tokens` and:
-
-```text
-actual_credits_micro = credits_micro(actual_input_tokens, actual_output_tokens, in_mult, out_mult)
-```
-
 The formula is deliberately conservative (charges less than or equal to the reserve) to avoid overcharging users for incomplete work, while the persisted `minimal_generation_floor_applied` (from `chat_turns.minimal_generation_floor_applied`) ensures non-zero billing for provider resources consumed.
 
 #### Outbox Emission Requirement (Aborted Streams)
@@ -6018,8 +6014,8 @@ When a turn transitions to `ABORTED`, the system MUST emit a Mini-Chat outbox me
 |-------|-------|
 | `terminal_state` | Internal turn state: `"cancelled"` (disconnect/cancel) or `"failed"` (orphan watchdog) |
 | `billing_outcome` | `"aborted"` |
-| `settlement_method` | `"estimated"` (or `"actual"` if provider reported partial usage) |
-| `usage` | Provider-reported token counts when known; `null` otherwise (always `null` on the orphan watchdog path). The estimated split is not emitted. |
+| `settlement_method` | `"estimated"` |
+| `usage` | `null` (the cancel path and the orphan watchdog carry no usage). The estimated split is not emitted. |
 | `actual_credits_micro` | Credit-denominated charge (authoritative for CCM billing debit; see section 5.7 outbox payload unit convention) |
 | `policy_version_applied` | From `chat_turns.policy_version_applied` |
 | `effective_model` | Model resolved at preflight (from `chat_turns.effective_model`) |
@@ -6267,13 +6263,16 @@ reserved_credits_micro_premium =
 
 **Tier availability check across all periods and buckets**
 
-Premium tier requires BOTH bucket `tier:premium` AND bucket `total` to pass for ALL periods:
+Premium tier requires BOTH bucket `total` AND bucket `tier:premium` to pass for ALL periods. The code checks bucket `total` first, then `tier:premium`, each for day and then month, and stops at the first failure (`quota_service.rs`):
+
+Bucket `total`:
+**day:** 25_000_000 + 3_750_000 = 28_750_000 <= 60_000_000 -> passes
+**month:** 240_000_000 + 3_750_000 = 243_750_000 <= 600_000_000 -> passes
 
 Bucket `tier:premium`:
 **day:** 20_000_000 + 3_750_000 = 23_750_000 > 22_000_000  -> does NOT pass
-**month:** 200_000_000 + 3_750_000 = 203_750_000 <= 300_000_000 -> passes
 
-(Bucket `total` not checked — `tier:premium` already failed.)
+(The `tier:premium` month period is not checked: the day period already failed.)
 
 The rule "a tier is available only if ALL required buckets pass in ALL periods" means:
 
