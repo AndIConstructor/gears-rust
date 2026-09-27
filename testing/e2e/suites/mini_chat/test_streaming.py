@@ -28,7 +28,7 @@ from .conftest import (
     uuid_from_db,
     wait_for,
 )
-from .mock_provider.responses import SCENARIOS
+from .mock_provider.responses import SCENARIOS, MockEvent
 from .mock_provider.server import FILES_PATH
 from .test_attachments import _chunked_multipart, _upload, _upload_ready
 
@@ -124,12 +124,21 @@ class TestStreamPing:
 
     @pytest.mark.timeout(30)
     def test_ping_only_before_content(self, request, chat, mock_provider):
-        """The provider stays silent for 6 s (> sse_ping_interval_seconds=5 in base.yaml):
-        at least one ping arrives, and none after the first delta."""
+        """No content reaches the client for about 8 s (sse_ping_interval_seconds
+        is 5 in base.yaml): at least one ping arrives, and none after the
+        first delta. The mock sends `response.in_progress` (no client event)
+        after 4 s and the first delta 4 s later, so each silent gap of the
+        provider stream stays well under the OAGW idle timeout
+        (proxy_timeout_secs 8) while the client wait is 3 s over the ping
+        interval."""
         if request.config.getoption("mode") == "online":
             pytest.skip("requires mock provider (delayed scenario)")
         scenario = slow_scenario(3, slow=0.3)
-        scenario.initial_delay = 6.0
+        scenario.events = [
+            MockEvent("response.in_progress", {"response": {"status": "in_progress"}}, delay=4.0),
+            dataclasses.replace(scenario.events[0], delay=4.0),
+            *scenario.events[1:],
+        ]
         mock_provider.set_next_scenario(scenario)
 
         resp = httpx.post(

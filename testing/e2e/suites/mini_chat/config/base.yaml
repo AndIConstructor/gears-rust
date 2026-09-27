@@ -178,8 +178,8 @@ gears:
       # Upstream read timeout (idle time between reads, also the wait for the
       # response headers). Kept short so the provider_timeout test
       # (test_error_mapping.py, mock `header_delay`) fits the test budget; it
-      # must stay above the longest idle gap of a normal mock stream (the ping
-      # test in test_streaming.py waits 6 s before the first event).
+      # must stay above the longest idle gap of a normal mock stream (4 s in
+      # the ping test of test_streaming.py).
       proxy_timeout_secs: 8
       allow_http_upstream: false
       ssrf_policy:
