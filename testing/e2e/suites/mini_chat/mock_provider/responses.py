@@ -289,7 +289,10 @@ def match_scenario(user_input: str) -> Scenario:
     return SCENARIOS["*"]
 
 
-SUMMARY_OUTPUT_TOKENS = 25
+# `usage` of the mock summary response: the summary model reasons, so its
+# output_tokens include reasoning tokens that are not part of the text.
+SUMMARY_OUTPUT_TOKENS = 89
+SUMMARY_REASONING_TOKENS = 64
 
 
 def mock_summary_text(prompt: str) -> str:
@@ -324,7 +327,9 @@ def build_summary_response(body: dict, model: str, response_id: str) -> dict:
         }],
         "usage": {
             "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 0},
             "output_tokens": SUMMARY_OUTPUT_TOKENS,
+            "output_tokens_details": {"reasoning_tokens": SUMMARY_REASONING_TOKENS},
             "total_tokens": 100 + SUMMARY_OUTPUT_TOKENS,
         },
     }

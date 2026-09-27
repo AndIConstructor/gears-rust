@@ -26,6 +26,7 @@ import pytest
 from .conftest import (
     API_PREFIX,
     CATALOG_SYSTEM_PROMPT,
+    STANDARD_MODEL,
     TENANT_A_ID,
     THREAD_SUMMARY_QUEUE,
     TINY_CTX_MODEL,
@@ -35,6 +36,7 @@ from .conftest import (
     USER_A_ID,
     USER_B_ID,
     auth_headers,
+    exec_db,
     expect_done,
     expect_stream_started,
     list_messages,
@@ -48,10 +50,18 @@ from .conftest import (
     uuid_from_db,
     wait_for,
 )
-from .mock_provider.responses import SUMMARY_OUTPUT_TOKENS
+from .mock_provider.responses import (
+    SUMMARY_OUTPUT_TOKENS, SUMMARY_REASONING_TOKENS, mock_summary_text,
+)
 from .test_cleanup import _dead_letters, _processed_seq
 
 SUMMARY_MODEL_PROVIDER_ID = "gpt-5-mini"  # provider_model_id of summary_model_id
+
+# `token_estimate` of a stored summary: the summary response's output tokens
+# without its reasoning tokens (thread_summary_worker.rs
+# `estimate_summary_tokens`).
+SUMMARY_TOKEN_ESTIMATE = SUMMARY_OUTPUT_TOKENS - SUMMARY_REASONING_TOKENS
+assert SUMMARY_TOKEN_ESTIMATE > 0
 
 # Subject of the summary request: the platform default subject
 # (toolkit_security::constants::DEFAULT_SUBJECT_ID, libs/toolkit-security/src/constants.rs).
@@ -157,7 +167,7 @@ class TestThreadSummary:
         messages = list_messages(chat_id, token=TOKEN_USER_B)
         assert [m["role"] for m in messages] == ["user", "assistant"] * 2
         assert summary["summary_text"] == "MOCK-SUMMARY 1 user and 1 assistant messages"
-        assert summary["token_estimate"] == SUMMARY_OUTPUT_TOKENS
+        assert summary["token_estimate"] == SUMMARY_TOKEN_ESTIMATE
         # The frontier is the first turn's answer, not the finalized second turn.
         assert uuid_from_db(summary["summarized_up_to_message_id"]) == messages[1]["id"]
         assert tasks[0]["frozen_target_message_id"] == messages[1]["id"], tasks
@@ -200,7 +210,7 @@ class TestThreadSummary:
         mock_provider.clear_captured_requests()
         events = _complete_turn(chat_id, "Third question.", token=TOKEN_USER_B)
         assert expect_stream_started(events).data["thread_summary_applied"] == {
-            "token_estimate": SUMMARY_OUTPUT_TOKENS,
+            "token_estimate": SUMMARY_TOKEN_ESTIMATE,
         }
         captured = mock_provider.get_captured_requests()
         assert len(captured) == 1, captured
@@ -371,6 +381,43 @@ class TestThreadSummaryFailures:
         summary = _wait_for_summary(chat_id)
         assert summary["summary_text"] == "MOCK-SUMMARY 1 user and 1 assistant messages"
         assert len(_summary_requests(mock_provider, chat_id)) == 2
+
+    @pytest.mark.timeout(60)
+    def test_context_length_exceeded_drops_oldest_messages(
+        self, request, chat_with_model, mock_provider,
+    ):
+        """A summary request answered 400 `context_length_exceeded` is sent
+        again without the oldest messages (thread_summary_worker.rs: drop
+        max(ceil(n / 5), 2) of n, keep at least 2), and that summary is
+        stored with the same frontier.
+
+        Six messages to summarize: three turns on gpt-5.2 (large context, no
+        summary), then the chat is switched to the tiny-context model (DB
+        seed, as in test_turn_mutations.py 08-29); its next turn reaches the
+        threshold and schedules a summary of those six messages."""
+        _require_offline(request)
+        chat_id = chat_with_model(STANDARD_MODEL)["id"]
+        for i in range(3):
+            _complete_turn(chat_id, f"Question {i + 1}.")
+        assert _summary_tasks(chat_id) == []
+        assert exec_db("UPDATE chats SET model = ? WHERE id = ?", (TINY_CTX_MODEL, chat_id)) == 1
+        mock_provider.set_summary_fault(chat_id, 400, {"error": {
+            "message": "This model's maximum context length is 4096 tokens.",
+            "type": "invalid_request_error", "param": "input", "code": "context_length_exceeded",
+        }})
+        _complete_turn(chat_id, "Question 4.")
+
+        summary = _wait_for_summary(chat_id)
+        first, second = _summary_requests(mock_provider, chat_id)
+        assert mock_summary_text(provider_input(first)[0][1]) == (
+            "MOCK-SUMMARY 3 user and 3 assistant messages"
+        )
+        retried_prompt = provider_input(second)[0][1]
+        assert "User: Question 1." not in retried_prompt, retried_prompt
+        assert "User: Question 2." in retried_prompt, retried_prompt
+        assert summary["summary_text"] == "MOCK-SUMMARY 2 user and 2 assistant messages"
+        messages = list_messages(chat_id)
+        assert uuid_from_db(summary["summarized_up_to_message_id"]) == messages[5]["id"]
 
     @pytest.mark.timeout(60)
     def test_summary_failing_every_attempt_changes_nothing(
