@@ -156,6 +156,11 @@ pub struct GraphStorageConfig {
     /// Absolute deadline for interactive operations, seconds.
     pub deadline_interactive_secs: u64,
     /// Idempotency receipt retention, days.
+    ///
+    /// Validated, and read by nothing yet: receipts are kept until the
+    /// expiry protocol lands (#4874), because deleting a receipt would make a
+    /// late retry indistinguishable from a new request. Setting it has no
+    /// effect in this iteration; README § Known limitations says so.
     pub idempotency_retention_days: u32,
 
     /// Longest derivation chain a registered type may have, counted in

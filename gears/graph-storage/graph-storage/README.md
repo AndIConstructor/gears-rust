@@ -150,6 +150,9 @@ independently developed implementation can reach the service yet; #4873).
   five matrix rows report `not_implemented`.
 - *The `source_epoch` is minted once and never rotates*; the snapshot-identity
   contract holds for idempotency receipts only.
+- *Idempotency receipts never expire*: `idempotency_retention_days` is
+  validated and read by nothing, because an expiry needs a protocol before a
+  cleanup (a deleted receipt makes a late retry look new; #4874).
 - *Endpoint-constraint validation runs inside the ingest transaction but not
   under row locks* — the platform's secure ORM exposes no locking surface.
 - *Re-ingesting a tombstoned edge revives it* rather than refusing, so a
