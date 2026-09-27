@@ -309,6 +309,10 @@ class TestDowngrade:
         assert done["downgrade_reason"] == "premium_quota_exhausted"
         # The provider got the standard model (provider_model_id of gpt-5.2).
         assert mock_provider.get_last_request()["model"] == "gpt-5.2"
+        # Sent to the effective model's provider (OpenAI), not the chat model's (Azure).
+        assert [p for p in mock_provider.get_post_paths() if p.endswith("/responses")] == [
+            "/v1/responses",
+        ]
         # A standard turn does not charge the premium bucket.
         premium_after = find_period(get_quota_status(token=user2.token), "premium", "daily")
         assert premium_after["used_credits_micro"] == premium_before["used_credits_micro"]
@@ -330,6 +334,10 @@ class TestDowngrade:
             "downgrade", STANDARD_MODEL, "premium_quota_exhausted",
         ), done
         assert mock_provider.get_last_request()["model"] == "gpt-5.2"
+        # Sent to the effective model's provider (OpenAI), not the chat model's (Azure).
+        assert [p for p in mock_provider.get_post_paths() if p.endswith("/responses")] == [
+            "/v1/responses",
+        ]
         (turn,) = query_db(
             "SELECT reserved_credits_micro FROM chat_turns WHERE request_id = ?", (rid,),
         )
