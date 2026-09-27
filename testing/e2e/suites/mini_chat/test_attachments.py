@@ -1462,6 +1462,76 @@ class TestUploadVectorStoreIndexing:
         )
 
 
+# Upload reaper (config/base.yaml `upload_reaper`): a `pending` / `uploaded`
+# row not updated for this long is failed with `upload_abandoned`.
+UPLOAD_REAPER_STALE_AFTER_SECS = 60
+
+
+@pytest.mark.usefixtures("offline_only")
+class TestUploadReaper:
+    """An upload whose request is dropped before it records the outcome
+    leaves the attachment `uploaded`; the upload reaper fails it and the
+    attachment cleanup deletes the provider file. Slow: the reaper waits
+    `stale_after_secs` (60 s, the minimum) after the row's last update."""
+
+    @pytest.mark.timeout(150)
+    def test_abandoned_upload_failed_and_provider_file_deleted(
+        self, chat_with_model, mock_provider,
+    ):
+        """The client gives up while the vector store is still indexing the
+        document (indexing held): the server stops polling, the row stays
+        `uploaded`; about 60 s later GET reports `failed` with
+        `upload_abandoned`, the provider file is deleted and the cleanup
+        ends in `done`."""
+        chat_id = chat_with_model(STANDARD_MODEL)["id"]
+        mock_provider.hold_indexing()
+        started = time.monotonic()
+        with pytest.raises(httpx.ReadTimeout):
+            httpx.post(
+                f"{API_PREFIX}/chats/{chat_id}/attachments",
+                files={"file": ("abandoned.txt", io.BytesIO(b"never indexed"), "text/plain")},
+                timeout=httpx.Timeout(10, read=3),
+            )
+
+        rows = query_db(
+            "SELECT id, status, provider_file_id FROM attachments WHERE chat_id = ?", (chat_id,),
+        )
+        assert len(rows) == 1 and rows[0]["status"] == "uploaded", rows
+        att_id = uuid_from_db(rows[0]["id"])
+        file_id = rows[0]["provider_file_id"]
+        vs_id = _vector_store_id(chat_id)
+        status_read = ("GET", f"/v1/vector_stores/{vs_id}/files/{file_id}")
+
+        # The dropped request stops polling the indexing status (the poll
+        # interval is at most 2 s).
+        time.sleep(1)
+        reads = mock_provider.get_request_paths().count(status_read)
+        time.sleep(5)
+        assert mock_provider.get_request_paths().count(status_read) == reads, (
+            "the upload kept polling after the client disconnected"
+        )
+
+        def detail() -> dict | None:
+            resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            return body if body["status"] != "uploaded" else None
+
+        body = wait_for(
+            detail, "the reaper to fail the abandoned upload",
+            timeout=UPLOAD_REAPER_STALE_AFTER_SECS + 40, interval=1,
+        )
+        assert (body["status"], body["error_code"]) == ("failed", "upload_abandoned"), body
+        # Not before the row was stale.
+        assert time.monotonic() - started >= UPLOAD_REAPER_STALE_AFTER_SECS
+
+        wait_for(
+            lambda: ("DELETE", f"/v1/files/{file_id}") in mock_provider.get_request_paths(),
+            "the delete of the provider file",
+        )
+        assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
+
+
 @pytest.mark.usefixtures("offline_only")
 class TestUploadFilename:
     """The stored filename (handlers/attachments.rs, domain/mime_validation.rs)."""

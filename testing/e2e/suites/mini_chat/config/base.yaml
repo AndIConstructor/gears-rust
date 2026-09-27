@@ -209,6 +209,14 @@ gears:
         enabled: true
         scan_interval_secs: 2
         timeout_secs: 90
+      # Upload reaper: minimum allowed staleness (60s) and frequent scans, so
+      # an abandoned upload is failed about a minute after its last update
+      # (test_attachments.py TestUploadReaper). The upload's own indexing
+      # deadline (25s) keeps a live upload well under 60s.
+      upload_reaper:
+        enabled: true
+        scan_interval_secs: 2
+        stale_after_secs: 60
       thread_summary_worker:
         enabled: true
         # A catalog model: the built-in fallback (gpt-4.1-mini) is not in this
