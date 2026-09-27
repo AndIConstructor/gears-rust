@@ -14,6 +14,7 @@ from .conftest import (
     STANDARD_MODEL,
     TINY_CTX_MODEL,
     USER_A_ID,
+    USER_B_ID,
     OpenStream,
     assert_no_reserves,
     assert_problem,
@@ -632,6 +633,35 @@ def assert_mutation_rejected(chat_id: str, rid: str, before: list[dict], mock_pr
     assert turn_count(chat_id) == 1
     assert poll_turn(chat_id, rid)["state"] == "done"
     assert mock_provider.get_captured_requests() == []
+
+
+@pytest.mark.usefixtures("offline_only")
+@pytest.mark.parametrize("mutation", ["retry", "edit", "delete"])
+class TestMutationOtherRequester:
+    """20-11: a turn of the caller's chat that another user started (a
+    shared chat, not reachable through the API in P1; DB seed of
+    `chat_turns.requester_user_id`) cannot be retried, edited or deleted:
+    domain/service/turn_service.rs `validate_mutation` checks the requester."""
+
+    @pytest.mark.timeout(30)
+    def test_mutation_of_other_users_turn_403(self, chat, mock_provider, mutation):
+        """403 permission_denied with reason AUTHZ_DENIED; nothing changes
+        and the provider is not called."""
+        chat_id = chat["id"]
+        rid = complete_turn(chat_id, "Question.")
+        before = list_messages(chat_id)
+        assert exec_db(
+            "UPDATE chat_turns SET requester_user_id = ? WHERE chat_id = ? AND request_id = ?",
+            (USER_B_ID, chat_id, rid),
+        ) == 1
+
+        mock_provider.clear_captured_requests()
+        if mutation == "delete":
+            resp = httpx.delete(turn_url(chat_id, rid), timeout=10)
+        else:
+            resp = mutate(mutation, chat_id, rid)
+        assert_problem(resp, 403, "permission_denied", reason="AUTHZ_DENIED")
+        assert_mutation_rejected(chat_id, rid, before, mock_provider)
 
 
 @pytest.mark.usefixtures("offline_only")
