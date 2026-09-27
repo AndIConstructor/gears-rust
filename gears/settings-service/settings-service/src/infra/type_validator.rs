@@ -147,6 +147,16 @@ impl<S: SchemaSource> GtsTypeValidator<S> {
     }
 }
 
+/// The trait set of a resolved type, every level's trait blocks checked for
+/// shape first: the registry's merge drops a block that is not an object, and
+/// a type read as having no traits is a type read as not secret.
+fn traits_of(schema: &GtsTypeSchema) -> Result<TraitSet, MalformedTrait> {
+    for level in schema.ancestors() {
+        TraitSet::check_declared(level.traits.as_ref(), level.traits_schema.as_ref())?;
+    }
+    TraitSet::from_traits(schema.effective_traits())
+}
+
 /// The violation a type whose `x-gts-traits` is not well-formed produces.
 ///
 /// Reported on `value_type_id`, as an unknown type is: the fault is the type's,
@@ -203,7 +213,7 @@ impl<S: SchemaSource> TypeValidator for GtsTypeValidator<S> {
         };
         // A trait spelled wrongly is the type's fault, reported like an unknown
         // type: a value nobody can classify is not a value anybody has accepted.
-        let traits = match TraitSet::from_traits(schema.effective_traits()) {
+        let traits = match traits_of(&schema) {
             Ok(traits) => traits,
             Err(malformed) => {
                 return Ok(ValidationResult {
@@ -400,7 +410,7 @@ impl<S: SchemaSource> TypeValidator for GtsTypeValidator<S> {
         // A misspelt trait fails here, never defaults: the caller of this port
         // classifies a declaration on `secret`, and an empty or guessed answer
         // would store a credential as public data.
-        TraitSet::from_traits(schema.effective_traits()).map_err(|malformed| {
+        traits_of(&schema).map_err(|malformed| {
             let violation = malformed_trait(value_type_id, &malformed);
             DomainError::Validation {
                 field: violation.field,

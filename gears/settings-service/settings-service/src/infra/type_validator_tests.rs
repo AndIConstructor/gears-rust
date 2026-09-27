@@ -552,6 +552,81 @@ async fn a_value_of_a_type_with_a_misspelt_trait_is_rejected_not_passed() {
     assert_eq!(result.violations[0].code, field::VALUE_TYPE_MALFORMED);
 }
 
+/// Types whose trait blocks are present but are not objects. The registry's
+/// merge keeps only objects and drops the rest without a sign, so each of
+/// these would read as a type with no traits at all — a secret type among
+/// them classified public — if its shape were not checked.
+fn catalogue_with_shapeless_trait_blocks() -> (FakeSource, Vec<(&'static str, &'static str)>) {
+    let cases = [
+        (
+            "gts.cf.core.settings.type_traits_array.v1~",
+            json!({ "x-gts-traits": ["secret"] }),
+            "`x-gts-traits` must be an object, found an array",
+        ),
+        (
+            "gts.cf.core.settings.type_traits_string.v1~",
+            json!({ "x-gts-traits": "secret" }),
+            "`x-gts-traits` must be an object, found a string",
+        ),
+        (
+            "gts.cf.core.settings.type_traits_null.v1~",
+            json!({ "x-gts-traits": null }),
+            "`x-gts-traits` must be an object, found null",
+        ),
+        (
+            "gts.cf.core.settings.type_trait_schema_bool.v1~",
+            json!({ "x-gts-traits-schema": true }),
+            "`x-gts-traits-schema` must be an object, found a boolean",
+        ),
+        (
+            "gts.cf.core.settings.type_trait_props_array.v1~",
+            json!({ "x-gts-traits-schema": { "properties": [{ "secret": { "default": true } }] } }),
+            "`x-gts-traits-schema.properties` must be an object, found an array",
+        ),
+    ];
+    let mut source = catalogue();
+    let mut expected = Vec::new();
+    for (id, traits, message) in cases {
+        let mut schema = json!({ "$id": format!("gts://{id}"), "type": "string" });
+        for (k, v) in traits.as_object().expect("an object") {
+            schema[k] = v.clone();
+        }
+        source = source.with_type(id, schema);
+        expected.push((id, message));
+    }
+    (source, expected)
+}
+
+#[tokio::test]
+async fn a_trait_block_that_is_not_an_object_makes_the_type_malformed_not_traitless() {
+    let (source, cases) = catalogue_with_shapeless_trait_blocks();
+    let v = GtsTypeValidator::new(source);
+    for (id, expected) in cases {
+        match v.resolve_traits(id).await {
+            Err(DomainError::Validation {
+                field,
+                code,
+                message,
+            }) => {
+                assert_eq!(field, "value_type_id", "{id}");
+                assert_eq!(code, field::VALUE_TYPE_MALFORMED, "{id}");
+                assert!(message.contains(expected), "{id}: {message}");
+            }
+            other => panic!("{id}: expected a malformed type, got {other:?}"),
+        }
+        let result = v
+            .validate_value(id, &json!("hunter2"))
+            .await
+            .expect("the registry answered");
+        assert!(!result.is_accepted(), "{id}: {result:?}");
+        assert_eq!(
+            result.violations[0].code,
+            field::VALUE_TYPE_MALFORMED,
+            "{id}: {result:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_instance_of_a_derived_type_is_not_a_reference_to_the_base_type() {
     // A type derived from the target spells the target as its prefix, and so

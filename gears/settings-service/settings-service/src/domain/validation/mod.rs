@@ -117,7 +117,8 @@ pub struct TraitSet {
 /// store a credential as public data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MalformedTrait {
-    /// The trait's name in `x-gts-traits`.
+    /// The trait's name in `x-gts-traits`, or the block's own name when the
+    /// block itself has the wrong shape.
     pub name: &'static str,
     /// What the vocabulary expects there.
     pub expected: &'static str,
@@ -137,7 +138,55 @@ impl std::fmt::Display for MalformedTrait {
 
 impl std::error::Error for MalformedTrait {}
 
+/// The JSON type of a value, as a malformed trait names it.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 impl TraitSet {
+    /// Check the trait blocks one level of a type declares, before they are
+    /// merged. The registry's merge keeps an `x-gts-traits` object and the
+    /// `properties` object of an `x-gts-traits-schema`, and drops anything
+    /// else without a sign: `"x-gts-traits": ["secret"]` would reach
+    /// [`Self::from_traits`] as no traits at all and classify a secret type as
+    /// public. A block that is present is an object, or the type is malformed.
+    ///
+    /// # Errors
+    /// [`MalformedTrait`] naming the block that is not an object.
+    pub fn check_declared(
+        traits: Option<&Value>,
+        traits_schema: Option<&Value>,
+    ) -> Result<(), MalformedTrait> {
+        let not_an_object = |name: &'static str, value: &Value| MalformedTrait {
+            name,
+            expected: "an object",
+            found: json_kind(value),
+        };
+        if let Some(traits) = traits
+            && !traits.is_object()
+        {
+            return Err(not_an_object("x-gts-traits", traits));
+        }
+        if let Some(schema) = traits_schema {
+            if !schema.is_object() {
+                return Err(not_an_object("x-gts-traits-schema", schema));
+            }
+            if let Some(properties) = schema.get("properties")
+                && !properties.is_object()
+            {
+                return Err(not_an_object("x-gts-traits-schema.properties", properties));
+            }
+        }
+        Ok(())
+    }
+
     /// Read the interpreted traits off a merged `x-gts-traits` object.
     ///
     /// # Errors
@@ -145,23 +194,13 @@ impl TraitSet {
     /// absent trait is `false` or `None`, never an error: an empty object is a
     /// real answer.
     pub fn from_traits(raw: Value) -> Result<Self, MalformedTrait> {
-        fn kind(value: &Value) -> &'static str {
-            match value {
-                Value::Null => "null",
-                Value::Bool(_) => "a boolean",
-                Value::Number(_) => "a number",
-                Value::String(_) => "a string",
-                Value::Array(_) => "an array",
-                Value::Object(_) => "an object",
-            }
-        }
         let flag = |name: &'static str| match raw.get(name) {
             None => Ok(false),
             Some(Value::Bool(b)) => Ok(*b),
             Some(other) => Err(MalformedTrait {
                 name,
                 expected: "a boolean",
-                found: kind(other),
+                found: json_kind(other),
             }),
         };
         let text = |name: &'static str| match raw.get(name) {
@@ -170,7 +209,7 @@ impl TraitSet {
             Some(other) => Err(MalformedTrait {
                 name,
                 expected: "a string",
-                found: kind(other),
+                found: json_kind(other),
             }),
         };
         Ok(Self {

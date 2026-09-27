@@ -127,7 +127,7 @@ Not applicable. Validation is an internal service invoked by other features rath
 **Steps**:
 1. [x] - `p1` - Resolve the type through the types registry client - `inst-tvv-traits-1`
 2. [x] - `p1` - **IF** the type cannot be resolved → **RETURN** a resolution failure; callers treat this as fail-closed rather than as an empty trait set - `inst-tvv-traits-2`
-3. [x] - `p1` - Collect the trait set, including the secret marker, multiline rendering, cron dialect, dynamic-enum source, and entity-reference target; a trait that is present but not of its declared type is a resolution failure, never a default, because the secret marker decides whether a value is stored in clear - `inst-tvv-traits-3`
+3. [x] - `p1` - Collect the trait set, including the secret marker, multiline rendering, cron dialect, dynamic-enum source, and entity-reference target; a trait that is present but not of its declared type is a resolution failure, never a default, because the secret marker decides whether a value is stored in clear; so is a trait block — `x-gts-traits`, `x-gts-traits-schema` or its `properties` — present at any level of the type's chain but not an object, checked before the registry's merge, which drops such a block without a sign and would read a secret type as having no traits - `inst-tvv-traits-3`
 4. [x] - `p1` - **RETURN** the trait set, which serves two distinct callers: client rendering metadata, and create-time classification in entry 2.3 where the secret marker decides whether values route through the Secret Manager - `inst-tvv-traits-4`
 
 ### Classification Denormalization Sync
@@ -309,6 +309,7 @@ The system **MUST** copy the owning declaration's `data_classification` onto eac
 - [x] Trait resolution returns the secret marker, and a type carrying it is reported as secret-backed
 - [x] Trait resolution failure is reported as a failure rather than as an empty trait set
 - [x] A trait present with a value of the wrong type fails resolution and refuses the declaration, rather than defaulting to non-secret
+- [x] A type whose `x-gts-traits`, `x-gts-traits-schema` or trait-schema `properties` is present but not an object fails resolution and refuses a value as malformed, rather than reading as a type with no traits
 - [x] A `setting_values` row with both `value` and `secret_ref` set is rejected by the exactly-one check
 - [x] A `setting_values` row with neither `value` nor `secret_ref` set is rejected by the same check
 - [x] A setting whose type admits `null` stores JSON `null` in a non-`NULL` column and satisfies the exactly-one check
