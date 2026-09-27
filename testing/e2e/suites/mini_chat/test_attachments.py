@@ -1663,6 +1663,25 @@ class TestUploadFilename:
         assert mock_provider.get_post_paths() == []
 
 
+class TestCsvUpload:
+    """`rag.allow_csv_upload` (on by default, not overridden in base.yaml):
+    `text/csv` is remapped to `text/plain` (domain/mime_validation.rs
+    `remap_csv_to_plain`) and indexed as a document."""
+
+    def test_csv_stored_as_text_plain_document(self, chat):
+        chat_id = chat["id"]
+        payload = b"name,value\nalpha,1\nbeta,2\n"
+        resp = _upload(chat_id, "data.csv", payload, "text/csv")
+        assert resp.status_code == 201, resp.text
+        att = resp.json()
+        assert (att["filename"], att["content_type"], att["kind"], att["status"], att["size_bytes"]) == (
+            "data.csv", "text/plain", "document", "ready", len(payload),
+        ), att
+        get = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att['id']}", timeout=10)
+        assert get.status_code == 200, get.text
+        assert (get.json()["content_type"], get.json()["kind"]) == ("text/plain", "document"), get.json()
+
+
 @pytest.mark.multi_provider
 @pytest.mark.usefixtures("offline_only")
 class TestAttachmentsInProviderRequest:
