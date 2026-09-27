@@ -54,11 +54,15 @@ class TestTurnLifecycle:
             events=[],
         ))
 
-        status, _, _ = stream_message(chat_id, "Fail now.", request_id=request_id)
+        status, events, _ = stream_message(chat_id, "Fail now.", request_id=request_id)
         assert status == 200
+        # The stream ends with one `error` event, no `done`.
+        assert [e.event for e in events if e.event in ("error", "done")] == ["error"], events
+        assert events[-1].event == "error", [e.event for e in events]
+        assert (events[-1].data["code"], events[-1].data["message"]) == ("provider_error", "fail")
 
         turn = poll_turn(chat_id, request_id)
-        assert turn["state"] == "error"
+        assert (turn["state"], turn["error_code"]) == ("error", "provider_error"), turn
         assert turn.get("assistant_message_id") is None
         assert [m["role"] for m in list_messages(chat_id)] == ["user"]
 
