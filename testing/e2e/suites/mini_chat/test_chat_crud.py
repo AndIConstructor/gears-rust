@@ -54,6 +54,15 @@ class TestCreateChat:
         assert "created_at" in body
         assert "updated_at" in body
 
+    def test_create_chat_location_header(self, server):
+        """The 201 carries `Location: /mini-chat/v1/chats/{id}`. The path is
+        the one the gear router sees: the api-gateway `prefix_path` (`/cf`
+        here) is not included (toolkit `created_json`)."""
+        resp = httpx.post(f"{API_PREFIX}/chats", json={})
+        assert resp.status_code == 201
+        chat_id = resp.json()["id"]
+        assert resp.headers.get("location") == f"/mini-chat/v1/chats/{chat_id}", resp.headers
+
     def test_create_chat_with_model(self, server):
         resp = httpx.post(f"{API_PREFIX}/chats", json={"model": STANDARD_MODEL})
         assert resp.status_code == 201

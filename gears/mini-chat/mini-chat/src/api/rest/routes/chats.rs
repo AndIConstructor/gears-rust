@@ -1,6 +1,9 @@
 use axum::Router;
 use toolkit::api::OpenApiRegistry;
-use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt, ThrottlingSpec};
+use toolkit::api::operation_builder::{
+    OperationBuilder, OperationBuilderODataExt, ResponseHeaderSpec, ResponseHeaderType,
+    ThrottlingSpec,
+};
 
 use super::AiChatLicense;
 use crate::api::rest::{dto, handlers};
@@ -41,6 +44,11 @@ pub(super) fn register_chat_routes(
             http::StatusCode::CREATED,
             "Created chat",
         )
+        .response_header(ResponseHeaderSpec::new(
+            "Location",
+            "Path of the created chat",
+            ResponseHeaderType::String,
+        ))
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)

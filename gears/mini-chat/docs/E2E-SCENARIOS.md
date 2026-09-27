@@ -99,6 +99,7 @@ toggled per test.
 | 02-26 | List Chats — Cursor Reused with Another `$filter` → 400 `invalid_argument` (`FILTER_MISMATCH`) | test_chat_crud.py | TestListChats::test_list_chats_cursor_with_other_filter_400 |
 | 02-27 | List Chats — `limit=0` → 400 `invalid_argument` (`INVALID_LIMIT`) | test_chat_crud.py | TestListChats::test_list_chats_zero_limit_400 |
 | 02-28 | List Chats — `cursor` with `$orderby` → 400 `invalid_argument` (`ORDER_WITH_CURSOR`) | test_chat_crud.py | TestListChats::test_list_chats_orderby_with_cursor_400 |
+| 02-29 | Create Chat → 201 with `Location: /mini-chat/v1/chats/{id}` (the path the gear router sees, without the api-gateway `prefix_path`) | test_chat_crud.py | TestCreateChat::test_create_chat_location_header |
 
 ## 03 — Messages API
 
