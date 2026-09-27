@@ -895,10 +895,10 @@ where
         let mut rec =
             AuditRecord::new(key.as_str(), None, owner_module, operation, request_id).by_module();
         if let Some(pre) = pre {
-            rec = rec.with_pre_image(AuditValue::record(pre, false));
+            rec = rec.with_pre_image(AuditValue::definition(pre));
         }
         if let Some(post) = post {
-            rec = rec.with_post_image(AuditValue::record(post, false));
+            rec = rec.with_post_image(AuditValue::definition(post));
         }
         // Written on the same unscoped path as the row it audits, inside its
         // transaction: a scopeless row cannot satisfy a tenant predicate, so a

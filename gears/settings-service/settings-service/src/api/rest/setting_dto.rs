@@ -410,20 +410,34 @@ pub struct AuditRecordDto {
     pub occurred_at: String,
 }
 
-fn recorded(image: Option<&crate::audit::AuditValue>, mask_pii: bool) -> Option<Value> {
+/// One image as a reader is shown it. A secret was recorded as its mask. A
+/// `pii` image is masked for a reader without the entitlement whatever the
+/// setting is classified as now; a clear one is masked too while the setting
+/// is `pii`, which covers what was recorded before it was classified so.
+fn recorded(
+    image: Option<&crate::audit::AuditValue>,
+    setting_is_pii: bool,
+    may_read_pii: bool,
+) -> Option<Value> {
+    let mask = || Value::String(MASK_TOKEN.to_owned());
     image.map(|v| match v {
-        crate::audit::AuditValue::Masked => Value::String(MASK_TOKEN.to_owned()),
-        crate::audit::AuditValue::Clear(_) if mask_pii => Value::String(MASK_TOKEN.to_owned()),
-        crate::audit::AuditValue::Clear(value) => value.clone(),
+        crate::audit::AuditValue::Masked => mask(),
+        crate::audit::AuditValue::Pii(_) if !may_read_pii => mask(),
+        crate::audit::AuditValue::Clear(_) if setting_is_pii && !may_read_pii => mask(),
+        crate::audit::AuditValue::Pii(value) | crate::audit::AuditValue::Clear(value) => {
+            value.clone()
+        }
     })
 }
 
 // @cpt-dod:cpt-cf-settings-service-dod-audit-store-masking-classification:p1
 /// Render a stored record for the history read.
 ///
-/// `values_are_pii` says whether the setting's values are `pii`-classified;
-/// `may_read_pii` whether the caller holds the entitlement. A secret needs no
-/// decision here: it was never recorded in plaintext.
+/// `values_are_pii` says whether the setting's values are `pii`-classified
+/// now; `may_read_pii` whether the caller holds the entitlement. A `pii` image
+/// carries its own class and is masked without the entitlement whatever the
+/// setting is classified as now. A secret needs no decision here: it was never
+/// recorded in plaintext.
 #[must_use]
 pub fn render_record(
     record: &crate::audit::StoredAuditRecord,
@@ -433,7 +447,7 @@ pub fn render_record(
     // @cpt-begin:cpt-cf-settings-service-flow-audit-store-history:p1:inst-as-hist-8
     let actor_masked =
         record.actor_classification == crate::audit::ActorClassification::Pii && !may_read_pii;
-    let values_masked = values_are_pii && !may_read_pii;
+    let values_masked = (values_are_pii || record.has_pii_image()) && !may_read_pii;
     AuditRecordDto {
         id: record.id,
         tenant_id: record.tenant_id,
@@ -444,8 +458,8 @@ pub fn render_record(
             record.actor.clone()
         },
         actor_masked,
-        pre_value: recorded(record.pre_image.as_ref(), values_masked),
-        post_value: recorded(record.post_image.as_ref(), values_masked),
+        pre_value: recorded(record.pre_image.as_ref(), values_are_pii, may_read_pii),
+        post_value: recorded(record.post_image.as_ref(), values_are_pii, may_read_pii),
         values_masked,
         outcome: record.outcome.as_str().to_owned(),
         request_id: record.request_id.clone(),

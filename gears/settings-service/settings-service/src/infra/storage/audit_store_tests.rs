@@ -23,8 +23,14 @@ async fn db() -> Arc<DBProvider<DbError>> {
 
 fn record(tenant: Uuid, request: &str) -> AuditRecord {
     AuditRecord::new(KEY, Some(tenant), "admin", AuditOperation::Change, request)
-        .with_pre_image(AuditValue::record(json!(false), false))
-        .with_post_image(AuditValue::record(json!(true), false))
+        .with_pre_image(AuditValue::record(
+            json!(false),
+            crate::audit::ImageClass::Public,
+        ))
+        .with_post_image(AuditValue::record(
+            json!(true),
+            crate::audit::ImageClass::Public,
+        ))
 }
 
 async fn history(
@@ -121,14 +127,48 @@ async fn a_secret_image_is_stored_masked_and_read_back_masked() {
     let db = db().await;
     let tenant = Uuid::new_v4();
     let conn = db.conn().expect("connection");
-    let rec = AuditRecord::new(KEY, Some(tenant), "admin", AuditOperation::Change, "r")
-        .with_post_image(AuditValue::record(json!("hunter2"), true));
+    let rec =
+        AuditRecord::new(KEY, Some(tenant), "admin", AuditOperation::Change, "r").with_post_image(
+            AuditValue::record(json!("hunter2"), crate::audit::ImageClass::Secret),
+        );
     AuditStore
         .append(&conn, &AccessScope::allow_all(), rec)
         .await
         .expect("append");
     let page = history(&db, tenant, None, None).await;
     assert_eq!(page.items[0].post_image, Some(AuditValue::Masked));
+}
+
+#[tokio::test]
+async fn a_pii_image_keeps_its_class_through_the_store() {
+    // The class is inside the stored image, next to the `clear` and `masked`
+    // kinds the column already held: no column of its own, no migration.
+    let db = db().await;
+    let tenant = Uuid::new_v4();
+    let conn = db.conn().expect("connection");
+    let rec = AuditRecord::new(KEY, Some(tenant), "admin", AuditOperation::Change, "r")
+        .with_pre_image(AuditValue::record(
+            json!("bob@example.com"),
+            crate::audit::ImageClass::Pii,
+        ))
+        .with_post_image(AuditValue::record(
+            json!("alice@example.com"),
+            crate::audit::ImageClass::Pii,
+        ));
+    AuditStore
+        .append(&conn, &AccessScope::allow_all(), rec)
+        .await
+        .expect("append");
+    let page = history(&db, tenant, None, None).await;
+    assert_eq!(
+        page.items[0].pre_image,
+        Some(AuditValue::Pii(json!("bob@example.com")))
+    );
+    assert_eq!(
+        page.items[0].post_image,
+        Some(AuditValue::Pii(json!("alice@example.com")))
+    );
+    assert!(page.items[0].has_pii_image());
 }
 
 #[tokio::test]
@@ -275,7 +315,10 @@ fn an_image_that_does_not_decode_is_an_integrity_error_not_an_absent_image() {
         .expect("an intact row maps");
     assert_eq!(
         intact.pre_image,
-        Some(AuditValue::record(json!(false), false))
+        Some(AuditValue::record(
+            json!(false),
+            crate::audit::ImageClass::Public
+        ))
     );
     let absent = super::to_domain(stored_row(None)).expect("an absent image is absent");
     assert_eq!(absent.pre_image, None);

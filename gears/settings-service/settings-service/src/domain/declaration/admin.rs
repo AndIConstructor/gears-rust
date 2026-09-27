@@ -1316,10 +1316,10 @@ where
             actor.request_id.clone(),
         );
         if let Some(pre) = pre {
-            record = record.with_pre_image(AuditValue::record(pre, false));
+            record = record.with_pre_image(AuditValue::definition(pre));
         }
         if let Some(post) = post {
-            record = record.with_post_image(AuditValue::record(post, false));
+            record = record.with_post_image(AuditValue::definition(post));
         }
         self.sink
             .append(conn, &AccessScope::allow_all(), record)

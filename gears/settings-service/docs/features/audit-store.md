@@ -93,7 +93,7 @@ Two things about the record itself are fixed before it is written. Masking happe
 5. [x] - `p1` - DB: SELECT the declaration by key; **IF** none → **RETURN** `404`; a retired declaration keeps its history and is read like an active one - `inst-as-hist-5`
 6. [x] - `p1` - Evaluate the caller's effective tenant access for the setting; **IF** `hidden` → **RETURN** `404` rather than `403`, so a hidden setting's existence is not disclosed through its history - `inst-as-hist-6`
 7. [x] - `p1` - Compose the canonical audit resource id for the key and the target tenant with the shared formatter, and DB: SELECT audit_records WHERE declaration_key = {key} AND (tenant_id = {tenant} OR tenant_id IS NULL) ORDER BY occurred_at DESC through `idx_audit_scoped`, cursor-paginated and bound to the pair, on the caller's `AccessScope` — the scope's own records and the setting's definition records, which belong to no tenant and explain changes no scope made - `inst-as-hist-7`
-8. [x] - `p1` - **FOR EACH** record → **IF** its actor classification is `pii` **AND** the caller is not authorized for unmasked PII → mask the actor; **IF** a recorded value is `pii`-classified under the same condition → mask it; a `secret` value needs no decision here, since it was never recorded in plaintext - `inst-as-hist-8`
+8. [x] - `p1` - **FOR EACH** record → **IF** its actor classification is `pii` **AND** the caller is not authorized for unmasked PII → mask the actor; **IF** a recorded value carries the `pii` class, or the setting is `pii` now, under the same condition → mask it — a value recorded while its setting was `pii` stays masked after the setting is declassified, and one recorded before it became `pii` is masked once it is; a `secret` value needs no decision here, since it was never recorded in plaintext - `inst-as-hist-8`
 9. [x] - `p1` - **RETURN** `200` with the page of records — `tenant_id` (`null` for a definition record), `operation`, `actor`, `pre_value`, `post_value`, `outcome`, `request_id`, `change_set_id`, `occurred_at` — and its pagination cursors; an empty page is `200` with no items, never an error - `inst-as-hist-9`
 
 ## 3. Processes / Business Logic (CDSL)
@@ -107,7 +107,7 @@ Two things about the record itself are fixed before it is written. Masking happe
 **Output**: The record committed together with the mutation, or the mutation rejected
 
 **Steps**:
-1. [x] - `p1` - Mask the pre-image and post-image by the declaration's classification before the record exists: a `secret` value is replaced by the mask token and never enters the record; a `pii` or `public` value is recorded as is, the read side masking `pii` for callers without the entitlement - `inst-as-append-1`
+1. [x] - `p1` - Mask the pre-image and post-image by the declaration's classification before the record exists: a `secret` value is replaced by the mask token and never enters the record; a `pii` value is recorded with its class inside the image, so the class the value had when it was set outlives a later reclassification of the setting, and a `public` value is recorded as is; the caller names the class of every image — a restriction or a category is `public`, a declaration's own image is `pii` when its setting is, since its Schema Default is a value of it - `inst-as-append-1`
 2. [x] - `p1` - Stamp the actor and the actor's own `public` or `pii` classification onto the record, so the read side can honour it without re-deriving who the actor was - `inst-as-append-2`
 3. [x] - `p1` - Compose the `resource` field with the shared formatter, and set `declaration_key` and `tenant_id` from the same two inputs, so the scoped query is an index lookup that can never disagree with the resource id - `inst-as-append-3`
 4. [x] - `p1` - Set `occurred_at` from the gear's shared clock, aligned to the microsecond Postgres keeps as every other timestamp column is, so both backends hold the same instant, `retain_until` to the value supplied or `NULL` for the configured default, and `change_set_id` when the mutation was produced under one - `inst-as-append-4`
@@ -196,7 +196,7 @@ The system **MUST** form every record's `resource` as `cf.settings:{key}@{tenant
 
 - [x] `p1` - **ID**: `cpt-cf-settings-service-dod-audit-store-masking-classification`
 
-A `secret`-classified value **MUST** be masked before the record is built and **MUST NOT** appear in plaintext in any record. Every record **MUST** carry the actor's `public` or `pii` classification, and the history read **MUST** mask a `pii` actor, and any `pii`-classified recorded value, for a caller not authorized for unmasked PII. The read **MUST NOT** apply a second masking implementation to secrets, since none were recorded.
+A `secret`-classified value **MUST** be masked before the record is built and **MUST NOT** appear in plaintext in any record. Every record **MUST** carry the actor's `public` or `pii` classification, and the history read **MUST** mask a `pii` actor, and any `pii`-classified recorded value, for a caller not authorized for unmasked PII. A value's class **MUST** be recorded with it, so a value recorded while its setting was `pii` stays masked after the setting is declassified; while a setting is `pii`, every value recorded for it is masked, including those recorded before it was classified so. The read **MUST NOT** apply a second masking implementation to secrets, since none were recorded.
 
 **Implements**:
 - `cpt-cf-settings-service-algo-audit-store-append`
@@ -247,6 +247,7 @@ Every record **MUST** carry `retain_until` or fall under the store's configured 
 - [x] A platform-level **value** record carries the root tenant's id, never a sentinel; a record about a **definition** — a category or a declaration — carries no tenant at all, so the write borrows no scope and asks the Tenant Resolver for nothing
 - [x] History for one setting at one scope returns that pair's records and the setting's definition records, each item's `tenant_id` telling them apart (`null` for a definition record), newest first, and a second page follows the cursor without duplicates; another scope's records never appear
 - [x] A `pii`-classified actor is masked for a caller without the PII entitlement and unmasked for one with it
+- [x] A value recorded while its setting was `pii` stays masked in the history for a caller without the entitlement after the setting is declassified to `public`, and is shown to one with it
 - [x] History of a hidden setting returns `404`, and history of a setting for a tenant outside the caller's subtree, or for a standalone descendant, returns `403`
 - [x] History of a retired declaration is readable
 - [x] A setting with no history returns `200` with an empty page

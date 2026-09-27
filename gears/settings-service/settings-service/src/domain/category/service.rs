@@ -10,7 +10,7 @@
 use toolkit_db::secure::DBRunner;
 use toolkit_security::SecurityContext;
 
-use crate::audit::{AuditOperation, AuditRecord, AuditSink, AuditValue};
+use crate::audit::{AuditOperation, AuditRecord, AuditSink, AuditValue, ImageClass};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -218,7 +218,7 @@ impl<R: CategoryRepository, S: AuditSink> CategoryService<R, S> {
             &created.key,
             AuditOperation::Create,
             None,
-            Some(AuditValue::record(snapshot(&created), false)),
+            Some(AuditValue::record(snapshot(&created), ImageClass::Public)),
             actor,
         )
         .await?;
@@ -270,8 +270,8 @@ impl<R: CategoryRepository, S: AuditSink> CategoryService<R, S> {
             scope,
             &updated.key,
             AuditOperation::Change,
-            Some(AuditValue::record(snapshot(&current), false)),
-            Some(AuditValue::record(snapshot(&updated), false)),
+            Some(AuditValue::record(snapshot(&current), ImageClass::Public)),
+            Some(AuditValue::record(snapshot(&updated), ImageClass::Public)),
             actor,
         )
         .await?;
@@ -345,7 +345,7 @@ impl<R: CategoryRepository, S: AuditSink> CategoryService<R, S> {
             scope,
             &current.key,
             AuditOperation::Remove,
-            Some(AuditValue::record(snapshot(&current), false)),
+            Some(AuditValue::record(snapshot(&current), ImageClass::Public)),
             None,
             actor,
         )

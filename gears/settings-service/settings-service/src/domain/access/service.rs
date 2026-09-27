@@ -17,7 +17,7 @@ use super::{
     AccessRepository, EffectiveAccess, Restriction, RestrictionDraft, TenantAccess,
     evict_access_change, may_restrict, restriction_tag, strictest,
 };
-use crate::audit::{AuditOperation, AuditRecord, AuditSink, AuditValue};
+use crate::audit::{AuditOperation, AuditRecord, AuditSink, AuditValue, ImageClass};
 use crate::domain::category::{DomainVisibility, is_visible};
 use crate::domain::declaration::{Declaration, DeclarationRepository};
 use crate::domain::error::DomainError;
@@ -325,9 +325,10 @@ where
             operation,
             actor.request_id.clone(),
         )
-        .with_post_image(AuditValue::record(snapshot(&stored), false));
+        .with_post_image(AuditValue::record(snapshot(&stored), ImageClass::Public));
         if let Some(previous) = &current {
-            record = record.with_pre_image(AuditValue::record(snapshot(previous), false));
+            record =
+                record.with_pre_image(AuditValue::record(snapshot(previous), ImageClass::Public));
         }
         self.sink
             .append(conn, &AccessScope::allow_all(), record)
@@ -393,7 +394,7 @@ where
                 AuditOperation::Remove,
                 actor.request_id.clone(),
             )
-            .with_pre_image(AuditValue::record(snapshot(previous), false));
+            .with_pre_image(AuditValue::record(snapshot(previous), ImageClass::Public));
             self.sink
                 .append(conn, &AccessScope::allow_all(), record)
                 .await?;

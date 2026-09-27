@@ -545,11 +545,12 @@ pub async fn get_history(
         .history(&conn, &scope, key.as_str(), target.tenant_id(root), &query)
         .await?;
     let values_are_pii = declaration.data_classification == "pii";
+    // A `pii` image keeps its class after the setting is declassified, so it
+    // asks for the entitlement as much as a `pii` setting or actor does.
     let needs_entitlement = values_are_pii
-        || page
-            .items
-            .iter()
-            .any(|r| r.actor_classification == crate::audit::ActorClassification::Pii);
+        || page.items.iter().any(|r| {
+            r.actor_classification == crate::audit::ActorClassification::Pii || r.has_pii_image()
+        });
     let pii = needs_entitlement && may_read_pii(&enforcer, &ctx).await;
     // @cpt-begin:cpt-cf-settings-service-flow-audit-store-history:p1:inst-as-hist-9
     let items: Vec<AuditRecordDto> = page

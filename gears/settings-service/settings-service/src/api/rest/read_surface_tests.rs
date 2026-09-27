@@ -795,6 +795,62 @@ async fn history_returns_the_records_the_writes_left_newest_first() {
 }
 
 #[tokio::test]
+async fn a_pii_value_stays_masked_in_the_history_after_the_setting_is_declassified() {
+    // An administrator may downgrade `pii` to `public` with step-up. The
+    // values recorded while the setting was `pii` stay personal data: the
+    // record keeps their class, so the history masks them for a reader
+    // without the entitlement whatever the declaration says now, and shows
+    // them to one with it.
+    for (h, entitled) in [
+        (RestHarness::new().await, true),
+        (RestHarness::without_pii_entitlement().await, false),
+    ] {
+        let id = h
+            .inner
+            .declare_typed("contact", "cascading", json!("nobody"), TEXT, "pii")
+            .await;
+        let value = format!(
+            "/settings-service/v1/settings/{}/value",
+            encoded(&h, "contact")
+        );
+        let written = h
+            .send(
+                "PUT",
+                &value,
+                Some(json!({ "value": "alice@example.com" })),
+                Some("absent"),
+                h.inner.tree.root,
+            )
+            .await;
+        assert_eq!(written.status, 200, "{}", written.body);
+        h.inner.reclassify(id, "public").await;
+
+        let items = h
+            .items(
+                &format!(
+                    "/settings-service/v1/settings/{}/history",
+                    encoded(&h, "contact")
+                ),
+                h.inner.tree.root,
+            )
+            .await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        if entitled {
+            assert_eq!(
+                items[0]["post_value"],
+                json!("alice@example.com"),
+                "{}",
+                items[0]
+            );
+            assert_eq!(items[0]["values_masked"], json!(false), "{}", items[0]);
+        } else {
+            assert_eq!(items[0]["post_value"], json!(MASK_TOKEN), "{}", items[0]);
+            assert_eq!(items[0]["values_masked"], json!(true), "{}", items[0]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn history_of_a_secret_shows_the_mask_token_it_was_recorded_with() {
     // A secret is never recorded in plaintext, so there is no entitlement that
     // would unmask it here — the record itself holds the token.

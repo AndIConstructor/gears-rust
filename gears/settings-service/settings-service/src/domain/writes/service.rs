@@ -20,7 +20,7 @@ use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
 use super::{image_of, value_state_tag};
-use crate::audit::{AuditOperation, AuditRecord, AuditSink, AuditValue};
+use crate::audit::{AuditOperation, AuditRecord, AuditSink, AuditValue, ImageClass};
 use crate::domain::access::{AccessRepository, TenantAccess};
 use crate::domain::category::{DomainVisibility, is_visible};
 use crate::domain::declaration::{Declaration, DeclarationRepository};
@@ -970,13 +970,13 @@ where
         if let Some(old) = &old_value {
             record = record.with_pre_image(AuditValue::record(
                 old.clone(),
-                declaration.has_secret_trait,
+                ImageClass::of_value(&declaration.data_classification),
             ));
         }
         if let Some(new) = &new_value {
             record = record.with_post_image(AuditValue::record(
                 new.clone(),
-                declaration.has_secret_trait,
+                ImageClass::of_value(&declaration.data_classification),
             ));
         }
         self.sink.append(conn, &scope, record).await?;

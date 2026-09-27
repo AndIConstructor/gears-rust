@@ -586,6 +586,32 @@ impl ResolutionHarness {
             .id
     }
 
+    /// Classify a declaration anew — what an administrator's `PATCH` of
+    /// `data_classification` does to the row — the rest of its metadata as
+    /// `declare` leaves it.
+    pub async fn reclassify(&self, declaration_id: Uuid, classification: &str) {
+        let conn = self.db.conn().expect("connection");
+        DeclarationRepo
+            .update_metadata(
+                &conn,
+                &AccessScope::allow_all(),
+                declaration_id,
+                crate::domain::declaration::DeclarationMetadata {
+                    mode: "standard".to_owned(),
+                    description: None,
+                    domain_affinity: None,
+                    licence_feature: None,
+                    data_classification: classification.to_owned(),
+                    requires_step_up: true,
+                    anonymous_exposable: false,
+                },
+                None,
+                true,
+            )
+            .await
+            .expect("metadata");
+    }
+
     /// Bind a declaration to an administrative domain, the rest of its
     /// metadata as `declare` leaves it.
     pub async fn bind_domain(&self, declaration_id: Uuid, domain: &str) {

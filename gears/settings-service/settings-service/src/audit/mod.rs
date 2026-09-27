@@ -152,15 +152,62 @@ impl ActorClassification {
     }
 }
 
+/// How sensitive what an image records is, stated by the caller that knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageClass {
+    /// Nothing personal or secret: a restriction, a category, the definition
+    /// of a setting that is not `pii`.
+    Public,
+    /// Personal data: a `pii` setting's value, or the definition of one,
+    /// whose Schema Default is a value of it.
+    Pii,
+    /// A secret: never recorded, only its mask.
+    Secret,
+}
+
+impl ImageClass {
+    /// The class of a setting's value under its declaration's classification.
+    /// A classification this build does not know is taken as secret: a value
+    /// nobody can classify is not recorded.
+    #[must_use]
+    pub fn of_value(data_classification: &str) -> Self {
+        match data_classification {
+            "public" => Self::Public,
+            "pii" => Self::Pii,
+            _ => Self::Secret,
+        }
+    }
+
+    /// The class of a declaration's own image. Its Schema Default is a value
+    /// of the setting: personal when the setting is `pii`, and for a secret
+    /// only the empty placeholder a secret setting carries, never a
+    /// credential. A classification this build does not know is taken as
+    /// `pii`, masked for a reader without the entitlement.
+    #[must_use]
+    pub fn of_definition(data_classification: &str) -> Self {
+        match data_classification {
+            "public" | "secret" => Self::Public,
+            _ => Self::Pii,
+        }
+    }
+}
+
 /// A pre- or post-image as it goes into the trail.
 ///
 /// Secret-classified values are masked here and only here: DESIGN.md §4.2 masks
 /// them before the record is built, so no later stage ever holds plaintext.
+/// A `pii` value is recorded with its class, and the history read masks it
+/// for a reader without the entitlement whatever the setting is classified as
+/// by the time it is read: a value that was personal data when it was set
+/// stays personal data after the setting is declassified.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum AuditValue {
     /// A value recorded as it was.
     Clear(serde_json::Value),
+    /// A `pii`-classified value, recorded as it was and shown only to a reader
+    /// entitled to unmasked PII.
+    Pii(serde_json::Value),
     /// A secret-classified value. The content is deliberately absent — this
     /// variant carries no payload, so there is nothing to leak into the trail
     /// even by mistake.
@@ -168,20 +215,38 @@ pub enum AuditValue {
 }
 
 impl AuditValue {
-    /// Record a value, masking it when the setting is secret-classified.
+    /// Record an image under the class its caller states.
     ///
-    /// Taking the classification as an argument rather than inspecting the
-    /// value means a caller cannot forget to mask: there is no constructor that
-    /// records a value without stating whether it is secret.
+    /// Taking the class as an argument rather than inspecting the value means
+    /// a caller cannot forget it: there is no constructor that records a value
+    /// without stating whether it is secret or personal.
     #[must_use]
-    pub fn record(value: serde_json::Value, is_secret: bool) -> Self {
+    pub fn record(value: serde_json::Value, class: ImageClass) -> Self {
         // @cpt-begin:cpt-cf-settings-service-algo-audit-store-append:p1:inst-as-append-1
-        if is_secret {
-            Self::Masked
-        } else {
-            Self::Clear(value)
+        match class {
+            ImageClass::Public => Self::Clear(value),
+            ImageClass::Pii => Self::Pii(value),
+            ImageClass::Secret => Self::Masked,
         }
         // @cpt-end:cpt-cf-settings-service-algo-audit-store-append:p1:inst-as-append-1
+    }
+
+    /// Record a declaration's snapshot, classed by the classification the
+    /// snapshot itself carries — the one the declaration had at that moment,
+    /// which is what decides whether its Schema Default is personal data.
+    #[must_use]
+    pub fn definition(snapshot: serde_json::Value) -> Self {
+        let class = snapshot
+            .get("data_classification")
+            .and_then(serde_json::Value::as_str)
+            .map_or(ImageClass::Pii, ImageClass::of_definition);
+        Self::record(snapshot, class)
+    }
+
+    /// Whether this image holds personal data.
+    #[must_use]
+    pub fn is_pii(&self) -> bool {
+        matches!(self, Self::Pii(_))
     }
 }
 
@@ -333,6 +398,18 @@ pub struct StoredAuditRecord {
     pub occurred_at: OffsetDateTime,
     /// The explicit retention horizon, when one was given.
     pub retain_until: Option<OffsetDateTime>,
+}
+
+impl StoredAuditRecord {
+    /// Whether either image holds personal data, so a reader's entitlement
+    /// decides what it is shown.
+    #[must_use]
+    pub fn has_pii_image(&self) -> bool {
+        [&self.pre_image, &self.post_image]
+            .into_iter()
+            .flatten()
+            .any(AuditValue::is_pii)
+    }
 }
 
 /// The sink every mutation writes through.
