@@ -624,29 +624,27 @@ async fn a_contributed_declaration_is_not_admin_editable_or_retirable() {
     assert_eq!(h.load(id).await.status, "active");
 }
 
-#[tokio::test]
-async fn a_retired_contributed_declaration_is_not_revived_by_an_administrative_create() {
-    // Nothing reserves the `settings` package an admin key is composed with,
-    // so a module's retired contribution can sit at exactly the key an
-    // administrative create composes.
-    let h = Harness::verified().await;
-    let key = SettingKey::contributed("acme", "settings", "network", "proxy", NonZeroU32::MIN)
-        .expect("key");
+/// A module's declaration at the key an administrative create composes.
+/// Nothing reserves the `settings` package an admin key is composed with, so
+/// a module may contribute exactly `acme.settings.network.<name>.v1~`.
+async fn contributed_at_the_admin_key(h: &Harness, name: &str) -> Uuid {
+    let key =
+        SettingKey::contributed("acme", "settings", "network", name, NonZeroU32::MIN).expect("key");
     assert_eq!(
         key.as_str(),
-        SettingKey::compose("acme", "network", "proxy")
+        SettingKey::compose("acme", "network", name)
             .expect("admin key")
             .as_str(),
         "the module's key is the one an administrator composes"
     );
     let conn = h.base.db.conn().expect("connection");
-    let id = DeclarationRepo
+    DeclarationRepo
         .insert(
             &conn,
             &AccessScope::allow_all(),
             DeclarationDraft {
                 key: key.to_string(),
-                leaf_slug: "proxy".to_owned(),
+                leaf_slug: name.to_owned(),
                 value_type_id: BOOL.to_owned(),
                 category_id: h.base.category_id(),
                 default_value: json!(true),
@@ -666,42 +664,82 @@ async fn a_retired_contributed_declaration_is_not_revived_by_an_administrative_c
         )
         .await
         .expect("contributed")
-        .id;
-    h.base.retire(id).await;
+        .id
+}
 
-    // Same value type, scope class and secret trait: only the owner stands
-    // between this request and a revive.
-    let err = h
-        .create(h.request("proxy"), &admin_actor())
-        .await
-        .expect_err("contributed");
-    match err {
-        DomainError::Conflict { detail } => assert!(
-            detail.starts_with(super::conflict::CONTRIBUTED_IMMUTABLE),
-            "{detail}"
-        ),
-        other => panic!("{other:?}"),
-    }
-    // A retype is refused for the same reason, not as a retype: who may change
-    // the row at all is judged first.
-    let mut retype = h.request("proxy");
+/// Requests that differ from the contributed row in whatever an
+/// administrator might send: the same shape, a retype, a value type the
+/// registry does not know, a classification the type contradicts.
+fn requests_at_a_contributed_key(
+    h: &Harness,
+    name: &str,
+) -> Vec<(&'static str, CreateDeclaration)> {
+    let same = h.request(name);
+    let mut retype = h.request(name);
     retype.value_type_id = TEXT.to_owned();
     retype.default_value = json!("");
-    let err = h
-        .create(retype, &admin_actor())
-        .await
-        .expect_err("contributed");
+    let mut unknown = h.request(name);
+    unknown.value_type_id = "gts.cf.core.settings.type_nowhere.v1~".to_owned();
+    let mut contradicted = h.request(name);
+    contradicted.data_classification = Some("secret".to_owned());
+    vec![
+        ("the same shape", same),
+        ("a retype", retype),
+        ("an unknown value type", unknown),
+        ("a contradicted classification", contradicted),
+    ]
+}
+
+fn assert_contributed_immutable(err: DomainError, what: &str) {
     match err {
         DomainError::Conflict { detail } => assert!(
             detail.starts_with(super::conflict::CONTRIBUTED_IMMUTABLE),
-            "{detail}"
+            "{what}: {detail}"
         ),
-        other => panic!("{other:?}"),
+        other => panic!("{what}: the owner's refusal first, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_retired_contributed_declaration_is_not_revived_by_an_administrative_create() {
+    // Who may change the row at all is judged before anything about the
+    // request is resolved: whatever the administrator sends, the answer is
+    // the owner's — not a retype, an unknown type or a classification
+    // conflict standing in front of it.
+    let h = Harness::verified().await;
+    let id = contributed_at_the_admin_key(&h, "proxy").await;
+    h.base.retire(id).await;
+
+    for (what, request) in requests_at_a_contributed_key(&h, "proxy") {
+        let err = h.create(request, &admin_actor()).await.expect_err(what);
+        assert_contributed_immutable(err, what);
     }
     let row = h.load(id).await;
     assert_eq!(row.status, "retired");
     assert_eq!(row.default_value, json!(true));
     assert_eq!(row.owner_module.as_deref(), Some("module-x"));
+    assert!(h.audit.records().is_empty(), "nothing audited");
+}
+
+#[tokio::test]
+async fn an_active_contributed_declaration_is_not_evolved_by_an_administrative_create() {
+    // The same answer on the evolution path, and ahead of step-up: a change
+    // that cannot go through is refused, not challenged. The harness has no
+    // step-up verifier, so a challenge would be the answer if it came first.
+    let h = Harness::new().await;
+    let id = contributed_at_the_admin_key(&h, "proxy").await;
+
+    for (what, request) in requests_at_a_contributed_key(&h, "proxy") {
+        let err = h.create(request, &admin_actor()).await.expect_err(what);
+        assert_contributed_immutable(err, what);
+    }
+    let row = h.load(id).await;
+    assert_eq!(row.status, "active");
+    assert_eq!(row.default_value, json!(true));
+    assert!(
+        h.by_key(&row.key.replace(".v1~", ".v2~")).await.is_none(),
+        "no major minted"
+    );
     assert!(h.audit.records().is_empty(), "nothing audited");
 }
 

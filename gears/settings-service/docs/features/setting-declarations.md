@@ -208,7 +208,7 @@ The hardest constraint here is not any single field but the rule connecting them
 4. [x] - `p1` - Construct the key and look up an existing declaration at that key - `inst-decl-react-4`
 5. [x] - `p1` - **IF** no row exists → continue as an ordinary create - `inst-decl-react-5`
 6. [x] - `p1` - **IF** a row exists with `status` = 'active' → **RETURN** `409` for the duplicate key; an active declaration anywhere on the setting's version-stripped path is found first and the request is an evolution or a `409` (Evolve Declaration), so a revive considers only a path with no active major - `inst-decl-react-6`
-7. [x] - `p1` - **IF** the retired declaration is `module_contributed` → **RETURN** `409 ContributedDeclarationImmutable`, nothing written: a gear's declaration changes only through its owning module, a revive would replace its Schema Default and metadata, and the `settings` package an admin key is composed with is not reserved from modules — judged before the refusals below - `inst-decl-react-15`
+7. [x] - `p1` - **IF** the retired declaration is `module_contributed` → **RETURN** `409 ContributedDeclarationImmutable`, nothing written: a gear's declaration changes only through its owning module, a revive would replace its Schema Default and metadata, and the `settings` package an admin key is composed with is not reserved from modules — judged right after the key is looked up, before the request's value type, classification or default is resolved and before step-up, so no refusal about them stands in front of it - `inst-decl-react-15`
 8. [x] - `p1` - Require a valid credential step-up assertion, because reactivation changes whether a live setting resolves - `inst-decl-react-7`
 9. [x] - `p1` - **IF** step-up is absent or invalid → **RETURN** `403` - `inst-decl-react-8`
 10. [x] - `p1` - **IF** the re-declaration flips the secret trait, changes the Scope Class or names a different `value_type_id` → **RETURN** `409` naming which, nothing written — judged before the Schema Default is validated, so a revive that cannot happen is refused as such rather than for a default that does not fit a type it could never adopt: the first two would move stored values rather than re-interpret them, and the setting's own GTS type is registered with its value type, which the Types Registry does not replace - `inst-decl-react-13`
@@ -235,12 +235,13 @@ The hardest constraint here is not any single field but the rule connecting them
 
 **Steps**:
 1. [x] - `p1` - Look up every declaration on the request's version-stripped path — `(vendor, category, leaf name)`, whatever the major or status; **IF** one is active, the request is an evolution rather than a create or a revive - `inst-decl-evolve-1`
-2. [x] - `p1` - **IF** the request changes none of the value type, the Schema Default and the scope class of the active declaration → **RETURN** `409` for the duplicate key - `inst-decl-evolve-2`
-3. [x] - `p1` - Require a valid credential step-up assertion, because evolution retires a live setting's current major; **IF** absent or invalid → **RETURN** `401`/`403` - `inst-decl-evolve-3`
-4. [x] - `p1` - **IF** the active declaration is contributed by a gear → **RETURN** `409`; **IF** the new value type flips the secret trait → **RETURN** `409`, since stored values would be re-interpreted rather than moved - `inst-decl-evolve-4`
-5. [x] - `p1` - Mint the next free major: one above the highest major the path has ever used, retired ones included, composed as `<vendor>.settings.<category>.<name>.vN~` - `inst-decl-evolve-5`
-6. [x] - `p1` - In one transaction: retire the active predecessor and record it; insert the successor at the new key — its own GTS setting type registered first, its create recorded; copy every predecessor value to it at the same scope under an update lock, re-validating each against the new value type and flagging what fails `needs_review` with its detail, never coercing or dropping it - `inst-decl-evolve-6`
-7. [x] - `p1` - Invalidate the local cache for both keys, and **RETURN** `200` with the successor and `evolved: true` - `inst-decl-evolve-7`
+2. [x] - `p1` - **IF** the active declaration is contributed by a gear → **RETURN** `409 ContributedDeclarationImmutable`, nothing written — judged before anything about the request is resolved and before step-up, since it decides who may change the row at all; a gear's declaration evolves when that gear registers a new major - `inst-decl-evolve-8`
+3. [x] - `p1` - **IF** the request changes none of the value type, the Schema Default and the scope class of the active declaration → **RETURN** `409` for the duplicate key - `inst-decl-evolve-2`
+4. [x] - `p1` - Require a valid credential step-up assertion, because evolution retires a live setting's current major; **IF** absent or invalid → **RETURN** `401`/`403` - `inst-decl-evolve-3`
+5. [x] - `p1` - **IF** the new value type flips the secret trait → **RETURN** `409`, since stored values would be re-interpreted rather than moved - `inst-decl-evolve-4`
+6. [x] - `p1` - Mint the next free major: one above the highest major the path has ever used, retired ones included, composed as `<vendor>.settings.<category>.<name>.vN~` - `inst-decl-evolve-5`
+7. [x] - `p1` - In one transaction: retire the active predecessor and record it; insert the successor at the new key — its own GTS setting type registered first, its create recorded; copy every predecessor value to it at the same scope under an update lock, re-validating each against the new value type and flagging what fails `needs_review` with its detail, never coercing or dropping it - `inst-decl-evolve-6`
+8. [x] - `p1` - Invalidate the local cache for both keys, and **RETURN** `200` with the successor and `evolved: true` - `inst-decl-evolve-7`
 
 ### Declare Dependency Group
 
@@ -553,7 +554,8 @@ The system **MUST** emit an audit record through the Audit Emitter for every dec
 - [x] A `PATCH` loosening `data_classification` from `pii` to `public` without step-up returns `403`, and succeeds with a valid step-up assertion
 - [x] A `PATCH` clearing `requires_step_up` or enabling `anonymous_exposable` without step-up returns `403` and leaves the flag unchanged; the opposite edits apply immediately
 - [x] A `PATCH` on a `module_contributed` declaration returns a contributed-immutable conflict
-- [x] Re-declaring a retired `module_contributed` declaration at its key returns a contributed-immutable conflict — before a retype refusal — and leaves it retired with its Schema Default and owner
+- [x] Re-declaring a retired `module_contributed` declaration at its key returns a contributed-immutable conflict whatever the request names — the same shape, a retype, an unknown value type, a contradicted classification — and leaves it retired with its Schema Default and owner
+- [x] Re-declaring an active `module_contributed` declaration returns a contributed-immutable conflict whatever the request names, without asking for step-up, and mints no major
 - [x] A `PATCH` without `If-Match` returns `428`, and with a stale `If-Match` returns `412`
 - [x] Retiring a declaration without step-up returns `403`
 - [x] Retiring a declaration sets `status` to `retired`, leaves every row in `setting_values` intact, and does not go through the value write path

@@ -467,6 +467,46 @@ where
             .find_by_key(conn, scope, key.as_str())
             .await?;
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-4
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-1
+        // The active declaration on the version-stripped path comes first,
+        // whatever its major: after `v1 → v2` the composed `v1` key is retired,
+        // and looking it up alone would revive it beside the live `v2`.
+        let on_path = self.declarations_on_path(conn, scope, &key).await?;
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-1
+        let active = on_path.iter().find(|d| d.status == "active");
+        let retired = if active.is_none() {
+            existing.as_ref().filter(|d| d.status == "retired")
+        } else {
+            None
+        };
+        // Who may change the row at all is judged before anything about the
+        // request is resolved: a gear's declaration answers with its owner,
+        // whatever value type, classification or default the request names —
+        // no registry lookup and no classification rule stands in front of
+        // that answer — and ahead of step-up, which is asked only of a change
+        // that could go through. Nothing keeps a module out of the `settings`
+        // package an admin key is composed with, so its declaration can sit at
+        // this key or on this path.
+        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-8
+        if let Some(active) = active
+            && active.source == "module_contributed"
+        {
+            return Err(conflict(
+                conflict::CONTRIBUTED_IMMUTABLE,
+                format!(
+                    "`{}` is contributed by a gear; it evolves when that gear registers a new \
+                     major",
+                    active.key
+                ),
+            ));
+        }
+        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-8
+        if let Some(retired) = retired {
+            // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-15
+            // A revive would replace its Schema Default and metadata.
+            Self::refuse_contributed(retired)?;
+            // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-15
+        }
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-8
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-9
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-10
@@ -478,26 +518,10 @@ where
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-10
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-9
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-8
-        // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-1
-        // The active declaration on the version-stripped path comes first,
-        // whatever its major: after `v1 → v2` the composed `v1` key is retired,
-        // and looking it up alone would revive it beside the live `v2`.
-        let on_path = self.declarations_on_path(conn, scope, &key).await?;
-        // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-1
         // A revive's own refusals are about the retired row, not the default:
         // judged first, so a retype is refused as one rather than as a default
         // that does not fit the type it could never adopt.
-        if !on_path.iter().any(|d| d.status == "active")
-            && let Some(retired) = existing.as_ref().filter(|d| d.status == "retired")
-        {
-            // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-15
-            // A gear's declaration changes only through its owning module, and
-            // a revive would replace its Schema Default and metadata. Nothing
-            // keeps a module out of the `settings` package an admin key is
-            // composed with, so its retired contribution can sit at this key.
-            // Who may change the row at all comes before what may change.
-            Self::refuse_contributed(retired)?;
-            // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-reactivate:p1:inst-decl-react-15
+        if let Some(retired) = retired {
             revive_refusal(retired, &request, &derived)?;
         }
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-create:p1:inst-decl-create-11
@@ -826,16 +850,8 @@ where
         self.verify_step_up(actor).await?;
         // @cpt-end:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-3
         // @cpt-begin:cpt-cf-settings-service-flow-setting-declarations-evolve:p1:inst-decl-evolve-4
-        if active.source == "module_contributed" {
-            return Err(conflict(
-                conflict::CONTRIBUTED_IMMUTABLE,
-                format!(
-                    "`{}` is contributed by a gear; it evolves when that gear registers a new \
-                     major",
-                    active.key
-                ),
-            ));
-        }
+        // A contributed declaration never reaches this point: `create` refuses
+        // it before anything else.
         // A secret's values live by reference and everything else inline: a
         // copy across that boundary would re-interpret stored values, not move
         // them, exactly as a revive may not.
