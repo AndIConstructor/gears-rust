@@ -1023,8 +1023,14 @@ impl<
             token_estimate: u32::try_from(ts.token_estimate).unwrap_or(0),
         });
 
-        let recent_messages = match &thread_summary {
-            Some(ts) => {
+        // `None`: the chat had no live message when the snapshot was taken,
+        // so there is no history. Retry/edit take the snapshot before they
+        // insert the new user message but read history after it; an
+        // unbounded query would return that message and the provider would
+        // get the question twice.
+        let recent_messages = match (&thread_summary, snapshot_boundary) {
+            (_, None) => Ok(Vec::new()),
+            (Some(ts), snapshot_boundary @ Some(_)) => {
                 self.message_repo
                     .recent_after_boundary(
                         &conn,
@@ -1037,7 +1043,7 @@ impl<
                     )
                     .await
             }
-            None => {
+            (None, snapshot_boundary @ Some(_)) => {
                 self.message_repo
                     .recent_for_context(
                         &conn,
