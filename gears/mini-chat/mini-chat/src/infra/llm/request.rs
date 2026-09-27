@@ -338,6 +338,7 @@ impl LlmRequestBuilder {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod user_identity_tests {
     use super::UserIdentity;
 

@@ -535,5 +535,6 @@ impl crate::infra::llm::LlmProvider for VllmResponsesProvider {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "vllm_responses_tests.rs"]
 mod vllm_responses_tests;

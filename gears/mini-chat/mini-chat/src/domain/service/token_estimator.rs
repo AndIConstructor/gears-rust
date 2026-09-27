@@ -72,6 +72,7 @@ pub fn estimate_tokens(input: &EstimationInput, budgets: &EstimationBudgets) -> 
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

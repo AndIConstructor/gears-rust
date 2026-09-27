@@ -540,5 +540,6 @@ pub fn llm_request(model: impl Into<String>) -> LlmRequestBuilder {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "mod_tests.rs"]
 mod mod_tests;

@@ -175,6 +175,7 @@ impl VectorStoreProvider for DispatchingVectorStore {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::sync::Mutex;
 

@@ -828,5 +828,6 @@ fn unwrap_mutation_err(e: toolkit_db::DbError) -> MutationError {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "turn_service_test.rs"]
 mod tests;

@@ -268,6 +268,7 @@ fn map_db_err(db_err: &sea_orm::DbErr) -> DomainError {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::DomainError;
 

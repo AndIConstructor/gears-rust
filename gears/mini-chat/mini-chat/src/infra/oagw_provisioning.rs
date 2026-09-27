@@ -729,6 +729,7 @@ fn extract_query_allowlist(api_path: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

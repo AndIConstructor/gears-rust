@@ -87,6 +87,7 @@ pub fn credits_micro_checked(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

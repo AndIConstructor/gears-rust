@@ -967,6 +967,7 @@ fn requester_type_label(requester_type: mini_chat_sdk::RequesterType) -> &'stati
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod trigger_tests {
     use super::should_trigger_summary;
 
@@ -1026,6 +1027,7 @@ mod trigger_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::domain::llm::Usage;

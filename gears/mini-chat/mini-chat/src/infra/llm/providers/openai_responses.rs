@@ -1175,5 +1175,6 @@ impl crate::infra::llm::LlmProvider for OpenAiResponsesProvider {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "openai_responses_tests.rs"]
 mod openai_responses_tests;

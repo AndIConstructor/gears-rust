@@ -142,6 +142,7 @@ fn log_worker_result(name: &str, result: Result<anyhow::Result<()>, tokio::task:
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::sync::Arc;

@@ -1496,6 +1496,7 @@ async fn send_finalization_failed_error(tx: &mpsc::Sender<StreamEvent>) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

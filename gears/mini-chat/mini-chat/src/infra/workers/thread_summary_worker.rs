@@ -748,6 +748,7 @@ fn is_context_length_error(e: &crate::infra::llm::LlmProviderError) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use toolkit_db::outbox::LeasedMessageHandler;

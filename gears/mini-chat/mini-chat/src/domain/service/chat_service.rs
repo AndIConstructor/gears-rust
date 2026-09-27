@@ -444,5 +444,6 @@ fn validate_title(title: Option<&str>) -> Result<(), DomainError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "chat_service_test.rs"]
 mod tests;

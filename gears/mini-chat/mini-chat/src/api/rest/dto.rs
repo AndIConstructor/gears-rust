@@ -466,3 +466,59 @@ pub struct EditTurnRequest {
 }
 
 impl toolkit::api::api_dto::RequestApiDto for EditTurnRequest {}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::domain::models::ReactionKind;
+    use crate::infra::db::entity::attachment::{AttachmentKind, AttachmentStatus};
+
+    fn wire<T: serde::Serialize>(v: T) -> String {
+        serde_json::to_value(v)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// Stored strings map to the enum values the schema documents; the wire
+    /// value equals the stored one.
+    #[test]
+    fn stored_strings_map_to_wire_enums() {
+        for role in ["user", "assistant", "system"] {
+            assert_eq!(wire(MessageRoleDto::from_db(role)), role);
+        }
+        for status in ["pending", "uploaded", "ready", "failed"] {
+            assert_eq!(wire(AttachmentStatusDto::from_db(status)), status);
+        }
+        for kind in ["document", "image"] {
+            assert_eq!(wire(AttachmentKindDto::from_db(kind)), kind);
+        }
+    }
+
+    #[test]
+    fn entity_enums_map_to_wire_enums() {
+        assert_eq!(wire(ReactionKindDto::from(ReactionKind::Like)), "like");
+        assert_eq!(
+            wire(ReactionKindDto::from(ReactionKind::Dislike)),
+            "dislike"
+        );
+        for (status, expected) in [
+            (AttachmentStatus::Pending, "pending"),
+            (AttachmentStatus::Uploaded, "uploaded"),
+            (AttachmentStatus::Ready, "ready"),
+            (AttachmentStatus::Failed, "failed"),
+        ] {
+            assert_eq!(wire(AttachmentStatusDto::from(status)), expected);
+        }
+        assert_eq!(
+            wire(AttachmentKindDto::from(AttachmentKind::Document)),
+            "document"
+        );
+        assert_eq!(
+            wire(AttachmentKindDto::from(AttachmentKind::Image)),
+            "image"
+        );
+    }
+}

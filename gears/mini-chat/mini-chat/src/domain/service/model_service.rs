@@ -93,5 +93,6 @@ impl ModelService {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "model_service_test.rs"]
 mod tests;

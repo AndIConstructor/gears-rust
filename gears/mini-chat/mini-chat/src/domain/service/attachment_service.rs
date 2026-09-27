@@ -253,6 +253,8 @@ struct BackgroundIndexing<AR: AttachmentRepository + 'static> {
     provider_id: String,
     vector_store_id: String,
     provider_file_id: String,
+    /// [`BACKGROUND_INDEXING_TIMEOUT`]; shorter in tests.
+    timeout: std::time::Duration,
 }
 
 impl<AR: AttachmentRepository + 'static> BackgroundIndexing<AR> {
@@ -272,7 +274,7 @@ impl<AR: AttachmentRepository + 'static> BackgroundIndexing<AR> {
     /// refreshes `updated_at` so the upload reaper leaves the row alone.
     /// `None` when the row is gone or no longer `uploaded`.
     async fn wait(&self) -> Option<IndexingWait> {
-        let overall = tokio::time::Instant::now() + BACKGROUND_INDEXING_TIMEOUT;
+        let overall = tokio::time::Instant::now() + self.timeout;
         loop {
             if !self.heartbeat().await {
                 return None;
@@ -422,6 +424,8 @@ pub struct AttachmentService<
     /// Indexing deadline measured from the upload start
     /// ([`UPLOAD_INDEXING_DEADLINE`]).
     indexing_deadline: std::time::Duration,
+    /// Limit of the background indexing wait ([`BACKGROUND_INDEXING_TIMEOUT`]).
+    background_indexing_timeout: std::time::Duration,
 }
 
 impl<
@@ -465,12 +469,19 @@ impl<
             metrics,
             anthropic_files_client,
             indexing_deadline: UPLOAD_INDEXING_DEADLINE,
+            background_indexing_timeout: BACKGROUND_INDEXING_TIMEOUT,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_indexing_deadline(mut self, deadline: std::time::Duration) -> Self {
         self.indexing_deadline = deadline;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_background_indexing_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.background_indexing_timeout = timeout;
         self
     }
 
@@ -1688,6 +1699,7 @@ impl<
                             provider_id: provider_id.clone(),
                             vector_store_id: vs_id.clone(),
                             provider_file_id: provider_file_id.clone(),
+                            timeout: self.background_indexing_timeout,
                         }
                         .run(),
                     );
@@ -1880,5 +1892,6 @@ impl<
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "attachment_service_test.rs"]
 mod tests;

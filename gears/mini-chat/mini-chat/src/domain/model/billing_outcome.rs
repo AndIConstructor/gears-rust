@@ -146,6 +146,7 @@ pub fn derive_billing_outcome(input: &BillingDerivationInput) -> BillingDerivati
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

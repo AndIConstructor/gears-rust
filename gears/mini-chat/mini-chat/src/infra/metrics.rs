@@ -986,5 +986,6 @@ impl MiniChatMetricsPort for MiniChatMetricsMeter {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "metrics_tests.rs"]
 mod metrics_tests;

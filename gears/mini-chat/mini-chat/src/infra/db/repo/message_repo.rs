@@ -566,5 +566,6 @@ fn upper_bound_filter(b: SnapshotBoundary) -> Condition {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "message_repo_test.rs"]
 mod tests;

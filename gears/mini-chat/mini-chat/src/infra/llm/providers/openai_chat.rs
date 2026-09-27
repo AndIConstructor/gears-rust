@@ -827,6 +827,7 @@ impl crate::infra::llm::LlmProvider for OpenAiChatProvider {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::infra::llm::{LlmMessage, llm_request};
@@ -1405,5 +1406,49 @@ mod tests {
         let body = build_request_body(&request, true);
 
         assert!(body.get("tools").is_none());
+    }
+
+    fn sampling(
+        temperature: Option<f64>,
+        top_p: Option<f64>,
+        penalty: Option<f64>,
+    ) -> mini_chat_sdk::ModelApiParams {
+        mini_chat_sdk::ModelApiParams {
+            temperature,
+            top_p,
+            frequency_penalty: penalty,
+            presence_penalty: penalty,
+            stop: vec![],
+            extra_body: None,
+            reasoning_effort: None,
+        }
+    }
+
+    /// Each sampling parameter is sent only when the model config sets it.
+    #[test]
+    fn api_params_sampling_sent_only_when_set() {
+        let set = llm_request("gpt-4o")
+            .message(LlmMessage::user("Hi"))
+            .api_params(sampling(Some(0.3), None, Some(0.1)))
+            .build_streaming();
+        let body = build_request_body(&set, true);
+        assert_eq!(body["temperature"], 0.3);
+        assert_eq!(body["frequency_penalty"], 0.1);
+        assert_eq!(body["presence_penalty"], 0.1);
+        assert!(body.get("top_p").is_none(), "{body}");
+
+        let unset = llm_request("gpt-4o")
+            .message(LlmMessage::user("Hi"))
+            .api_params(sampling(None, None, None))
+            .build_streaming();
+        let body = build_request_body(&unset, true);
+        for key in [
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+        ] {
+            assert!(body.get(key).is_none(), "{key} must not be sent: {body}");
+        }
     }
 }

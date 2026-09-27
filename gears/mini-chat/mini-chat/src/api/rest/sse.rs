@@ -213,6 +213,7 @@ impl StreamPhase {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::domain::stream_events::{DoneData, ErrorData};

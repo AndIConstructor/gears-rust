@@ -563,7 +563,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
         let max_output_tokens_cap = input.max_output_tokens_cap;
         let candidate_reserve = move |entry: &ModelCatalogEntry| -> i64 {
             credits_micro_checked(
-                estimate_input_tokens(&catalog_budgets(Some(entry), floor), entry),
+                estimate_input_tokens(&catalog_budgets(entry, floor), entry),
                 u64::from(std::cmp::min(
                     entry.max_output_tokens,
                     max_output_tokens_cap,
@@ -734,7 +734,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
 
                             // Recompute the estimate with the effective model's
                             // budgets, and credits with its multipliers and max_output.
-                            let model_estimation_budgets = catalog_budgets(Some(eff_entry), floor);
+                            let model_estimation_budgets = catalog_budgets(eff_entry, floor);
                             let estimated_input =
                                 estimate_input_tokens(&model_estimation_budgets, eff_entry);
                             let final_reserved = credits_micro_checked(
@@ -1208,15 +1208,8 @@ impl<QR: QuotaUsageRepository> QuotaService<QR> {
 }
 
 /// Estimation budgets of a catalog entry, with the deployment-level
-/// `minimal_generation_floor`. A model missing from the catalog uses the
-/// default budgets.
-fn catalog_budgets(entry: Option<&ModelCatalogEntry>, floor: u32) -> EstimationBudgets {
-    let Some(entry) = entry else {
-        return EstimationBudgets {
-            minimal_generation_floor: floor,
-            ..EstimationBudgets::default()
-        };
-    };
+/// `minimal_generation_floor`.
+fn catalog_budgets(entry: &ModelCatalogEntry, floor: u32) -> EstimationBudgets {
     let b = &entry.estimation_budgets;
     EstimationBudgets {
         bytes_per_token_conservative: b.bytes_per_token_conservative,
@@ -1231,6 +1224,7 @@ fn catalog_budgets(entry: Option<&ModelCatalogEntry>, floor: u32) -> EstimationB
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::domain::service::test_helpers::{TestCatalogEntryParams, test_catalog_entry};

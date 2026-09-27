@@ -316,6 +316,7 @@ fn default_cleanup_max_attempts() -> u32 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

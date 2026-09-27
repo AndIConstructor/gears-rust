@@ -3499,6 +3499,132 @@ async fn test_background_indexing_failure_marks_attachment_failed() {
     panic!("provider file was not deleted");
 }
 
+/// The background wait gives up after its limit: the attachment becomes
+/// `failed` / `indexing_failed`.
+#[tokio::test]
+async fn test_background_indexing_timeout_marks_attachment_failed() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    let mut responses = vec![
+        Ok(file_upload_response("file-idx-006")),
+        Ok(vector_store_create_response("vs-idx-006")),
+    ];
+    responses.extend((0..40).map(|_| Ok(vector_store_file_response("in_progress"))));
+    let oagw = MockOagwGateway::with_responses(responses);
+    let svc = build_service(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+    )
+    .with_indexing_deadline(std::time::Duration::ZERO)
+    .with_background_indexing_timeout(std::time::Duration::from_millis(600));
+
+    let attachment = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await
+    .expect("upload returns while indexing continues");
+    assert_eq!(
+        attachment.status,
+        crate::infra::db::entity::attachment::AttachmentStatus::Uploaded
+    );
+
+    let row = wait_for_row(&db_prov, |r| {
+        r.status == crate::infra::db::entity::attachment::AttachmentStatus::Failed
+    })
+    .await;
+    assert_eq!(row.error_code.as_deref(), Some("indexing_failed"));
+}
+
+/// An attachment deleted while the background wait runs is left to the
+/// delete path: the wait neither marks it failed nor deletes its provider
+/// file, even past its limit.
+#[tokio::test]
+async fn test_background_indexing_leaves_deleted_row_alone() {
+    use crate::infra::db::entity::attachment::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use toolkit_db::secure::SecureUpdateExt;
+
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    // Only `in_progress` answers: the wait would run until its limit unless
+    // it stops on the deleted row.
+    let mut responses = vec![
+        Ok(file_upload_response("file-idx-007")),
+        Ok(vector_store_create_response("vs-idx-007")),
+    ];
+    responses.extend((0..40).map(|_| Ok(vector_store_file_response("in_progress"))));
+    let oagw = MockOagwGateway::with_responses(responses);
+    let svc = build_service(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+    )
+    .with_indexing_deadline(std::time::Duration::ZERO)
+    .with_background_indexing_timeout(std::time::Duration::from_secs(2));
+
+    let attachment = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await
+    .expect("upload returns while indexing continues");
+
+    let conn = db_prov.conn().unwrap();
+    Entity::update_many()
+        .col_expr(
+            Column::DeletedAt,
+            Expr::value(Some(time::OffsetDateTime::now_utc())),
+        )
+        .filter(Column::Id.eq(attachment.id))
+        .secure()
+        .scope_with(&toolkit_security::AccessScope::allow_all())
+        .exec(&conn)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    assert!(
+        !oagw
+            .captured_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.uri.contains("/v1/files/file-idx-007")),
+        "the background wait must not delete the provider file"
+    );
+    let row = only_attachment_row(&db_prov).await;
+    assert_eq!(
+        row.status,
+        crate::infra::db::entity::attachment::AttachmentStatus::Uploaded
+    );
+    assert!(row.error_code.is_none(), "{:?}", row.error_code);
+}
+
 /// A transient failure of one status read does not fail the upload; the
 /// next read decides.
 #[tokio::test]

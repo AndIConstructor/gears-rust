@@ -196,5 +196,6 @@ async fn reap_one(deps: &UploadReaperDeps, row: AttachmentModel, cutoff: OffsetD
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "upload_reaper_tests.rs"]
 mod tests;

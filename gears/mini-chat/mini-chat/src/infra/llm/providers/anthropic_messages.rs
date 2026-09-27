@@ -1273,6 +1273,7 @@ fn build_complete_result(
 // ════════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::str_to_string)]
 mod tests {
     use oagw_sdk::sse::{FromServerEvent, ServerEvent};
@@ -2333,5 +2334,49 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0]["role"], "assistant");
         assert_eq!(msgs[1]["role"], "user");
+    }
+
+    fn sampling(
+        temperature: Option<f64>,
+        top_p: Option<f64>,
+        penalty: Option<f64>,
+    ) -> mini_chat_sdk::ModelApiParams {
+        mini_chat_sdk::ModelApiParams {
+            temperature,
+            top_p,
+            frequency_penalty: penalty,
+            presence_penalty: penalty,
+            stop: vec![],
+            extra_body: None,
+            reasoning_effort: None,
+        }
+    }
+
+    /// Anthropic rejects `temperature` together with `top_p`: a tuned `top_p`
+    /// (< 1.0) is sent alone; otherwise only `temperature`, when set.
+    #[test]
+    fn api_params_top_p_or_temperature() {
+        use crate::infra::llm::{LlmMessage, llm_request};
+        let body_for = |p| {
+            let r = llm_request("claude-sonnet")
+                .message(LlmMessage::user("Hi"))
+                .api_params(p)
+                .build_streaming();
+            build_request_body(&r, true)
+        };
+        let body = body_for(sampling(Some(0.5), Some(0.8), Some(0.1)));
+        assert_eq!(body["top_p"], 0.8);
+        assert!(body.get("temperature").is_none(), "{body}");
+        assert!(body.get("frequency_penalty").is_none(), "{body}");
+
+        let body = body_for(sampling(Some(0.5), Some(1.0), None));
+        assert_eq!(body["temperature"], 0.5);
+        assert!(body.get("top_p").is_none(), "{body}");
+
+        let body = body_for(sampling(None, None, None));
+        assert!(
+            body.get("temperature").is_none() && body.get("top_p").is_none(),
+            "{body}"
+        );
     }
 }

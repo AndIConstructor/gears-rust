@@ -538,6 +538,7 @@ impl toolkit_db::outbox::LeasedMessageHandler for AuditEventHandler {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use mini_chat_sdk::{

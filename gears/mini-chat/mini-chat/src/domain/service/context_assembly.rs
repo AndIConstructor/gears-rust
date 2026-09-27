@@ -433,6 +433,7 @@ fn build_system_instructions(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -1275,6 +1276,32 @@ mod tests {
         // available = 128_000 - 4096 - 1000 (code_interpreter) - 100 (overhead)
         let available = compute_available_budget(&budget).unwrap();
         assert_eq!(available, 128_000 - 4096 - 1000 - 100);
+    }
+
+    // Tool surcharges and the fixed overhead that use up the whole input
+    // limit leave no room for history: BudgetExceeded, not a zero budget.
+    #[test]
+    fn deductions_filling_the_input_limit_exceed_budget() {
+        let budget = TokenBudget {
+            context_window: 128_000,
+            max_output_tokens_applied: 4096,
+            // input limit 1100 = code_interpreter surcharge 1000 + overhead 100
+            max_input_tokens: 1100,
+            budgets: test_budgets(),
+            tools_enabled: false,
+            web_search_enabled: false,
+            code_interpreter_enabled: true,
+        };
+        match compute_available_budget(&budget) {
+            Err(ContextAssemblyError::BudgetExceeded {
+                required_tokens,
+                available_tokens,
+            }) => {
+                assert_eq!(required_tokens, 1100);
+                assert_eq!(available_tokens, 1100);
+            }
+            other => panic!("expected BudgetExceeded, got {other:?}"),
+        }
     }
 
     // ── Image inlining tests ──

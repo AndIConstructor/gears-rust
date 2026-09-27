@@ -231,6 +231,7 @@ impl ProviderResolver {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use toolkit_canonical_errors::CanonicalError;

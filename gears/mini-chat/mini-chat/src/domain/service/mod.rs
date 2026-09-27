@@ -36,6 +36,7 @@ mod reaction_service;
 pub(crate) mod replay;
 mod stream_service;
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) mod test_helpers;
 pub(crate) mod thumbnail;
 pub(crate) mod token_estimator;

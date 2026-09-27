@@ -228,3 +228,24 @@ async fn start_mutation_stream(
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(30)))
         .into_response()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// The turn status endpoint reports `done` / `error` for the stored
+    /// `completed` / `failed` states.
+    #[test]
+    fn turn_state_maps_to_status_state() {
+        for (state, expected) in [
+            (TurnState::Running, "running"),
+            (TurnState::Completed, "done"),
+            (TurnState::Failed, "error"),
+            (TurnState::Cancelled, "cancelled"),
+        ] {
+            let value = serde_json::to_value(map_turn_state(&state)).unwrap();
+            assert_eq!(value, expected);
+        }
+    }
+}

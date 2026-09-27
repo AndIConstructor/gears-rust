@@ -224,6 +224,7 @@ fn orphan_input_from_turn(turn: &TurnModel) -> OrphanFinalizationInput {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use uuid::Uuid;

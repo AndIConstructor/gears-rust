@@ -129,6 +129,7 @@ async fn create_leader_elector() -> anyhow::Result<Arc<dyn LeaderElector>> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
