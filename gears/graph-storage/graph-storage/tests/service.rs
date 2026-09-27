@@ -2047,6 +2047,67 @@ async fn a_store_that_inherits_the_default_node_types_is_hydrated_and_filtered()
     assert_eq!(keys, ["kept", "seed"], "the filter applies after hydration");
 }
 
+/// Through the same inherited default, the phantom toggle is applied after
+/// hydration: a neighborhood that excludes phantoms and names no type filter
+/// still drops the phantom neighbour.
+///
+/// The traverse case above excludes the phantom by type, so a broken phantom
+/// toggle would hide behind the type filter there. This one has no type
+/// filter, and only the toggle can drop `ghost`.
+#[tokio::test]
+async fn a_store_that_inherits_the_default_node_types_still_excludes_phantoms() {
+    use graph_storage_sdk::models::NeighborhoodRequest;
+
+    let fake = Arc::new(graph_storage::infra::fake_store::FakeGraphStore::new());
+    let harness = Harness::configured_over_store(
+        Arc::new(support::without_node_types::StoreWithoutNodeTypes(
+            Arc::clone(&fake),
+        )),
+        fake,
+        Arc::new(support::AllowInOwnTenant),
+        GraphStorageConfig::default(),
+    );
+    let ctx = harness.ctx();
+    harness.seed_ontology(&ctx).await;
+    harness
+        .services
+        .ingest(
+            &ctx,
+            conformance::batch(
+                vec![
+                    conformance::node("seed", "seed"),
+                    conformance::node("kept", "kept"),
+                ],
+                vec![
+                    conformance::edge("seed", "kept"),
+                    conformance::edge("seed", "ghost"),
+                ],
+            ),
+        )
+        .await
+        .expect("the batch commits");
+    let walked = harness
+        .services
+        .neighborhood(
+            &ctx,
+            NeighborhoodRequest {
+                root: "seed".to_owned(),
+                depth: 1,
+                node_budget: None,
+                include_phantoms: false,
+            },
+        )
+        .await
+        .expect("the neighborhood answers through the inherited default");
+    let mut keys: Vec<&str> = walked.nodes.iter().map(|n| n.node_key.as_str()).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["kept", "seed"],
+        "the phantom is dropped by the toggle alone; nothing else filters here"
+    );
+}
+
 /// How many rows one piece asks for when the whole budget remains -- the
 /// widest a piece can be.
 fn budgeted_piece(budget: u64, item_ceiling: u64) -> u64 {

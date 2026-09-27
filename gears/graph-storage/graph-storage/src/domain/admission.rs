@@ -464,6 +464,18 @@ pub fn admit_projection(
     // counts are the bound a tree of one-character names would slip past
     // on bytes alone. Both are applied here; the six constants are the
     // extractor's own.
+    //
+    // The byte sums are a lower bound on the text REST would have measured,
+    // and deliberately so: the tree carries no separators, parentheses,
+    // quotes or keywords, `ast::Expr` has no serializer to recover them, and
+    // an estimate that overshot would refuse a query REST admits. The
+    // overshoot the other way is bounded by the counts: a node spells at
+    // most eight bytes of syntax (` and `, a pair of parentheses, a pair of
+    // quotes), an order key at most six (`,`, ` desc`), a select field one
+    // (`,`), so an in-process query admitted here is within
+    // `8 * MAX_NODES` bytes of `MAX_FILTER_LEN`, `6 * MAX_ORDER_FIELDS` of
+    // `MAX_ORDERBY_LEN` and `MAX_SELECT_FIELDS` of `MAX_SELECT_LEN` -- an
+    // accepted asymmetry, not an unbounded one.
     if let Some(filter) = filter {
         let (bytes, nodes) = filter_shape(filter);
         if bytes > toolkit::api::odata::MAX_FILTER_LEN {
@@ -966,5 +978,45 @@ mod tests {
         let refused = admit_projection(&cfg, &[], &query)
             .expect_err("more select fields than REST admits are refused");
         assert!(refused.to_string().contains("$select names"), "{refused}");
+
+        // And exactly at each count, admitted: the boundary REST accepts is
+        // the boundary this accepts, so an off-by-one cannot refuse a query
+        // the REST path serves.
+        let mut at_limit = Expr::Identifier("a".to_owned());
+        for _ in 1..toolkit::api::odata::MAX_NODES {
+            at_limit = !at_limit;
+        }
+        admit_projection(
+            &cfg,
+            &[],
+            &toolkit_odata::ODataQuery::default().with_filter(at_limit),
+        )
+        .expect("a filter with exactly MAX_NODES nodes is admitted");
+        let keys_at_limit = toolkit_odata::ODataOrderBy(
+            (0..toolkit::api::odata::MAX_ORDER_FIELDS)
+                .map(|_| toolkit_odata::OrderKey {
+                    field: "f".to_owned(),
+                    dir: toolkit_odata::SortDir::Asc,
+                })
+                .collect(),
+        );
+        admit_projection(
+            &cfg,
+            &[],
+            &toolkit_odata::ODataQuery::default().with_order(keys_at_limit),
+        )
+        .expect("exactly MAX_ORDER_FIELDS order keys are admitted");
+        let fields_at_limit: Vec<String> = (0..toolkit::api::odata::MAX_SELECT_FIELDS)
+            .map(|_| "s".to_owned())
+            .collect();
+        admit_projection(
+            &cfg,
+            &[],
+            &toolkit_odata::ODataQuery {
+                select: Some(fields_at_limit),
+                ..toolkit_odata::ODataQuery::default()
+            },
+        )
+        .expect("exactly MAX_SELECT_FIELDS select fields are admitted");
     }
 }
