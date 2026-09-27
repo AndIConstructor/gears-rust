@@ -163,9 +163,12 @@ fn unwrap_mutation_err(e: toolkit_db::DbError) -> DomainError {
 /// as abandoned. Provider vector-store creation takes seconds.
 const STALE_VECTOR_STORE_PLACEHOLDER: time::Duration = time::Duration::seconds(120);
 
-/// How long an upload waits for the vector store to index a document before
-/// the attachment is marked `failed` with `indexing_failed`.
-const INDEXING_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
+/// Time from the start of an upload until the vector store must have indexed
+/// the document; after it the attachment is marked `failed` with
+/// `indexing_failed`. The upload runs inside the request and api-gateway ends
+/// every request after 30 s, so the deadline leaves room to write the failed
+/// state and answer before that.
+const UPLOAD_INDEXING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
 /// First and maximum interval between indexing status polls (doubling).
 const INDEXING_POLL_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
 const INDEXING_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(2);
@@ -195,8 +198,9 @@ pub struct AttachmentService<
     /// configured — the parallel upload is skipped silently in that case.
     anthropic_files_client:
         Option<Arc<crate::infra::llm::providers::anthropic_files_client::AnthropicFilesClient>>,
-    /// Upper bound on waiting for vector store indexing ([`INDEXING_TIMEOUT`]).
-    indexing_timeout: std::time::Duration,
+    /// Indexing deadline measured from the upload start
+    /// ([`UPLOAD_INDEXING_DEADLINE`]).
+    indexing_deadline: std::time::Duration,
 }
 
 impl<
@@ -239,28 +243,28 @@ impl<
             thumbnail_config,
             metrics,
             anthropic_files_client,
-            indexing_timeout: INDEXING_TIMEOUT,
+            indexing_deadline: UPLOAD_INDEXING_DEADLINE,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn with_indexing_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.indexing_timeout = timeout;
+    pub(crate) fn with_indexing_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.indexing_deadline = deadline;
         self
     }
 
     /// Wait until the vector store finishes indexing the file. `Ok(())` on
     /// `completed`; `Err` with the reason on `failed` / `cancelled`, a
-    /// status read failure, or [`Self::indexing_timeout`].
+    /// status read failure, or `deadline`.
     async fn wait_for_indexing(
         &self,
         ctx: &SecurityContext,
+        deadline: tokio::time::Instant,
         provider_id: &str,
         vector_store_id: &str,
         provider_file_id: &str,
         mut status: VectorStoreFileStatus,
     ) -> Result<(), String> {
-        let deadline = tokio::time::Instant::now() + self.indexing_timeout;
         let mut delay = INDEXING_POLL_INITIAL;
         loop {
             match status {
@@ -270,23 +274,34 @@ impl<
             }
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                return Err(format!(
-                    "indexing not finished after {}s",
-                    self.indexing_timeout.as_secs()
-                ));
+                return Err("indexing not finished before the upload deadline".to_owned());
             }
             tokio::time::sleep(delay.min(deadline - now)).await;
             delay = (delay * 2).min(INDEXING_POLL_MAX);
-            status = self
-                .vector_store
-                .get_vector_store_file_status(
+            // The status read is bounded by the deadline. A transient failure
+            // (5xx, gateway error) keeps polling; any other error ends
+            // the wait.
+            let read = tokio::time::timeout_at(
+                deadline,
+                self.vector_store.get_vector_store_file_status(
                     ctx.clone(),
                     provider_id,
                     vector_store_id,
                     provider_file_id,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
+                ),
+            )
+            .await;
+            status = match read {
+                Err(_elapsed) => {
+                    return Err("indexing not finished before the upload deadline".to_owned());
+                }
+                Ok(Ok(status)) => status,
+                Ok(Err(FileStorageError::Unavailable { message })) => {
+                    tracing::debug!(error = %message, "indexing status read failed; polling again");
+                    VectorStoreFileStatus::InProgress
+                }
+                Ok(Err(e)) => return Err(e.to_string()),
+            };
         }
     }
 
@@ -981,6 +996,7 @@ impl<
         use crate::domain::mime_validation::structured_filename;
         use crate::domain::repos::InsertAttachmentParams;
 
+        let indexing_deadline = tokio::time::Instant::now() + self.indexing_deadline;
         let tenant_id = ctx.subject_tenant_id();
         let user_id = ctx.subject_id();
         let is_document = attachment_kind == AttachmentKind::Document;
@@ -1476,7 +1492,14 @@ impl<
             let indexing_err = match added {
                 Err(e) => Some(DomainError::from(e)),
                 Ok(status) => self
-                    .wait_for_indexing(ctx, &provider_id, &vs_id, &provider_file_id, status)
+                    .wait_for_indexing(
+                        ctx,
+                        indexing_deadline,
+                        &provider_id,
+                        &vs_id,
+                        &provider_file_id,
+                        status,
+                    )
                     .await
                     .err()
                     .map(|reason| {

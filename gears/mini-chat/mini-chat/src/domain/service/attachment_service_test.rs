@@ -3365,7 +3365,7 @@ async fn test_upload_indexing_failed_marks_attachment_failed() {
     assert_eq!(row.error_code.as_deref(), Some("indexing_failed"));
 }
 
-/// Indexing that does not finish within the timeout fails the upload.
+/// Indexing that does not finish before the upload deadline fails the upload.
 #[tokio::test]
 async fn test_upload_indexing_timeout_marks_attachment_failed() {
     let db = inmem_db().await;
@@ -3388,7 +3388,7 @@ async fn test_upload_indexing_timeout_marks_attachment_failed() {
         Arc::new(NoopOutboxEnqueuer),
         RagConfig::default(),
     )
-    .with_indexing_timeout(std::time::Duration::from_millis(300));
+    .with_indexing_deadline(std::time::Duration::from_millis(300));
 
     let err = test_upload_file(
         &svc,
@@ -3406,4 +3406,47 @@ async fn test_upload_indexing_timeout_marks_attachment_failed() {
     );
     let row = only_attachment_row(&db_prov).await;
     assert_eq!(row.error_code.as_deref(), Some("indexing_failed"));
+}
+
+/// A transient failure of one status read does not fail the upload; the
+/// next read decides.
+#[tokio::test]
+async fn test_upload_indexing_survives_transient_status_error() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    let oagw = MockOagwGateway::with_responses(vec![
+        Ok(file_upload_response("file-idx-004")),
+        Ok(vector_store_create_response("vs-idx-004")),
+        Ok(vector_store_file_response("in_progress")),
+        Err(CanonicalError::service_unavailable().create()),
+        Ok(vector_store_file_response("completed")),
+    ]);
+    let svc = build_service(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+    );
+
+    let attachment = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await
+    .expect("upload succeeds after the transient error");
+    assert_eq!(
+        attachment.status,
+        crate::infra::db::entity::attachment::AttachmentStatus::Ready
+    );
+    assert_eq!(oagw.captured_requests.lock().unwrap().len(), 5);
 }
