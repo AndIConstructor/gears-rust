@@ -428,6 +428,18 @@ def chat_cleanup_payloads(chat_id: str) -> list[dict]:
     ]
 
 
+def wait_for(predicate, what: str, timeout: float = 10.0, interval: float = 0.2):
+    """Poll `predicate()` until it returns a truthy value; return that value."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out after {timeout}s waiting for {what}")
+        time.sleep(interval)
+
+
 def wait_cleanup_terminal(attachment_ids: list[str], timeout: float = 20.0) -> dict[str, str]:
     """Poll until the cleanup_status of every attachment is `done` or `failed`;
     return {attachment_id: cleanup_status}."""

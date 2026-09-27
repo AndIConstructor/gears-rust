@@ -29,6 +29,7 @@ from .conftest import (
     usage_events,
     uuid_from_db,
     wait_cleanup_terminal,
+    wait_for,
 )
 from .mock_provider.responses import SCENARIOS, Scenario
 
@@ -1256,4 +1257,158 @@ class TestFileSearchToolEvents:
         assert rows == [{"file_search_completed_count": 1}], rows
         usage = usage_events(rid)
         assert [u["file_search_calls"] for u in usage] == [1], usage
+
+
+def _vector_store_id(chat_id: str) -> str:
+    rows = query_db("SELECT vector_store_id FROM chat_vector_stores WHERE chat_id = ?", (chat_id,))
+    assert len(rows) == 1 and rows[0]["vector_store_id"], rows
+    return rows[0]["vector_store_id"]
+
+
+@pytest.mark.usefixtures("offline_only")
+class TestUploadVectorStoreProviderMismatch:
+    """The chat's vector store belongs to another storage backend (DB seed)."""
+
+    @pytest.mark.timeout(30)
+    def test_upload_after_switch_to_other_provider_409(self, chat_with_model, mock_provider):
+        """A document uploaded in an Azure chat creates the chat's vector
+        store with the `azure` backend. With `chats.model` switched to the
+        OpenAI model gpt-5.2 in the DB, the next document is stored at
+        OpenAI, then the vector store step finds the azure store: 409
+        already_exists (chat resource, `resource_name` provider_mismatch)
+        with the fixed detail. The attachment is `failed` with
+        `vector_store_failed`, the store row is kept, no vector store is
+        written, and the file just stored at OpenAI is deleted."""
+        chat_id = chat_with_model(DEFAULT_MODEL)["id"]
+        _upload_ready(chat_id, "first.txt", b"stored with azure", "text/plain")
+        store = query_db(
+            "SELECT provider, vector_store_id FROM chat_vector_stores WHERE chat_id = ?", (chat_id,),
+        )
+        assert [r["provider"] for r in store] == ["azure"], store
+        assert exec_db("UPDATE chats SET model = ? WHERE id = ?", (STANDARD_MODEL, chat_id)) == 1
+
+        mock_provider.clear_captured_requests()
+        resp = _upload(chat_id, "second.txt", b"stored with openai", "text/plain")
+        body = assert_problem(resp, 409, "already_exists", resource_type=RESOURCE_CHAT)
+        assert body["detail"] == "chat vector store belongs to another provider", body
+        assert body["context"]["resource_name"] == "provider_mismatch", body
+
+        rows = query_db(
+            "SELECT status, error_code, provider_file_id FROM attachments "
+            "WHERE chat_id = ? AND filename = ?",
+            (chat_id, "second.txt"),
+        )
+        assert [(r["status"], r["error_code"]) for r in rows] == [
+            ("failed", "vector_store_failed"),
+        ], rows
+        assert query_db(
+            "SELECT provider, vector_store_id FROM chat_vector_stores WHERE chat_id = ?", (chat_id,),
+        ) == store
+        assert mock_provider.get_post_paths() == ["/v1/files"]
+        file_id = rows[0]["provider_file_id"]
+        wait_for(
+            lambda: ("DELETE", f"/v1/files/{file_id}") in mock_provider.get_request_paths(),
+            "the delete of the file stored at OpenAI",
+        )
+
+
+@pytest.mark.usefixtures("offline_only")
+class TestUploadFilename:
+    """The stored filename (handlers/attachments.rs, domain/mime_validation.rs)."""
+
+    def test_part_without_filename_is_named_upload(self, chat):
+        """A `file` part without `filename=` is stored as "upload"."""
+        chat_id = chat["id"]
+        resp = _raw_upload(chat_id, _multipart(("file", None, "text/plain", b"unnamed")), MULTIPART_CT)
+        assert resp.status_code == 201, resp.text
+        att = resp.json()
+        assert (att["filename"], att["content_type"], att["status"]) == (
+            "upload", "text/plain", "ready",
+        ), att
+        get = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att['id']}", timeout=10)
+        assert get.json()["filename"] == "upload", get.json()
+
+    def test_long_filename_truncated_keeping_extension(self, chat):
+        """A filename over 255 characters is cut to 255, keeping the
+        extension: 300 + ".txt" → 251 characters of the stem + ".txt"."""
+        chat_id = chat["id"]
+        att_id = _upload_ready(chat_id, "a" * 300 + ".txt", b"long name", "text/plain")
+        get = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+        assert get.json()["filename"] == "a" * 251 + ".txt", get.json()
+
+    def test_octet_stream_with_unknown_extension_400(self, chat, mock_provider):
+        """`application/octet-stream` is resolved from the extension; for an
+        unknown one (`.qqq`) it stays octet-stream, which is not a supported
+        type: 400 invalid_argument UNSUPPORTED_CONTENT_TYPE on `content_type`,
+        nothing stored, provider not called."""
+        chat_id = chat["id"]
+        mock_provider.clear_captured_requests()
+        resp = _upload(chat_id, "data.qqq", b"\x00\x01binary", "application/octet-stream")
+        body = assert_problem(
+            resp, 400, "invalid_argument", field_reason="UNSUPPORTED_CONTENT_TYPE",
+            resource_type=RESOURCE_ATTACHMENT,
+        )
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["content_type"], body
+        assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
+        assert mock_provider.get_post_paths() == []
+
+
+@pytest.mark.multi_provider
+@pytest.mark.usefixtures("offline_only")
+class TestAttachmentsInProviderRequest:
+    """Offline counterparts of the online attachment tests: the provider
+    request, not the model's answer."""
+
+    def test_document_and_image_in_one_request(self, provider_chat, mock_provider):
+        """10-24 (offline part): a message with a ready document and an image
+        sends one request with the text and `input_image` (the image's
+        provider file id) in the user message and the `file_search` tool on
+        the chat's vector store."""
+        chat_id = provider_chat["id"]
+        doc_id = _upload_ready(chat_id, "report.txt", b"The code word is FLAMINGO.", "text/plain")
+        img_id = _upload_ready(chat_id, "animal.png", make_minimal_png(), "image/png")
+
+        mock_provider.clear_captured_requests()
+        status, events, raw = stream_message(
+            chat_id, "What is in the image and the report?", attachment_ids=[doc_id, img_id],
+        )
+        assert status == 200, raw
+        expect_done(events)
+
+        (req,) = mock_provider.get_captured_requests()
+        user_items = [i for i in req["input"] if i.get("role") == "user"]
+        assert user_items[-1]["content"] == [
+            {"type": "input_text", "text": "What is in the image and the report?"},
+            {"type": "input_image", "file_id": provider_file_id(img_id)},
+        ]
+        assert [(t["type"], t["vector_store_ids"]) for t in req["tools"]] == [
+            ("file_search", [_vector_store_id(chat_id)]),
+        ], req["tools"]
+        assert req["metadata"]["feature"] == "file_search", req["metadata"]
+
+    @pytest.mark.timeout(30)
+    def test_medium_document_upload_and_stream(self, provider_chat, mock_provider):
+        """10-35 (offline part): a ~500 KB document goes through the
+        streaming upload: 201 `ready` with its exact size, its provider file
+        is added to the chat's vector store, and a message referencing it
+        sends `file_search` on that store and ends in `done`."""
+        chat_id = provider_chat["id"]
+        payload = b"The quick brown fox. " * 25_000
+        resp = _upload(chat_id, "medium_doc.txt", payload, "text/plain")
+        assert resp.status_code == 201, resp.text
+        att = resp.json()
+        assert (att["status"], att["size_bytes"]) == ("ready", len(payload)), att
+        vs_id = _vector_store_id(chat_id)
+        assert mock_provider.vector_store_file_ids(vs_id) == [provider_file_id(att["id"])]
+
+        mock_provider.clear_captured_requests()
+        status, events, raw = stream_message(
+            chat_id, "Summarize the attached document briefly.", attachment_ids=[att["id"]],
+        )
+        assert status == 200, raw
+        expect_done(events)
+        (req,) = mock_provider.get_captured_requests()
+        assert [(t["type"], t["vector_store_ids"]) for t in req["tools"]] == [
+            ("file_search", [vs_id]),
+        ], req["tools"]
 
