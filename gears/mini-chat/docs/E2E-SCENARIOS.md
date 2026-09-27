@@ -25,11 +25,24 @@ mode (the `offline_only` fixture or a `pytest.skip` at the start of the test): o
 mock is a no-op that records nothing. Rows marked "mock only" cover a defence-in-depth
 limit that a real provider never reaches (it stops at the model's `max_tool_calls`, 2 in
 config/base.yaml); only the mock can exceed it. `provider_chat` is parameterized over OpenAI
-(`gpt-5.2`, standard tier) and Azure (`azure-gpt-4.1`, premium tier).
+(`gpt-5.2`, standard tier) and Azure (`azure-gpt-4.1`, premium tier). In online mode every
+test timeout is raised to at least 300 s (conftest.py `ONLINE_MIN_TIMEOUT_SECS`).
 
-**`test_live_smoke.py` is online only** (module-level `online_only` marker). It runs against
-an already-running backend with real LLM calls and duplicates paths the offline suite covers
-with the mock provider. It is referenced below only where it is the sole coverage.
+**Best-effort online tests** skip themselves when the real provider does not produce the
+feature (no citations in the answer, the provider timed out or rate-limited). A pass says
+the feature works when it shows up; a skip says nothing. They are listed as "(online only,
+best-effort)" and never as the only coverage of a scenario.
+
+**Daily periods:** usage is kept per UTC day. Tests that compare daily usage before and
+after a turn, or seed today's usage, use the `same_utc_day` fixture: it skips the test when
+less than its timeout plus 10 s is left before UTC midnight.
+
+**`test_live_smoke.py` is online only** (module-level `online_only` marker). It sends real
+LLM requests to the backend at `BASE_URL` (the rig in `--mode online`, or a backend started
+by hand with `E2E_BINARY=skip`) and repeats paths the offline suite covers with the mock
+provider. It is best-effort: it skips when the backend is not reachable, when the provider
+times out or rate-limits, and when the small-context model is not in the catalog. No row
+below uses it as coverage.
 
 **Error contract (ADR-0004):** pre-stream errors are canonical Problem JSON (`type` names the
 category, e.g. `invalid_argument`, `not_found`, `aborted`, `resource_exhausted`). Post-stream
@@ -46,7 +59,12 @@ that table cannot show that a message was never enqueued.
 **Mock provider paths:** the mock answers 404 to a path that neither configured provider uses
 (OpenAI under `/v1` without a query; Azure Files and Vector Stores under `/openai` with
 `api-version`; Azure Responses on `/openai/v1/responses`), and every test fails if such a
-request was made (conftest.py `reset_mock_provider_state`).
+request was made (conftest.py `reset_mock_provider_state`). It answers like the real API:
+every Responses event carries `type` and `sequence_number`; adding a file to a vector store
+answers `in_progress` and the next status read `completed` (a test can set other statuses);
+the uploaded file records the form's `purpose` and filename. Thread summary requests
+(non-streaming) are kept apart from the turn requests, so a summary sent in the background
+during a later test is not in that test's captured requests.
 
 ---
 
@@ -101,7 +119,7 @@ toggled per test.
 | 02-18 | List Ordered by Activity (send moves chat to top) | test_chat_crud.py    | TestListChats::test_send_moves_older_chat_to_top             |
 | 02-19 | Update Without Title (schema-invalid) → 422 `invalid_argument` | test_chat_crud.py | TestUpdateChat::test_update_without_title_is_422     |
 | 02-20 | Update with Malformed JSON → 400 `invalid_argument` | test_chat_crud.py  | TestUpdateChat::test_update_malformed_json_is_400            |
-| 02-21 | Full Conversation Lifecycle (3 turns, history, `message_count`, turn status, credits charged per turn, replay charges nothing, delete) | test_full_scenario.py | TestFullConversationScenario::test_full_conversation |
+| 02-21 | Full Conversation Lifecycle (3 turns, history, `message_count`, turn status, total daily usage grows by the sum of the three turns' costs, replay charges nothing, delete) | test_full_scenario.py | TestFullConversationScenario::test_full_conversation |
 | 02-22 | Create Title — Whitespace-Only → 400 `invalid_argument` | test_chat_crud.py | TestCreateChat::test_create_chat_whitespace_title_rejected |
 | 02-23 | Create with Schema-Invalid Body (`model: 123`) → 422 `invalid_argument` | test_chat_crud.py | TestCreateChat::test_create_chat_schema_invalid_is_422 |
 | 02-24 | Create with Malformed JSON → 400 `invalid_argument` | test_chat_crud.py | TestCreateChat::test_create_chat_malformed_json_is_400 |
@@ -123,7 +141,7 @@ toggled per test.
 | 03-04 | OData `$filter=role eq 'assistant'`: exactly the answers of two turns, in order | test_messages.py  | TestMessages::test_odata_filter_role               |
 | 03-05 | Message request_id Always Non-Null         | test_messages.py  | TestMessages::test_request_id_non_null             |
 | 03-06 | Attachments Array Always Present           | test_messages.py  | TestMessages::test_attachments_array_present       |
-| 03-07 | my_reaction Field on Assistant Messages    | test_messages.py  | TestMessages::test_my_reaction_field               |
+| 03-07 | `my_reaction` Present (required) on Every Message, null Without a Reaction | test_messages.py | TestMessages::test_my_reaction_field |
 | 03-08 | User + Assistant Messages Share request_id (every turn pair; each turn its own) | test_messages.py | TestMessages::test_request_id_shared_per_turn |
 | 03-09 | Unknown `$filter` Field → 400 `invalid_argument` (`INVALID_FILTER`) | test_messages.py | TestMessages::test_unknown_filter_field_400    |
 | 03-10 | Messages of Nonexistent Chat → 404 `not_found` | test_messages.py | TestMessages::test_messages_of_nonexistent_chat_404 |
@@ -155,9 +173,10 @@ toggled per test.
 | 04-09 | Messages Persisted After Stream: exactly the user message and the answer, in order, with the sent content, the `delta` text, the turn's request_id and an empty attachments array | test_streaming.py | TestMessages::test_messages_persisted_after_stream, TestMessages::test_user_message_content_matches |
 | 04-10 | Assistant Message Stores the Token Counts of `done` | test_streaming.py | TestMessages::test_assistant_message_has_tokens            |
 | 04-11 | Too Many Images per Message → 400 `out_of_range` | test_attachments.py | TestTooManyImages::test_too_many_images_rejected            |
-| 04-12 | Attachment of Another Chat, of a Failed Upload, or Listed Twice → 400 `invalid_argument` (`invalid_attachment`), no turn, provider not called | test_streaming.py | TestStreamInvalidAttachments::test_attachment_of_other_chat_rejected, TestStreamInvalidAttachments::test_failed_attachment_rejected, TestStreamInvalidAttachments::test_duplicate_attachment_ids_rejected |
+| 04-12 | Attachment of Another Chat, of a Failed Upload, Deleted, Still Uploading (`pending`), or Listed Twice → 400 `invalid_argument` (`invalid_attachment`), no turn, provider not called | test_streaming.py | TestStreamInvalidAttachments::test_attachment_of_other_chat_rejected, TestStreamInvalidAttachments::test_failed_attachment_rejected, TestStreamInvalidAttachments::test_deleted_attachment_rejected, TestStreamInvalidAttachments::test_pending_attachment_rejected, TestStreamInvalidAttachments::test_duplicate_attachment_ids_rejected |
 | 04-13 | Malformed JSON Body → 400 `invalid_argument` (JSON, not SSE) | test_streaming.py | TestStreamPreflightErrors::test_malformed_json_rejected |
 | 04-14 | Whitespace-Only Content → 400 `invalid_argument` (`EMPTY_CONTENT` on `content`: the content is trimmed), no turn | test_streaming.py | TestStreamPreflightErrors::test_whitespace_only_content_rejected |
+| 04-15 | Provider SSE Events Without `event:` Lines Are Dispatched by `data.type`: a plain answer and a web search answer (tool events, citations) complete with `done` | test_streaming.py | TestProviderEventsWithoutEventLine; unit tests: gears/mini-chat/mini-chat/src/infra/llm/providers/openai_responses_tests.rs (`parse_event_without_event_line_uses_data_type`) |
 
 ## 05 — SSE Event Contract
 
@@ -168,7 +187,7 @@ toggled per test.
 | 05-03 | stream_started: is_new_turn=false on Replay | test_stream_started.py | TestStreamStartedOnReplay::test_replay_emits_stream_started_with_is_new_turn_false |
 | 05-04 | Delta Events: type=text, content=string     | test_streaming.py      | TestStreamBasic::test_stream_has_delta_events, TestStreamBasic::test_stream_assembled_text_nonempty |
 | 05-05 | Tool Events: phase/name/details (web search: `web_search` `start` then `done`; code interpreter: `start`, then `done` with the logs output from `response.output_item.done`; file search: `file_search` `start` then `done`; exact values, offline) | test_web_search.py | TestWebSearchBasic::test_web_search_tool_events_name_and_phases; test_code_interpreter.py TestCodeInterpreterToolEvents::test_code_interpreter_has_start_and_done, TestCodeInterpreterToolEvents::test_code_interpreter_done_has_output; test_attachments.py TestFileSearchToolEvents::test_file_search_tool_events_and_counter |
-| 05-06 | Citations Event: items Array | test_web_search.py | TestWebSearchCitations; TestWebSearchOnline::test_citations_structure_if_present (online only) |
+| 05-06 | Citations Event: items Array | test_web_search.py | TestWebSearchCitations; TestWebSearchOnline::test_citations_structure_if_present (online only, best-effort: skips when the answer has no citations) |
 | 05-07 | File Citation (OpenAI shape: `file_id`, `filename`, `index`) → `attachment_id` and Filename, Empty `snippet`, No `span`, No Provider File ID; Unknown File Dropped | test_attachments.py | TestFileCitationMapping::test_file_citation_maps_to_attachment_id; TestUploadSearchCitationFlow::test_upload_search_citation_flow (online only) |
 | 05-08 | Done Event: Core Fields                     | test_streaming.py      | TestStreamDoneEvent::test_done_event_contract                |
 | 05-09 | Done Event: Usage Tokens (no internal token fields) | test_streaming.py | TestStreamDoneEvent::test_done_event_contract               |
@@ -191,20 +210,22 @@ toggled per test.
 | 06-02 | Replay: is_new_turn=false, Same message_id | test_stream_started.py | TestStreamStartedOnReplay::test_replay_emits_stream_started_with_is_new_turn_false |
 | 06-03 | Replay: No LLM Call, No Quota, No Outbox | test_idempotency.py | TestIdempotency::test_replay_does_not_modify_quota_or_call_provider; test_settlement.py TestSettlement::test_one_usage_outbox_event_per_turn (the replay itself: `done`, `is_new_turn` false) |
 | 06-04 | Multiple Replays Side-Effect-Free          | test_idempotency.py    | TestIdempotency::test_replay_does_not_modify_quota_or_call_provider (3 replays) |
-| 06-05 | Running Turn + Same request_id → 409 `aborted` (`request_id_conflict`) | test_idempotency.py | TestIdempotency::test_running_turn_same_request_id_409 |
-| 06-06 | Failed Turn + Same request_id → 409 `aborted` (`request_id_conflict`) | test_idempotency.py | TestIdempotency::test_failed_turn_same_request_id_409 |
-| 06-07 | Cancelled Turn + Same request_id → 409 `aborted` (`request_id_conflict`) | test_idempotency.py | TestIdempotency::test_cancelled_turn_same_request_id_409 |
+| 06-05 | Running Turn + Same request_id → 409 `aborted` (`request_id_conflict`, detail "request_id is already used by another turn in this chat") | test_idempotency.py | TestIdempotency::test_running_turn_same_request_id_409 |
+| 06-06 | Failed Turn + Same request_id → 409 `aborted` (`request_id_conflict`, same detail) | test_idempotency.py | TestIdempotency::test_failed_turn_same_request_id_409 |
+| 06-07 | Cancelled Turn + Same request_id → 409 `aborted` (`request_id_conflict`, same detail) | test_idempotency.py | TestIdempotency::test_cancelled_turn_same_request_id_409 |
 | 06-08 | Replay Priority Over Parallel Turn Check   | test_idempotency.py    | TestIdempotency::test_replay_priority_over_parallel_check         |
 | 06-09 | Replay Does Not Modify Quota               | test_idempotency.py    | TestIdempotency::test_replay_does_not_modify_quota_or_call_provider |
-| 06-10 | request_id of a Turn Replaced by Retry → 409 `aborted` (`request_id_conflict`) | test_idempotency.py | TestIdempotency::test_request_id_replaced_by_retry_409 |
-| 06-11 | request_id of a Turn Removed by DELETE /turns → 409 `aborted` (`request_id_conflict`), no new turn | test_idempotency.py | TestIdempotency::test_request_id_of_deleted_turn_409 |
+| 06-10 | request_id of a Turn Replaced by Retry → 409 `aborted` (`request_id_conflict`, same detail) | test_idempotency.py | TestIdempotency::test_request_id_replaced_by_retry_409 |
+| 06-11 | request_id of a Turn Removed by DELETE /turns → 409 `aborted` (`request_id_conflict`, same detail), no new turn | test_idempotency.py | TestIdempotency::test_request_id_of_deleted_turn_409 |
+| 06-12 | request_id of a Completed Turn in Another Chat of the Same User → a New Turn in This Chat (`is_new_turn` true, `done`), not a replay or a conflict: the key is `(chat_id, request_id)` | test_idempotency.py | TestIdempotency::test_request_id_of_another_chat_starts_a_new_turn |
+| 06-13 | `request_id` Not a UUID → 422 `invalid_argument`, no turn, provider not called | test_idempotency.py | TestIdempotency::test_request_id_not_a_uuid_422 |
 
 ## 07 — Parallel Turn Enforcement
 
 | ID    | Scenario                                    | Test File             | Covered by                                                  |
 |-------|---------------------------------------------|-----------------------|-------------------------------------------------------------|
 | 07-01 | Partial Unique Index                        | —                     | (DB-level, not e2e testable)                                |
-| 07-02 | Second Stream → 409 `aborted` (`turn_already_running`) | test_parallel_turn.py | TestParallelTurn::test_second_stream_409_turn_already_running |
+| 07-02 | Second Stream → 409 `aborted` (`turn_already_running`, detail "Another turn is running in this chat") | test_parallel_turn.py | TestParallelTurn::test_second_stream_409_turn_already_running |
 | 07-03 | New Stream Succeeds After Previous Terminal | test_parallel_turn.py | TestParallelTurn::test_new_stream_succeeds_after_terminal   |
 
 ## 08 — Turn Mutations
@@ -234,11 +255,14 @@ toggled per test.
 | 08-21 | Edit Running Turn → 400 `failed_precondition` (`turn_state`/`STATE`), the turn keeps streaming | test_turn_mutations.py | TestTurnEdit::test_edit_running_turn_400 |
 | 08-22 | Edit Without `content` → 422, Malformed JSON → 400 `invalid_argument`; the turn is kept | test_turn_mutations.py | TestTurnEdit::test_edit_body_errors |
 | 08-23 | Edit Content over `max_input_tokens` → 400 `out_of_range` (`INPUT_TOO_LONG`), turn kept, provider not called | test_turn_mutations.py | TestTurnEdit::test_edit_content_over_max_input_tokens_400 |
-| 08-24 | Edit Content over the Context Budget (tiny-context model) → 400 `out_of_range` (`CONTEXT_BUDGET_EXCEEDED`), provider not called; context assembly runs after the edit committed, so the old turn is replaced and the new turn is `error` with `context_length_exceeded` and no answer (DESIGN §3.9) | test_turn_mutations.py | TestTurnEdit::test_edit_content_over_context_budget_400 |
+| 08-24 | Edit Content over the Context Budget (tiny-context model) → 400 `out_of_range` (`CONTEXT_BUDGET_EXCEEDED`), provider not called; context assembly runs after the edit committed, so the old turn is replaced and the new turn is `error` with `context_length_exceeded`, no answer, no usage event, no reserve left (DESIGN §3.9) | test_turn_mutations.py | TestTurnEdit::test_edit_content_over_context_budget_400 |
 | 08-25 | Edit with Whitespace-Only Content → 400 `invalid_argument` (`EMPTY_CONTENT` on `content`), turn kept | test_turn_mutations.py | TestTurnEdit::test_edit_whitespace_only_content_400 |
 | 08-26 | Retry or Edit in a Chat Whose Model Left the Catalog (DB seed) → 400 `invalid_argument` (`INVALID_MODEL` on `model`, chat resource), turn kept, provider not called | test_turn_mutations.py | TestMutationChatModelLeftCatalog::test_mutation_with_model_missing_from_catalog_400 |
 | 08-27 | Retry or Edit Copy the Replaced Message's Attachments Except Soft-Deleted Ones (DB seed of `deleted_at`); the new request carries the image as `input_image` and `file_search` | test_turn_mutations.py | TestMutationAttachments::test_mutation_copies_attachments_except_deleted; unit tests: gears/mini-chat/mini-chat/src/infra/db/repo/message_attachment_repo.rs (`copy_for_retry_excludes_soft_deleted`) |
 | 08-28 | Retry or Edit Re-Run the Image Checks Before the Turn Is Replaced: image turn after the chat model is switched to one without vision (DB seed) → 400 `VISION_NOT_SUPPORTED`; a fifth image linked in the DB → 400 `out_of_range` `TOO_MANY_IMAGES`; turn kept, provider not called | test_turn_mutations.py | TestMutationAttachments::test_image_turn_on_model_without_vision_400, TestMutationAttachments::test_more_images_than_allowed_400 |
+| 08-29 | Retry over the Context Budget: a 6000-byte question sent on gpt-5.2, then the chat switched to the tiny-context model (DB seed) → 400 `out_of_range` (`CONTEXT_BUDGET_EXCEEDED`), provider not called; the old turn is replaced, the new turn is `error` with `context_length_exceeded`, no answer, no usage event, no reserve left | test_turn_mutations.py | TestTurnRetry::test_retry_over_context_budget_400 |
+| 08-30 | Retry or Edit Sends the (New) Question Once, After the History Before the Turn, With and Without Earlier Turns (regression: the only live turn was sent twice when the snapshot boundary was missing) | test_turn_mutations.py | TestTurnRetry::test_mutation_sends_the_question_once |
+| 08-31 | Retry or Edit at the Daily `web_search` or `code_interpreter` Quota (the retried turn used web search; the chat has a ready XLSX) → 429 `resource_exhausted` on that quota, turn kept, provider not called | test_quota_policy.py | TestWebSearchDailyQuota::test_web_search_quota_blocks_mutation, TestCodeInterpreterDailyQuota::test_code_interpreter_quota_blocks_mutation |
 
 ## 09 — Turn Lifecycle
 
@@ -261,7 +285,8 @@ toggled per test.
 ## 10 — Attachments
 
 Upload is synchronous in P1: `POST /attachments` returns 201 with `status: ready`; polling
-still works but is not required (ADR-0007).
+still works but is not required (ADR-0007). A document is `ready` only after the chat's
+vector store reports it indexed (`completed`).
 
 | ID    | Scenario                                     | Test File                | Covered by                                                  |
 |-------|----------------------------------------------|--------------------------|-------------------------------------------------------------|
@@ -280,9 +305,9 @@ still works but is not required (ADR-0007).
 | 10-13 | Multi-Provider Upload: each chat's upload reaches its own provider's Files API (`/v1/files` OpenAI, `/openai/files` Azure) | test_attachments.py | TestDualProviderUpload::test_dual_provider_upload; TestDualProviderRAGStream::test_dual_provider_rag_stream (online only) |
 | 10-14 | doc_summary: Async for Docs, Null for Images | —                        | N/A — not implemented (ADR-0007): `doc_summary` is always `null` |
 | 10-15 | img_thumbnail Present for Ready Images       | test_attachments.py      | TestImageUploadAndSend::test_image_upload_and_send (non-null only; format not checked) |
-| 10-16 | error_code on Failed Status                  | test_attachments.py      | TestUploadProviderFailure::test_upload_failure_marks_attachment_failed |
-| 10-17 | Mid-Stream Size Limit → 400 `out_of_range`   | test_attachments.py      | TestChunkedUpload::test_chunked_oversize_image_rejected     |
-| 10-18 | Upload with Content-Length over the Limit → 400 `out_of_range` (`FILE_TOO_LARGE` on field `content_length`: the Content-Length pre-check rejects it before the streaming counter reads the part), nothing sent to the provider | test_attachments.py | TestUploadSizeEnforcement::test_oversize_image_rejected, TestUploadSizeEnforcement::test_oversize_document_rejected |
+| 10-16 | Provider Upload Failure → 503 `service_unavailable` with `Retry-After`; the attachment is `failed` with `error_code` `upload_failed` | test_attachments.py | TestUploadProviderFailure::test_upload_failure_marks_attachment_failed |
+| 10-17 | Streaming Size Counter (chunked upload, no Content-Length) over the Limit → 400 `out_of_range` (`FILE_TOO_LARGE`), nothing sent to the provider; the attachment row, inserted before the body is read, is `failed` with `file_too_large` | test_attachments.py | TestChunkedUpload::test_chunked_oversize_image_rejected |
+| 10-18 | Upload with Content-Length over the Limit → 400 `out_of_range` (`FILE_TOO_LARGE` on field `content_length`): the Content-Length pre-check rejects it before any attachment row is inserted and before the streaming counter reads the part; nothing sent to the provider | test_attachments.py | TestUploadSizeEnforcement::test_oversize_image_rejected, TestUploadSizeEnforcement::test_oversize_document_rejected |
 | 10-19 | Chunked-Encoding Streaming Counter           | test_attachments.py      | TestChunkedUpload::test_chunked_upload_within_limit_ready   |
 | 10-20 | Images Not Added to Vector Store             | test_attachments.py      | TestImageUploadAndSend::test_image_upload_and_send          |
 | 10-21 | provider_file_id Never Exposed               | test_attachments.py      | TestUploadAndGet::test_provider_storage_fields_not_exposed  |
@@ -293,7 +318,7 @@ still works but is not required (ADR-0007).
 | 10-26 | Documents per Chat Exceeded → 429 `resource_exhausted` (`document_limit`) | test_attachments.py | TestPerChatLimits::test_document_limit_exceeded |
 | 10-27 | Storage per Chat Exceeded → 429 `resource_exhausted` (`storage_limit`): documents 1 KiB under the 100 MB chat limit, each within the per-file limit; a 100-byte upload fits, a 2 KiB upload is rejected, provider not called | test_attachments.py | TestPerChatLimits::test_storage_limit_exceeded |
 | 10-28 | Max Indexed Chunks per Chat                  | —                        | N/A — not implemented (ADR-0007)                            |
-| 10-29 | Deleted Document Excluded from file_search   | test_attachments.py      | N/A — not implemented (ADR-0007): `file_search` runs without attribute filters, so a deleted document stays searchable until the cleanup handler deletes its provider file. Citations of a deleted document are omitted: TestFileCitationMapping::test_citation_of_deleted_attachment_dropped |
+| 10-29 | Deleted Document: its citations are dropped | test_attachments.py | TestFileCitationMapping::test_citation_of_deleted_attachment_dropped; exclusion from `file_search`: N/A — not implemented (ADR-0007): `file_search` runs without attribute filters, so a deleted document stays searchable until the cleanup handler deletes its provider file |
 | 10-30 | XLSX Upload Accepted and Ready               | test_code_interpreter.py | TestXlsxUploadAccepted::test_xlsx_upload_accepted, TestXlsxUploadAccepted::test_xlsx_reaches_ready |
 | 10-31 | Code Interpreter Tool Events in Stream (`start`, `done`, after `stream_started` and before the deltas that follow the call) | test_code_interpreter.py | TestCodeInterpreterToolEvents, TestCodeInterpreterEventOrdering::test_tool_events_before_done |
 | 10-32 | code_interpreter Tool with container.file_ids (the XLSX provider file) and `include: ["code_interpreter_call.outputs"]` in Provider Request (no `include` without code_interpreter: TestXlsxPurposeRouting::test_txt_triggers_file_search_not_code_interpreter) | test_code_interpreter.py | TestCodeInterpreterProviderRequest::test_code_interpreter_tool_in_request |
@@ -313,9 +338,13 @@ still works but is not required (ADR-0007).
 | 10-46 | DELETE of an Attachment Uploaded by Another User in the Caller's Chat → 404 `not_found` (attachment `resource_type`, same as an unknown id), row not deleted, no cleanup enqueued | — | unit test: gears/mini-chat/mini-chat/src/domain/service/attachment_service_test.rs (`test_delete_attachment_uploaded_by_other_user_not_found`); not reachable: a chat has one owner, and only the owner can upload to it |
 | 10-47 | Upload to a Chat Whose Model Left the Catalog (DB seed) → 400 `invalid_argument` (chat `resource_type`, field `model`, `INVALID_MODEL`), nothing stored, provider not called; other model-resolution failures are returned as is, no fallback storage provider | test_attachments.py | TestUploadChatModelLeftCatalog::test_upload_to_chat_with_model_missing_from_catalog_400; unit tests: gears/mini-chat/mini-chat/src/domain/service/attachment_service_test.rs (`test_upload_rejected_when_chat_model_left_catalog`, `test_upload_propagates_model_resolution_error`) |
 | 10-48 | Ready Document in a Chat on a Model Without `tool_support.file_search` → No file_search Tool in the Provider Request | test_attachments.py | TestFileSearchModelSupport::test_no_file_search_tool_on_model_without_support |
-| 10-48 | Upload When the Chat's Vector Store Belongs to Another Storage Backend (DB seed: an Azure chat's store, then `chats.model` switched to an OpenAI model) → 409 `already_exists` (chat resource, `resource_name` `provider_mismatch`, detail "chat vector store belongs to another provider"); attachment `failed` (`vector_store_failed`), store kept, the file just stored at the provider deleted | test_attachments.py | TestUploadVectorStoreProviderMismatch::test_upload_after_switch_to_other_provider_409 |
 | 10-49 | Upload Filename: a part without `filename=` is stored as `upload`; a name over 255 characters is cut to 255 keeping the extension | test_attachments.py | TestUploadFilename::test_part_without_filename_is_named_upload, TestUploadFilename::test_long_filename_truncated_keeping_extension |
 | 10-50 | `application/octet-stream` with an Unknown Extension → 400 `invalid_argument` (`UNSUPPORTED_CONTENT_TYPE` on `content_type`), nothing stored, provider not called | test_attachments.py | TestUploadFilename::test_octet_stream_with_unknown_extension_400 |
+| 10-51 | Upload When the Chat's Vector Store Belongs to Another Storage Backend (DB seed: an Azure chat's store, then `chats.model` switched to an OpenAI model) → 409 `already_exists` (chat resource, `resource_name` `provider_mismatch`, detail "chat vector store belongs to another provider"); attachment `failed` (`vector_store_failed`), store kept, the file just stored at the provider deleted | test_attachments.py | TestUploadVectorStoreProviderMismatch::test_upload_after_switch_to_other_provider_409 |
+| 10-52 | Document Ready Only After Indexing: the vector store answers `in_progress` twice, then `completed` → 201 `ready` after two status reads of the vector store file (`GET /vector_stores/{id}/files/{file_id}`, the route registered for it in OAGW); the upload form's `purpose` is `assistants` (images: not asserted, issue #5022) | test_attachments.py | TestUploadVectorStoreIndexing::test_upload_ready_after_indexing_completes; unit tests: gears/mini-chat/mini-chat/src/domain/service/attachment_service_test.rs (`test_upload_waits_for_vector_store_indexing`), gears/mini-chat/mini-chat/src/infra/oagw_provisioning.rs (`rag_routes_cover_indexing_status_poll`) |
+| 10-53 | Indexing `failed` (on the add or after a poll) or `cancelled`, with `last_error` → 503 `service_unavailable` (`Retry-After: 10`); the attachment is `failed` with `indexing_failed`; the stored provider file is deleted. The indexing timeout (60 s) does not fit the E2E budget | test_attachments.py | TestUploadVectorStoreIndexing::test_indexing_failure_marks_attachment_failed; unit tests: gears/mini-chat/mini-chat/src/domain/service/attachment_service_test.rs (`test_upload_indexing_failed_marks_attachment_failed`, `test_upload_indexing_timeout_marks_attachment_failed`) |
+| 10-54 | Vector Store Creation Fails at the Provider → 503 `service_unavailable`; the attachment is `failed` with `vector_store_failed`, no store recorded, the stored provider file deleted | test_attachments.py | TestUploadVectorStoreIndexing::test_vector_store_create_failure_503 |
+| 10-55 | Request Body over the api-gateway `body_limit_bytes` (64 000 000, Content-Length) → 413 from the gateway before the handler: no attachment row, nothing sent to the provider | test_attachments.py | TestUploadSizeEnforcement::test_body_over_gateway_limit_413 |
 
 ## 11 — Models API
 
@@ -344,6 +373,7 @@ still works but is not required (ADR-0007).
 | 12-07 | Reaction on Nonexistent Message → 404 `not_found` (PUT and DELETE; `resource_type` message, `resource_name` the message id) | test_reactions.py | TestReactions::test_reaction_on_nonexistent_message_404 |
 | 12-08 | Reaction Other Than like/dislike → 400 `invalid_argument`, nothing stored | test_reactions.py | TestReactions::test_invalid_reaction_value_400 |
 | 12-09 | Reaction Without `reaction` → 422, Malformed JSON → 400 `invalid_argument`; nothing stored | test_reactions.py | TestReactions::test_reaction_body_errors |
+| 12-10 | Reaction on the Answer of a Deleted Turn (PUT and DELETE) → 404 `not_found` (message resource), nothing stored | test_reactions.py | TestReactions::test_reaction_on_answer_of_deleted_turn_404 |
 
 ## 13 — Quota Status API
 
@@ -366,11 +396,11 @@ still works but is not required (ADR-0007).
 |-------|-------------------------------------------|---------------------------|--------------------------------------------------------------|
 | 14-01 | Preflight Reserve Persisted (while the turn runs; unchanged after completion) | test_settlement.py | TestSettlement::test_reservation_snapshot_persisted; test_full_scenario.py TestTurnDetailsInDb::test_max_output_tokens_applied |
 | 14-02 | Tier Downgrade: Premium Exhausted → Standard | test_quota_policy.py   | TestDowngrade::test_premium_exhausted_downgrades_to_standard |
-| 14-03 | Bucket Model: total + tier:premium        | test_quota_enforcement.py | TestQuotaEnforcement::test_bucket_model_premium_counts_total, TestQuotaEnforcement::test_bucket_model_standard_counts_total |
+| 14-03 | Bucket Model: a premium turn charges `total` and `tier:premium`, a standard turn `total` only, each by the `done` usage times the model multipliers | test_quota_enforcement.py | TestQuotaEnforcement::test_bucket_model_premium_counts_total, TestQuotaEnforcement::test_bucket_model_standard_counts_total |
 | 14-04 | Daily + Monthly Periods Both Checked      | test_quota_policy.py      | TestPeriodsCheckedSeparately::test_single_exhausted_period_rejects |
 | 14-05 | All Tiers Exhausted → 429 `resource_exhausted`, one violation: subject `tokens`, description `quota_exceeded` | test_quota_policy.py | TestQuotaExhaustion::test_all_tiers_exhausted_429 |
-| 14-06 | Reserve Before Provider Call              | test_quota_policy.py      | TestQuotaExhaustion::test_all_tiers_exhausted_429 (rejected reserve: provider not called) |
-| 14-07 | Credits Formula: tokens × per-token multiplier, exact integer credits_micro | test_quota_enforcement.py | TestQuotaEnforcement::test_bucket_model_premium_counts_total, TestQuotaEnforcement::test_bucket_model_standard_counts_total; test_quota_status.py TestQuotaUsageTracking::test_used_credits_increase_after_send; rounding of fractional multipliers: unit tests: gears/mini-chat/mini-chat/src/domain/service/credit_arithmetic.rs |
+| 14-06 | Reserve Before Provider Call: the reserve is persisted while the provider streams; a reserve that does not fit is rejected before the provider is called | test_settlement.py | TestSettlement::test_reservation_snapshot_persisted; test_quota_policy.py TestQuotaExhaustion::test_all_tiers_exhausted_429 |
+| 14-07 | Credits Formula: tokens × per-token multiplier, exact integer credits_micro (computed from the `done` usage) | test_quota_enforcement.py | TestQuotaEnforcement::test_bucket_model_premium_counts_total, TestQuotaEnforcement::test_bucket_model_standard_counts_total; test_quota_status.py TestQuotaUsageTracking::test_used_credits_increase_after_send; rounding of fractional multipliers: unit tests: gears/mini-chat/mini-chat/src/domain/service/credit_arithmetic.rs |
 | 14-08 | max_output_tokens Hard Cap (`max_output_tokens_applied` 8192 on the turn, `max_output_tokens` 8192 in the provider request) | test_full_scenario.py | TestTurnDetailsInDb::test_max_output_tokens_applied; test_provider_request.py TestMaxOutputTokens::test_max_output_tokens_in_request |
 | 14-09 | policy_version_applied Persisted (1, the version of the static model policy plugin) | test_quota_enforcement.py | TestQuotaEnforcement::test_policy_version_persisted_per_turn |
 | 14-10 | Settlement Uses Persisted Policy          | —                         | unit tests: gears/mini-chat/mini-chat/src/domain/service/quota_service.rs (`settle_uses_snapshot_of_policy_version_applied_not_current`) |
@@ -387,6 +417,9 @@ still works but is not required (ADR-0007).
 | 14-21 | Per-User Daily Image-Input Quota          | —                         | N/A — not implemented (ADR-0008)                             |
 | 14-22 | Per-User Daily file_search Limit          | —                         | N/A — not implemented (ADR-0007)                             |
 | 14-23 | Edit While Exhausted → 429 `resource_exhausted` (`tokens`), Old Turn Kept, Provider Not Called | test_quota_policy.py | TestQuotaExhaustion::test_edit_while_exhausted_keeps_old_turn |
+| 14-24 | Each Cascade Candidate Checked with Its Own Reserve: 60 000 credits_micro left in `total` — below the premium reserve (8192 output tokens × 15), above the standard one — → downgrade to gpt-5.2 (`premium_quota_exhausted`), not 429 | test_quota_policy.py | TestDowngrade::test_standard_reserve_fits_where_premium_does_not; unit tests: gears/mini-chat/mini-chat/src/domain/service/quota_service.rs (`preflight_cascade_checks_candidate_reserve_expensive_premium`, `preflight_cascade_checks_candidate_reserve_expensive_standard`) |
+| 14-25 | Limits Re-Checked in the Reserve Transaction (a concurrent reserve committed after preflight read the usage) → 429, nothing reserved; for send and for retry/edit | — | unit tests: gears/mini-chat/mini-chat/src/domain/service/stream_service/mod.rs (`reserve_and_create_turn_rechecks_limits_after_concurrent_reserve`, `run_stream_for_mutation_rechecks_limits_after_concurrent_reserve`); not E2E: the race window between preflight and the reserve transaction cannot be hit deterministically, and SQLite serializes the writers |
+| 14-26 | A Downgraded Turn Is Sent to the Effective Model's Provider: a premium chat (azure-gpt-4.1, Azure) downgraded to gpt-5.2 sends the request to OpenAI `/v1/responses`, not to Azure | test_quota_policy.py | TestDowngrade::test_premium_exhausted_downgrades_to_standard, TestDowngrade::test_standard_reserve_fits_where_premium_does_not; unit tests: gears/mini-chat/mini-chat/src/domain/service/stream_service/mod.rs (`downgrade_routes_to_effective_models_provider`) |
 
 ## 15 — Settlement & Finalization
 
@@ -420,7 +453,7 @@ still works but is not required (ADR-0007).
 | 16-02 | System Prompt Across Models              | test_context_assembly.py | TestSystemPrompt::test_system_prompt_sent_as_instructions (both providers) |
 | 16-03 | Recent Messages: Oldest First, Up to `recent_messages_limit` (10) | test_context_assembly.py | TestContextHistory::test_history_sent_in_order, TestContextHistoryLimit::test_only_recent_messages_sent |
 | 16-04 | Deleted Turns Excluded                   | test_turn_mutations.py   | TestTurnDelete::test_deleted_turn_not_sent_to_provider       |
-| 16-05 | Thread Summary Replaces Older Messages; a turn that does not fit next to the summary is dropped whole (question and answer), never an answer without its question | test_thread_summary.py | TestThreadSummary::test_summary_replaces_summarized_messages; test_live_smoke.py TestLiveThreadSummaryTrigger::test_summary_trigger_fires_and_applied_on_next_turn (online only) |
+| 16-05 | Thread Summary Replaces Older Messages; a turn that does not fit next to the summary is dropped whole (question and answer), never an answer without its question | test_thread_summary.py | TestThreadSummary::test_summary_replaces_summarized_messages |
 | 16-06 | Only Messages After Summary Boundary; truncation drops whole turns | test_thread_summary.py | TestThreadSummary::test_summary_replaces_summarized_messages; unit tests: gears/mini-chat/mini-chat/src/domain/service/context_assembly.rs (`thread_summary_included_as_first_message`, `truncation_drops_thread_summary`) |
 | 16-07 | Model Recall from Earlier Turns          | test_context_assembly.py | TestContextRecall (online only) |
 | 16-08 | web_search Tool with search_context_size (default `low`) | test_provider_request.py | TestWebSearchToolType::test_web_search_tool_type_is_web_search, TestWebSearchToolType::test_web_search_has_search_context_size |
@@ -462,8 +495,8 @@ still works but is not required (ADR-0007).
 | ID    | Scenario                             | Test File                | Covered by                                                   |
 |-------|--------------------------------------|--------------------------|--------------------------------------------------------------|
 | 18-01 | Web Search Tool Events (`web_search` `start` then `done`, after `stream_started`, between the deltas of the two answer messages, before `done`) | test_web_search.py | TestWebSearchBasic::test_web_search_tool_events_name_and_phases, TestWebSearchEventOrdering::test_tool_events_before_done |
-| 18-02 | Web Search Citations (the `url_citation` range is sliced from the `output_text` part that carries it, in characters) | test_web_search.py | TestWebSearchCitations; TestWebSearchOnline::test_citations_structure_if_present (online only) |
-| 18-03 | Citations Right Before Done | test_web_search.py | TestWebSearchEventOrdering::test_citations_before_done; TestWebSearchOnline::test_citations_structure_if_present (online only) |
+| 18-02 | Web Search Citations (the `url_citation` range is sliced from the `output_text` part that carries it, in characters) | test_web_search.py | TestWebSearchCitations; TestWebSearchOnline::test_citations_structure_if_present (online only, best-effort: skips when the answer has no citations) |
+| 18-03 | Citations Right Before Done | test_web_search.py | TestWebSearchEventOrdering::test_citations_before_done; TestWebSearchOnline::test_citations_structure_if_present (online only, best-effort: skips when the answer has no citations) |
 | 18-04 | No web_search Tool Without the Flag: a `SEARCH:` prompt without `web_search` sends no `tools` | test_web_search.py | TestWebSearchDisabledByDefault::test_search_prompt_without_flag_has_no_web_search |
 | 18-05 | Works on Standard Model              | test_web_search.py       | TestWebSearchBasic (the `openai` parameter runs on `gpt-5.2`, standard tier) |
 | 18-06 | Turn Done After Web Search           | test_web_search.py       | TestWebSearchTurnStatus::test_turn_done_after_web_search     |
@@ -489,7 +522,7 @@ still works but is not required (ADR-0007).
 | 19-08 | Crash Recovery: Turn Status API        | —               | unit tests: gears/mini-chat/mini-chat/src/infra/db/repo/turn_repo.rs (`cas_finalize_orphan_transitions_to_failed`), gears/mini-chat/mini-chat/src/domain/service/finalization_service.rs (`finalize_orphan_cas_winner`); the restart itself is not exercised |
 | 19-09 | Thread Summary Trigger (no summary task enqueued after a turn below the threshold, while that turn's usage event from the same transaction is; exactly one at the turn that reaches it, targeting the previous turn's answer: the triggering turn is not summarized) | test_thread_summary.py | TestThreadSummary::test_summary_replaces_summarized_messages |
 | 19-10 | Thread Summary Worker (summary model, stored summary and frontier, messages marked compressed) | test_thread_summary.py | TestThreadSummary::test_summary_replaces_summarized_messages |
-| 19-11 | Retry of the Turn That Triggered the Summary → the Summary Does Not Contain It; the Request Has the Summary and the Original Question, Not the Replaced Answer | test_thread_summary.py | TestThreadSummary::test_retry_after_summary_does_not_resend_replaced_answer |
+| 19-11 | Retry of the Turn That Triggered the Summary → the Summary Does Not Cover It and Is Kept; the Request Has the Summary and the Original Question, Not the Replaced Answer | test_thread_summary.py | TestThreadSummary::test_retry_after_summary_does_not_resend_replaced_answer |
 | 19-12 | Second Chat Delete → 404, Single Cleanup Event | test_cleanup.py | TestCleanupWorkerDB::test_second_delete_chat_404_single_cleanup_event |
 | 19-13 | Empty Chat Deletion Still Enqueues Cleanup | test_cleanup.py | TestCleanupWorkerDB::test_chat_without_attachments_still_enqueues |
 | 19-14 | Hard Purge After Grace Period          | —               | N/A — not implemented (ADR-0009)                                  |
@@ -498,6 +531,8 @@ still works but is not required (ADR-0007).
 | 19-17 | Provider 403 on Every File Delete → the attachment cleanup is retried `max_attempts` times and ends in `failed` | test_cleanup.py | TestProviderCleanupOpenAI::test_attachment_cleanup_provider_403_ends_failed, TestProviderCleanupAzure::test_attachment_cleanup_provider_403_ends_failed |
 | 19-18 | Provider 500 on Every Vector Store Delete → the chat cleanup message is dead-lettered after `max_attempts` deliveries, not retried again (the processor offset is past it); the `chat_vector_stores` row stays | test_cleanup.py | TestProviderCleanupOpenAI::test_vector_store_delete_500_is_dead_lettered, TestProviderCleanupAzure::test_vector_store_delete_500_is_dead_lettered |
 | 19-19 | Attachment Deletion Enqueues Cleanup Event | test_cleanup.py | TestCleanupWorkerDB::test_attachment_deletion_enqueues_cleanup_event |
+| 19-20 | Mutation of a Turn the Summary Covers (after DELETE of the later turn) Drops the Summary in the Mutation Transaction: retry, edit or delete; a retry or edit is sent without the summary; the covered messages are uncompressed, so a retry of the second of three turns carries the first turn as history | test_thread_summary.py | TestThreadSummary::test_mutation_of_summarized_turn_drops_summary, TestThreadSummary::test_retry_of_summarized_turn_restores_earlier_history; unit tests: gears/mini-chat/mini-chat/src/domain/service/turn_service_test.rs (`retry_of_covered_turn_drops_summary`, `edit_of_covered_turn_drops_summary`, `delete_of_covered_turn_drops_summary`, `retry_of_uncovered_turn_keeps_summary`, `delete_of_uncovered_turn_keeps_summary`, `dropped_summary_uncompresses_earlier_messages`) |
+| 19-21 | Summary Request Fails at the Provider: retried, and the next request stores the summary; failing on all `max_attempts` (3) deliveries → no summary, no message compressed, the next turn sent without a summary | test_thread_summary.py | TestThreadSummaryFailures |
 
 ## 20 — Authorization
 
@@ -506,9 +541,10 @@ still works but is not required (ADR-0007).
 | 20-01 | PEP Before Every Operation                 | —                 | unit tests: gears/mini-chat/mini-chat/src/domain/service/chat_service_test.rs (`chat_model_for_send_is_authorized_by_send_message_only`), gears/mini-chat/mini-chat/src/domain/service/turn_service_test.rs (`retry_via_preview_asks_the_pdp_once`, `enforcer_evaluation_failure_maps_to_forbidden`), gears/mini-chat/mini-chat/src/domain/service/model_service_test.rs (`list_models_denied_returns_forbidden`, `get_model_denied_returns_forbidden`); GAP for the other operations: no test checks that each one calls the PEP. Not E2E: the rig's static PDP allows every request, so a missing PEP call is not observable; the 401s of test_isolation.py TestAuthentication come from api-gateway authentication, not the PEP |
 | 20-02 | PDP Unreachable → 403 Fail-Closed          | —                 | unit tests: gears/mini-chat/mini-chat/src/domain/error.rs (`pdp_evaluation_failure_denies_access`) |
 | 20-03 | Foreign Resource → 404 `not_found`, Provider Not Called | test_isolation.py | TestIsolation::test_foreign_resource_is_404, TestIsolation::test_foreign_resource_not_sent_to_provider |
-| 20-04 | Constraints Compiled to SQL WHERE          | test_isolation.py | TestIsolation::test_foreign_chat_not_listed                |
+| 20-04 | Chat List Scoped to the Caller: another user's chat is not listed | test_isolation.py | TestIsolation::test_foreign_chat_not_listed |
 | 20-05 | Missing Token → 401 `unauthenticated` (`MISSING_BEARER`), `WWW-Authenticate: Bearer realm="api"` | test_isolation.py | TestAuthentication::test_missing_token_is_401 |
 | 20-06 | Unknown Token → 401 `unauthenticated` (`AUTHN_FAILED`), `WWW-Authenticate: Bearer error="invalid_token"` | test_isolation.py | TestAuthentication::test_unknown_token_is_401 |
 | 20-07 | Foreign Mutations Leave Owner Data Unchanged (chat, messages, turn, attachment, no reaction) | test_isolation.py | TestIsolation::test_owner_resources_unchanged |
 | 20-08 | Send Message Authorized by `send_message` Only (a policy without `read` can send) | — | unit tests: gears/mini-chat/mini-chat/src/domain/service/chat_service_test.rs (`chat_model_for_send_is_authorized_by_send_message_only`); not E2E: the static PDP of the rig allows everything |
 | 20-09 | PDP Denial → 403 `permission_denied` (`AUTHZ_DENIED`) | — | unit tests: gears/mini-chat/mini-chat/src/api/rest/error.rs (`forbidden_carries_authz_denied_reason`, `mutation_forbidden_emits_permission_denied_with_authz_reason`); not E2E: the static PDP of the rig allows everything |
+| 20-10 | Own Turn, Message and Attachment Ids Addressed Through Another Chat of the Same User → 404 `not_found` (GET/retry/edit/delete turn, GET/DELETE attachment, PUT/DELETE reaction); nothing changes | test_isolation.py | TestCrossChatIds |
