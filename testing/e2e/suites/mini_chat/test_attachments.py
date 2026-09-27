@@ -609,6 +609,8 @@ class TestUploadSizeEnforcement:
         body = assert_problem(resp, 400, "out_of_range", field_reason="FILE_TOO_LARGE")
         assert [v["field"] for v in body["context"]["field_violations"]] == ["content_length"], body
         assert _file_upload_calls(mock_provider) == []
+        # Rejected before the attachment row is inserted.
+        assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
 
     @pytest.mark.usefixtures("offline_only")
     def test_oversize_document_rejected(self, provider_chat, mock_provider):
@@ -627,6 +629,8 @@ class TestUploadSizeEnforcement:
         body = assert_problem(resp, 400, "out_of_range", field_reason="FILE_TOO_LARGE")
         assert [v["field"] for v in body["context"]["field_violations"]] == ["content_length"], body
         assert _file_upload_calls(mock_provider) == []
+        # Rejected before the attachment row is inserted.
+        assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
 
     def test_document_within_limit_succeeds(self, provider_chat):
         """Upload a document just under the limit → succeeds."""
@@ -848,8 +852,7 @@ class TestUploadProviderFailure:
         detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
         assert detail.status_code == 200, detail.text
         body = detail.json()
-        assert body["status"] == "failed", body
-        assert body.get("error_code"), body
+        assert (body["status"], body["error_code"]) == ("failed", "upload_failed"), body
 
 
 # ---------------------------------------------------------------------------
@@ -862,12 +865,18 @@ class TestChunkedUpload:
     def test_chunked_oversize_image_rejected(self, request, chat, mock_provider):
         """10-17: a chunked image over uploaded_image_max_size_kb (5 MB) passes
         the Content-Length pre-check and is stopped by the streaming counter:
-        400 out_of_range FILE_TOO_LARGE; nothing reaches the provider."""
+        400 out_of_range FILE_TOO_LARGE; nothing reaches the provider, and
+        the attachment row is `failed` with `file_too_large`."""
         _require_offline(request)
         payload = b"\x89PNG" + b"\x00" * (MAX_IMAGE_BYTES - 4 + 1)
         resp = _upload_chunked(chat["id"], "big.png", payload, "image/png")
         assert_problem(resp, 400, "out_of_range", field_reason="FILE_TOO_LARGE")
         assert _file_upload_calls(mock_provider) == []
+        # The row was inserted before the body was read; the counter fails it.
+        rows = query_db(
+            "SELECT status, error_code FROM attachments WHERE chat_id = ?", (chat["id"],),
+        )
+        assert rows == [{"status": "failed", "error_code": "file_too_large"}], rows
 
     def test_chunked_upload_within_limit_ready(self, request, chat):
         """10-19: a chunked document within the limit → 201, ready, exact size_bytes."""
@@ -1309,6 +1318,100 @@ class TestUploadVectorStoreProviderMismatch:
         wait_for(
             lambda: ("DELETE", f"/v1/files/{file_id}") in mock_provider.get_request_paths(),
             "the delete of the file stored at OpenAI",
+        )
+
+
+def _failed_upload_row(chat_id: str) -> dict:
+    """The only attachment row of the chat, after a failed upload (the
+    Problem carries no attachment id)."""
+    rows = query_db(
+        "SELECT id, status, error_code, provider_file_id FROM attachments WHERE chat_id = ?",
+        (chat_id,),
+    )
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+@pytest.mark.usefixtures("offline_only")
+class TestUploadVectorStoreIndexing:
+    """A document is `ready` only once the vector store has indexed it.
+
+    The chat uses gpt-5.2 (OpenAI paths). Adding a file answers
+    `in_progress` by default; the upload then reads the file's status."""
+
+    @pytest.mark.timeout(30)
+    def test_upload_ready_after_indexing_completes(self, chat_with_model, mock_provider):
+        """Two `in_progress` answers, then `completed`: 201 `ready` after two
+        status reads of the vector store file. The upload form's purpose is
+        `assistants`."""
+        chat_id = chat_with_model(STANDARD_MODEL)["id"]
+        mock_provider.set_indexing(["in_progress", "in_progress", "completed"])
+
+        att_id = _upload_ready(chat_id, "indexed.txt", b"indexed document", "text/plain")
+
+        vs_id = _vector_store_id(chat_id)
+        file_id = provider_file_id(att_id)
+        reads = [
+            (m, p) for m, p in mock_provider.get_request_paths()
+            if m == "GET" and p == f"/v1/vector_stores/{vs_id}/files/{file_id}"
+        ]
+        assert len(reads) == 2, mock_provider.get_request_paths()
+        assert [f["purpose"] for f in mock_provider.get_uploaded_files()] == ["assistants"]
+
+    @pytest.mark.timeout(30)
+    @pytest.mark.parametrize("statuses", [
+        pytest.param(["in_progress", "failed"], id="failed_after_poll"),
+        pytest.param(["failed"], id="failed_on_add"),
+        pytest.param(["in_progress", "cancelled"], id="cancelled"),
+    ])
+    def test_indexing_failure_marks_attachment_failed(
+        self, chat_with_model, mock_provider, statuses,
+    ):
+        """The vector store reports `failed` (or `cancelled`) with a
+        `last_error`: 503 service_unavailable with Retry-After, the
+        attachment is `failed` with `indexing_failed`, and the file just
+        stored at the provider is deleted."""
+        chat_id = chat_with_model(STANDARD_MODEL)["id"]
+        mock_provider.set_indexing(
+            statuses, last_error={"code": "unsupported_file", "message": "file type not supported"},
+        )
+
+        resp = _upload(chat_id, "broken.txt", b"cannot be indexed", "text/plain")
+        assert_problem(resp, 503, "service_unavailable")
+        assert resp.headers.get("Retry-After") == "10", resp.headers
+
+        row = _failed_upload_row(chat_id)
+        detail = httpx.get(
+            f"{API_PREFIX}/chats/{chat_id}/attachments/{uuid_from_db(row['id'])}", timeout=10,
+        ).json()
+        assert (detail["status"], detail["error_code"]) == ("failed", "indexing_failed"), detail
+        file_id = row["provider_file_id"]
+        wait_for(
+            lambda: ("DELETE", f"/v1/files/{file_id}") in mock_provider.get_request_paths(),
+            "the delete of the stored file",
+        )
+
+    @pytest.mark.timeout(30)
+    def test_vector_store_create_failure_503(self, chat_with_model, mock_provider):
+        """The provider fails to create the chat's vector store: 503
+        service_unavailable, the attachment is `failed` with
+        `vector_store_failed`, no store is recorded, and the stored file is
+        deleted."""
+        chat_id = chat_with_model(STANDARD_MODEL)["id"]
+        mock_provider.set_fault("POST", "/v1/vector_stores", 500)
+
+        resp = _upload(chat_id, "no-store.txt", b"no vector store", "text/plain")
+        assert_problem(resp, 503, "service_unavailable")
+
+        row = _failed_upload_row(chat_id)
+        assert (row["status"], row["error_code"]) == ("failed", "vector_store_failed"), row
+        assert query_db(
+            "SELECT vector_store_id FROM chat_vector_stores WHERE chat_id = ?", (chat_id,),
+        ) == []
+        file_id = row["provider_file_id"]
+        wait_for(
+            lambda: ("DELETE", f"/v1/files/{file_id}") in mock_provider.get_request_paths(),
+            "the delete of the stored file",
         )
 
 
