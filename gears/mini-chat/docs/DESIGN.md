@@ -1541,7 +1541,7 @@ sequenceDiagram
 4. Context assembly, provider resolution (effective model's provider) and the quota reserve with the limit re-check (the reserve is the last step).
 5. Stream as in the send path.
 
-A failure in step 4 returns a JSON error and marks the new turn `failed` with `error_code = context_length_exceeded` (context budget) or `turn_setup_failed` (any other error, including the reserve re-check, which returns 429 `quota_exceeded`); no reserve exists at that point. Such a failure happens after the mutation commit, so the previous turn is already replaced: only rejections in steps 1–2 leave the previous answer in place. See section 3.9.
+A failure in step 4 returns a JSON error and marks the new turn `failed` with `error_code = context_length_exceeded` (context budget), `quota_exceeded` (the reserve re-check, which returns 429 `quota_exceeded`) or `turn_setup_failed` (any other error); no reserve exists at that point. Such a failure happens after the mutation commit, so the previous turn is already replaced: only rejections in steps 1–2 leave the previous answer in place. See section 3.9.
 
 #### File Upload
 
@@ -3913,7 +3913,7 @@ These are deployment constraints that must be validated during infrastructure se
 
 #### Turn State Model
 
-Every user-initiated streaming turn that reaches preflight reserve creation inserts a `chat_turns` row with four possible states. Pre-reserve failures (validation errors, authorization denials, quota rejections, context assembly or provider resolution errors) do not create a `chat_turns` row on the send path. On the retry/edit path the new turn row is created by the mutation commit, before context assembly and the reserve; a failure after that commit marks the new turn `failed` (`turn_setup_failed` or `context_length_exceeded`), see section 3.9.
+Every user-initiated streaming turn that reaches preflight reserve creation inserts a `chat_turns` row with four possible states. Pre-reserve failures (validation errors, authorization denials, quota rejections, context assembly or provider resolution errors) do not create a `chat_turns` row on the send path. On the retry/edit path the new turn row is created by the mutation commit, before context assembly and the reserve; a failure after that commit marks the new turn `failed` (`turn_setup_failed`, `context_length_exceeded` or, after the reserve re-check, `quota_exceeded`), see section 3.9.
 
 | State | Meaning | Terminal? |
 |-------|---------|-----------|
@@ -4779,8 +4779,8 @@ The availability check and the reserve write are separate transactions. The rese
 
 1. `QuotaService::preflight_evaluate` opens a transaction, reads the `quota_usage` rows with `SELECT ... FOR UPDATE` (PostgreSQL), runs the cascade and the daily tool-quota checks, and commits without writing a reserve.
 2. The reserve is written later: in `reserve_and_create_turn` for `messages:stream` (together with the user message and the turn), or in the reserve transaction of retry/edit (together with `update_preflight_fields`).
-3. In the same transaction, after the increments, `verify_reserve_within_limits` re-reads the bucket rows and checks `spent + reserved <= limit` for every bucket and period of the decision. The increments hold the row locks (PostgreSQL) or the write lock (SQLite), so the re-check sees every reserve committed before it.
-4. If a bucket is over its limit, the transaction rolls back and the request gets HTTP 429 `quota_exceeded` (`quota_scope = tokens`), the same response as a preflight reject. On `messages:stream` no turn or user message is left behind. On retry/edit the new turn was already committed by the mutation transaction; it is marked `failed` with `error_code = turn_setup_failed`.
+3. In the same transaction, after the increments, `verify_reserve_within_limits` re-reads the user's bucket rows (plain `SELECT`, no `FOR UPDATE`) and checks `spent + reserved <= limit` for every bucket and period of the decision. The increments hold the row locks (PostgreSQL) or the write lock (SQLite), so the re-check sees every reserve committed before it.
+4. If a bucket is over its limit, the transaction rolls back and the request gets HTTP 429 `quota_exceeded` (`quota_scope = tokens`), the same response as a preflight reject. On `messages:stream` no turn or user message is left behind. On retry/edit the new turn was already committed by the mutation transaction; it is marked `failed` with `error_code = quota_exceeded`.
 
 Two concurrent requests that both pass preflight therefore cannot both book a reserve over the limit; the later one is rejected. The re-check does not run the cascade again: a request rejected at this point is not downgraded.
 
@@ -5540,7 +5540,7 @@ Deterministic reconciliation for `ABORTED` and post-provider-start `FAILED` outc
 
 The stream terminal paths (completed, incomplete, failed, cancelled) use `FinalizationService::finalize_turn_cas()`. Two paths are separate functions ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)):
 - **Orphan watchdog** — `FinalizationService::finalize_orphan_turn()`: its own CAS (`cas_finalize_orphan`, which re-checks the stale-progress predicate), then the same shared helpers (`derive_billing_outcome`, `settle_in_tx` on the estimated path, the outbox enqueuer). It records `selected_model` = the effective model in the usage and audit events and quota decision `"unknown"` in the audit event, and skips settlement (with a warning) when the turn's reserve fields are NULL. That happens for a retry/edit turn left `running` before `update_preflight_fields` (for example, the pod stopped between the mutation commit and the reserve). The usage event is still enqueued, with `billing_outcome = "aborted"`, `settlement_method = "estimated"`, `actual_credits_micro = 0`, `usage = null`, `effective_model` and `selected_model` = `""` and `policy_version_applied = 0`; no `quota_usage` row changes.
-- **Unstarted retry/edit turn** — `StreamService::fail_unstarted_turn()`: when retry/edit setup fails after the mutation committed and before the reserve is taken, a plain CAS moves the turn to `failed` (`turn_setup_failed` or `context_length_exceeded`). No reserve exists, so there is no settlement and no outbox event.
+- **Unstarted retry/edit turn** — `StreamService::fail_unstarted_turn()`: when retry/edit setup fails after the mutation committed and before the reserve is taken, a plain CAS moves the turn to `failed` (`turn_setup_failed`, `context_length_exceeded` or, after the reserve re-check, `quota_exceeded`). No reserve exists, so there is no settlement and no outbox event.
 
 The shared parts are the helpers, not one function: billing outcome derivation (`derive_billing_outcome`), quota settlement (`QuotaSettler::settle_in_tx`) and the outbox enqueuer (`OutboxEnqueuer`).
 

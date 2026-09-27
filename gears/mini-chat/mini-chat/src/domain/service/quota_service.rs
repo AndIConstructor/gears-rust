@@ -442,8 +442,8 @@ pub struct ReserveLimitExceeded;
 /// Check the limits again after the reserve increments, in the same
 /// transaction. The preflight check runs in an earlier transaction, so two
 /// concurrent requests can both pass it; the increments take the row locks
-/// (Postgres) or the write lock (`SQLite`), so this check sees every reserve
-/// committed before it. Returns [`ReserveLimitExceeded`] inside
+/// (Postgres) or the write lock (`SQLite`), so this check, a new statement,
+/// sees every reserve committed before it. Returns [`ReserveLimitExceeded`] inside
 /// `DbError::Other`; the caller rolls back and reports `quota_exceeded`.
 pub async fn verify_reserve_within_limits<QR: QuotaUsageRepository, C: DBRunner>(
     repo: &QR,
@@ -454,17 +454,11 @@ pub async fn verify_reserve_within_limits<QR: QuotaUsageRepository, C: DBRunner>
         return Ok(());
     }
     let scope = AccessScope::for_tenant(computed.tenant_id);
-    let period_types: Vec<PeriodType> = computed.periods.iter().map(|(pt, _)| pt.clone()).collect();
-    let period_starts: Vec<time::Date> = computed.periods.iter().map(|(_, ps)| *ps).collect();
+    // Plain read of the user's rows (the sums below filter by bucket and
+    // period): the increments above already hold the rows this request
+    // reserved; locking other rows could deadlock with a concurrent preflight.
     let rows = repo
-        .find_bucket_rows_for_update(
-            runner,
-            &scope,
-            computed.tenant_id,
-            computed.user_id,
-            &period_types,
-            &period_starts,
-        )
+        .find_bucket_rows(runner, &scope, computed.tenant_id, computed.user_id)
         .await
         .map_err(to_db)?;
     let within = computed.buckets.iter().all(|bucket| {

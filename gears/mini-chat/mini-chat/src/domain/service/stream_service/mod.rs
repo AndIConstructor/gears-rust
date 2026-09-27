@@ -1627,6 +1627,7 @@ impl<
     async fn fail_unstarted_turn(&self, scope: &AccessScope, turn_id: Uuid, err: &StreamError) {
         let error_code = match err {
             StreamError::ContextBudgetExceeded { .. } => "context_length_exceeded",
+            StreamError::QuotaExhausted { error_code, .. } => error_code.as_str(),
             _ => "turn_setup_failed",
         };
         warn!(%turn_id, error_code, error = ?err, "turn setup failed after the mutation committed");
@@ -6992,6 +6993,7 @@ mod tests {
             .unwrap()
             .expect("turn must exist");
         assert_eq!(turn.state, TurnState::Failed);
+        assert_eq!(turn.error_code.as_deref(), Some("quota_exceeded"));
         let rows = OrmQuotaUsageRepo
             .find_bucket_rows_for_update(
                 &conn,
