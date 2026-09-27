@@ -694,6 +694,78 @@ async fn a_lower_major_than_the_active_one_is_always_refused() {
 }
 
 #[tokio::test]
+async fn re_registering_a_retired_lower_major_beside_an_active_higher_one_is_a_regression() {
+    // A rollback or a stale binary sends the v1 the gear upgraded from. Its
+    // row exists, retired; reviving it beside the live v2 would break the one
+    // active major a path may hold. It is refused for that item alone, as a
+    // lower major never registered is, and the rest of the batch proceeds.
+    let h = Harness::new().await;
+    h.register(vec![port("listen_port", json!(8080))]).await;
+    let v2 = ContributedDeclaration::new(
+        key("network", "listen_port", 2),
+        NARROW_PORT.to_owned(),
+        json!(8080),
+        ScopeClass::Global,
+    );
+    h.register(vec![v2]).await;
+
+    let result = h
+        .register(vec![
+            port("listen_port", json!(8080)),
+            flag("network", "proxy_enabled"),
+        ])
+        .await;
+    assert_eq!(codes(&result), vec![reason::MAJOR_REGRESSION]);
+    assert_eq!(result.registered, 1, "the rest of the batch went through");
+    assert_eq!(
+        h.stored(&key("network", "listen_port", 1))
+            .await
+            .expect("v1")
+            .status,
+        "retired"
+    );
+    assert_eq!(
+        h.stored(&key("network", "listen_port", 2))
+            .await
+            .expect("v2")
+            .status,
+        "active"
+    );
+}
+
+#[tokio::test]
+async fn a_retired_lower_major_stays_retired_when_the_higher_one_is_retired_too() {
+    // The same rule whatever the status of the higher major: a gear does not
+    // roll a setting back by re-registering an older major. Only the highest
+    // major a path has used comes back by being registered again.
+    let h = Harness::new().await;
+    h.register(vec![port("listen_port", json!(8080))]).await;
+    let v2 = ContributedDeclaration::new(
+        key("network", "listen_port", 2),
+        NARROW_PORT.to_owned(),
+        json!(8080),
+        ScopeClass::Global,
+    );
+    h.register(vec![v2.clone()]).await;
+    h.retire_as(MODULE, vec![key("network", "listen_port", 2)])
+        .await;
+
+    let result = h.register(vec![port("listen_port", json!(8080))]).await;
+    assert_eq!(codes(&result), vec![reason::MAJOR_REGRESSION]);
+    assert_eq!(
+        h.stored(&key("network", "listen_port", 1))
+            .await
+            .expect("v1")
+            .status,
+        "retired"
+    );
+    // The highest major is the one that comes back.
+    let result = h.register(vec![v2]).await;
+    assert_eq!(result.errors, Vec::new());
+    assert_eq!(result.reactivated, 1);
+}
+
+#[tokio::test]
 async fn a_higher_major_carries_every_value_across_and_retires_the_predecessor() {
     let h = Harness::new().await;
     h.register(vec![port("listen_port", json!(8080))]).await;

@@ -251,6 +251,20 @@ where
         // @cpt-end:cpt-cf-settings-service-flow-module-contributions-register:p1:inst-mc-reg-4
 
         match (same_major, highest) {
+            // @cpt-begin:cpt-cf-settings-service-algo-module-contributions-reconcile:p1:inst-mc-rec-8
+            // A lower major than the path has used is refused whether a row of
+            // it exists or not, and whatever the status of the higher one:
+            // reviving an older major beside a live newer one would break the
+            // one active major a path holds, and a gear does not roll a setting
+            // back by re-registering an older major — it ships the next one.
+            (_, Some(highest)) if admitted.major < highest => Err(refused(
+                reason::MAJOR_REGRESSION,
+                format!(
+                    "`{key}` is a lower major than the stored v{highest}; a gear does not roll a \
+                     setting back by re-registering an older major"
+                ),
+            )),
+            // @cpt-end:cpt-cf-settings-service-algo-module-contributions-reconcile:p1:inst-mc-rec-8
             (None, None) => {
                 self.register_new(
                     conn,
@@ -276,7 +290,9 @@ where
                 .await
             }
             // @cpt-begin:cpt-cf-settings-service-algo-module-contributions-reconcile:p1:inst-mc-rec-7
-            (None, Some(highest)) if admitted.major > highest => {
+            // A higher major than any the path has used: the regression arm
+            // above took every lower one, and an equal one has its own row.
+            (None, Some(highest)) => {
                 let predecessor = on_path
                     .iter()
                     .find(|d| major_of(d) == Some(highest) && d.status == "active")
@@ -327,17 +343,7 @@ where
                         .await
                     }
                 }
-            }
-            // @cpt-end:cpt-cf-settings-service-algo-module-contributions-reconcile:p1:inst-mc-rec-7
-            // @cpt-begin:cpt-cf-settings-service-algo-module-contributions-reconcile:p1:inst-mc-rec-8
-            (None, Some(highest)) => Err(refused(
-                reason::MAJOR_REGRESSION,
-                format!(
-                    "`{key}` is a lower major than the stored v{highest}; a gear does not roll a \
-                     setting back by re-registering an older major"
-                ),
-            )),
-            // @cpt-end:cpt-cf-settings-service-algo-module-contributions-reconcile:p1:inst-mc-rec-8
+            } // @cpt-end:cpt-cf-settings-service-algo-module-contributions-reconcile:p1:inst-mc-rec-7
         }
     }
 

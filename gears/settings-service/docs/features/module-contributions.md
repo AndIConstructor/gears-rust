@@ -151,7 +151,7 @@ The key is the module's own: `gts.cf.core.settings.setting_type.v1~<vendor>.<pac
 5. [x] - `p1` - **IF** a declaration exists at the same major **AND** is active → DB: UPDATE its descriptive metadata and classification in place, preserving every administrator-set value; **IF** the classification changed → re-sync the denormalized copy on the setting's value rows in the same transaction; **RETURN** updated - `inst-mc-rec-5`
 6. [x] - `p1` - **IF** a declaration exists at the same major **AND** is retired → DB: UPDATE status = 'active' and its metadata, re-validate every retained value against the type and flag what fails with `needs_review` and its detail — a row the flag no longer reaches fails the reconcile rather than being reported flagged — evict the cache, and **RETURN** reactivated - `inst-mc-rec-6`
 7. [x] - `p1` - **IF** the contributed major is higher than the highest stored → **IF** the active predecessor on the path is owned by another module, or by an administrator → **RETURN** refused `not_owner`, since the upgrade would retire that row and take over the path; otherwise invoke the upgrade migration and **RETURN** registered - `inst-mc-rec-7`
-8. [x] - `p1` - **IF** the contributed major is lower than the active one → **RETURN** refused; a gear does not roll a setting back by re-registering an older major - `inst-mc-rec-8`
+8. [x] - `p1` - **IF** the contributed major is lower than the highest the path has used → **RETURN** refused `major_regression` for that item, judged before any of the steps above — whether a row of that major exists or not, and whatever the status of the higher one: reviving an older major beside a live newer one would break the one active major a path holds, and a gear does not roll a setting back by re-registering an older major - `inst-mc-rec-8`
 
 ### Upgrade Migration to a New Major
 
@@ -238,7 +238,7 @@ A contributed key **MUST** parse through the shared setting-key parser as the fi
 
 - [x] `p1` - **ID**: `cpt-cf-settings-service-dod-module-contributions-reconcile`
 
-Matched by version-stripped path, the reconciler **MUST** insert a new setting with `source = module_contributed`, **MUST** update descriptive metadata and classification in place at the same major while preserving administrator-set values and re-syncing the denormalized classification, **MUST** refuse a changed `value_type_id` at the same major as `ValueTypeChanged` whatever the declaration's status, **MUST** reactivate a retired declaration at the same major with its retained values re-validated, and **MUST** refuse a lower major than the active one. `secret` **MUST** be derived from the value type's trait and never accepted from the caller, and every default **MUST** be validated before a row is written.
+Matched by version-stripped path, the reconciler **MUST** insert a new setting with `source = module_contributed`, **MUST** update descriptive metadata and classification in place at the same major while preserving administrator-set values and re-syncing the denormalized classification, **MUST** refuse a changed `value_type_id` at the same major as `ValueTypeChanged` whatever the declaration's status, **MUST** reactivate a retired declaration at the same major with its retained values re-validated when that major is the highest the path has used, and **MUST** refuse, for that item alone, a lower major than the highest — whether a row of it exists, and whatever the higher one's status. `secret` **MUST** be derived from the value type's trait and never accepted from the caller, and every default **MUST** be validated before a row is written.
 
 **Implements**:
 - `cpt-cf-settings-service-algo-module-contributions-reconcile`
@@ -313,6 +313,7 @@ While the release is Embedded-only, the contribution trait **MUST** be bound in 
 - [x] Re-registering a retired setting at the same major reactivates it, and a retained value that no longer validates is flagged `needs_review` with a detail and falls through on read
 - [x] Registering `…sett1.v2~` with a different value type while `…sett1.v1~` is active with two values creates `v2` active, copies both values with the failing one flagged, retires `v1`, and leaves all of it or none of it when the transaction fails
 - [x] Registering a major lower than the active one is refused
+- [x] Re-registering a retired lower major beside an active higher one is refused `major_regression` for that item, the rest of the batch is reconciled, and the lower major stays retired; with the higher major retired too the lower one still stays retired, and only the highest comes back
 - [x] The setting's type exists in the types registry before its row, a retry after a failed insert reuses it, and retiring the declaration leaves it registered
 - [x] Retiring a key the module does not own is refused per item; retiring an already retired key changes nothing
 - [x] After a retire, a read of the key resolves as the distinct retired outcome and every value row remains
