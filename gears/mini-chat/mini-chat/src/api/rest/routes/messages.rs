@@ -2,7 +2,7 @@ use axum::Router;
 use toolkit::api::OpenApiRegistry;
 use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt};
 
-use super::{AiChatLicense, retry_after_header};
+use super::AiChatLicense;
 use crate::api::rest::{dto, handlers};
 use crate::infra::db::odata_mapper::MessageField;
 
@@ -65,8 +65,6 @@ pub(super) fn register_message_routes(
         .error_429(openapi)
         .error_500(openapi)
         .error_422(openapi)
-        .error_503(openapi)
-        .response_header(retry_after_header())
         .register(router, openapi);
 
     router

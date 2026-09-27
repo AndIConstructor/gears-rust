@@ -74,7 +74,8 @@ Chosen option: "Adopt the canonical `Problem` for REST, and keep `{code, message
 | Any other unique-constraint violation that the caller does not handle (`DomainError::Conflict` from the DB layer) | `already_exists` | 409 | `resource_name = unique_violation` |
 | Quota exhausted (tokens, daily web search, daily code interpreter) | `resource_exhausted` | 429 | `violations[{subject: <quota_scope>, description: "quota_exceeded"}]`; `quota_scope` is `tokens`, `web_search` or `code_interpreter` |
 | Per-chat document count or storage limit | `resource_exhausted` | 429 | `document_limit` / `storage_limit` (was 400) |
-| Provider or storage backend failure before streaming | `service_unavailable` | 503 + `Retry-After` | (was 502/504) |
+| Storage backend (provider Files / vector store API) failure on attachment upload | `service_unavailable` | 503 + `Retry-After` | (was 502/504) |
+| Provider or policy resolution failure before streaming (`messages:stream`, retry, edit) | `internal` | 500 | provider failures after the stream opens are SSE `error` events |
 | Upload concurrency limit | `service_unavailable` | 503 + `Retry-After` | |
 | Internal / database error | `internal` | 500 | |
 
