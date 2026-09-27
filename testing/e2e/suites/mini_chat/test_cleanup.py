@@ -397,20 +397,36 @@ def get_attachment_rows(chat_id: str) -> list[dict]:
     )
 
 
+def _assert_file_deleted_once(request, mock_provider, file_id: str) -> None:
+    """Offline: the cleanup sent exactly one DELETE for `file_id` and the
+    mock no longer holds the file (the DELETE found it, not a 404)."""
+    if request.config.getoption("mode") == "online":
+        return
+    deletes = _file_deletes(mock_provider, file_id)
+    assert len(deletes) == 1, mock_provider.get_request_paths()
+    assert deletes[0].split("?")[0].endswith(f"/files/{file_id}"), deletes
+    assert file_id not in [f["id"] for f in mock_provider.get_uploaded_files()]
+
+
 class TestCleanupWorkerDB:
     """Cleanup worker — DB state and outbox payloads.
 
     - Chat deletion ends the cleanup of each attachment in `done`
     - Chat deletion enqueues one chat cleanup event (also for an empty chat)
     - Attachment deletion enqueues a per-attachment cleanup event
+
+    Every test waits for the cleanup it starts: a cleanup left running would
+    send its DELETEs after the next test cleared the mock's files, get 404
+    and still end in `done`.
     """
 
     @pytest.mark.timeout(40)
-    def test_chat_deletion_marks_attachments_for_cleanup(self, server):
+    def test_chat_deletion_marks_attachments_for_cleanup(self, request, server, mock_provider):
         """DELETE chat → the attachment's cleanup ends in `done` after one
-        successful provider delete (cleanup_attempts stays 0)."""
+        successful provider delete of its own file (cleanup_attempts stays 0)."""
         chat_id = create_chat()["id"]
         att_id = upload_ready(chat_id)
+        file_id = provider_file_id(att_id)
         assert _cleanup_status(att_id) is None
 
         assert delete_chat(chat_id).status_code == 204
@@ -418,12 +434,13 @@ class TestCleanupWorkerDB:
         assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
         rows = get_attachment_rows(chat_id)
         assert [(r["cleanup_status"], r["cleanup_attempts"]) for r in rows] == [("done", 0)], rows
+        _assert_file_deleted_once(request, mock_provider, file_id)
 
     def test_chat_deletion_enqueues_chat_cleanup_event(self, server):
         """DELETE chat → one chat cleanup outbox payload with the chat's
         tenant, deletion time and a system request id."""
         chat_id = create_chat()["id"]
-        upload_ready(chat_id)  # work for the cleanup handler
+        att_id = upload_ready(chat_id)  # work for the cleanup handler
 
         assert delete_chat(chat_id).status_code == 204
 
@@ -431,11 +448,14 @@ class TestCleanupWorkerDB:
         assert len(payloads) == 1, payloads
         for key in ("system_request_id", "chat_deleted_at", "tenant_id"):
             assert key in payloads[0], payloads[0]
+        assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
 
-    def test_attachment_deletion_enqueues_cleanup_event(self, server):
-        """DELETE attachment → one per-attachment cleanup outbox payload."""
+    def test_attachment_deletion_enqueues_cleanup_event(self, request, server, mock_provider):
+        """DELETE attachment → one per-attachment cleanup outbox payload with
+        the provider file id; the cleanup deletes that file."""
         chat_id = create_chat()["id"]
         att_id = upload_ready(chat_id)
+        file_id = provider_file_id(att_id)
 
         resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
         assert resp.status_code == 204
@@ -448,30 +468,37 @@ class TestCleanupWorkerDB:
         payload = payloads[0]
         assert payload["event_type"] == "attachment_deleted"
         assert payload["chat_id"] == chat_id
-        assert "provider_file_id" in payload
+        assert payload["provider_file_id"] == file_id, payload
         assert "storage_backend" in payload
+        assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
+        _assert_file_deleted_once(request, mock_provider, file_id)
 
     @pytest.mark.timeout(40)
-    def test_chat_deletion_with_multiple_attachments(self, server):
-        """DELETE chat with 3 attachments → the cleanup of each one ends in `done`."""
+    def test_chat_deletion_with_multiple_attachments(self, request, server, mock_provider):
+        """DELETE chat with 3 attachments → the cleanup of each one ends in
+        `done`, each after one delete of its own provider file."""
         chat_id = create_chat()["id"]
         att_ids = [
             upload_ready(chat_id, f"File content {i}".encode(), f"test_{i}.txt")
             for i in range(3)
         ]
+        file_ids = [provider_file_id(a) for a in att_ids]
 
         assert delete_chat(chat_id).status_code == 204
 
         assert wait_cleanup_terminal(att_ids) == {a: "done" for a in att_ids}
+        for file_id in file_ids:
+            _assert_file_deleted_once(request, mock_provider, file_id)
 
     def test_second_delete_chat_404_single_cleanup_event(self, server):
         """A second DELETE of a chat is 404 and enqueues no second cleanup event."""
         chat_id = create_chat()["id"]
-        upload_ready(chat_id)
+        att_id = upload_ready(chat_id)
 
         assert delete_chat(chat_id).status_code == 204
         assert_problem(delete_chat(chat_id), 404, "not_found")
         assert len(chat_cleanup_payloads(chat_id)) == 1
+        assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
 
     def test_chat_without_attachments_still_enqueues(self, server):
         """DELETE of an empty chat still enqueues one chat cleanup event
