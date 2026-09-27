@@ -188,6 +188,7 @@ pub struct ProviderEntry {
 #[serde(deny_unknown_fields)]
 pub struct ProviderTenantOverride {
     /// Override upstream hostname for this tenant.
+    #[expand_vars]
     #[serde(default)]
     pub host: Option<String>,
     /// OAGW upstream alias for this tenant.
@@ -1138,6 +1139,37 @@ fn default_vendor() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tenant_override_host_expands_env_vars() {
+        use toolkit::var_expand::ExpandVars;
+
+        temp_env::with_var(
+            "MINI_CHAT_TEST_TENANT_HOST",
+            Some("tenant.example.com"),
+            || {
+                let mut entry: ProviderEntry = serde_json::from_value(serde_json::json!({
+                    "kind": "openai_responses",
+                    "host": "${MINI_CHAT_TEST_TENANT_HOST}",
+                    "storage_kind": "openai",
+                    "tenant_overrides": {
+                        "00000000-0000-0000-0000-000000000001": {
+                            "host": "${MINI_CHAT_TEST_TENANT_HOST}"
+                        }
+                    }
+                }))
+                .expect("provider entry deserializes");
+                entry.expand_vars().expect("expansion succeeds");
+                assert_eq!(entry.host, "tenant.example.com");
+                assert_eq!(
+                    entry.tenant_overrides["00000000-0000-0000-0000-000000000001"]
+                        .host
+                        .as_deref(),
+                    Some("tenant.example.com")
+                );
+            },
+        );
+    }
 
     #[test]
     fn provider_tenant_override_must_have_host_or_alias() {
