@@ -32,6 +32,7 @@ from .conftest import (
     wait_for,
 )
 from .mock_provider.responses import SCENARIOS, Scenario
+from .mock_provider.server import FILES_PATH
 
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 
@@ -860,7 +861,7 @@ class TestUploadProviderFailure:
         Retry-After; the inserted row is visible with status failed and an error_code."""
         _require_offline(request)
         chat_id = chat["id"]
-        mock_provider.set_fault("POST", "/files", 500)
+        mock_provider.set_fault("POST", FILES_PATH, 500)
 
         resp = _upload(chat_id, "fail.txt", b"provider will fail", "text/plain")
         assert_problem(resp, 503, "service_unavailable")

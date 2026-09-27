@@ -29,6 +29,7 @@ from .conftest import (
     wait_for,
 )
 from .mock_provider.responses import SCENARIOS
+from .mock_provider.server import FILES_PATH
 from .test_attachments import _chunked_multipart, _upload, _upload_ready
 
 
@@ -293,7 +294,7 @@ class TestStreamInvalidAttachments:
     def test_failed_attachment_rejected(self, chat, mock_provider):
         """An attachment whose provider upload failed (status `failed`) is not ready."""
         chat_id = chat["id"]
-        mock_provider.set_fault("POST", "/files", 500)
+        mock_provider.set_fault("POST", FILES_PATH, 500)
         assert _upload(chat_id, "fail.txt", b"upload fails", "text/plain").status_code == 503
         rows = query_db("SELECT id, status FROM attachments WHERE chat_id = ?", (chat_id,))
         assert [r["status"] for r in rows] == ["failed"], rows

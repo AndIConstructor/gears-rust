@@ -19,6 +19,7 @@ import uuid
 import httpx
 import pytest
 
+from .mock_provider.server import FILES_PATH, VECTOR_STORES_PATH
 from .conftest import (
     API_PREFIX,
     ATTACHMENT_CLEANUP_QUEUE,
@@ -129,7 +130,7 @@ def check_chat_cleanup_404_is_success(mock_provider, model: str) -> None:
     chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
     file_id = provider_file_id(att_id)
 
-    mock_provider.set_fault("DELETE", f"/files/{file_id}", 404)
+    mock_provider.set_fault("DELETE", rf"{FILES_PATH}/{file_id}", 404)
     assert delete_chat(chat_id).status_code == 204
 
     assert wait_cleanup_terminal([att_id]) == {att_id: "done"}
@@ -143,7 +144,7 @@ def check_attachment_cleanup_404_is_success(mock_provider, model: str) -> None:
     chat_id, (att_id,) = _chat_with_ready_docs(model, 1)
     file_id = provider_file_id(att_id)
 
-    mock_provider.set_fault("DELETE", f"/files/{file_id}", 404)
+    mock_provider.set_fault("DELETE", rf"{FILES_PATH}/{file_id}", 404)
     resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
     assert resp.status_code == 204
 
@@ -212,7 +213,7 @@ def check_attachment_cleanup_403_ends_failed(mock_provider, model: str) -> None:
     file_id = provider_file_id(att_id)
 
     # More faults than attempts: every delete of this file answers 403.
-    mock_provider.set_fault("DELETE", f"/files/{file_id}", 403, count=50)
+    mock_provider.set_fault("DELETE", rf"{FILES_PATH}/{file_id}", 403, count=50)
     resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
     assert resp.status_code == 204
 
@@ -239,7 +240,7 @@ def check_vector_store_delete_500_is_dead_lettered(mock_provider, model: str) ->
     vs_id = _vector_store_rows(chat_id)[0]["vector_store_id"]
     assert vs_id
 
-    mock_provider.set_fault("DELETE", f"/vector_stores/{vs_id}", 500, count=50)
+    mock_provider.set_fault("DELETE", rf"{VECTOR_STORES_PATH}/{vs_id}", 500, count=50)
     assert delete_chat(chat_id).status_code == 204
 
     assert wait_cleanup_terminal([att_id]) == {att_id: "done"}

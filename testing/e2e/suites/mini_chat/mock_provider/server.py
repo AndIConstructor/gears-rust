@@ -7,6 +7,7 @@ import email
 import email.policy
 import json
 import queue
+import re
 import threading
 import time
 import urllib.parse
@@ -48,6 +49,20 @@ def path_error(raw_path: str) -> str | None:
     if path.startswith("/v1/"):
         return f"unexpected query {query!r} on {path!r}" if query else None
     return f"unknown path {path!r}"
+
+
+# Path patterns for `set_fault` (matched in full against the path without
+# the query): the Files and Vector Stores collections of both providers.
+FILES_PATH = r"(?:/v1|/openai)/files"
+VECTOR_STORES_PATH = r"(?:/v1|/openai)/vector_stores"
+
+
+def _not_found(message: str) -> dict:
+    return {"error": {"message": message, "type": "invalid_request_error", "param": None, "code": None}}
+
+
+def _invalid(message: str, param: str | None = None) -> dict:
+    return {"error": {"message": message, "type": "invalid_request_error", "param": param, "code": None}}
 
 
 # The real API answers `in_progress` when a file is added to a vector store
@@ -178,6 +193,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._json_response(200, build_summary_response(body, model, response_id))
             return
         server.capture_request(body)
+        ref_error = server.unknown_reference(body)
+        if ref_error is not None:
+            self._json_response(*ref_error)
+            return
         try:
             scenario = server._override_queue.get_nowait()
         except queue.Empty:
@@ -234,13 +253,20 @@ class _Handler(BaseHTTPRequestHandler):
         file_id = f"file-mock-{uuid.uuid4().hex[:12]}"
         form = _multipart_form(self.headers.get("Content-Type", ""), raw)
         content, filename = form.get("file", (b"", None))
+        purpose = form.get("purpose", (b"", None))[0].decode(errors="replace")
+        if "file" not in form or not filename:
+            self._json_response(400, _invalid("A file with a filename is required.", "file"))
+            return
+        if not purpose:
+            self._json_response(400, _invalid("Missing required parameter: 'purpose'.", "purpose"))
+            return
         file_obj = {
             "id": file_id,
             "object": "file",
             "bytes": len(content),
             "created_at": int(time.time()),
             "filename": filename,
-            "purpose": form.get("purpose", (b"", None))[0].decode(errors="replace"),
+            "purpose": purpose,
             "status": "processed",
         }
         with server._state_lock:
@@ -274,7 +300,10 @@ class _Handler(BaseHTTPRequestHandler):
         file_id = file_id.split("?")[0]
         with server._state_lock:
             deleted = server._files.pop(file_id, None) is not None
-        self._json_response(200, {"id": file_id, "object": "file", "deleted": deleted})
+        if not deleted:
+            self._json_response(404, _not_found(f"No such File object: {file_id}"))
+            return
+        self._json_response(200, {"id": file_id, "object": "file", "deleted": True})
 
     # ── Vector Stores API ───────────────────────────────────────────────
 
@@ -313,7 +342,10 @@ class _Handler(BaseHTTPRequestHandler):
         vs_id = vs_id.split("?")[0]
         with server._state_lock:
             deleted = server._vector_stores.pop(vs_id, None) is not None
-        self._json_response(200, {"id": vs_id, "object": "vector_store", "deleted": deleted})
+        if not deleted:
+            self._json_response(404, _not_found(f"No vector store found with id '{vs_id}'."))
+            return
+        self._json_response(200, {"id": vs_id, "object": "vector_store", "deleted": True})
 
     def _vector_store_file_ids(self) -> tuple[str, str | None]:
         """(vs_id, file_id) from `/…/vector_stores/{vs_id}/files[/{file_id}]`."""
@@ -347,10 +379,14 @@ class _Handler(BaseHTTPRequestHandler):
             file_id = ""
         with server._state_lock:
             vs_obj = server._vector_stores.get(vs_id)
-            if vs_obj is not None:
+            file_known = file_id in server._files
+            if vs_obj is not None and file_known:
                 vs_obj.setdefault("file_ids", []).append(file_id)
         if vs_obj is None:
-            self._json_response(404, {"error": {"message": f"No such vector_store: {vs_id}"}})
+            self._json_response(404, _not_found(f"No vector store found with id '{vs_id}'."))
+            return
+        if not file_known:
+            self._json_response(404, _not_found(f"No such File object: {file_id}"))
             return
         status = server.start_indexing(vs_id, file_id)
         self._json_response(200, self._vector_store_file_obj(vs_id, file_id, status))
@@ -377,8 +413,11 @@ class _Handler(BaseHTTPRequestHandler):
             deleted = vs_obj is not None and file_id in vs_obj.get("file_ids", [])
             if deleted:
                 vs_obj["file_ids"].remove(file_id)
+        if not deleted:
+            self._json_response(404, _not_found(f"No file found with id '{file_id}' in vector store '{vs_id}'."))
+            return
         self._json_response(
-            200, {"id": file_id, "object": "vector_store.file.deleted", "deleted": deleted},
+            200, {"id": file_id, "object": "vector_store.file.deleted", "deleted": True},
         )
 
     # ── Helpers ─────────────────────────────────────────────────────────
@@ -439,6 +478,11 @@ class MockProviderServer(ThreadingHTTPServer):
         self._indexing_last_error: dict | None = None
         # (vs_id, file_id) -> statuses still to report.
         self._indexing: dict[tuple[str, str], list[str]] = {}
+        # While set, every status read answers `in_progress` (hold_indexing).
+        self._indexing_held = False
+        # Reject Responses requests that name unknown files or vector stores
+        # (check_references).
+        self._check_references = True
 
     @property
     def port(self) -> int:
@@ -518,15 +562,16 @@ class MockProviderServer(ThreadingHTTPServer):
             self._path_errors.clear()
 
     def set_fault(
-        self, method: str, path_contains: str, status: int,
+        self, method: str, path: str, status: int,
         body: dict | None = None, count: int = 1,
     ) -> None:
-        """Answer the next `count` `method` requests whose path contains
-        `path_contains` with `status` and a JSON `body`, before normal handling."""
+        """Answer the next `count` `method` requests whose path (without the
+        query) matches the regex `path` in full with `status` and a JSON
+        `body`, before normal handling. See FILES_PATH / VECTOR_STORES_PATH."""
         if body is None:
             body = {"error": {"message": f"Mock fault {status}", "type": "mock_fault"}}
         with self._fault_lock:
-            self._faults.append([method.upper(), path_contains, status, body, count])
+            self._faults.append([method.upper(), re.compile(path), status, body, count])
 
     def set_summary_fault(
         self, chat_id: str, status: int, body: dict | None = None, count: int = 1,
@@ -555,7 +600,7 @@ class MockProviderServer(ThreadingHTTPServer):
         with self._fault_lock:
             for fault in self._faults:
                 f_method, f_path, status, body, _ = fault
-                if f_method == method and f_path in path:
+                if f_method == method and f_path.fullmatch(path.split("?")[0]):
                     fault[4] -= 1
                     if fault[4] <= 0:
                         self._faults.remove(fault)
@@ -578,8 +623,58 @@ class MockProviderServer(ThreadingHTTPServer):
             self._indexing[(vs_id, file_id)] = pending
             return pending.pop(0) if len(pending) > 1 else pending[0]
 
+    def hold_indexing(self, held: bool = True) -> None:
+        """While held, every vector store file status read answers
+        `in_progress`; released, reads continue with the set statuses."""
+        with self._state_lock:
+            self._indexing_held = held
+
+    def check_references(self, enabled: bool) -> None:
+        """Whether a Responses request naming a file (`input_image.file_id`,
+        code_interpreter `container.file_ids`) or vector store
+        (`file_search.vector_store_ids`) the mock does not hold is rejected
+        like the real API (400 / 404). On by default; reset after each test.
+        Tests that seed provider ids in the DB turn it off."""
+        with self._state_lock:
+            self._check_references = enabled
+
+    def unknown_reference(self, body: dict) -> tuple[int, dict] | None:
+        """(status, error body) for the first unknown file or vector store
+        the request names, or None."""
+        with self._state_lock:
+            if not self._check_references:
+                return None
+            files = set(self._files)
+            stores = set(self._vector_stores)
+        for item in body.get("input") or []:
+            if not isinstance(item, dict) or not isinstance(item.get("content"), list):
+                continue
+            for part in item["content"]:
+                if isinstance(part, dict) and part.get("type") == "input_image":
+                    fid = part.get("file_id")
+                    if fid is not None and fid not in files:
+                        return 400, _invalid(f"Invalid file id: '{fid}'.", "input")
+        for i, tool in enumerate(body.get("tools") or []):
+            if not isinstance(tool, dict):
+                continue
+            if tool.get("type") == "file_search":
+                for vs_id in tool.get("vector_store_ids") or []:
+                    if vs_id not in stores:
+                        return 404, _not_found(f"Vector store with id '{vs_id}' not found.")
+            if tool.get("type") == "code_interpreter":
+                container = tool.get("container")
+                if isinstance(container, dict):
+                    for fid in container.get("file_ids") or []:
+                        if fid not in files:
+                            return 400, _invalid(
+                                f"Invalid file id: '{fid}'.", f"tools[{i}].container.file_ids",
+                            )
+        return None
+
     def next_indexing_status(self, vs_id: str, file_id: str) -> str:
         with self._state_lock:
+            if self._indexing_held:
+                return "in_progress"
             pending = self._indexing.get((vs_id, file_id))
             if not pending:
                 return "completed"
@@ -598,6 +693,8 @@ class MockProviderServer(ThreadingHTTPServer):
         with self._state_lock:
             self._indexing_statuses = list(DEFAULT_INDEXING_STATUSES)
             self._indexing_last_error = None
+            self._indexing_held = False
+            self._check_references = True
         while True:
             try:
                 self._override_queue.get_nowait()
@@ -642,7 +739,7 @@ class _DummyMockProvider:
     def set_next_scenario(self, scenario: Scenario) -> None:
         pass
 
-    def set_fault(self, method: str, path_contains: str, status: int,
+    def set_fault(self, method: str, path: str, status: int,
                   body: dict | None = None, count: int = 1) -> None:
         pass
 
@@ -664,6 +761,12 @@ class _DummyMockProvider:
         return []
 
     def set_indexing(self, statuses: list[str], last_error: dict | None = None) -> None:
+        pass
+
+    def hold_indexing(self, held: bool = True) -> None:
+        pass
+
+    def check_references(self, enabled: bool) -> None:
         pass
 
     def get_request_paths(self) -> list[tuple[str, str]]:
