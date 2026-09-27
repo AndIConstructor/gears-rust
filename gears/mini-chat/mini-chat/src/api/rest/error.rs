@@ -183,13 +183,6 @@ impl From<DomainError> for CanonicalError {
                     .create()
             }
 
-            DomainError::ServiceUnavailable { message } => {
-                tracing::warn!(reason = %message, "mini-chat service unavailable");
-                CanonicalError::service_unavailable()
-                    .with_retry_after_seconds(5)
-                    .create()
-            }
-
             DomainError::ProviderError {
                 code,
                 sanitized_message,
@@ -215,6 +208,15 @@ fn conflict_detail(code: &str) -> &'static str {
             "Attachment is referenced by one or more messages and cannot be deleted"
         }
         _ => "resource already exists",
+    }
+}
+
+/// Client-facing detail for a `StreamError::Conflict` code.
+fn turn_conflict_detail(code: &str) -> &'static str {
+    match code {
+        "turn_already_running" => "Another turn is running in this chat",
+        "request_id_conflict" => "request_id is already used by another turn in this chat",
+        _ => "Turn conflict",
     }
 }
 
@@ -282,9 +284,14 @@ impl From<StreamError> for CanonicalError {
                 .with_reason("REPLAY")
                 .create(),
 
-            StreamError::Conflict { code, message } => MiniChatTurnError::aborted(message)
-                .with_reason(code)
-                .create(),
+            StreamError::Conflict { code, message } => {
+                // `message` names turn ids or carries driver constraint text;
+                // it goes to the log, the client gets a fixed detail.
+                tracing::info!(conflict_code = %code, error_message = %message, "turn conflict");
+                MiniChatTurnError::aborted(turn_conflict_detail(&code))
+                    .with_reason(code)
+                    .create()
+            }
 
             StreamError::TurnCreationFailed { source } => {
                 tracing::warn!(error = %source, "pre-stream turn creation failed");
@@ -746,17 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn service_unavailable_carries_retry_after_seconds() {
-        let p: Problem = DomainError::ServiceUnavailable {
-            message: "downstream timeout".into(),
-        }
-        .into_test_problem();
-        assert_eq!(p.status, Some(503));
-        assert_eq!(p.problem_type, SERVICE_UNAVAILABLE_TYPE);
-        assert_eq!(p.context["retry_after_seconds"].as_u64(), Some(5));
-    }
-
-    #[test]
     fn invalid_model_emits_field_violation() {
         let p: Problem = DomainError::InvalidModel {
             model: "gpt-fake".into(),
@@ -782,6 +778,44 @@ mod tests {
         .into_test_problem();
         assert_eq!(p.status, Some(409));
         assert_eq!(p.context["resource_name"], "unique_violation");
+    }
+
+    #[test]
+    fn turn_conflict_detail_hides_raw_message() {
+        let chat_id = uuid::Uuid::new_v4();
+        let turn_id = uuid::Uuid::new_v4();
+        for (code, raw, detail) in [
+            (
+                "turn_already_running",
+                format!("Chat {chat_id} already has a running turn {turn_id}"),
+                "Another turn is running in this chat",
+            ),
+            (
+                "request_id_conflict",
+                format!("Turn for request_id {turn_id} exists with state Running"),
+                "request_id is already used by another turn in this chat",
+            ),
+            (
+                "turn_already_running",
+                "UNIQUE constraint failed: chat_turns.chat_id".to_owned(),
+                "Another turn is running in this chat",
+            ),
+        ] {
+            let p: Problem = StreamError::Conflict {
+                code: code.into(),
+                message: raw.clone(),
+            }
+            .into_test_problem();
+            assert_eq!(p.status, Some(409), "{code}");
+            assert_eq!(p.detail, detail, "{code}");
+            assert_eq!(p.context["reason"], code);
+            let wire = serde_json::to_string(&p).unwrap();
+            assert!(!wire.contains(&raw), "{code}: raw message leaked: {wire}");
+            assert!(
+                !wire.contains(&turn_id.to_string()),
+                "{code}: turn id leaked"
+            );
+        }
     }
 
     #[test]

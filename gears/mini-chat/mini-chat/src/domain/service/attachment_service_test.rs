@@ -3150,7 +3150,7 @@ impl crate::domain::repos::ModelResolver for UnavailableModelResolver {
         _user_id: Uuid,
         _model: Option<String>,
     ) -> Result<crate::domain::models::ResolvedModel, crate::domain::error::DomainError> {
-        Err(crate::domain::error::DomainError::service_unavailable(
+        Err(crate::domain::error::DomainError::internal(
             "policy snapshot unavailable",
         ))
     }
@@ -3160,7 +3160,7 @@ impl crate::domain::repos::ModelResolver for UnavailableModelResolver {
         _user_id: Uuid,
         _model_id: &str,
     ) -> Result<crate::domain::models::ResolvedModel, crate::domain::error::DomainError> {
-        Err(crate::domain::error::DomainError::service_unavailable(
+        Err(crate::domain::error::DomainError::internal(
             "policy snapshot unavailable",
         ))
     }
@@ -3222,9 +3222,9 @@ async fn test_upload_propagates_model_resolution_error() {
     assert!(
         matches!(
             result,
-            Err(crate::domain::error::DomainError::ServiceUnavailable { .. })
+            Err(crate::domain::error::DomainError::InternalError { .. })
         ),
-        "expected ServiceUnavailable, got {result:?}"
+        "expected InternalError, got {result:?}"
     );
     assert!(oagw.captured_requests.lock().unwrap().is_empty());
     assert_eq!(count_attachment_rows(&db_prov).await, 0);
