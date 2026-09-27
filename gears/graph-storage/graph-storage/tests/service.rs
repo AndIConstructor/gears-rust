@@ -2106,6 +2106,18 @@ async fn a_store_that_inherits_the_default_node_types_still_excludes_phantoms() 
         ["kept", "seed"],
         "the phantom is dropped by the toggle alone; nothing else filters here"
     );
+    // And the edge that named it goes with it: an edge to an excluded node
+    // would say the node exists, which is what the toggle asked not to say.
+    let edges: Vec<(&str, &str)> = walked
+        .edges
+        .iter()
+        .map(|edge| (edge.src.as_str(), edge.dst.as_str()))
+        .collect();
+    assert_eq!(
+        edges,
+        [("seed", "kept")],
+        "no edge names the excluded phantom"
+    );
 }
 
 /// How many rows one piece asks for when the whole budget remains -- the
@@ -2232,8 +2244,8 @@ async fn the_caller_controlled_strings_are_bounded() {
     assert!(matches!(refused, DomainError::LimitExceeded { .. }));
 
     // The idempotency key is the same kind of string and the most durable of
-    // them: it is the primary key of the retry record, kept for the retention
-    // window and read on every retry.
+    // them: it is the primary key of the retry record, kept until the expiry
+    // protocol lands (#4874) and read on every retry.
     let mut batch = conformance::batch(vec![conformance::node("fine", "fine")], vec![]);
     batch.idempotency_key = Some(long.clone());
     let refused = harness
