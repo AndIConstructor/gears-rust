@@ -350,6 +350,39 @@ class TestStreamInvalidAttachments:
         assert result["resp"].status_code == 201, result["resp"].text
         assert result["resp"].json()["status"] == "ready"
 
+    @pytest.mark.timeout(30)
+    def test_uploaded_attachment_rejected(self, chat, mock_provider):
+        """A document stored at the provider while the vector store is still
+        indexing it: GET reports `uploaded`, and a send with it is rejected.
+        Released, the upload completes `ready`."""
+        chat_id = chat["id"]
+        mock_provider.hold_indexing()
+        result: dict[str, httpx.Response] = {}
+
+        def upload():
+            result["resp"] = _upload(chat_id, "indexing.txt", b"being indexed", "text/plain")
+
+        thread = threading.Thread(target=upload)
+        thread.start()
+        try:
+            rows = wait_for(
+                lambda: query_db(
+                    "SELECT id FROM attachments WHERE chat_id = ? AND status = 'uploaded'",
+                    (chat_id,),
+                ),
+                "the attachment in `uploaded` while indexing is polled",
+            )
+            att_id = uuid_from_db(rows[0]["id"])
+            detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+            assert detail.status_code == 200, detail.text
+            assert detail.json()["status"] == "uploaded", detail.json()
+            self._assert_rejected(chat_id, [att_id], mock_provider)
+        finally:
+            mock_provider.hold_indexing(False)
+            thread.join(timeout=30)
+        assert result["resp"].status_code == 201, result["resp"].text
+        assert result["resp"].json()["status"] == "ready"
+
 
 @pytest.mark.usefixtures("offline_only")
 class TestStreamInputLimits:
