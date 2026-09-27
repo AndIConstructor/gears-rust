@@ -1037,6 +1037,7 @@ class TestFileCitationMapping:
         }]}]
         assert file_id not in resp.text
 
+    @pytest.mark.timeout(40)
     def test_citation_of_deleted_attachment_dropped(self, request, chat, mock_provider):
         """10-29: file_search may still return a deleted document until its
         provider file is removed (ADR-0007), but a citation of it is omitted;

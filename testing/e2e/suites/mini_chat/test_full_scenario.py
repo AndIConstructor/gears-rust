@@ -38,6 +38,7 @@ def total_daily_used() -> int:
 class TestFullConversationScenario:
     """Complete conversation lifecycle: create → multi-turn → verify → delete."""
 
+    @pytest.mark.timeout(20)
     def test_full_conversation(self, server, provider_chat):
         # ── 1. Use provider-parameterized chat ───────────────────────────
         chat_id = provider_chat["id"]

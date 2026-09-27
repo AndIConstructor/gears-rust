@@ -108,6 +108,7 @@ class TestStreamStartedOrdering:
 class TestStreamStartedOnMutation:
     """stream_started carries a NEW request_id on retry and edit."""
 
+    @pytest.mark.timeout(30)
     def test_retry_emits_stream_started_with_new_request_id(self, provider_chat):
         chat_id = provider_chat["id"]
 
@@ -137,6 +138,7 @@ class TestStreamStartedOnMutation:
         # Verify done event present
         expect_done(retry_events)
 
+    @pytest.mark.timeout(30)
     def test_edit_emits_stream_started_with_new_request_id(self, provider_chat):
         chat_id = provider_chat["id"]
 

@@ -51,6 +51,7 @@ class TestQuotaEnforcement:
         if request.config.getoption("mode") == "online":
             pytest.skip("literal credit amounts depend on the mock's fixed usage")
 
+    @pytest.mark.timeout(30)
     def test_bucket_model_premium_counts_total(self, chat):
         """A premium turn charges both `total` and `tier:premium` by its cost.
 
@@ -63,6 +64,7 @@ class TestQuotaEnforcement:
         assert total_after - total_before == 330
         assert premium_after - premium_before == 330
 
+    @pytest.mark.timeout(30)
     def test_bucket_model_standard_counts_total(self, chat_with_model):
         """A standard turn charges `total` only.
 
@@ -76,6 +78,7 @@ class TestQuotaEnforcement:
         assert total_after - total_before == 86
         assert premium_after == premium_before
 
+    @pytest.mark.timeout(30)
     def test_policy_version_persisted_per_turn(self, chat):
         """The completed turn records `policy_version_applied` 1: the only
         version of the static model policy plugin (`SUPPORTED_POLICY_VERSION`

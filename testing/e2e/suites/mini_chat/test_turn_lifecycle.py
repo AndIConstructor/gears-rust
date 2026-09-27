@@ -43,6 +43,7 @@ class TestTurnLifecycle:
         assert turn.get("assistant_message_id") is None
         assert [m["role"] for m in list_messages(chat_id)] == ["user"]
 
+    @pytest.mark.timeout(30)
     def test_failed_turn_null_message_id(self, chat, mock_provider):
         """A provider failure without content: error, no assistant_message_id, no message."""
         chat_id = chat["id"]

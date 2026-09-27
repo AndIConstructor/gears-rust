@@ -70,6 +70,7 @@ class TestCodeInterpreterUsageAccounting:
 
     Offline only: the literal credit amounts depend on the mock's fixed usage."""
 
+    @pytest.mark.timeout(20)
     def test_code_interpreter_usage_correct(self, provider, server, xlsx_chat):
         """Single CI turn: verify credits, messages, tool events, and turn state."""
         chat_id = xlsx_chat["chat_id"]
@@ -132,6 +133,7 @@ class TestCodeInterpreterUsageAccounting:
         spent_after = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
         assert spent_after - spent_before == EXPECTED_CREDITS[provider]
 
+    @pytest.mark.timeout(20)
     def test_code_interpreter_calls_tracked_in_db(self, provider, server, xlsx_chat):
         """Verify code_interpreter_calls is incremented in quota_usage table."""
         chat_id = xlsx_chat["chat_id"]
@@ -152,6 +154,7 @@ class TestCodeInterpreterUsageAccounting:
         # The CODEINTERP scenario emits exactly one completed code_interpreter call.
         assert _query_ci_calls() == ci_before + 1
 
+    @pytest.mark.timeout(20)
     def test_non_ci_turn_has_zero_ci_calls(self, provider, server):
         """A normal turn (no XLSX) should not increment code_interpreter_calls."""
         model = PROVIDER_DEFAULT_MODEL[provider]

@@ -503,6 +503,7 @@ class TestCodeInterpreterPerMessageLimit:
     stops at the model's `max_tool_calls` (2, base.yaml) first."""
 
     @pytest.mark.usefixtures("offline_only")
+    @pytest.mark.timeout(30)
     def test_eleventh_code_interpreter_call_fails_the_turn(self, openai_chat, mock_provider):
         """The provider starts an eleventh code interpreter call in one answer:
         the client gets the tool events of the ten allowed calls (the eleventh

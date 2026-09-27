@@ -57,6 +57,7 @@ class TestWebSearchUsageAccounting:
 
     Offline only: the test sets the provider usage (SEARCH_USAGE)."""
 
+    @pytest.mark.timeout(20)
     def test_web_search_usage_correct(self, provider, server, mock_provider):
         """Single web-search turn: verify credits, messages, and turn state."""
         model = PROVIDER_DEFAULT_MODEL[provider]
@@ -115,6 +116,7 @@ class TestWebSearchUsageAccounting:
 
         assert tools == [("web_search", "start"), ("web_search", "done")], tools
 
+    @pytest.mark.timeout(20)
     def test_web_search_calls_counted(self, provider, chat_with_model):
         """The daily `total` usage row counts the completed web searches of a
         turn: the mock `SEARCH:*` answer has one."""

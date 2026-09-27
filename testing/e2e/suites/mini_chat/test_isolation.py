@@ -192,6 +192,7 @@ class TestIsolation:
 class TestQuotaIsolation:
     """Usage is accounted per user."""
 
+    @pytest.mark.timeout(20)
     def test_other_user_usage_is_not_charged(self, chat):
         """A's turn is charged to A (total daily grows by the turn's cost) and
         leaves B's usage unchanged. The turn runs in a chat of its own, so

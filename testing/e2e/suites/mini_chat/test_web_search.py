@@ -220,6 +220,7 @@ class TestWebSearchPerMessageLimit:
     in config.rs, not overridden in base.yaml) web searches per message."""
 
     @pytest.mark.usefixtures("offline_only")
+    @pytest.mark.timeout(30)
     def test_third_web_search_fails_the_turn(self, chat, mock_provider):
         """18-10: the provider starts a third web search in one answer: the
         stream ends with SSE `error` `web_search_calls_exceeded` and the turn

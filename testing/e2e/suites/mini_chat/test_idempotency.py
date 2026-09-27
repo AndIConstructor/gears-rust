@@ -69,6 +69,7 @@ class TestIdempotency:
             expect_done(first.drain())
         assert turn_count(chat_id) == 1
 
+    @pytest.mark.timeout(30)
     def test_failed_turn_same_request_id_409(self, request, chat, mock_provider):
         """Resending the request_id of a failed turn is 409 request_id_conflict."""
         _require_offline(request)
@@ -100,6 +101,7 @@ class TestIdempotency:
         assert_problem(post_stream(chat_id, body), 409, "aborted", reason="request_id_conflict")
         assert turn_count(chat_id) == 1
 
+    @pytest.mark.timeout(30)
     def test_request_id_replaced_by_retry_409(self, chat):
         """The request_id of a turn replaced by retry is not replayed: 409 request_id_conflict."""
         chat_id = chat["id"]
@@ -119,6 +121,7 @@ class TestIdempotency:
         assert_problem(post_stream(chat_id, body), 409, "aborted", reason="request_id_conflict")
         assert turn_count(chat_id) == 2
 
+    @pytest.mark.timeout(30)
     def test_request_id_of_deleted_turn_409(self, chat):
         """The request_id of a turn removed by DELETE /turns/{request_id} is
         neither replayed nor reused: 409 request_id_conflict, no new turn."""
@@ -157,6 +160,7 @@ class TestIdempotency:
             expect_done(b.drain())
 
     @pytest.mark.usefixtures("offline_only")
+    @pytest.mark.timeout(30)
     def test_replay_does_not_modify_quota_or_call_provider(self, chat, mock_provider):
         """Replaying a completed turn changes neither quota nor provider traffic
         (offline only: provider traffic is what the mock saw)."""

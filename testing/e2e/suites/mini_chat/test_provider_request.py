@@ -171,6 +171,7 @@ class TestProviderIdentity:
 class TestFileSearchMaxNumResults:
     """Verify file_search tool includes max_num_results."""
 
+    @pytest.mark.timeout(90)
     def test_file_search_has_max_num_results(self, provider_chat, mock_provider):
         """A message with a ready document sends file_search with the catalog max_num_results."""
         chat_id = provider_chat["id"]

@@ -833,12 +833,29 @@ def pytest_addoption(parser):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip online_only tests in offline mode."""
+    """Auto-skip online_only tests in offline mode; time the test body only.
+
+    pytest-timeout times setup, call and teardown together by default, so
+    the session fixtures (server start, credstore provisioning; each bounded
+    by its own wait) would count against whichever test runs first. Each
+    mini-chat test gets its timeout (its own `timeout` marker, else the ini
+    value) with `func_only=True`.
+    """
     if config.getoption("mode") == "offline":
         skip = pytest.mark.skip(reason="requires --mode online")
         for item in items:
             if "online_only" in item.keywords:
                 item.add_marker(skip)
+    default_timeout = float(config.getini("timeout") or 0)
+    for item in items:
+        if MODULE_DIR not in Path(str(item.path)).parents:
+            continue
+        marker = item.get_closest_marker("timeout")
+        timeout = marker.args[0] if marker is not None and marker.args else (
+            marker.kwargs.get("timeout", default_timeout) if marker is not None
+            else default_timeout
+        )
+        item.add_marker(pytest.mark.timeout(timeout, func_only=True), append=False)
 
 
 @pytest.fixture(scope="session", autouse=True)

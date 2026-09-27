@@ -400,6 +400,7 @@ class TestCleanupWorkerDB:
     - Attachment deletion enqueues a per-attachment cleanup event
     """
 
+    @pytest.mark.timeout(40)
     def test_chat_deletion_marks_attachments_for_cleanup(self, server):
         """DELETE chat → the attachment's cleanup ends in `done` after one
         successful provider delete (cleanup_attempts stays 0)."""
@@ -442,6 +443,7 @@ class TestCleanupWorkerDB:
         assert "provider_file_id" in payload
         assert "storage_backend" in payload
 
+    @pytest.mark.timeout(40)
     def test_chat_deletion_with_multiple_attachments(self, server):
         """DELETE chat with 3 attachments → the cleanup of each one ends in `done`."""
         chat_id = create_chat()["id"]

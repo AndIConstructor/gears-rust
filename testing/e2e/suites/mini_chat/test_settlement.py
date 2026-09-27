@@ -145,6 +145,7 @@ class TestSettlement:
         assert snapshot() == {**expected, "state": "completed"}
         assert_no_reserves(USER_A_ID)
 
+    @pytest.mark.timeout(30)
     def test_web_search_surcharge_in_reserve(self, request, chat, chat_with_model):
         """14-12: web search adds exactly `web_search_surcharge_tokens` to the
         reserve of the same first message.
@@ -215,6 +216,7 @@ class TestSettlement:
         assert poll_turn(chat["id"], rid)["state"] == "cancelled"
         assert_estimated_settlement(rid, used_before, "aborted", "Write slowly.")
 
+    @pytest.mark.timeout(30)
     def test_provider_http_error_releases_reserve(self, request, chat, mock_provider):
         """A provider HTTP 500 ends the stream with `error` and fails the turn;
         the reserve is released and the estimate charged (billing outcome
@@ -239,6 +241,7 @@ class TestSettlement:
         assert poll_turn(chat["id"], rid)["state"] == "error"
         assert_estimated_settlement(rid, used_before, "failed", "This should fail.")
 
+    @pytest.mark.timeout(30)
     def test_incomplete_response_is_done_and_settled_on_actual_usage(self, request, chat):
         """A provider `response.incomplete` (mock `TRUNCATE`, reason
         max_output_tokens) ends in `done`, not `error`: the turn is completed
@@ -271,6 +274,7 @@ class TestSettlement:
         assert total_daily_used() - used_before == cost
 
     @pytest.mark.usefixtures("offline_only")
+    @pytest.mark.timeout(30)
     def test_cached_and_reasoning_tokens_recorded_not_billed(self, chat, mock_provider):
         """The provider reports 300 cached of 400 input tokens and 40
         reasoning of 60 output tokens (`input_tokens_details.cached_tokens`,
@@ -318,6 +322,7 @@ class TestSettlement:
         assert event["actual_credits_micro"] == 2100, event
         assert total_daily_used() - used_before == 2100
 
+    @pytest.mark.timeout(30)
     def test_one_usage_outbox_event_per_turn(self, chat):
         """A completed turn enqueues exactly one usage event, even after a
         replay (the replay itself succeeds: `done`, `is_new_turn` false)."""

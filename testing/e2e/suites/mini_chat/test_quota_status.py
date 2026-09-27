@@ -84,6 +84,7 @@ class TestQuotaStatusEndpoint:
 class TestQuotaUsageTracking:
     """Quota usage increases after sending messages."""
 
+    @pytest.mark.timeout(20)
     def test_used_credits_increase_after_send(self, provider_chat):
         """Each completed turn adds its cost to the total daily usage.
 
@@ -106,6 +107,7 @@ class TestQuotaUsageTracking:
         after = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
         assert after - before == cost
 
+    @pytest.mark.timeout(20)
     def test_remaining_credits_decrease_after_send(self, provider_chat):
         """remaining_credits_micro strictly decreases after a charged turn.
 
@@ -151,6 +153,7 @@ class TestQuotaWarningsInDoneEvent:
             assert isinstance(w["warning"], bool)
             assert isinstance(w["exhausted"], bool)
 
+    @pytest.mark.timeout(20)
     def test_quota_warnings_consistent_with_endpoint(self, provider_chat):
         """Every `quota_warnings` entry of `done` equals the same tier/period of
         GET /quota/status read right after the turn."""

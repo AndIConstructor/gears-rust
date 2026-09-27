@@ -100,6 +100,7 @@ class TestTurnRetry:
             assert httpx.get(turn_url(chat_id, rid)).json()["state"] == "running"
             expect_done(s.drain())
 
+    @pytest.mark.timeout(30)
     def test_retry_non_latest_turn_409(self, chat):
         """Retrying a turn that is not the latest is 409 NOT_LATEST_TURN; nothing changes."""
         chat_id = chat["id"]
@@ -110,6 +111,7 @@ class TestTurnRetry:
         assert_problem(retry(chat_id, rid1), 409, "aborted", reason="NOT_LATEST_TURN")
         assert list_messages(chat_id) == before
 
+    @pytest.mark.timeout(30)
     def test_retry_replaces_the_answer(self, chat):
         """After retry the chat holds the original user message and exactly one new answer."""
         chat_id = chat["id"]
@@ -128,6 +130,7 @@ class TestTurnRetry:
         assert messages[0]["content"] == "Retry me."
         assert messages[1]["content"] == delta_text(events)
 
+    @pytest.mark.timeout(30)
     def test_retry_failed_turn(self, request, chat, mock_provider):
         """08-12: a turn in `error` state can be retried; the retry produces one new answer."""
         _require_offline(request)
@@ -178,6 +181,7 @@ class TestTurnRetry:
 class TestTurnEdit:
     """PATCH /turns/{request_id} replaces the last user message and its answer."""
 
+    @pytest.mark.timeout(30)
     def test_edit_replaces_user_message_and_answer(self, chat):
         chat_id = chat["id"]
         complete_turn(chat_id, "Keep this turn.")
@@ -200,6 +204,7 @@ class TestTurnEdit:
         old_ids = {m["id"] for m in before[2:]}
         assert old_ids.isdisjoint(m["id"] for m in messages)
 
+    @pytest.mark.timeout(30)
     def test_edit_empty_content_400(self, chat):
         chat_id = chat["id"]
         rid = complete_turn(chat_id, "Question.")
@@ -208,6 +213,7 @@ class TestTurnEdit:
         assert_problem(edit(chat_id, rid, ""), 400, "invalid_argument", field_reason="EMPTY_CONTENT")
         assert list_messages(chat_id) == before
 
+    @pytest.mark.timeout(30)
     def test_edit_body_errors(self, chat):
         """A body without `content` (schema-invalid) is 422 invalid_argument;
         malformed JSON is 400 invalid_argument. The turn is kept."""
@@ -225,6 +231,7 @@ class TestTurnEdit:
         assert list_messages(chat_id) == before
 
     @pytest.mark.usefixtures("offline_only")
+    @pytest.mark.timeout(30)
     def test_edit_content_over_max_input_tokens_400(self, chat_with_model, mock_provider):
         """Edit content of 12000 bytes on gpt-4.1-mini-tiny-ctx is estimated at
         (3000 + 500) * 1.1 = 3850 tokens > max_input_tokens 3000 (see
@@ -242,6 +249,7 @@ class TestTurnEdit:
         assert poll_turn(chat_id, rid)["state"] == "done"
 
     @pytest.mark.usefixtures("offline_only")
+    @pytest.mark.timeout(30)
     def test_edit_content_over_context_budget_400(self, chat_with_model, mock_provider):
         """Edit content of 6000 bytes on gpt-4.1-mini-tiny-ctx (2200 tokens)
         passes max_input_tokens but, with the system prompt (587 tokens),
@@ -275,6 +283,7 @@ class TestTurnEdit:
             ("user", content, new_rid),
         ]
 
+    @pytest.mark.timeout(30)
     def test_edit_non_latest_turn_409(self, chat):
         chat_id = chat["id"]
         rid1 = complete_turn(chat_id, "First turn.")
@@ -309,14 +318,17 @@ class TestTurnEdit:
 class TestUnknownTurn:
     """Retry, edit and delete of a request_id that has no turn in the chat: 404 not_found."""
 
+    @pytest.mark.timeout(30)
     def test_retry_unknown_turn_404(self, chat):
         complete_turn(chat["id"])
         assert_problem(retry(chat["id"], str(uuid.uuid4())), 404, "not_found")
 
+    @pytest.mark.timeout(30)
     def test_edit_unknown_turn_404(self, chat):
         complete_turn(chat["id"])
         assert_problem(edit(chat["id"], str(uuid.uuid4()), "Changed."), 404, "not_found")
 
+    @pytest.mark.timeout(30)
     def test_delete_unknown_turn_404(self, chat):
         complete_turn(chat["id"])
         resp = httpx.delete(turn_url(chat["id"], str(uuid.uuid4())), timeout=10)
@@ -330,6 +342,7 @@ class TestUnknownTurn:
 class TestTurnDelete:
     """DELETE /turns/{request_id} constraints and behavior."""
 
+    @pytest.mark.timeout(30)
     def test_delete_last_turn_204(self, chat):
         """Deleting the last (and only) turn returns 204 and removes messages."""
         chat_id = chat["id"]
@@ -357,6 +370,7 @@ class TestTurnDelete:
             assert httpx.get(turn_url(chat_id, rid)).json()["state"] == "running"
             expect_done(s.drain())
 
+    @pytest.mark.timeout(30)
     def test_delete_non_latest_turn_409(self, chat):
         """Deleting a turn that is not the latest is 409 NOT_LATEST_TURN; nothing changes."""
         chat_id = chat["id"]
@@ -368,6 +382,7 @@ class TestTurnDelete:
         assert_problem(resp, 409, "aborted", reason="NOT_LATEST_TURN")
         assert list_messages(chat_id) == before
 
+    @pytest.mark.timeout(30)
     def test_soft_deleted_turn_excluded_from_messages(self, chat):
         """After deleting the last turn, its messages disappear from GET /messages."""
         chat_id = chat["id"]
@@ -382,6 +397,7 @@ class TestTurnDelete:
             ("user", rid1), ("assistant", rid1),
         ]
 
+    @pytest.mark.timeout(30)
     def test_get_deleted_turn_404(self, chat):
         chat_id = chat["id"]
         rid = complete_turn(chat_id)
@@ -389,6 +405,7 @@ class TestTurnDelete:
 
         assert_problem(httpx.get(turn_url(chat_id, rid)), 404, "not_found")
 
+    @pytest.mark.timeout(30)
     def test_second_delete_turn_409_not_latest(self, chat):
         """A deleted turn is no longer the latest one: deleting it again is 409 NOT_LATEST_TURN."""
         chat_id = chat["id"]
@@ -398,6 +415,7 @@ class TestTurnDelete:
         resp = httpx.delete(turn_url(chat_id, rid), timeout=10)
         assert_problem(resp, 409, "aborted", reason="NOT_LATEST_TURN")
 
+    @pytest.mark.timeout(30)
     def test_deleted_turn_not_sent_to_provider(self, request, chat, mock_provider):
         """The content of a deleted turn is not part of the next provider request."""
         _require_offline(request)
@@ -480,6 +498,7 @@ class TestConcurrentRetries:
 class TestReplacedByRequestId:
     """After retry, the original turn's replaced_by_request_id points to the new turn."""
 
+    @pytest.mark.timeout(30)
     def test_replaced_by_request_id_set(self, chat):
         chat_id = chat["id"]
         rid1 = complete_turn(chat_id, "Original turn.")

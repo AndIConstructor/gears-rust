@@ -46,6 +46,7 @@ class TestErrorMapping:
         if request.config.getoption("mode") == "online":
             pytest.skip("requires mock provider (offline mode)")
 
+    @pytest.mark.timeout(30)
     def test_post_stream_sse_error_event(self, chat, mock_provider):
         """A `response.failed` mid-stream (error in `response.error`, as OpenAI
         sends it) is an SSE error `provider_error` with the provider message;
@@ -60,6 +61,7 @@ class TestErrorMapping:
         assert data["message"] == "Mock fail", data
         assert poll_turn(chat["id"], rid)["state"] == "error"
 
+    @pytest.mark.timeout(30)
     def test_error_event_keeps_provider_message(self, chat, mock_provider):
         """A flat SSE `error` event (`{"type":"error","code","message"}`) is an
         SSE error `provider_error` with the provider message; the turn fails."""
@@ -77,6 +79,7 @@ class TestErrorMapping:
         assert data["message"] == "Mock error event", data
         assert poll_turn(chat["id"], rid)["state"] == "error"
 
+    @pytest.mark.timeout(30)
     def test_function_call_without_knowledge_search_is_unexpected_tool_use(
         self, chat, mock_provider,
     ):
