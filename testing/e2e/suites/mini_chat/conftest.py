@@ -434,7 +434,10 @@ def _install_outbox_capture(timeout: float = 60.0) -> None:
 def outbox_payloads(needle: str, queue: str | None = None) -> list[dict]:
     """JSON payloads of the outbox messages enqueued so far (see "Outbox
     capture") that contain `needle`, oldest first; only `queue` if given."""
-    sql = f"SELECT payload FROM {E2E_OUTBOX_CAPTURE} WHERE payload LIKE ?"
+    # `payload` is a BLOB. The CAST is required: SQLite built with
+    # SQLITE_LIKE_DOESNT_MATCH_BLOBS (Debian/Ubuntu system libsqlite3, used by
+    # the CI Python) never matches LIKE against a BLOB.
+    sql = f"SELECT payload FROM {E2E_OUTBOX_CAPTURE} WHERE CAST(payload AS TEXT) LIKE ?"
     params: tuple = (f"%{needle}%",)
     if queue is not None:
         sql += " AND queue = ?"

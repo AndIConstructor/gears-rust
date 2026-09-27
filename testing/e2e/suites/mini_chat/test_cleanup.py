@@ -194,7 +194,9 @@ def _dead_letters(chat_id: str) -> list[dict]:
     """Dead-lettered outbox messages whose payload mentions `chat_id`."""
     return query_db(
         "SELECT partition_id, seq, payload, last_error FROM toolkit_outbox_dead_letters "
-        "WHERE payload LIKE ?",
+        # CAST: see outbox_payloads in conftest.py (LIKE never matches a
+        # BLOB on SQLite built with SQLITE_LIKE_DOESNT_MATCH_BLOBS).
+        "WHERE CAST(payload AS TEXT) LIKE ?",
         (f"%{chat_id}%",),
     )
 
