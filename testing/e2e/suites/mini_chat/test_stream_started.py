@@ -128,6 +128,7 @@ class TestStreamStartedOnMutation:
             timeout=90,
         )
         assert resp.status_code == 200, f"Retry failed: {resp.status_code} {resp.text}"
+        assert resp.headers["content-type"].startswith("text/event-stream"), resp.headers
         retry_events = parse_sse(resp.text)
 
         ss = expect_stream_started(retry_events)
@@ -159,6 +160,7 @@ class TestStreamStartedOnMutation:
             timeout=90,
         )
         assert resp.status_code == 200, f"Edit failed: {resp.status_code} {resp.text}"
+        assert resp.headers["content-type"].startswith("text/event-stream"), resp.headers
         edit_events = parse_sse(resp.text)
 
         ss = expect_stream_started(edit_events)
@@ -204,6 +206,7 @@ class TestStreamStartedOnReplay:
         status2 = resp2.status_code
         events2 = parse_sse(resp2.text) if status2 == 200 else []
         assert status2 == 200
+        assert resp2.headers["content-type"].startswith("text/event-stream"), resp2.headers
 
         ss_replay = expect_stream_started(events2)
         assert ss_replay.data["is_new_turn"] is False

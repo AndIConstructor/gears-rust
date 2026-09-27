@@ -49,9 +49,11 @@ class TestWebSearchBasic:
     @pytest.mark.usefixtures("offline_only")
     def test_web_search_tool_events_name_and_phases(self, provider_chat):
         """05-05, 18-01: the mock's one web search is sent as two `tool`
-        events named `web_search`: phase `start`, then `done`."""
+        events named `web_search`: phase `start`, then `done`, each with
+        empty `details`."""
         events = stream_search(provider_chat["id"], "SEARCH: current weather in Berlin")
         assert tool_events(events) == [("web_search", "start"), ("web_search", "done")], events
+        assert [e.data["details"] for e in events if e.event == "tool"] == [{}, {}], events
 
     def test_web_search_done_has_usage(self, provider_chat):
         """Done event after web search should include usage with tokens."""

@@ -1350,7 +1350,8 @@ class TestFileSearchToolEvents:
 
     def test_file_search_tool_events_and_counter(self, chat):
         """With a ready document the mock `FILESEARCH:*` answer runs one
-        file_search: `file_search` tool events `start` then `done`, the turn
+        file_search: `file_search` tool events `start` (empty `details`) then
+        `done` (`details.files_searched`), the turn
         counts one completed file search and its usage event reports
         `file_search_calls` 1."""
         chat_id = chat["id"]
@@ -1362,8 +1363,15 @@ class TestFileSearchToolEvents:
         assert status == 200, raw
         expect_done(events)
 
-        tools = [(e.data["name"], e.data["phase"]) for e in events if e.event == "tool"]
-        assert tools == [("file_search", "start"), ("file_search", "done")], tools
+        tools = [
+            (e.data["name"], e.data["phase"], e.data["details"]) for e in events if e.event == "tool"
+        ]
+        # `files_searched` counts the results of
+        # `response.file_search_call.completed`; OpenAI sends none there
+        # (the mock does the same), so it is 0.
+        assert tools == [
+            ("file_search", "start", {}), ("file_search", "done", {"files_searched": 0}),
+        ], tools
         rows = query_db(
             "SELECT file_search_completed_count FROM chat_turns WHERE request_id = ?", (rid,),
         )

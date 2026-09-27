@@ -45,6 +45,7 @@ class TestStreamBasic:
             timeout=90,
         )
         assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream"), resp.headers
         events = parse_sse(resp.text)
         assert len(events) > 0
         assert events[0].event == "stream_started"
