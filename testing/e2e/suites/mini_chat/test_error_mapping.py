@@ -285,3 +285,6 @@ class TestErrorMapping:
             assert provider_id not in data["message"], (
                 f"provider id {provider_id} leaked: {data['message']!r}"
             )
+        assert data["message"] == "Upstream failure for " + ", ".join(
+            ["[provider_id]"] * len(PROVIDER_IDS),
+        ), data
