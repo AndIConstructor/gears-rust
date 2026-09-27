@@ -896,7 +896,7 @@ fn parse_error(event_name: &str, data: &str) -> ProviderErrorPayload {
         retry: None,
     };
     match ProviderEvent::from_server_event(event).unwrap() {
-        ProviderEvent::ResponseFailed { error } => error,
+        ProviderEvent::ResponseFailed { error, .. } => error,
         other => panic!("expected ResponseFailed, got {other:?}"),
     }
 }
@@ -1225,6 +1225,38 @@ fn translate_completed_propagates_token_details() {
     }
 }
 
+/// `response.failed` carries `response.usage` when the provider billed the
+/// request; it reaches the terminal outcome, so settlement can use it.
+#[test]
+fn response_failed_usage_reaches_terminal_outcome() {
+    let event = ServerEvent {
+        event: Some("response.failed".to_string()),
+        data: r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"boom"},"usage":{"input_tokens":12,"output_tokens":3}}}"#.to_string(),
+        id: None,
+        retry: None,
+    };
+    let parsed = ProviderEvent::from_server_event(event).unwrap();
+    match translate_provider_event(&parsed, "") {
+        TranslatedEvent::Terminal(TerminalOutcome::Failed { usage: Some(u), .. }) => {
+            assert_eq!(u.input_tokens, 12);
+            assert_eq!(u.output_tokens, 3);
+        }
+        _ => panic!("expected Terminal(Failed) with usage"),
+    }
+
+    let without = ServerEvent {
+        event: Some("response.failed".to_string()),
+        data: r#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"boom"},"usage":null}}"#.to_string(),
+        id: None,
+        retry: None,
+    };
+    let parsed = ProviderEvent::from_server_event(without).unwrap();
+    assert!(matches!(
+        translate_provider_event(&parsed, ""),
+        TranslatedEvent::Terminal(TerminalOutcome::Failed { usage: None, .. })
+    ));
+}
+
 #[test]
 fn translate_failed_returns_terminal() {
     let event = ProviderEvent::ResponseFailed {
@@ -1232,6 +1264,7 @@ fn translate_failed_returns_terminal() {
             code: "err".into(),
             message: "failed".into(),
         },
+        usage: None,
     };
     let translated = translate_provider_event(&event, "partial");
     match translated {

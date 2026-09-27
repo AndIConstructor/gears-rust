@@ -58,6 +58,9 @@ pub(super) enum ProviderEvent {
     },
     ResponseFailed {
         error: ProviderErrorPayload,
+        /// `response.usage` of a `response.failed` event, when the provider
+        /// reports it; `None` for a bare `error` event.
+        usage: Option<RawUsage>,
     },
     ResponseIncomplete {
         response: ResponseObject,
@@ -301,9 +304,17 @@ struct ErrorEventData {
 struct FailedResponse {
     #[serde(default)]
     error: Option<ProviderErrorPayload>,
+    #[serde(default)]
+    usage: Option<RawUsage>,
 }
 
 impl ErrorEventData {
+    /// The error payload and, for `response.failed`, the reported usage.
+    fn into_error_and_usage(mut self) -> (Option<ProviderErrorPayload>, Option<RawUsage>) {
+        let usage = self.response.as_mut().and_then(|r| r.usage.take());
+        (self.into_error(), usage)
+    }
+
     fn into_error(self) -> Option<ProviderErrorPayload> {
         let Self {
             response,
@@ -486,8 +497,10 @@ impl FromServerEvent for ProviderEvent {
                         detail: format!("failed to parse response failed: {e}"),
                     }
                 })?;
+                let (error, usage) = data.into_error_and_usage();
                 Ok(ProviderEvent::ResponseFailed {
-                    error: data.into_error().unwrap_or_default(),
+                    error: error.unwrap_or_default(),
+                    usage,
                 })
             }
 
@@ -515,7 +528,7 @@ impl FromServerEvent for ProviderEvent {
                         code: String::new(),
                         message: event.data.clone(),
                     });
-                Ok(ProviderEvent::ResponseFailed { error })
+                Ok(ProviderEvent::ResponseFailed { error, usage: None })
             }
 
             other => {
@@ -652,7 +665,7 @@ pub(super) fn translate_provider_event(
             })
         }
 
-        ProviderEvent::ResponseFailed { error } => {
+        ProviderEvent::ResponseFailed { error, usage } => {
             let sanitized = crate::infra::llm::sanitize_provider_message(&error.message);
             TranslatedEvent::Terminal(TerminalOutcome::Failed {
                 error: LlmProviderError::ProviderError {
@@ -660,7 +673,7 @@ pub(super) fn translate_provider_event(
                     message: sanitized,
                     raw_detail: Some(RawDetail(error.message.clone())),
                 },
-                usage: None,
+                usage: usage.as_ref().map(RawUsage::to_usage),
                 partial_content: accumulated_text.to_owned(),
             })
         }

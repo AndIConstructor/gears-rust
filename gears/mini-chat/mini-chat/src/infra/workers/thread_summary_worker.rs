@@ -363,7 +363,11 @@ impl ThreadSummaryHandler {
             return MessageResult::Retry;
         }
         let llm_usage = response.usage;
-        let token_estimate = estimate_summary_tokens(llm_usage.output_tokens, summary_text.len());
+        let token_estimate = estimate_summary_tokens(
+            llm_usage.output_tokens,
+            llm_usage.reasoning_tokens,
+            summary_text.len(),
+        );
 
         // 5. CAS-protected atomic commit
         let deps = Arc::clone(&self.deps);
@@ -718,9 +722,17 @@ fn format_summary_output(raw: &str) -> String {
 
 /// Derive a token estimate for the stored summary.
 /// Prefers actual `output_tokens` from the provider; falls back to `bytes/4`.
-fn estimate_summary_tokens(output_tokens: i64, summary_byte_len: usize) -> i32 {
-    if output_tokens > 0 {
-        i32::try_from(output_tokens).unwrap_or(i32::MAX)
+/// Tokens of the summary text: the provider's output tokens without the
+/// reasoning tokens (a reasoning model counts them in `output_tokens`, but
+/// they are not part of the stored text), else `ceil(bytes / 4)`.
+fn estimate_summary_tokens(
+    output_tokens: i64,
+    reasoning_tokens: i64,
+    summary_byte_len: usize,
+) -> i32 {
+    let text_tokens = output_tokens.saturating_sub(reasoning_tokens.max(0));
+    if text_tokens > 0 {
+        i32::try_from(text_tokens).unwrap_or(i32::MAX)
     } else {
         i32::try_from(summary_byte_len.div_ceil(4)).unwrap_or(i32::MAX)
     }
@@ -778,13 +790,20 @@ mod tests {
 
     #[test]
     fn token_estimate_prefers_output_tokens() {
-        assert_eq!(estimate_summary_tokens(250, 1000), 250);
+        assert_eq!(estimate_summary_tokens(250, 0, 1000), 250);
+    }
+
+    #[test]
+    fn token_estimate_excludes_reasoning_tokens() {
+        assert_eq!(estimate_summary_tokens(250, 200, 1000), 50);
+        // Reasoning only (no text tokens reported): fall back to the length.
+        assert_eq!(estimate_summary_tokens(200, 200, 40), 10);
     }
 
     #[test]
     fn token_estimate_falls_back_to_len_div_4() {
         // 200 bytes / 4 = 50 tokens
-        assert_eq!(estimate_summary_tokens(0, 200), 50);
+        assert_eq!(estimate_summary_tokens(0, 0, 200), 50);
     }
 
     // ── E2E tests: full handler pipeline with real DB ──────────────────
