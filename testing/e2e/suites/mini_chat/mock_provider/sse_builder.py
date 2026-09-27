@@ -182,6 +182,8 @@ def build_sse_stream(
 
     text = _accumulate_text(scenario)
 
+    if scenario.terminal == "none":
+        return b"".join(chunks)
     if scenario.terminal == "failed":
         chunks.append(_sse_event(
             "response.failed", _build_failed_data(scenario, model, response_id),

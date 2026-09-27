@@ -1201,9 +1201,13 @@ def reset_mock_provider_state(mock_provider):
     mock_provider.clear_override_scenarios()
     mock_provider.clear_state()
     yield
+    path_errors = mock_provider.get_path_errors()
     mock_provider.clear_captured_requests()
     mock_provider.clear_override_scenarios()
     mock_provider.clear_state()
+    # The mock answers 404 to a path that neither configured provider uses
+    # (mock_provider/server.py, `path_error`); none may have been requested.
+    assert path_errors == []
 
 
 @pytest.fixture

@@ -42,7 +42,9 @@ class Scenario:
     # The whole `response.completed` output. When set, it replaces the
     # message item built from the deltas, `citations` and `output_items`.
     output: list[dict] | None = None
-    # Terminal type: "completed" (default), "failed", "incomplete"
+    # Terminal type: "completed" (default), "failed", "incomplete", or "none":
+    # the stream ends (the connection closes) after `events` without any
+    # terminal event.
     terminal: str = "completed"
     error: dict | None = None
     incomplete_reason: str | None = None
@@ -58,6 +60,8 @@ class Scenario:
     # When set, no SSE is produced — the mock returns a plain JSON error response.
     http_error_status: int | None = None
     http_error_body: dict | None = None
+    # Extra response headers of the HTTP-level error (e.g. `Retry-After`).
+    http_error_headers: dict[str, str] = field(default_factory=dict)
 
 
 def _message_item(item_id: str, text: str | None,

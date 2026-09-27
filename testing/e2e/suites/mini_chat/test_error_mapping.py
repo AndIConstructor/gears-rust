@@ -8,7 +8,9 @@ A provider failure after the stream opened is an SSE `error` event with
 import httpx
 import pytest
 
-from .conftest import API_PREFIX, expect_stream_started, parse_sse, poll_turn
+from .conftest import (
+    API_PREFIX, expect_stream_started, list_messages, parse_sse, poll_turn, usage_events,
+)
 from .mock_provider.responses import MockEvent, Scenario
 
 # Provider identifiers the sanitizer must scrub (shapes of real IDs; the
@@ -151,6 +153,82 @@ class TestErrorMapping:
         ))
         data, _ = _stream_error(chat["id"])
         assert data == {"code": "rate_limited", "message": "Rate limited by provider"}, data
+
+    @pytest.mark.timeout(30)
+    def test_rate_limited_with_retry_after(self, chat, mock_provider):
+        """A provider 429 with `Retry-After: 7` (seconds): OAGW passes the
+        status and the header through (DESIGN, "Provider rate limit"), and
+        the delay reaches the client only in the SSE message; the error has
+        no other field and the turn fails with `rate_limited`."""
+        mock_provider.set_next_scenario(Scenario(
+            http_error_status=429,
+            http_error_body={"error": {"message": "Rate limited", "type": "rate_limit_error"}},
+            http_error_headers={"Retry-After": "7"},
+        ))
+        data, rid = _stream_error(chat["id"])
+        assert data == {
+            "code": "rate_limited", "message": "Rate limited by provider; retry in 7s",
+        }, data
+        turn = poll_turn(chat["id"], rid)
+        assert (turn["state"], turn["error_code"]) == ("error", "rate_limited"), turn
+
+    @pytest.mark.timeout(30)
+    def test_stream_without_terminal_event_is_provider_error(self, chat, mock_provider):
+        """The provider stream ends (the connection closes) after a delta and
+        without response.completed/failed/incomplete: an invalid response,
+        so SSE `error` `provider_error` (DESIGN §3.3: "an invalid response
+        ... or the provider stream failed"; `stream_interrupted` is only for
+        a provider task that ends without a terminal event). The turn fails
+        with that code, keeps no answer, and is settled on the estimate
+        (billing outcome `failed`)."""
+        mock_provider.set_next_scenario(Scenario(
+            events=[MockEvent("response.output_text.delta", {"delta": "Partial"})],
+            terminal="none",
+        ))
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat['id']}/messages:stream",
+            json={"content": "trigger error"},
+            headers={"Accept": "text/event-stream"}, timeout=30,
+        )
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        assert [e.event for e in events] == ["stream_started", "delta", "error"], events
+        assert events[-1].data == {
+            "code": "provider_error", "message": "stream ended without terminal event",
+        }, events[-1].data
+        rid = expect_stream_started(events).data["request_id"]
+        turn = poll_turn(chat["id"], rid)
+        assert (turn["state"], turn["error_code"], turn.get("assistant_message_id")) == (
+            "error", "provider_error", None,
+        ), turn
+        assert list_messages(chat["id"])[-1]["role"] == "user"
+        (event,) = usage_events(rid)
+        assert (event["billing_outcome"], event["settlement_method"]) == (
+            "failed", "estimated",
+        ), event
+
+    @pytest.mark.timeout(30)
+    def test_function_call_with_invalid_json_arguments_is_provider_error(self, chat, mock_provider):
+        """A `function_call` output item whose `arguments` is not JSON: the
+        provider adapter rejects the response before it looks at the tool
+        name (openai_responses.rs), so it is `provider_error` with the parse
+        error, not `unexpected_tool_use`; the turn fails with that code."""
+        mock_provider.set_next_scenario(Scenario(
+            events=[MockEvent("response.output_text.delta", {"delta": "Let me look"})],
+            output_items=[{
+                "type": "function_call",
+                "id": "fc_mock_1",
+                "call_id": "call_mock_1",
+                "name": "search_knowledge",
+                "arguments": "{not json",
+                "status": "completed",
+            }],
+        ))
+        data, rid = _stream_error(chat["id"])
+        assert data["code"] == "provider_error", data
+        assert data["message"].startswith("function_call arguments were not valid JSON: "), data
+        turn = poll_turn(chat["id"], rid)
+        assert (turn["state"], turn["error_code"]) == ("error", "provider_error"), turn
 
     @pytest.mark.parametrize("source", ["response_failed", "http_500"])
     def test_error_message_no_provider_ids(self, chat, mock_provider, source):

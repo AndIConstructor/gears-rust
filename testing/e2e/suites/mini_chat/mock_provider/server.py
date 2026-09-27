@@ -7,6 +7,7 @@ import json
 import queue
 import threading
 import time
+import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -17,6 +18,34 @@ from .sse_builder import build_sse_stream
 
 _response_counter = 0
 _counter_lock = threading.Lock()
+
+# Request paths of the two providers of config/base.yaml, as the mock sees
+# them after OAGW strips the upstream alias. The Azure Responses route is
+# the configured `api_path` (the v1 API: no `api-version`); the Azure Files
+# and Vector Stores routes carry the configured `api_version`. OpenAI routes
+# are under /v1 and carry no query.
+OPENAI_RESPONSES_PATH = "/v1/responses"
+AZURE_RESPONSES_PATH = "/openai/v1/responses"
+AZURE_API_VERSION = "2025-03-01-preview"
+
+
+def path_error(raw_path: str) -> str | None:
+    """Why `raw_path` is not a path the configured providers use, or None."""
+    path, _, query = raw_path.partition("?")
+    params = urllib.parse.parse_qs(query, keep_blank_values=True)
+    if path.endswith("/responses"):
+        if path not in (OPENAI_RESPONSES_PATH, AZURE_RESPONSES_PATH):
+            return f"unknown Responses path {path!r}"
+        if query:
+            return f"unexpected query {query!r} on {path!r}"
+        return None
+    if path.startswith("/openai/"):
+        if params != {"api-version": [AZURE_API_VERSION]}:
+            return f"Azure path {path!r} needs exactly api-version={AZURE_API_VERSION}, got {query!r}"
+        return None
+    if path.startswith("/v1/"):
+        return f"unexpected query {query!r} on {path!r}" if query else None
+    return f"unknown path {path!r}"
 
 
 def _next_response_id() -> str:
@@ -51,10 +80,10 @@ class _Handler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
 
-        if self._inject_fault():
+        if self._reject_unknown_path() or self._inject_fault():
             return
         # Vector-store paths first: `/vector_stores/{id}/files` also contains "/files".
-        if "responses" in self.path:
+        if self.path.split("?")[0].endswith("/responses"):
             self._handle_responses(raw)
         elif "/vector_stores/" in self.path and "/files" in self.path:
             self._handle_vector_store_file_add(raw)
@@ -67,7 +96,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._log_path()
-        if self._inject_fault():
+        if self._reject_unknown_path() or self._inject_fault():
             return
         if "/vector_stores/" in self.path and "/files/" in self.path:
             self._handle_vector_store_file_get()
@@ -82,7 +111,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self._log_path()
-        if self._inject_fault():
+        if self._reject_unknown_path() or self._inject_fault():
             return
         if "/vector_stores/" in self.path and "/files/" in self.path:
             self._handle_vector_store_file_delete()
@@ -127,7 +156,9 @@ class _Handler(BaseHTTPRequestHandler):
             error_body = scenario.http_error_body if scenario.http_error_body is not None else {
                 "error": {"message": "Mock error", "type": "mock_error"}
             }
-            self._json_response(scenario.http_error_status, error_body)
+            self._json_response(
+                scenario.http_error_status, error_body, scenario.http_error_headers,
+            )
             return
 
         sse_bytes = build_sse_stream(scenario, model, response_id, request_body=body)
@@ -304,11 +335,24 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
-    def _json_response(self, status: int, body: dict):
+    def _reject_unknown_path(self) -> bool:
+        """Answer 404 to a path the configured providers do not use (see
+        `path_error`) and record it; True if rejected."""
+        error = path_error(self.path)
+        if error is None:
+            return False
+        server: MockProviderServer = self.server  # type: ignore[assignment]
+        server.record_path_error(self.command, self.path, error)
+        self._json_response(404, {"error": {"message": f"mock: {error}", "type": "invalid_request_error"}})
+        return True
+
+    def _json_response(self, status: int, body: dict, headers: dict[str, str] | None = None):
         payload = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -327,6 +371,8 @@ class MockProviderServer(ThreadingHTTPServer):
         self._vector_stores: dict[str, dict] = {}
         self._captured_requests: list[dict] = []
         self._request_paths: list[tuple[str, str]] = []
+        # Requests rejected by `path_error`: (method, path, reason).
+        self._path_errors: list[tuple[str, str, str]] = []
         self._capture_lock = threading.Lock()
         # One-shot HTTP faults: [method, path_contains, status, body, remaining].
         self._faults: list[list] = []
@@ -370,11 +416,22 @@ class MockProviderServer(ThreadingHTTPServer):
         cleanup that an earlier test started, which may still be running."""
         return [p for m, p in self.get_request_paths() if m == "POST"]
 
+    def record_path_error(self, method: str, path: str, reason: str) -> None:
+        with self._capture_lock:
+            self._path_errors.append((method, path, reason))
+
+    def get_path_errors(self) -> list[tuple[str, str, str]]:
+        """(method, path, reason) of each request to a path the configured
+        providers do not use (answered 404), since the last clear."""
+        with self._capture_lock:
+            return list(self._path_errors)
+
     def clear_captured_requests(self) -> None:
-        """Clear all captured request bodies and request paths."""
+        """Clear all captured request bodies, request paths and path errors."""
         with self._capture_lock:
             self._captured_requests.clear()
             self._request_paths.clear()
+            self._path_errors.clear()
 
     def set_fault(
         self, method: str, path_contains: str, status: int,
@@ -408,6 +465,13 @@ class MockProviderServer(ThreadingHTTPServer):
                 self._override_queue.get_nowait()
             except queue.Empty:
                 return
+
+    def vector_store_file_ids(self, vs_id: str) -> list[str] | None:
+        """Provider file ids added to vector store `vs_id`, or None if the
+        mock has no such store (since the last `clear_state`)."""
+        with self._state_lock:
+            vs_obj = self._vector_stores.get(vs_id)
+            return None if vs_obj is None else list(vs_obj.get("file_ids", []))
 
     def clear_state(self) -> None:
         """Drop file/vector_store state left by previous tests (thread-safe)."""
@@ -454,6 +518,12 @@ class _DummyMockProvider:
 
     def get_post_paths(self) -> list[str]:
         return []
+
+    def get_path_errors(self) -> list[tuple[str, str, str]]:
+        return []
+
+    def vector_store_file_ids(self, vs_id: str) -> list[str] | None:
+        return None
 
     def clear_captured_requests(self) -> None:
         pass
