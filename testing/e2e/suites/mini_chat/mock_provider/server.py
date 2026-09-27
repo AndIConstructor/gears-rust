@@ -171,6 +171,10 @@ class _Handler(BaseHTTPRequestHandler):
             server.capture_summary_request(body)
             # Non-streaming requests come from background work (thread
             # summary), so they never consume a test's queued scenario.
+            fault = server.take_summary_fault()
+            if fault is not None:
+                self._json_response(*fault)
+                return
             self._json_response(200, build_summary_response(body, model, response_id))
             return
         server.capture_request(body)
@@ -422,6 +426,9 @@ class MockProviderServer(ThreadingHTTPServer):
         self._capture_lock = threading.Lock()
         # One-shot HTTP faults: [method, path_contains, status, body, remaining].
         self._faults: list[list] = []
+        # Faults of the non-streaming (thread summary) Responses requests:
+        # [status, body, remaining].
+        self._summary_faults: list[list] = []
         self._fault_lock = threading.Lock()
         # Guards _files and _vector_stores: handler threads outlive per-test
         # fixtures, and the in-flight delete path is not atomic.
@@ -521,6 +528,24 @@ class MockProviderServer(ThreadingHTTPServer):
         with self._fault_lock:
             self._faults.append([method.upper(), path_contains, status, body, count])
 
+    def set_summary_fault(self, status: int, body: dict | None = None, count: int = 1) -> None:
+        """Answer the next `count` thread summary (non-streaming Responses)
+        requests with `status` and a JSON `body`; turn requests are not affected."""
+        if body is None:
+            body = {"error": {"message": f"Mock fault {status}", "type": "mock_fault"}}
+        with self._fault_lock:
+            self._summary_faults.append([status, body, count])
+
+    def take_summary_fault(self) -> tuple[int, dict] | None:
+        with self._fault_lock:
+            if not self._summary_faults:
+                return None
+            fault = self._summary_faults[0]
+            fault[2] -= 1
+            if fault[2] <= 0:
+                self._summary_faults.pop(0)
+            return fault[0], fault[1]
+
     def take_fault(self, method: str, path: str) -> tuple[int, dict] | None:
         """Consume one matching fault; return (status, body) or None."""
         with self._fault_lock:
@@ -565,6 +590,7 @@ class MockProviderServer(ThreadingHTTPServer):
         statuses left by previous tests."""
         with self._fault_lock:
             self._faults.clear()
+            self._summary_faults.clear()
         with self._state_lock:
             self._indexing_statuses = list(DEFAULT_INDEXING_STATUSES)
             self._indexing_last_error = None
@@ -624,6 +650,9 @@ class _DummyMockProvider:
 
     def get_summary_requests(self) -> list[dict]:
         return []
+
+    def set_summary_fault(self, status: int, body: dict | None = None, count: int = 1) -> None:
+        pass
 
     def get_uploaded_files(self) -> list[dict]:
         return []

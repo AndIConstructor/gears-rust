@@ -296,3 +296,62 @@ class TestThreadSummary:
         assert len(captured) == 1, captured
         assert provider_input(captured[0]) == [("user", question)]
         assert summary["summary_text"] not in str(captured[0]), "stale summary sent"
+
+
+# ThreadSummaryWorkerConfig default `max_attempts` (src/config/background.rs),
+# not overridden in config/base.yaml.
+SUMMARY_MAX_ATTEMPTS = 3
+
+
+class TestThreadSummaryFailures:
+    """The summary request fails at the provider."""
+
+    @pytest.mark.timeout(60)
+    def test_failed_summary_request_is_retried(self, request, chat_with_model, mock_provider):
+        """A provider 500 on the summary request: the task is retried and the
+        second request stores the summary."""
+        _require_offline(request)
+        mock_provider.set_summary_fault(500, count=1)
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        _complete_turn(chat_id, "First question.")
+        _complete_turn(chat_id, "Second question.")
+
+        summary = _wait_for_summary(chat_id)
+        assert summary["summary_text"] == "MOCK-SUMMARY 1 user and 1 assistant messages"
+        assert len(_summary_requests(mock_provider, chat_id)) == 2
+
+    @pytest.mark.timeout(60)
+    def test_summary_failing_every_attempt_changes_nothing(
+        self, request, chat_with_model, mock_provider,
+    ):
+        """The summary request fails on each of the `max_attempts` (3)
+        deliveries: the task is dropped, no summary is stored, no message is
+        marked compressed, and the next turn is sent without a summary."""
+        _require_offline(request)
+        mock_provider.set_summary_fault(500, count=SUMMARY_MAX_ATTEMPTS)
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        _complete_turn(chat_id, "First question.")
+        _complete_turn(chat_id, "Second question.")
+
+        deadline = time.monotonic() + 30
+        while (
+            len(_summary_requests(mock_provider, chat_id)) < SUMMARY_MAX_ATTEMPTS
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.2)
+        assert len(_summary_requests(mock_provider, chat_id)) == SUMMARY_MAX_ATTEMPTS
+        time.sleep(2)  # no further delivery of the dropped task
+        assert len(_summary_requests(mock_provider, chat_id)) == SUMMARY_MAX_ATTEMPTS
+        assert _summary_rows(chat_id) == []
+        compressed = query_db(
+            "SELECT is_compressed FROM messages WHERE chat_id = ? AND deleted_at IS NULL",
+            (chat_id,),
+        )
+        assert [r["is_compressed"] for r in compressed] == [0, 0, 0, 0]
+
+        mock_provider.clear_captured_requests()
+        events = _complete_turn(chat_id, "Third question.")
+        assert expect_stream_started(events).data.get("thread_summary_applied") is None
+        (req,) = mock_provider.get_captured_requests()
+        assert all(not text.startswith(SUMMARY_PREAMBLE) for _, text in provider_input(req))
+        assert provider_input(req)[-1] == ("user", "Third question.")
