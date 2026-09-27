@@ -105,7 +105,7 @@ This PRD uses **P1/P2** to describe phased scope. The `p1`/`p2` tags on requirem
 
 - Chat CRUD (create, list, get, update title, delete) API; chat detail returns metadata + message_count (no embedded messages)
 - Paginated message history via cursor-based pagination with OData v4 query support
-- Attachment status endpoint (upload is processed synchronously; the endpoint returns the current status and metadata)
+- Attachment status endpoint (upload is processed synchronously, except document indexing that continues in the background after the request deadline; the endpoint returns the current status and metadata)
 - Real-time streamed AI responses (SSE)
 - Persistent conversation history
 - Document upload and document-aware question answering via file search
@@ -254,7 +254,7 @@ When a stream is cancelled or disconnects before a terminal completion, the syst
 
 The system MUST allow users to upload document files to a chat. Uploaded documents are extracted, chunked, and indexed into the chat's dedicated vector store with `attachment_id` metadata. Exception: files routed exclusively to `code_interpreter` (currently XLSX) are NOT extracted, chunked, or indexed. The system does NOT include full extracted file text in prompts; only relevant retrieved excerpts (top-k chunks) are included during file search. Attachment access MUST be limited to the owning user within their tenant.
 
-**P1 upload is synchronous** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)): `POST /v1/chats/{id}/attachments` uploads the file to the provider and indexes it within the request, and returns `201 Created` with the attachment identifier and `status: ready`. For a document added to the vector store, the request waits until the provider reports indexing `completed` (at most 25 s from the start of the upload, inside the api-gateway 30 s request timeout); if indexing fails or does not finish in time, the attachment becomes `failed` with `error_code = indexing_failed` and the upload returns 503 `service_unavailable`. On failure it returns an HTTP error; the attachment row stays visible via `GET /v1/chats/{id}/attachments/{attachment_id}` with `status: failed` and an `error_code` field (stable internal code, no provider identifiers). `uploaded` is an internal intermediate status and can be observed. When the request is dropped (in practice a client disconnect, since the 25 s indexing deadline ends a document upload before the gateway timeout) or the process dies mid-upload, a background job later marks the row `failed` with `error_code = upload_abandoned` and deletes the provider file recorded on the row, if any; rows of a deleted chat, whose provider cleanup chat deletion already owns, are skipped (DESIGN.md B.9.5). Polling the GET endpoint is supported but not required. `doc_summary` is never provided by the client and is always `null` in P1 (see `cpt-cf-mini-chat-fr-doc-summary`).
+**P1 upload is synchronous unless indexing is still running at the request deadline** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)): `POST /v1/chats/{id}/attachments` uploads the file to the provider and indexes it within the request, and returns `201 Created` with the attachment identifier and `status: ready`. For a document added to the vector store, the request waits until the provider reports indexing `completed`, at most 25 s from the start of the upload (inside the api-gateway 30 s request timeout). If indexing fails within that time, the attachment becomes `failed` with `error_code = indexing_failed` and the upload returns 503 `service_unavailable`. If indexing is still in progress at 25 s, the upload returns `201 Created` with `status: uploaded`, and a background task keeps waiting for up to 10 minutes: the attachment then becomes `ready`, or `failed` with `error_code = indexing_failed` when indexing fails or does not finish in time. A message that references an attachment that is not `ready` is rejected with 400 (`invalid_attachment`), so the client polls the GET endpoint until the status is `ready` or `failed`. On failure the upload returns an HTTP error; the attachment row stays visible via `GET /v1/chats/{id}/attachments/{attachment_id}` with `status: failed` and an `error_code` field (stable internal code, no provider identifiers). When the request is dropped (in practice a client disconnect, since the 25 s indexing deadline ends a document upload before the gateway timeout) or the process dies mid-upload or during the background wait, a background job later marks the row `failed` with `error_code = upload_abandoned` and deletes the provider file recorded on the row, if any; rows of a deleted chat, whose provider cleanup chat deletion already owns, are skipped (DESIGN.md B.9.5). `doc_summary` is never provided by the client and is always `null` in P1 (see `cpt-cf-mini-chat-fr-doc-summary`).
 
 Maximum document size: configurable (`rag.uploaded_file_max_size_kb`, default 25 MiB). A larger upload is rejected with 400 (`out_of_range`, `FILE_TOO_LARGE`). Mini-chat sets no request body limit of its own: the api-gateway `defaults.body_limit_bytes` (default 16 MiB) applies first and must be at least 25 MiB + 64 KiB (26,279,936 bytes) for 25 MiB documents, otherwise the gateway returns 413; an unsupported MIME type is rejected with 400 (`invalid_argument`, `UNSUPPORTED_CONTENT_TYPE`). Concurrent in-flight uploads per process are bounded (`rag.max_concurrent_uploads`, default 10); excess uploads get 503 with `Retry-After: 5`.
 
@@ -1309,7 +1309,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 1. User uploads a document file to a chat
 2. System stores the file with the external provider
 3. System indexes the file in the tenant's document search index
-4. System returns `201 Created` with the attachment ID and `status: ready` (synchronous upload, [ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md))
+4. System returns `201 Created` with the attachment ID and `status: ready` (synchronous upload, [ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)), or `status: uploaded` when indexing is still running 25 s after the upload started; the attachment becomes `ready` or `failed` in the background
 5. Document summary generation is not implemented in P1; `doc_summary` stays `null`
 
 **Postconditions**:
@@ -1320,6 +1320,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 - **File too large**: System rejects with HTTP 400 (`out_of_range`, `FILE_TOO_LARGE`)
 - **Per-chat document or storage limit reached**: System rejects with HTTP 429 (`resource_exhausted`, `document_limit` / `storage_limit`)
 - **Processing failure**: The request returns an HTTP error; the attachment row is kept with `status: failed` and `error_code`, visible via `GET /v1/chats/{id}/attachments/{attachment_id}`
+- **Indexing still running at the request deadline**: The client polls `GET /v1/chats/{id}/attachments/{attachment_id}` until `status` is `ready` or `failed`; a message that references the attachment before it is `ready` is rejected with HTTP 400 (`invalid_attachment`)
 
 #### UC-010: Upload Image and Ask About It
 
@@ -1601,7 +1602,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 - [ ] Document summary is generated on upload and used in context assembly (not implemented — [ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md))
 - [ ] Soft-deleted chat data is hard-purged after the configured grace period (not implemented — [ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md))
 - [ ] Chat deletion emits an audit event (not implemented — [ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md))
-- [ ] Upload returns `201` with `status: ready`; a failed upload returns an HTTP error and the row is visible with `status: failed`
+- [ ] Upload returns `201` with `status: ready`, or `status: uploaded` when document indexing is still running at the request deadline and the attachment becomes `ready` or `failed` in the background; a failed upload returns an HTTP error and the row is visible with `status: failed`
 - [ ] `GET /v1/chats` lists the chat with the most recent message, retry or edit first
 - [ ] A PDP failure returns 403, not 500; another user's chat returns 404
 - [ ] (not implemented — [ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)) Administrators can assign MCP servers to user roles via `POST /v1/admin/roles/{role}/mcp-servers` and revoke via `DELETE /v1/admin/roles/{role}/mcp-servers/{sid}`; only enabled servers visible to the tenant can be assigned
