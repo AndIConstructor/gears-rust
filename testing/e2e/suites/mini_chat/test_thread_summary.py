@@ -45,6 +45,7 @@ from .conftest import (
     stream_message,
     usage_events,
     uuid_from_db,
+    wait_for,
 )
 from .mock_provider.responses import SUMMARY_OUTPUT_TOKENS
 
@@ -297,6 +298,55 @@ class TestThreadSummary:
         assert provider_input(captured[0]) == [("user", question)]
         assert summary["summary_text"] not in str(captured[0]), "stale summary sent"
 
+
+    @pytest.mark.timeout(90)
+    def test_retry_of_summarized_turn_restores_earlier_history(
+        self, request, chat_with_model, mock_provider,
+    ):
+        """Three turns: the summary after the third covers the first two.
+        After DELETE of the third turn, a retry of the second drops the
+        summary and clears `is_compressed`: the retried request carries the
+        first turn as history, then the second question."""
+        _require_offline(request)
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        _complete_turn(chat_id, "First question.")
+        second_rid = str(uuid.uuid4())
+        _complete_turn(chat_id, "Second question.", request_id=second_rid)
+        _wait_for_summary(chat_id)
+        third_rid = str(uuid.uuid4())
+        _complete_turn(chat_id, "Third question.", request_id=third_rid)
+        messages = list_messages(chat_id)
+        # The next summary moves the frontier to the second turn's answer.
+        summary = wait_for(
+            lambda: [
+                r for r in _summary_rows(chat_id)
+                if uuid_from_db(r["summarized_up_to_message_id"]) == messages[3]["id"]
+            ],
+            "the summary of the first two turns", timeout=30,
+        )[0]
+
+        resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/turns/{third_rid}", timeout=10)
+        assert resp.status_code == 204, resp.text
+        assert _summary_rows(chat_id) == [summary]
+
+        mock_provider.clear_captured_requests()
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/turns/{second_rid}/retry",
+            headers={"Accept": "text/event-stream"}, timeout=90,
+        )
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        expect_done(events)
+        assert expect_stream_started(events).data.get("thread_summary_applied") is None
+        assert _summary_rows(chat_id) == []
+
+        captured = mock_provider.get_captured_requests()
+        assert len(captured) == 1, captured
+        assert provider_input(captured[0]) == [
+            ("user", "First question."),
+            ("assistant", messages[1]["content"]),
+            ("user", "Second question."),
+        ]
 
 # ThreadSummaryWorkerConfig default `max_attempts` (src/config/background.rs),
 # not overridden in config/base.yaml.
