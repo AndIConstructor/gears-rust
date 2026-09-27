@@ -879,14 +879,16 @@ class TestUploadProviderFailure:
 
     def test_upload_failure_marks_attachment_failed(self, request, chat, mock_provider):
         """10-16: provider 500 on POST /files → 503 service_unavailable with
-        Retry-After; the inserted row is visible with status failed and an error_code."""
+        Retry-After 10 (every provider error, api/rest/error.rs; the upload
+        concurrency limit answers 5, 10-40); the inserted row is visible with
+        status failed and an error_code."""
         _require_offline(request)
         chat_id = chat["id"]
         mock_provider.set_fault("POST", FILES_PATH, 500)
 
         resp = _upload(chat_id, "fail.txt", b"provider will fail", "text/plain")
-        assert_problem(resp, 503, "service_unavailable")
-        assert resp.headers.get("Retry-After", "").isdigit(), resp.headers
+        assert_problem(resp, 503, "service_unavailable", detail=DETAIL_SERVICE_UNAVAILABLE)
+        assert resp.headers.get("Retry-After") == "10", resp.headers
 
         # The Problem carries no attachment id; the row is found in the DB.
         rows = query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,))
