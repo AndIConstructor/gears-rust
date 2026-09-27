@@ -430,8 +430,9 @@ impl toolkit_db::outbox::LeasedMessageHandler for UsageEventHandler {
 /// - `Permanent` → `Reject` (dead-letter)
 /// - Deserialization failure → `Reject` (corrupt payload)
 /// - Plugin not configured → `Ok` (audit is optional; the gateway logs a
-///   warning once and the event is dropped)
-/// - Plugin resolution error → `Retry` (transient; plugin may not be ready yet)
+///   warning once and the event is dropped; the next delivery looks again)
+/// - Plugin resolution error, or an instance registered in types-registry
+///   whose client is not in `ClientHub` → `Retry` (plugin may not be ready yet)
 pub struct AuditEventHandler {
     pub(crate) audit_gateway: Arc<AuditGateway>,
     pub(crate) metrics: Arc<dyn MiniChatMetricsPort>,
@@ -975,6 +976,62 @@ mod tests {
             matches!(result, MessageResult::Ok),
             "expected Ok when no plugin configured"
         );
+    }
+
+    // ── AuditEventHandler: instance resolved, client missing → Retry ──
+
+    #[tokio::test]
+    async fn audit_handler_retry_when_plugin_client_missing() {
+        let handler = AuditEventHandler {
+            audit_gateway: AuditGateway::with_lookup(
+                Arc::new(toolkit::client_hub::ClientHub::new()),
+                || Some("test.audit.plugin.v1~test._.missing.v1".to_owned()),
+            ),
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        };
+        let msg = make_outbox_message(make_audit_envelope_payload());
+        let result = LeasedMessageHandler::handle(&handler, &msg).await;
+        assert!(
+            matches!(result, MessageResult::Retry),
+            "expected Retry when the plugin client is not in ClientHub"
+        );
+    }
+
+    // ── AuditEventHandler: plugin registered after a no-plugin delivery ──
+
+    #[tokio::test]
+    async fn audit_handler_uses_plugin_registered_later() {
+        use std::sync::atomic::AtomicBool;
+
+        const ID: &str = "test.audit.plugin.v1~test._.late.v1";
+        let hub = Arc::new(toolkit::client_hub::ClientHub::new());
+        let registered = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&registered);
+        let handler = AuditEventHandler {
+            audit_gateway: AuditGateway::with_lookup(Arc::clone(&hub), move || {
+                flag.load(Ordering::SeqCst).then(|| ID.to_owned())
+            }),
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        };
+
+        let msg = make_outbox_message(make_audit_envelope_payload());
+        assert!(matches!(
+            LeasedMessageHandler::handle(&handler, &msg).await,
+            MessageResult::Ok
+        ));
+
+        let plugin = MockAuditPlugin::ok();
+        hub.register_scoped::<dyn MiniChatAuditPluginClientV1>(
+            toolkit::client_hub::ClientScope::gts_id(ID),
+            plugin.clone() as Arc<dyn MiniChatAuditPluginClientV1>,
+        );
+        registered.store(true, Ordering::SeqCst);
+
+        assert!(matches!(
+            LeasedMessageHandler::handle(&handler, &msg).await,
+            MessageResult::Ok
+        ));
+        assert_eq!(plugin.calls(), 1, "the late plugin must receive the event");
     }
 
     // ── AuditEventHandler: transient plugin error → Retry ──
