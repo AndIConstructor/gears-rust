@@ -9,10 +9,25 @@ if TYPE_CHECKING:
     from .responses import Scenario
 
 
-def _sse_event(event_type: str, data: dict) -> bytes:
-    """Format a single SSE event as wire bytes."""
-    payload = json.dumps(data, separators=(",", ":"))
-    return f"event: {event_type}\ndata: {payload}\n\n".encode()
+class _EventWriter:
+    """Formats SSE events as the Responses API sends them: every event's
+    data carries its `type` and a `sequence_number` counted from 0 within
+    the stream. `event_lines=False` leaves out the `event:` lines (the
+    event name is then only in `data.type`)."""
+
+    def __init__(self, event_lines: bool = True):
+        self._event_lines = event_lines
+        self._sequence = 0
+
+    def __call__(self, event_type: str, data: dict) -> bytes:
+        payload = json.dumps(
+            {"type": event_type, **data, "sequence_number": self._sequence},
+            separators=(",", ":"),
+        )
+        self._sequence += 1
+        if self._event_lines:
+            return f"event: {event_type}\ndata: {payload}\n\n".encode()
+        return f"data: {payload}\n\n".encode()
 
 
 def _accumulate_text(scenario: "Scenario") -> str:
@@ -171,6 +186,7 @@ def build_sse_stream(
     from .responses import should_include_tool_event
 
     chunks: list[bytes] = []
+    _sse_event = _EventWriter(event_lines=not scenario.omit_event_lines)
 
     for ev in scenario.events:
         if request_body and not should_include_tool_event(ev, request_body):

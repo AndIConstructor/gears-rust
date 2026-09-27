@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import email
+import email.policy
 import json
 import queue
 import threading
@@ -48,6 +50,36 @@ def path_error(raw_path: str) -> str | None:
     return f"unknown path {path!r}"
 
 
+# The real API answers `in_progress` when a file is added to a vector store
+# and reports `completed` on a later status read.
+DEFAULT_INDEXING_STATUSES = ("in_progress", "completed")
+
+
+def _is_summary_request(raw: bytes) -> bool:
+    """A non-streaming Responses request: the thread summary worker's."""
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(body, dict) and body.get("stream") is False and "input" in body
+
+
+def _multipart_form(content_type: str, raw: bytes) -> dict[str, tuple[bytes, str | None]]:
+    """{field name: (value, filename)} of a multipart/form-data body."""
+    msg = email.message_from_bytes(
+        f"Content-Type: {content_type}\r\n\r\n".encode() + raw,
+        policy=email.policy.HTTP,
+    )
+    form: dict[str, tuple[bytes, str | None]] = {}
+    if not msg.is_multipart():
+        return form
+    for part in msg.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if name:
+            form[name] = (part.get_payload(decode=True) or b"", part.get_filename())
+    return form
+
+
 def _next_response_id() -> str:
     global _response_counter
     with _counter_lock:
@@ -76,9 +108,10 @@ class _Handler(BaseHTTPRequestHandler):
         return True
 
     def do_POST(self):
-        self._log_path()
         content_length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        server: MockProviderServer = self.server  # type: ignore[assignment]
+        server.log_request_path(self.command, self.path, background=_is_summary_request(raw))
 
         if self._reject_unknown_path() or self._inject_fault():
             return
@@ -134,12 +167,13 @@ class _Handler(BaseHTTPRequestHandler):
         response_id = _next_response_id()
 
         server: MockProviderServer = self.server  # type: ignore[assignment]
-        server.capture_request(body)
         if body.get("stream") is False:
+            server.capture_summary_request(body)
             # Non-streaming requests come from background work (thread
             # summary), so they never consume a test's queued scenario.
             self._json_response(200, build_summary_response(body, model, response_id))
             return
+        server.capture_request(body)
         try:
             scenario = server._override_queue.get_nowait()
         except queue.Empty:
@@ -190,16 +224,19 @@ class _Handler(BaseHTTPRequestHandler):
     # ── Files API ───────────────────────────────────────────────────────
 
     def _handle_file_upload(self, raw: bytes):
-        """POST /v1/files — accept any upload, return a file object."""
+        """POST /v1/files — accept any upload, return a file object with the
+        purpose and filename of the multipart form."""
         server: MockProviderServer = self.server  # type: ignore[assignment]
         file_id = f"file-mock-{uuid.uuid4().hex[:12]}"
+        form = _multipart_form(self.headers.get("Content-Type", ""), raw)
+        content, filename = form.get("file", (b"", None))
         file_obj = {
             "id": file_id,
             "object": "file",
-            "bytes": len(raw),
+            "bytes": len(content),
             "created_at": int(time.time()),
-            "filename": "upload.bin",
-            "purpose": "assistants",
+            "filename": filename,
+            "purpose": form.get("purpose", (b"", None))[0].decode(errors="replace"),
             "status": "processed",
         }
         with server._state_lock:
@@ -282,14 +319,19 @@ class _Handler(BaseHTTPRequestHandler):
         file_id = parts[i + 3] if len(parts) > i + 3 else None
         return vs_id, file_id
 
-    def _vector_store_file_obj(self, vs_id: str, file_id: str) -> dict:
-        return {
+    def _vector_store_file_obj(self, vs_id: str, file_id: str, status: str) -> dict:
+        server: MockProviderServer = self.server  # type: ignore[assignment]
+        obj = {
             "id": file_id,
             "object": "vector_store.file",
             "vector_store_id": vs_id,
-            "status": "completed",
+            "status": status,
+            "last_error": None,
             "created_at": int(time.time()),
         }
+        if status in ("failed", "cancelled"):
+            obj["last_error"] = server.indexing_last_error()
+        return obj
 
     def _handle_vector_store_file_add(self, raw: bytes):
         """POST /v1/vector_stores/{vs_id}/files — attach a file to a vector store."""
@@ -306,7 +348,8 @@ class _Handler(BaseHTTPRequestHandler):
         if vs_obj is None:
             self._json_response(404, {"error": {"message": f"No such vector_store: {vs_id}"}})
             return
-        self._json_response(200, self._vector_store_file_obj(vs_id, file_id))
+        status = server.start_indexing(vs_id, file_id)
+        self._json_response(200, self._vector_store_file_obj(vs_id, file_id, status))
 
     def _handle_vector_store_file_get(self):
         """GET /v1/vector_stores/{vs_id}/files/{file_id}."""
@@ -316,7 +359,8 @@ class _Handler(BaseHTTPRequestHandler):
             vs_obj = server._vector_stores.get(vs_id)
             found = vs_obj is not None and file_id in vs_obj.get("file_ids", [])
         if found:
-            self._json_response(200, self._vector_store_file_obj(vs_id, file_id))
+            status = server.next_indexing_status(vs_id, file_id)
+            self._json_response(200, self._vector_store_file_obj(vs_id, file_id, status))
         else:
             self._json_response(404, {"error": {"message": f"No such vector_store file: {file_id}"}})
 
@@ -370,6 +414,8 @@ class MockProviderServer(ThreadingHTTPServer):
         self._files: dict[str, dict] = {}
         self._vector_stores: dict[str, dict] = {}
         self._captured_requests: list[dict] = []
+        # Non-streaming Responses requests (thread summary, background work).
+        self._summary_requests: list[dict] = []
         self._request_paths: list[tuple[str, str]] = []
         # Requests rejected by `path_error`: (method, path, reason).
         self._path_errors: list[tuple[str, str, str]] = []
@@ -380,28 +426,58 @@ class MockProviderServer(ThreadingHTTPServer):
         # Guards _files and _vector_stores: handler threads outlive per-test
         # fixtures, and the in-flight delete path is not atomic.
         self._state_lock = threading.Lock()
+        # Indexing statuses of a file added to a vector store: the add answers
+        # the first, each status read the next; the last one stays.
+        self._indexing_statuses: list[str] = list(DEFAULT_INDEXING_STATUSES)
+        self._indexing_last_error: dict | None = None
+        # (vs_id, file_id) -> statuses still to report.
+        self._indexing: dict[tuple[str, str], list[str]] = {}
 
     @property
     def port(self) -> int:
         return self.server_address[1]
 
     def capture_request(self, body: dict) -> None:
-        """Store a request body for later inspection (thread-safe)."""
+        """Store a streaming Responses request body (thread-safe)."""
         with self._capture_lock:
             self._captured_requests.append(body)
 
+    def capture_summary_request(self, body: dict) -> None:
+        """Store a non-streaming Responses request body (thread-safe)."""
+        with self._capture_lock:
+            self._summary_requests.append(body)
+
     def get_last_request(self) -> dict | None:
-        """Return the most recent captured request body, or None."""
+        """Return the most recent streaming Responses request body, or None."""
         with self._capture_lock:
             return self._captured_requests[-1] if self._captured_requests else None
 
     def get_captured_requests(self) -> list[dict]:
-        """Return all captured Responses API request bodies, oldest first."""
+        """Streaming Responses API request bodies (the turns), oldest first.
+
+        Leaves out the non-streaming thread summary requests: the summary
+        worker runs in the background and may send one during a later test
+        (see `get_summary_requests`)."""
         with self._capture_lock:
             return list(self._captured_requests)
 
-    def log_request_path(self, method: str, path: str) -> None:
-        """Record the method and path of every request (thread-safe)."""
+    def get_summary_requests(self) -> list[dict]:
+        """Non-streaming Responses API request bodies (thread summary), oldest first."""
+        with self._capture_lock:
+            return list(self._summary_requests)
+
+    def get_uploaded_files(self) -> list[dict]:
+        """File objects of the uploads stored since the last `clear_state`,
+        with the `purpose` and `filename` of the upload form."""
+        with self._state_lock:
+            return [dict(f) for f in self._files.values()]
+
+    def log_request_path(self, method: str, path: str, *, background: bool = False) -> None:
+        """Record the method and path of a request (thread-safe). A thread
+        summary request (`background`) is not recorded: it may come from an
+        earlier test."""
+        if background:
+            return
         with self._capture_lock:
             self._request_paths.append((method, path))
 
@@ -430,6 +506,7 @@ class MockProviderServer(ThreadingHTTPServer):
         """Clear all captured request bodies, request paths and path errors."""
         with self._capture_lock:
             self._captured_requests.clear()
+            self._summary_requests.clear()
             self._request_paths.clear()
             self._path_errors.clear()
 
@@ -456,10 +533,41 @@ class MockProviderServer(ThreadingHTTPServer):
                     return status, body
         return None
 
+    def set_indexing(self, statuses: list[str], last_error: dict | None = None) -> None:
+        """Indexing statuses of the next files added to a vector store: the
+        add answers `statuses[0]`, each status read the next one, and the
+        last one stays. `last_error` is sent with `failed` / `cancelled`.
+        Reset to DEFAULT_INDEXING_STATUSES after each test."""
+        assert statuses, "at least one status"
+        with self._state_lock:
+            self._indexing_statuses = list(statuses)
+            self._indexing_last_error = last_error
+
+    def start_indexing(self, vs_id: str, file_id: str) -> str:
+        with self._state_lock:
+            pending = list(self._indexing_statuses)
+            self._indexing[(vs_id, file_id)] = pending
+            return pending.pop(0) if len(pending) > 1 else pending[0]
+
+    def next_indexing_status(self, vs_id: str, file_id: str) -> str:
+        with self._state_lock:
+            pending = self._indexing.get((vs_id, file_id))
+            if not pending:
+                return "completed"
+            return pending.pop(0) if len(pending) > 1 else pending[0]
+
+    def indexing_last_error(self) -> dict | None:
+        with self._state_lock:
+            return self._indexing_last_error
+
     def clear_override_scenarios(self) -> None:
-        """Drop queued per-request overrides and faults left by previous tests."""
+        """Drop queued per-request overrides, faults and the indexing
+        statuses left by previous tests."""
         with self._fault_lock:
             self._faults.clear()
+        with self._state_lock:
+            self._indexing_statuses = list(DEFAULT_INDEXING_STATUSES)
+            self._indexing_last_error = None
         while True:
             try:
                 self._override_queue.get_nowait()
@@ -478,6 +586,7 @@ class MockProviderServer(ThreadingHTTPServer):
         with self._state_lock:
             self._files.clear()
             self._vector_stores.clear()
+            self._indexing.clear()
 
     def set_next_scenario(self, scenario: Scenario) -> None:
         """Override the scenario for the next request (consumed once, thread-safe)."""
@@ -512,6 +621,15 @@ class _DummyMockProvider:
 
     def get_captured_requests(self) -> list[dict]:
         return []
+
+    def get_summary_requests(self) -> list[dict]:
+        return []
+
+    def get_uploaded_files(self) -> list[dict]:
+        return []
+
+    def set_indexing(self, statuses: list[str], last_error: dict | None = None) -> None:
+        pass
 
     def get_request_paths(self) -> list[tuple[str, str]]:
         return []

@@ -1428,7 +1428,7 @@ class TestFileSearchModelSupport:
         status, events, raw = stream_message(chat_id, "What grew?")
         assert status == 200, raw
         expect_done(events)
-        streamed = [r for r in mock_provider.get_captured_requests() if r.get("stream") is not False]
+        streamed = mock_provider.get_captured_requests()
         assert len(streamed) == 1, streamed
         tools = [t.get("type") for t in streamed[0].get("tools", [])]
         assert "file_search" not in tools, streamed[0].get("tools")

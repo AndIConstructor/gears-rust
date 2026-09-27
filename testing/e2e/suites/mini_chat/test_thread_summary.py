@@ -104,6 +104,14 @@ def _summary_rows(chat_id: str) -> list[dict]:
     )
 
 
+def _summary_requests(mock_provider, chat_id: str) -> list[dict]:
+    """Thread summary requests the mock received for the chat."""
+    return [
+        r for r in mock_provider.get_summary_requests()
+        if (r.get("metadata") or {}).get("chat_id") == chat_id
+    ]
+
+
 def _wait_for_summary(chat_id: str, timeout: float = 30.0) -> dict:
     deadline = time.monotonic() + timeout
     rows = _summary_rows(chat_id)
@@ -168,9 +176,7 @@ class TestThreadSummary:
 
         # The summary request: non-streaming, on the summary model, with the
         # first turn in the prompt and without the second.
-        summary_requests = [
-            r for r in mock_provider.get_captured_requests() if r.get("stream") is False
-        ]
+        summary_requests = _summary_requests(mock_provider, chat_id)
         assert len(summary_requests) == 1, summary_requests
         assert summary_requests[0]["model"] == SUMMARY_MODEL_PROVIDER_ID
         # A system task: the tenant with the default subject (not the chat
@@ -193,8 +199,7 @@ class TestThreadSummary:
         assert expect_stream_started(events).data["thread_summary_applied"] == {
             "token_estimate": SUMMARY_OUTPUT_TOKENS,
         }
-        # A later summary run may add a non-streaming request; keep the turn's.
-        captured = [r for r in mock_provider.get_captured_requests() if r.get("stream") is not False]
+        captured = mock_provider.get_captured_requests()
         assert len(captured) == 1, captured
         assert captured[0]["instructions"] == CATALOG_SYSTEM_PROMPT
         # The second turn is not summarized, and on this small-context model
@@ -228,7 +233,7 @@ class TestThreadSummary:
         assert resp.status_code == 200, resp.text
         expect_done(parse_sse(resp.text))
 
-        captured = [r for r in mock_provider.get_captured_requests() if r.get("stream") is not False]
+        captured = mock_provider.get_captured_requests()
         assert len(captured) == 1, captured
         assert provider_input(captured[0]) == [
             ("user", SUMMARY_PREAMBLE + summary["summary_text"]),

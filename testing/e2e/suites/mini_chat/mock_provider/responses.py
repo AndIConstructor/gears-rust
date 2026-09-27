@@ -62,6 +62,9 @@ class Scenario:
     http_error_body: dict | None = None
     # Extra response headers of the HTTP-level error (e.g. `Retry-After`).
     http_error_headers: dict[str, str] = field(default_factory=dict)
+    # Send the SSE events without `event:` lines; each event is named only
+    # by its `data.type`.
+    omit_event_lines: bool = False
 
 
 def _message_item(item_id: str, text: str | None,
