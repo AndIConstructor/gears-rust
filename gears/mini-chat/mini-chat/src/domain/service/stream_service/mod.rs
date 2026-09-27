@@ -434,6 +434,9 @@ impl<
 
         // ── Post-preflight image guards (kill switches + vision capability) ──
         check_image_support(num_images, &computed.kill_switches, pf.vision_input)?;
+        // The web_search tool is sent only when the effective model supports it;
+        // the requested flag is still stored on the turn for retry/edit.
+        let web_search_tool = web_search_enabled && pf.tool_support.web_search;
 
         // Metrics: estimated tokens (only on allow/downgrade)
         #[allow(clippy::cast_precision_loss)]
@@ -527,16 +530,21 @@ impl<
             max_input_tokens: pf.max_input_tokens,
             budgets: pf.estimation_budgets,
             tools_enabled: file_search_enabled,
-            web_search_enabled,
+            web_search_enabled: web_search_tool,
             code_interpreter_enabled,
         });
         // file_search and knowledge_search are mutually exclusive — when both
         // are configured, file_search wins (native vector-store tool, already
         // billed via the adapter). knowledge_search would otherwise double-bill
         // OpenAI/Responses traffic and silently drop on Anthropic.
-        let knowledge_search_enabled = self.knowledge_search_config.enabled
-            && self.knowledge_retriever.is_some()
-            && !file_search_enabled;
+        // The flag follows the parameters: when they cannot be built (no
+        // retriever, provider or api_version), the tool is not offered.
+        let knowledge_search = if file_search_enabled {
+            None
+        } else {
+            self.build_knowledge_search_params(&tenant_id.to_string())
+        };
+        let knowledge_search_enabled = knowledge_search.is_some();
         let (assembled, summary_info) = self
             .gather_context(
                 tenant_id,
@@ -544,7 +552,7 @@ impl<
                 snapshot_boundary,
                 &pf.system_prompt,
                 &content,
-                web_search_enabled,
+                web_search_tool,
                 file_search_enabled,
                 knowledge_search_enabled,
                 &vector_store_ids,
@@ -662,7 +670,7 @@ impl<
                 api_params: pf.api_params,
                 provider_file_id_map,
                 anthropic_file_ids,
-                knowledge_search: self.build_knowledge_search_params(&tenant_id_str),
+                knowledge_search,
             },
             cancel,
             tx,
@@ -1309,6 +1317,7 @@ impl<
             ci_file_ids: pre_ci_file_ids,
             image_file_ids,
         } = preflight;
+        let web_search_tool = web_search_enabled && pf.tool_support.web_search;
 
         let conn = self
             .db
@@ -1398,13 +1407,18 @@ impl<
             max_input_tokens: pf.max_input_tokens,
             budgets: pf.estimation_budgets,
             tools_enabled: file_search_enabled,
-            web_search_enabled,
+            web_search_enabled: web_search_tool,
             code_interpreter_enabled,
         });
         // See `run_stream` for the mutual-exclusion rationale.
-        let knowledge_search_enabled = self.knowledge_search_config.enabled
-            && self.knowledge_retriever.is_some()
-            && !file_search_enabled;
+        // The flag follows the parameters: when they cannot be built (no
+        // retriever, provider or api_version), the tool is not offered.
+        let knowledge_search = if file_search_enabled {
+            None
+        } else {
+            self.build_knowledge_search_params(&tenant_id.to_string())
+        };
+        let knowledge_search_enabled = knowledge_search.is_some();
         let (assembled, summary_info) = self
             .gather_context(
                 tenant_id,
@@ -1412,7 +1426,7 @@ impl<
                 snapshot_boundary,
                 &pf.system_prompt,
                 &content,
-                web_search_enabled,
+                web_search_tool,
                 file_search_enabled,
                 knowledge_search_enabled,
                 &vector_store_ids,
@@ -1564,7 +1578,7 @@ impl<
                 api_params: pf.api_params,
                 provider_file_id_map,
                 anthropic_file_ids,
-                knowledge_search: self.build_knowledge_search_params(&tenant_id_str),
+                knowledge_search,
             },
         })
     }
@@ -7156,6 +7170,146 @@ mod tests {
         ) -> Result<ResponseResult, LlmProviderError> {
             unimplemented!("not needed for streaming tests")
         }
+    }
+
+    struct ToolCapturingProvider {
+        captured: std::sync::Mutex<Option<Vec<crate::domain::llm::LlmTool>>>,
+        inner: MockProvider,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ToolCapturingProvider {
+        async fn stream(
+            &self,
+            ctx: SecurityContext,
+            request: LlmRequest<Streaming>,
+            upstream_alias: &str,
+            cancel: CancellationToken,
+        ) -> Result<ProviderStream, LlmProviderError> {
+            *self.captured.lock().unwrap() = Some(request.tools().to_vec());
+            self.inner
+                .stream(ctx, request, upstream_alias, cancel)
+                .await
+        }
+
+        async fn complete(
+            &self,
+            _ctx: SecurityContext,
+            _request: LlmRequest<NonStreaming>,
+            _upstream_alias: &str,
+        ) -> Result<ResponseResult, LlmProviderError> {
+            unimplemented!("not needed for streaming tests")
+        }
+    }
+
+    struct NoopRetriever;
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::KnowledgeRetriever for NoopRetriever {
+        async fn retrieve(
+            &self,
+            _ctx: SecurityContext,
+            _req: crate::domain::ports::knowledge_retriever::RetrievalRequest,
+        ) -> Result<
+            Vec<crate::domain::ports::knowledge_retriever::RetrievedChunk>,
+            crate::domain::ports::knowledge_retriever::RetrievalError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Knowledge search is enabled with a retriever, but its parameters cannot
+    /// be built (no `provider_id`): the tool must not be offered to the model.
+    #[tokio::test]
+    async fn knowledge_search_tool_not_sent_when_params_cannot_be_built() {
+        let db = mock_db_provider(inmem_db().await);
+        let (tenant_id, user_id, chat_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let capturing = Arc::new(ToolCapturingProvider {
+            captured: std::sync::Mutex::new(None),
+            inner: MockProvider::completed(&["ok"]),
+        });
+        let mut svc = build_stream_service(db.clone(), Arc::clone(&capturing) as _);
+        svc.knowledge_search_config.enabled = true;
+        svc.knowledge_search_config.provider_id = None;
+        svc.knowledge_retriever = Some(Arc::new(NoopRetriever));
+
+        let (tx, mut rx) = mpsc::channel(32);
+        let handle = svc
+            .run_stream(
+                test_security_ctx_with_id(tenant_id, user_id),
+                chat_id,
+                Uuid::new_v4(),
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect("stream starts");
+        while rx.recv().await.is_some() {}
+        handle.await.unwrap();
+
+        let tools = capturing
+            .captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("provider called");
+        assert!(
+            !tools
+                .iter()
+                .any(|t| matches!(t, crate::domain::llm::LlmTool::Function { name, .. } if name == "search_knowledge")),
+            "search_knowledge must not be sent: {tools:?}"
+        );
+    }
+
+    /// `web_search` requested on a model whose catalog entry does not support it:
+    /// the tool is not sent to the provider.
+    #[tokio::test]
+    async fn web_search_tool_not_sent_when_model_lacks_support() {
+        let db = mock_db_provider(inmem_db().await);
+        let (tenant_id, user_id, chat_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        let capturing = Arc::new(ToolCapturingProvider {
+            captured: std::sync::Mutex::new(None),
+            inner: MockProvider::completed(&["ok"]),
+        });
+        // The test catalog entry has tool_support.web_search = false.
+        let svc = build_stream_service(db.clone(), Arc::clone(&capturing) as _);
+        let (tx, mut rx) = mpsc::channel(32);
+        let handle = svc
+            .run_stream(
+                test_security_ctx_with_id(tenant_id, user_id),
+                chat_id,
+                Uuid::new_v4(),
+                "hello".into(),
+                test_resolved_model(),
+                true,
+                Vec::new(),
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect("stream starts");
+        while rx.recv().await.is_some() {}
+        handle.await.unwrap();
+
+        let tools = capturing
+            .captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("provider called");
+        assert!(
+            !tools
+                .iter()
+                .any(|t| matches!(t, crate::domain::llm::LlmTool::WebSearch { .. })),
+            "web_search must not be sent: {tools:?}"
+        );
     }
 
     /// Retry/edit sends the source message's images to the provider.
