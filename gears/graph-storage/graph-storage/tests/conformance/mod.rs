@@ -6753,3 +6753,237 @@ pub async fn an_edge_does_not_follow_a_node_ingested_under_a_new_key(
         "the neighbour still sees the old node, and only it"
     );
 }
+
+/// `expected_version` on a key with no node: zero is "there must be none"
+/// and holds; anything else names a row that is not there and is a conflict.
+///
+/// A stored version is 1 or more, so `Some(0)` is the one conditional a
+/// producer can make without a version to read back, and it is how a key is
+/// claimed exactly once. `Some(3)` on an absent key used to insert quietly:
+/// the only compare-and-set token this gear offers passed against a version
+/// that never existed.
+pub async fn an_expected_version_on_an_absent_key_is_a_conflict_unless_it_is_zero(
+    store: &dyn GraphStoreV1,
+    tenant: Uuid,
+) {
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = ctx(tenant, &scope, None);
+    store
+        .register_types(&ctx, ontology_batch())
+        .await
+        .expect("the ontology registers");
+
+    let mut claim = node("fresh", "fresh");
+    claim.expected_version = Some(0);
+    let outcome = ingest_batch(store, &ctx, batch(vec![claim], Vec::new()))
+        .await
+        .expect("zero on an absent key is the claim it is meant to be");
+    assert_eq!(outcome.counts.nodes_inserted, 1, "{:?}", outcome.counts);
+
+    let mut wrong = node("absent", "absent");
+    wrong.expected_version = Some(3);
+    let refused = ingest_batch(store, &ctx, batch(vec![wrong], Vec::new()))
+        .await
+        .expect_err("an expectation of version 3 names a row that is not there");
+    assert!(
+        matches!(&refused, GraphStoreError::Conflict { reason } if reason.contains("no node is stored")),
+        "the refusal says the row is absent: {refused:?}"
+    );
+    assert!(
+        store.get_node(&ctx, &"absent".to_owned(), 1).await.is_err(),
+        "nothing was inserted under the refused expectation"
+    );
+
+    let mut again = node("fresh", "fresh");
+    again.expected_version = Some(0);
+    let refused = ingest_batch(store, &ctx, batch(vec![again], Vec::new()))
+        .await
+        .expect_err("zero on an existing key is a conflict: the key is taken");
+    assert!(
+        matches!(&refused, GraphStoreError::Conflict { reason } if reason.contains("stored version is 1")),
+        "{refused:?}"
+    );
+}
+
+/// Two writers claiming one key with `expected_version: Some(0)` -- exactly
+/// one gets it, and the other is told.
+///
+/// This is how a producer claims a version number across replicas without a
+/// lock and without a read: both try to create the same key under "there
+/// must be none", and the compare-and-set in the statement decides. Sixteen
+/// barrier rounds; on a store that serializes `ingest` the second writer reads
+/// the first's row and the case proves the arithmetic.
+pub async fn two_creators_with_expected_version_zero_do_not_both_win(
+    store: std::sync::Arc<dyn GraphStoreV1>,
+    tenant: Uuid,
+) {
+    let scope = AccessScope::for_tenant(tenant);
+    let reader = ctx(tenant, &scope, None);
+    store
+        .register_types(&reader, ontology_batch())
+        .await
+        .expect("the ontology registers");
+
+    for round in 0..16 {
+        let key = format!("claim-{round}");
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let creator = |name: &'static str| {
+            let store = std::sync::Arc::clone(&store);
+            let gate = std::sync::Arc::clone(&gate);
+            let key = key.clone();
+            tokio::spawn(async move {
+                let scope = AccessScope::for_tenant(tenant);
+                let ctx = ctx(tenant, &scope, None);
+                let mut spec = node(&key, name);
+                spec.expected_version = Some(0);
+                gate.wait().await;
+                ingest_batch(store.as_ref(), &ctx, batch(vec![spec], Vec::new())).await
+            })
+        };
+        // Both are spawned before either is awaited: the barrier is for two,
+        // and a creator awaited alone waits at it for a partner that never
+        // starts.
+        let (left, right) = (creator("left"), creator("right"));
+        let left = left.await.expect("the task does not panic");
+        let right = right.await.expect("the task does not panic");
+        let won = [left.is_ok(), right.is_ok()]
+            .into_iter()
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(
+            won, 1,
+            "round {round}: exactly one creator claims the key; left {left:?}, right {right:?}"
+        );
+        let loser = match (left, right) {
+            (Err(loser), Ok(_)) | (Ok(_), Err(loser)) => loser,
+            other => panic!("round {round}: one winner was asserted above, got {other:?}"),
+        };
+        assert!(
+            matches!(loser, GraphStoreError::Conflict { .. }),
+            "round {round}: the loser is told a conflict it can act on: {loser:?}"
+        );
+        store
+            .get_node(&reader, &key, 1)
+            .await
+            .expect("the winner's node is there");
+    }
+}
+
+/// A registration batch is one act: one conflicting type registers nothing,
+/// in whichever order the batch names it, and the refusal names the type.
+///
+/// `fr-type-registration` requires batch atomicity. A producer registering
+/// its whole ontology before the first write meets this when one type has
+/// drifted: the answer is `on_existing: update` for a compatible drift, or
+/// a batch without the drifted type, and this case is what that producer
+/// can rely on either way.
+pub async fn a_batch_with_one_conflicting_type_registers_none_and_names_it(
+    store: &dyn GraphStoreV1,
+    tenant: Uuid,
+) {
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = ctx(tenant, &scope, None);
+    seed_requirements(store, &ctx, &["proposed"]).await;
+
+    let conflicting = requirement_revision(
+        &requirement_properties(&["proposed", "approved"], true, false),
+        &["key", "statement"],
+        &["/payload/status"],
+    );
+    let newcomer_id =
+        "gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~acme.gs._.newcomer.v1~";
+    let newcomer = || TypeRegistration {
+        type_id: newcomer_id.to_owned(),
+        schema: serde_json::json!({
+            "$id": format!("gts://{newcomer_id}"),
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "allOf": [
+                { "$ref": "gts://gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~" },
+                { "type": "object", "properties": { "payload": {
+                    "type": "object",
+                    "properties": { "note": { "type": "string" } }
+                } } }
+            ]
+        }),
+    };
+
+    for (label, batch) in [
+        ("conflict first", vec![conflicting.clone(), newcomer()]),
+        ("conflict last", vec![newcomer(), conflicting.clone()]),
+    ] {
+        let refused = store
+            .register_types(&ctx, batch)
+            .await
+            .expect_err("one changed schema refuses the batch");
+        assert!(
+            matches!(&refused, GraphStoreError::Conflict { reason } if reason.contains(EVOLVING)),
+            "{label}: the refusal names the drifted type: {refused:?}"
+        );
+        let absent = store
+            .get_type(&ctx, &newcomer_id.to_owned())
+            .await
+            .expect_err("the newcomer was in a refused batch and is not registered");
+        assert!(
+            matches!(absent, GraphStoreError::NotFound),
+            "{label}: nothing of a refused batch is registered: {absent:?}"
+        );
+    }
+}
+
+/// A replacement removes only what carries its attribute: a node of a
+/// scope-managed type whose payload does not name the scope is not the
+/// scope's, and stays.
+///
+/// Membership is the payload field `attribute = value`, not the type and not
+/// the batch: a producer whose nodes do not carry the attribute sees a
+/// replacement remove nothing, which is this case's second half, and the
+/// reason "`replace_scope` does nothing" is a payload without the field.
+pub async fn a_replacement_leaves_alone_what_does_not_carry_its_attribute(
+    store: &dyn GraphStoreV1,
+    tenant: Uuid,
+) {
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = ctx(tenant, &scope, None);
+    store
+        .register_types(&ctx, ontology_batch())
+        .await
+        .expect("the ontology registers");
+
+    // One node in the scope, one of the same type with no `repository` at all.
+    ingest_batch(
+        store,
+        &ctx,
+        batch(
+            vec![
+                scoped_node("in-scope", "acme/infra"),
+                node("unscoped", "unscoped"),
+            ],
+            Vec::new(),
+        ),
+    )
+    .await
+    .expect("both nodes are created by an ordinary ingest");
+
+    // A replacement that names neither: the unscoped node is not the scope's
+    // to remove; the in-scope one is.
+    let outcome = ingest_batch(store, &ctx, batch_replacing(Vec::new(), Vec::new(), 1))
+        .await
+        .expect("an empty replacement commits");
+    assert_eq!(
+        outcome.counts.scope_removed_nodes, 1,
+        "only the node carrying the attribute is the scope's: {:?}",
+        outcome.counts
+    );
+    assert!(
+        store
+            .get_node(&ctx, &"in-scope".to_owned(), 1)
+            .await
+            .is_err(),
+        "the scope's node is gone"
+    );
+    store
+        .get_node(&ctx, &"unscoped".to_owned(), 1)
+        .await
+        .expect("a node without the attribute is left alone by every replacement");
+}

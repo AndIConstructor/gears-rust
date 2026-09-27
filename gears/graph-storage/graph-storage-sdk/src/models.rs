@@ -693,6 +693,14 @@ pub struct NodeSpec {
     /// payload is *not* offered — ingest is replace, so `None` clears.
     pub payload: Option<serde_json::Value>,
     /// Optional compare-and-set on the node's stored version.
+    ///
+    /// A stored version is 1 or more and advances on every update. `Some(n)`
+    /// with `n >= 1` requires the stored version to be exactly `n`, and is a
+    /// conflict when it is not -- including when no node is stored under the
+    /// key at all. `Some(0)` means "there must be no node under this key":
+    /// the one conditional a producer can make without a version to read
+    /// back, and the way to claim a key exactly once across writers. Edges
+    /// carry no version: their identity is derived from their endpoints.
     pub expected_version: Option<i64>,
 }
 

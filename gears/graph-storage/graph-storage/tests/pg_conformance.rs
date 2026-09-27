@@ -2011,3 +2011,30 @@ pg_case!(
     an_edge_does_not_follow_a_node_ingested_under_a_new_key,
     conformance::an_edge_does_not_follow_a_node_ingested_under_a_new_key
 );
+
+pg_case!(
+    an_expected_version_on_an_absent_key_is_a_conflict_unless_it_is_zero,
+    conformance::an_expected_version_on_an_absent_key_is_a_conflict_unless_it_is_zero
+);
+pg_case!(
+    a_batch_with_one_conflicting_type_registers_none_and_names_it,
+    conformance::a_batch_with_one_conflicting_type_registers_none_and_names_it
+);
+pg_case!(
+    a_replacement_leaves_alone_what_does_not_carry_its_attribute,
+    conformance::a_replacement_leaves_alone_what_does_not_carry_its_attribute
+);
+
+/// The window is open here: two transactions both find no row before either
+/// commits, and the unique key decides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_creators_with_expected_version_zero_do_not_both_win() {
+    let Some(stand) = stand(HopStrategy::Pgq).await else {
+        return;
+    };
+    conformance::two_creators_with_expected_version_zero_do_not_both_win(
+        std::sync::Arc::clone(&stand.store) as std::sync::Arc<dyn GraphStoreV1>,
+        Uuid::now_v7(),
+    )
+    .await;
+}

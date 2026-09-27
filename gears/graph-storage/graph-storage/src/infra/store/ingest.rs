@@ -917,6 +917,22 @@ async fn upsert_node(
     };
 
     let Some(current) = existing else {
+        // `expected_version` is a statement about a stored row. `Some(0)`
+        // says "there must be none" -- the one conditional a caller can make
+        // with no version to read back, since a stored version is 1 or more
+        // -- and it holds here. Any other expectation names a row that is
+        // not there, and inserting under it would tell the caller its
+        // compare-and-set passed against a version that never existed.
+        if let Some(expected) = spec.expected_version
+            && expected != 0
+        {
+            return Err(GraphStoreError::Conflict {
+                reason: format!(
+                    "expected version {expected}, but no node is stored under key `{}`",
+                    spec.node_key
+                ),
+            });
+        }
         let active = node::ActiveModel {
             tenant_id: ActiveValue::Set(tenant),
             id: ActiveValue::NotSet,

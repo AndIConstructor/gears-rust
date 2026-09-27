@@ -2156,6 +2156,18 @@ fn apply_node(
     }
 
     let Some(existing) = nodes.iter_mut().find(|n| n.key == spec.node_key) else {
+        // `Some(0)` is "there must be none" and holds; any other expectation
+        // names a row that is not there (see the built-in store).
+        if let Some(expected) = spec.expected_version
+            && expected != 0
+        {
+            return Err(GraphStoreError::Conflict {
+                reason: format!(
+                    "expected version {expected}, but no node is stored under key `{}`",
+                    spec.node_key
+                ),
+            });
+        }
         *state.next_id += 1;
         nodes.push(FakeNode {
             id: *state.next_id,

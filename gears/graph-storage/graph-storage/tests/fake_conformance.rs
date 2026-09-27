@@ -636,3 +636,42 @@ async fn an_edge_does_not_follow_a_node_ingested_under_a_new_key() {
     conformance::an_edge_does_not_follow_a_node_ingested_under_a_new_key(&store(), Uuid::now_v7())
         .await;
 }
+
+#[tokio::test]
+async fn an_expected_version_on_an_absent_key_is_a_conflict_unless_it_is_zero() {
+    conformance::an_expected_version_on_an_absent_key_is_a_conflict_unless_it_is_zero(
+        &store(),
+        Uuid::now_v7(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_batch_with_one_conflicting_type_registers_none_and_names_it() {
+    conformance::a_batch_with_one_conflicting_type_registers_none_and_names_it(
+        &store(),
+        Uuid::now_v7(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_replacement_leaves_alone_what_does_not_carry_its_attribute() {
+    conformance::a_replacement_leaves_alone_what_does_not_carry_its_attribute(
+        &store(),
+        Uuid::now_v7(),
+    )
+    .await;
+}
+
+/// Run here too: this store serializes `ingest`, so the second creator reads
+/// the first's row and the case proves the arithmetic of one winner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_creators_with_expected_version_zero_do_not_both_win() {
+    conformance::two_creators_with_expected_version_zero_do_not_both_win(
+        std::sync::Arc::new(store())
+            as std::sync::Arc<dyn graph_storage_sdk::plugin_api::GraphStoreV1>,
+        Uuid::now_v7(),
+    )
+    .await;
+}
