@@ -13,7 +13,9 @@ from .conftest import (
     RESOURCE_CHAT,
     STANDARD_MODEL,
     TINY_CTX_MODEL,
+    USER_A_ID,
     OpenStream,
+    assert_no_reserves,
     assert_problem,
     delta_text,
     exec_db,
@@ -29,6 +31,7 @@ from .conftest import (
     slow_scenario,
     stream_message,
     turn_count,
+    usage_events,
     uuid_from_db,
 )
 from .mock_provider.responses import MockEvent, Scenario
@@ -147,6 +150,39 @@ class TestTurnRetry:
         expect_done(parse_sse(resp.text))
         (req,) = mock_provider.get_captured_requests()
         assert provider_input(req) == [*history, ("user", question)]
+
+    @pytest.mark.timeout(30)
+    def test_retry_over_context_budget_400(self, chat_with_model, mock_provider):
+        """A 6000-byte question sent on gpt-5.2 is over the context budget of
+        gpt-4.1-mini-tiny-ctx (2500 tokens with the system prompt, see
+        TestTurnEdit::test_edit_content_over_context_budget_400) and within
+        its max_input_tokens. With the chat switched to that model in the DB,
+        a retry is 400 out_of_range CONTEXT_BUDGET_EXCEEDED, the provider is
+        not called; context assembly runs after the retry committed, so the
+        old turn is replaced and the new turn fails with
+        `context_length_exceeded`, without an answer or a usage event."""
+        chat_id = chat_with_model(STANDARD_MODEL)["id"]
+        content = "x" * 6_000
+        rid = complete_turn(chat_id, content)
+        assert exec_db("UPDATE chats SET model = ? WHERE id = ?", (TINY_CTX_MODEL, chat_id)) == 1
+
+        mock_provider.clear_captured_requests()
+        resp = retry(chat_id, rid)
+        assert_problem(resp, 400, "out_of_range", field_reason="CONTEXT_BUDGET_EXCEEDED")
+        assert mock_provider.get_captured_requests() == []
+
+        live = query_db(
+            "SELECT request_id FROM chat_turns WHERE chat_id = ? AND deleted_at IS NULL",
+            (chat_id,),
+        )
+        assert len(live) == 1, live
+        new_rid = uuid_from_db(live[0]["request_id"])
+        assert new_rid != rid
+        turn = poll_turn(chat_id, new_rid)
+        assert (turn["state"], turn["error_code"]) == ("error", "context_length_exceeded"), turn
+        assert [(m["role"], m["content"]) for m in list_messages(chat_id)] == [("user", content)]
+        assert usage_events(new_rid) == []
+        assert_no_reserves(USER_A_ID)
 
     @pytest.mark.timeout(30)
     def test_retry_replaces_the_answer(self, chat):
@@ -334,6 +370,9 @@ class TestTurnEdit:
         assert [(m["role"], m["content"], m["request_id"]) for m in list_messages(chat_id)] == [
             ("user", content, new_rid),
         ]
+        # A turn that never reached the provider is not billed: no usage event.
+        assert usage_events(new_rid) == []
+        assert_no_reserves(USER_A_ID)
 
     @pytest.mark.timeout(30)
     def test_edit_non_latest_turn_409(self, chat):
