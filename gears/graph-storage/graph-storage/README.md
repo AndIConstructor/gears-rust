@@ -86,6 +86,58 @@ asynchronous, and nothing awaits it — so after a failed run
 `docker ps --filter ancestor=pg19-pgvector:latest` is worth a glance; a
 handful of forgotten servers is enough to make the next run look flaky too.
 
+## Using it from a producer
+
+Answers to the questions producers have asked while building on the gear.
+Each is the shipped behaviour, with the contract that fixes it.
+
+- **Registering an ontology is one batch, atomically** (`fr-type-registration`):
+  one type that conflicts refuses the whole batch and registers nothing, and
+  the refusal names the type. A type that drifted compatibly (a description, an
+  optional field) is updated in place with `options.on_existing: update`, and
+  `POST /types/compatibility` says beforehand what a change would cost;
+  an incompatible change needs a new major or `options.revalidate`. Registering
+  one type at a time is a valid fallback, not a workaround.
+- **`expected_version` is the one conditional write.** A stored version is 1 or
+  more and advances on every update; `Some(n)` requires exactly `n` and is a
+  conflict otherwise, including when no node is stored under the key.
+  `Some(0)` means "there must be none": two writers claiming one key with it
+  get exactly one success, which is how a version number is claimed across
+  replicas without a lock. No read returns the version yet (README § Known
+  limitations), so a read-then-update is last-writer-wins until it does. Edges
+  carry no version: their identity is derived from their endpoints.
+- **Scope replacement removes what carries the scope.** `replace_scope:
+  {attribute, value, generation}` removes, after the batch's own writes, the
+  nodes of `scope_managed` types whose payload field `attribute` equals
+  `value` and that the batch did not re-supply, and the `static` edges the
+  scope declared (edges record the scope that declared them). A node whose
+  payload does not carry the attribute is not the scope's and is never removed
+  -- a replacement that "does nothing" is a payload without the field. The
+  generation is monotonic per scope; an equal generation with different
+  content is a conflict.
+- **A tombstoned node key is not reusable before purge**, and purge is not
+  built; a tombstoned edge is revived by the next upsert that names it
+  (DESIGN § Soft Delete Contract, rules 4 and 6).
+- **Adjacency on a node read is bounded** by `node_read_max_adjacency` (100
+  by default, at most 1 000) with a truncation flag and no cursor. To list
+  every edge of a hub, walk it: `POST /graph/traverse` with the node as the
+  seed and depth 1 returns its edges, up to `traversal_max_nodes` (1 000 by
+  default, at most 10 000) neighbours.
+- **`$filter` and `$orderby` reach payload attributes the type declares** in
+  its `index` trait (`payload/severity`), equality served by one GIN over the
+  payload; range and ordering over a payload path are admitted and unindexed.
+  A type that declares no `index` paths can be filtered by `node_key`, `name`,
+  `created_at` and `updated_at` only, which is a scan of the tenant. The audit
+  envelope's `updated_at` is when the gear last wrote the row, not when the
+  object changed; an object's own time belongs in its payload.
+- **Nodes and edges in one batch** commit or fail together
+  (`fr-bulk-ingest`); an importer that writes nodes in one call and edges in
+  another has, between the two, a graph with nodes and no edges.
+- **Migrations are additive** from `v0.1.0`: no shipped migration's DDL has
+  changed since it shipped (later tags add migrations), so a database created
+  by any tag upgrades in place. Only a database from the vendored prototype
+  needs to start empty.
+
 ## Known limitations
 
 What the documents require and this iteration does not yet deliver, so a
