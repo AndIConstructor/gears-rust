@@ -145,10 +145,17 @@ fn default_max_tool_calls() -> u32 {
 /// LLM API inference parameters (API: `PolicyModelApiParams`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelApiParams {
-    pub temperature: f64,
-    pub top_p: f64,
-    pub frequency_penalty: f64,
-    pub presence_penalty: f64,
+    /// Sampling parameters. Each one is sent only when set; leave them unset
+    /// for reasoning models, which reject them ("Unsupported parameter:
+    /// 'temperature' is not supported with this model").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
     pub stop: Vec<String>,
     /// Provider-specific extra body parameters (e.g. vLLM `top_k`,
     /// `chat_template_kwargs`). Must be a JSON object; its keys are merged
@@ -401,10 +408,10 @@ mod tests {
             available_from: OffsetDateTime::UNIX_EPOCH,
             max_file_size_mb: 25,
             api_params: ModelApiParams {
-                temperature: 0.7,
-                top_p: 1.0,
-                frequency_penalty: 0.0,
-                presence_penalty: 0.0,
+                temperature: Some(0.7),
+                top_p: Some(1.0),
+                frequency_penalty: Some(0.0),
+                presence_penalty: Some(0.0),
                 stop: vec![],
                 extra_body: None,
                 reasoning_effort: None,

@@ -362,10 +362,7 @@ gears:
             available_from: "2025-01-01T00:00:00Z"
             max_file_size_mb: 50
             api_params:
-              temperature: 0.7
-              top_p: 1.0
-              frequency_penalty: 0.0
-              presence_penalty: 0.0
+              # Reasoning model: no sampling params (the API rejects them).
               stop: []
             features:
               streaming: true
@@ -423,10 +420,7 @@ gears:
             available_from: "2025-01-01T00:00:00Z"
             max_file_size_mb: 25
             api_params:
-              temperature: 0.7
-              top_p: 1.0
-              frequency_penalty: 0.0
-              presence_penalty: 0.0
+              # Reasoning model: no sampling params (the API rejects them).
               stop: []
             features:
               streaming: true

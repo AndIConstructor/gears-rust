@@ -573,18 +573,24 @@ fn build_request_body<M>(request: &LlmRequest<M>, stream: bool) -> serde_json::V
     //
     // Anthropic 4.x reasoning models reject requests that specify both
     // `temperature` and `top_p` ("cannot both be specified for this model").
-    // Treat `top_p == 1.0` (the no-op identity) as "operator left top_p alone"
-    // and forward only `temperature`. If `top_p` is genuinely tuned (< 1.0),
-    // forward `top_p` only and drop `temperature`.
+    // Treat an unset `top_p` or `top_p == 1.0` (the no-op identity) as
+    // "operator left top_p alone" and forward only `temperature` (when set).
+    // If `top_p` is genuinely tuned (< 1.0), forward `top_p` only and drop
+    // `temperature`.
     if let Some(p) = request.api_params.as_ref() {
-        if p.top_p < 1.0 {
-            body["top_p"] = serde_json::json!(p.top_p);
-            debug!(
-                top_p = p.top_p,
-                "Anthropic adapter: forwarding top_p only (temperature dropped)"
-            );
-        } else {
-            body["temperature"] = serde_json::json!(p.temperature);
+        match p.top_p {
+            Some(top_p) if top_p < 1.0 => {
+                body["top_p"] = serde_json::json!(top_p);
+                debug!(
+                    top_p,
+                    "Anthropic adapter: forwarding top_p only (temperature dropped)"
+                );
+            }
+            _ => {
+                if let Some(temperature) = p.temperature {
+                    body["temperature"] = serde_json::json!(temperature);
+                }
+            }
         }
         if !p.stop.is_empty() {
             body["stop_sequences"] = serde_json::json!(&p.stop);

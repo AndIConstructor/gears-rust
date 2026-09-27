@@ -3452,7 +3452,7 @@ Each entry specifies the model identifier, provider, tier, capability flags, lim
 | `max_num_results` | integer | Top-k chunks per `file_search` call. |
 | `web_search_context_size` | `low` \| `medium` \| `high` | Search context size hint for web search. |
 | `max_tool_calls` | integer | Maximum built-in tool calls the provider may make per request (default 2). Sent only by the OpenAI Responses adapter. |
-| `general_config` | object | `api_params` (temperature, top_p, penalties, stop, `extra_body`, `reasoning_effort`), `features`, `tool_support` (`web_search`, `file_search`, `image_generation`, `code_interpreter`, `mcp` — the `mcp` flag is unused, [ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)), `supported_endpoints`, `max_file_size_mb` (per-model upload cap). |
+| `general_config` | object | `api_params` (optional `temperature`, `top_p`, `frequency_penalty`, `presence_penalty` — each sent only when set; leave them unset for reasoning models such as gpt-5-mini, which reject them with 400 "Unsupported parameter" — plus `stop`, `extra_body`, `reasoning_effort`), `features`, `tool_support` (`web_search`, `file_search`, `image_generation`, `code_interpreter`, `mcp` — the `mcp` flag is unused, [ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)), `supported_endpoints`, `max_file_size_mb` (per-model upload cap). |
 | `preference` | object (optional) | `is_default`, `sort_order`. |
 | `system_prompt` | string | Sent as system instructions on every request for this model. |
 | `thread_summary_prompt` | string | System prompt of the thread-summary call; read from the entry of the summary model (`thread_summary_worker.summary_model_id`). Empty falls back to `thread_summary_worker.summary_system_prompt`. |

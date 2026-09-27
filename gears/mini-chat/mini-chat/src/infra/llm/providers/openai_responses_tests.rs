@@ -523,10 +523,10 @@ fn builder_function_tool_included() {
 /// individual tests override field-by-field.
 fn test_api_params() -> mini_chat_sdk::ModelApiParams {
     mini_chat_sdk::ModelApiParams {
-        temperature: 0.7,
-        top_p: 1.0,
-        frequency_penalty: 0.0,
-        presence_penalty: 0.0,
+        temperature: Some(0.7),
+        top_p: Some(1.0),
+        frequency_penalty: Some(0.0),
+        presence_penalty: Some(0.0),
         stop: vec![],
         extra_body: None,
         reasoning_effort: None,
@@ -538,7 +538,7 @@ fn builder_reasoning_effort_nested_under_reasoning() {
     let request = llm_request("o3")
         .message(LlmMessage::user("Think hard"))
         .api_params(mini_chat_sdk::ModelApiParams {
-            temperature: 1.0,
+            temperature: Some(1.0),
             reasoning_effort: Some("high".into()),
             ..test_api_params()
         })
@@ -555,6 +555,35 @@ fn builder_reasoning_effort_nested_under_reasoning() {
     assert_eq!(body["reasoning"]["effort"], "high");
     // Other typed params land at top level
     assert_eq!(body["temperature"], 1.0);
+}
+
+/// Unset sampling parameters are not sent: reasoning models (gpt-5-mini)
+/// reject `temperature` with 400 "Unsupported parameter".
+#[test]
+fn builder_omits_unset_sampling_params() {
+    let request = llm_request("gpt-5-mini")
+        .message(LlmMessage::user("Hello"))
+        .api_params(mini_chat_sdk::ModelApiParams {
+            temperature: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            reasoning_effort: Some("low".into()),
+            ..test_api_params()
+        })
+        .build_streaming();
+
+    let body = build_request_body(&request, true);
+
+    for key in [
+        "temperature",
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+    ] {
+        assert!(body.get(key).is_none(), "{key} must not be sent: {body}");
+    }
+    assert_eq!(body["reasoning"]["effort"], "low");
 }
 
 #[test]
