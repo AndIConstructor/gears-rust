@@ -8,22 +8,30 @@ import pytest
 
 from .conftest import (
     API_PREFIX,
+    BARE_MODEL,
+    RESOURCE_ATTACHMENT,
+    RESOURCE_CHAT,
+    STANDARD_MODEL,
     TINY_CTX_MODEL,
     OpenStream,
     assert_problem,
     delta_text,
+    exec_db,
     expect_done,
     expect_stream_started,
     list_messages,
     open_stream,
     parse_sse,
     poll_turn,
+    provider_file_id,
     query_db,
     slow_scenario,
     stream_message,
+    turn_count,
     uuid_from_db,
 )
 from .mock_provider.responses import MockEvent, Scenario
+from .test_attachments import MAX_IMAGES_PER_MESSAGE, _upload_ready, make_minimal_png
 
 
 # ---------------------------------------------------------------------------
@@ -535,3 +543,165 @@ class TestReplacedByRequestId:
         )
         assert len(rows) == 1, f"Turn {rid1} not found in DB"
         assert uuid_from_db(rows[0]["replaced_by_request_id"]) == new_rid
+
+
+# ---------------------------------------------------------------------------
+# Tests: mutation preflight (chat model, attachments)
+# ---------------------------------------------------------------------------
+
+def mutate(mutation: str, chat_id: str, rid: str) -> httpx.Response:
+    """Retry the turn, or edit it to "Edited question."."""
+    return {
+        "retry": lambda: retry(chat_id, rid),
+        "edit": lambda: edit(chat_id, rid, "Edited question."),
+    }[mutation]()
+
+
+def assert_mutation_rejected(chat_id: str, rid: str, before: list[dict], mock_provider) -> None:
+    """The rejected mutation changed nothing: same messages, the turn is
+    still the chat's only turn and `done`, and the provider was not called."""
+    assert list_messages(chat_id) == before
+    assert turn_count(chat_id) == 1
+    assert poll_turn(chat_id, rid)["state"] == "done"
+    assert mock_provider.get_captured_requests() == []
+
+
+@pytest.mark.usefixtures("offline_only")
+@pytest.mark.parametrize("mutation", ["retry", "edit"])
+class TestMutationChatModelLeftCatalog:
+    """Retry and edit of a chat whose model is no longer in the catalog (DB
+    seed, as for a send: test_streaming.py TestChatModelLeftCatalog)."""
+
+    @pytest.mark.timeout(30)
+    def test_mutation_with_model_missing_from_catalog_400(self, chat, mock_provider, mutation):
+        """400 invalid_argument INVALID_MODEL on `model` (chat resource),
+        before the turn is replaced."""
+        chat_id = chat["id"]
+        rid = complete_turn(chat_id, "Question.")
+        before = list_messages(chat_id)
+        assert exec_db(
+            "UPDATE chats SET model = ? WHERE id = ?", ("gpt-removed-from-catalog", chat_id),
+        ) == 1
+
+        mock_provider.clear_captured_requests()
+        body = assert_problem(
+            mutate(mutation, chat_id, rid), 400, "invalid_argument",
+            field_reason="INVALID_MODEL", resource_type=RESOURCE_CHAT,
+        )
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["model"], body
+        assert_mutation_rejected(chat_id, rid, before, mock_provider)
+
+
+@pytest.mark.usefixtures("offline_only")
+@pytest.mark.parametrize("mutation", ["retry", "edit"])
+class TestMutationAttachments:
+    """The new user message of a retry or edit keeps the attachments of the
+    one it replaces (turn_service.rs, `copy_for_retry`), and the image
+    checks of a send run again before the turn is replaced
+    (stream_service `preflight_mutation`)."""
+
+    @pytest.mark.timeout(40)
+    def test_mutation_copies_attachments_except_deleted(self, chat_with_model, mock_provider,
+                                                        mutation):
+        """A turn with two documents and an image; one document is then
+        soft-deleted (DB seed of `deleted_at`: a referenced attachment
+        cannot be deleted over the API). The new user message references the
+        other document and the image, and the new provider request carries
+        the image as `input_image` and `file_search` on the chat's store."""
+        chat_id = chat_with_model(STANDARD_MODEL)["id"]  # vision, file_search
+        keep = _upload_ready(chat_id, "keep.txt", b"Kept document.", "text/plain")
+        gone = _upload_ready(chat_id, "gone.txt", b"Deleted document.", "text/plain")
+        image = _upload_ready(chat_id, "red.png", make_minimal_png(), "image/png")
+        rid = str(uuid.uuid4())
+        status, events, raw = stream_message(
+            chat_id, "Question.", request_id=rid, attachment_ids=[keep, gone, image],
+        )
+        assert status == 200, raw
+        expect_done(events)
+        poll_turn(chat_id, rid, ("done",))
+        assert exec_db("UPDATE attachments SET deleted_at = created_at WHERE id = ?", (gone,)) == 1
+
+        mock_provider.clear_captured_requests()
+        resp = mutate(mutation, chat_id, rid)
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        new_rid = expect_stream_started(events).data["request_id"]
+        expect_done(events)
+
+        user = list_messages(chat_id)[0]
+        assert (user["role"], user["request_id"]) == ("user", new_rid), user
+        assert sorted(a["attachment_id"] for a in user["attachments"]) == sorted([keep, image]), user
+        (req,) = mock_provider.get_captured_requests()
+        text = {"retry": "Question.", "edit": "Edited question."}[mutation]
+        assert [i for i in req["input"] if i.get("role") == "user"][-1]["content"] == [
+            {"type": "input_text", "text": text},
+            {"type": "input_image", "file_id": provider_file_id(image)},
+        ]
+        (store,) = query_db(
+            "SELECT vector_store_id FROM chat_vector_stores WHERE chat_id = ?", (chat_id,),
+        )
+        assert [(t["type"], t["vector_store_ids"]) for t in req["tools"]] == [
+            ("file_search", [store["vector_store_id"]]),
+        ], req["tools"]
+
+    @pytest.mark.timeout(30)
+    def test_image_turn_on_model_without_vision_400(self, chat_with_model, mock_provider, mutation):
+        """A turn with an image on gpt-5.2; the chat model is then switched
+        to gpt-5-bare (no VISION_INPUT) in the DB: 400 invalid_argument
+        VISION_NOT_SUPPORTED on `content_type` (attachment resource), as for
+        a send (01-06), before the turn is replaced."""
+        chat_id = chat_with_model(STANDARD_MODEL)["id"]
+        image = _upload_ready(chat_id, "red.png", make_minimal_png(), "image/png")
+        rid = str(uuid.uuid4())
+        status, events, raw = stream_message(
+            chat_id, "Question.", request_id=rid, attachment_ids=[image],
+        )
+        assert status == 200, raw
+        expect_done(events)
+        poll_turn(chat_id, rid, ("done",))
+        before = list_messages(chat_id)
+        assert exec_db("UPDATE chats SET model = ? WHERE id = ?", (BARE_MODEL, chat_id)) == 1
+
+        mock_provider.clear_captured_requests()
+        body = assert_problem(
+            mutate(mutation, chat_id, rid), 400, "invalid_argument",
+            field_reason="VISION_NOT_SUPPORTED", resource_type=RESOURCE_ATTACHMENT,
+        )
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["content_type"], body
+        assert_mutation_rejected(chat_id, rid, before, mock_provider)
+
+    @pytest.mark.timeout(40)
+    def test_more_images_than_allowed_400(self, chat, mock_provider, mutation):
+        """A turn with `max_images_per_message` (4) images; a fifth image is
+        then linked to its user message in the DB: 400 out_of_range
+        TOO_MANY_IMAGES on `image_count` (attachment resource), as for a
+        send (04-11), before the turn is replaced."""
+        chat_id = chat["id"]  # vision-capable default model
+        images = [
+            _upload_ready(chat_id, f"img{i}.png", make_minimal_png(color=(i * 40, 0, 0)), "image/png")
+            for i in range(MAX_IMAGES_PER_MESSAGE + 1)
+        ]
+        rid = str(uuid.uuid4())
+        status, events, raw = stream_message(
+            chat_id, "Question.", request_id=rid, attachment_ids=images[:-1],
+        )
+        assert status == 200, raw
+        expect_done(events)
+        poll_turn(chat_id, rid, ("done",))
+        before = list_messages(chat_id)
+        assert exec_db(
+            "INSERT INTO message_attachments "
+            "(tenant_id, chat_id, message_id, attachment_id, created_at) "
+            "SELECT tenant_id, chat_id, message_id, ?, created_at FROM message_attachments "
+            "WHERE message_id = ? LIMIT 1",
+            (images[-1], before[0]["id"]),
+        ) == 1
+        before = list_messages(chat_id)
+
+        mock_provider.clear_captured_requests()
+        body = assert_problem(
+            mutate(mutation, chat_id, rid), 400, "out_of_range",
+            field_reason="TOO_MANY_IMAGES", resource_type=RESOURCE_ATTACHMENT,
+        )
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["image_count"], body
+        assert_mutation_rejected(chat_id, rid, before, mock_provider)
