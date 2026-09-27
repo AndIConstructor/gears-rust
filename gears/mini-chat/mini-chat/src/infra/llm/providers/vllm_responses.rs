@@ -1,7 +1,7 @@
 // Updated: 2026-04-07 by Constructor Tech
 //! vLLM Responses API adapter (`/v1/responses`).
 //!
-//! Implements [`LlmProvider`] for vLLM's OpenAI-compatible Responses API.
+//! Implements [`LlmProvider`](crate::infra::llm::LlmProvider) for vLLM's OpenAI-compatible Responses API.
 //! vLLM supports the same SSE event format as `OpenAI` but has stricter input
 //! validation: assistant messages must use plain string content (not the
 //! `output_text` array format), and tool-related fields are omitted.

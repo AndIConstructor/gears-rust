@@ -51,7 +51,8 @@ pub enum ProviderKind {
 /// Create a provider adapter from a [`ProviderKind`].
 ///
 /// The upstream alias is not stored in the adapter — it is passed per-request
-/// to [`LlmProvider::stream()`] and [`LlmProvider::complete()`].
+/// to [`LlmProvider::stream`](crate::infra::llm::LlmProvider::stream) and
+/// [`LlmProvider::complete`](crate::infra::llm::LlmProvider::complete).
 #[must_use]
 pub fn create_provider(
     gateway: Arc<dyn ServiceGatewayClientV1>,

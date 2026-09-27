@@ -1,6 +1,6 @@
 //! `OpenAI` Chat Completions API adapter (`/v1/chat/completions`).
 //!
-//! Implements [`LlmProvider`] by converting [`LlmRequest`] to the Chat
+//! Implements [`LlmProvider`](crate::infra::llm::LlmProvider) by converting [`LlmRequest`] to the Chat
 //! Completions API format, proxying through OAGW, parsing SSE events, and
 //! translating them to the shared `TranslatedEvent` contract.
 

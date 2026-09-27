@@ -39,7 +39,7 @@ pub struct MiniChatConfig {
     pub client_credentials: ClientCredentialsConfig,
     #[serde(default)]
     pub metrics: MetricsConfig,
-    /// Provider registry. Key = `provider_id` (matches [`ModelCatalogEntry::provider_id`]).
+    /// Provider registry. Key = `provider_id` (matches [`ModelCatalogEntry::provider_id`](mini_chat_sdk::ModelCatalogEntry::provider_id)).
     #[expand_vars]
     #[serde(default = "default_providers")]
     pub providers: HashMap<String, ProviderEntry>,
@@ -139,7 +139,7 @@ pub struct ProviderEntry {
     #[serde(default)]
     pub auth_plugin_type: Option<String>,
     /// Auth plugin config (e.g., `header`, `prefix`, `secret_ref`).
-    /// Values support `${VAR}` env expansion via [`config_expanded()`].
+    /// Values support `${VAR}` env expansion via [`GearCtx::config_expanded`](toolkit::GearCtx::config_expanded).
     #[expand_vars]
     #[serde(default)]
     pub auth_config: Option<HashMap<String, String>>,

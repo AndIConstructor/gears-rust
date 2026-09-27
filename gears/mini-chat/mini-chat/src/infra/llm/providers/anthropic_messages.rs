@@ -1,6 +1,6 @@
 //! Anthropic Messages API adapter.
 //!
-//! Implements [`LlmProvider`] using the Anthropic Messages API (`/v1/messages`).
+//! Implements [`LlmProvider`](crate::infra::llm::LlmProvider) using the Anthropic Messages API (`/v1/messages`).
 //! Translates [`LlmRequest`] to the Anthropic wire format, processes named SSE
 //! events via a stateful scan pass, and converts them to the shared
 //! `TranslatedEvent` contract.

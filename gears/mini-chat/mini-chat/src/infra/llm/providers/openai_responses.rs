@@ -1,7 +1,7 @@
 // Updated: 2026-04-14 by Constructor Tech
 //! `OpenAI` Responses API adapter (`/v1/responses`).
 //!
-//! Implements [`LlmProvider`] by converting [`LlmRequest`] to the Responses
+//! Implements [`LlmProvider`](crate::infra::llm::LlmProvider) by converting [`LlmRequest`] to the Responses
 //! API wire format, proxying through OAGW, parsing SSE events, and
 //! translating them to the shared `TranslatedEvent` contract.
 

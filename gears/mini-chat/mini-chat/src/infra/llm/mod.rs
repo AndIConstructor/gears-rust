@@ -507,7 +507,7 @@ impl Stream for ProviderStream {
 /// Provider-agnostic LLM trait. Each provider adapter implements this.
 ///
 /// The `upstream_alias` parameter identifies the OAGW upstream to route
-/// through. It is resolved per-request by [`ProviderResolver`] based on
+/// through. It is resolved per-request by [`ProviderResolver`](crate::infra::llm::provider_resolver::ProviderResolver) based on
 /// the model's `provider_id` and the tenant's endpoint configuration.
 #[async_trait::async_trait]
 pub trait LlmProvider: Send + Sync {

@@ -213,7 +213,7 @@ pub struct TextSpan {
     pub end: usize,
 }
 
-/// Resolved attachment identity returned by [`build_provider_file_id_map`].
+/// Resolved attachment identity returned by `AttachmentRepository::build_provider_file_id_map`.
 #[domain_model]
 #[derive(Debug, Clone)]
 pub struct AttachmentRef {
