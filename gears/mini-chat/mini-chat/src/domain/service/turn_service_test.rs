@@ -1399,3 +1399,55 @@ async fn retry_of_uncovered_turn_keeps_summary() {
 
     assert!(summary_exists(&svc, tenant_id, chat_id).await);
 }
+
+/// Dropping the summary clears `is_compressed`, so the older turns it
+/// covered return to the context instead of being lost.
+#[tokio::test]
+async fn dropped_summary_uncompresses_earlier_messages() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+    let oldest = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (first, second) = two_turns_with_summary_of_first(&svc, &ctx, tenant_id, chat_id).await;
+
+    // The summary worker marks everything up to the frontier compressed.
+    let scope = AccessScope::for_tenant(tenant_id);
+    let conn = svc.db.conn().unwrap();
+    let frontier = {
+        use crate::domain::repos::ThreadSummaryRepository as _;
+        repo::thread_summary_repo::ThreadSummaryRepository
+            .get_latest(&conn, &scope, chat_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .frontier
+    };
+    let marked = svc
+        .message_repo
+        .mark_messages_compressed(&conn, &scope, chat_id, None, &frontier)
+        .await
+        .unwrap();
+    assert_eq!(marked, 4, "oldest and first turn: user + assistant each");
+
+    svc.delete(&ctx, chat_id, second).await.unwrap();
+    svc.retry(&ctx, chat_id, first).await.unwrap();
+
+    assert!(!summary_exists(&svc, tenant_id, chat_id).await);
+    let oldest_msgs = svc
+        .message_repo
+        .find_by_chat_and_request_id(&conn, &scope, chat_id, oldest)
+        .await
+        .unwrap();
+    assert_eq!(oldest_msgs.len(), 2);
+    assert!(
+        oldest_msgs.iter().all(|m| !m.is_compressed),
+        "messages covered by the dropped summary must be uncompressed"
+    );
+}

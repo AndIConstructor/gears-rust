@@ -57,8 +57,10 @@ pub trait ThreadSummaryRepository: Send + Sync {
         token_estimate: i32,
     ) -> Result<u64, DomainError>;
 
-    /// Delete the chat's summary. Used when a retry, edit or delete changes
-    /// a turn the summary already covers. Returns rows deleted.
+    /// Delete the chat's summary and clear `is_compressed` on the chat's
+    /// messages, so context assembly and the next summary see them again.
+    /// Used when a retry, edit or delete changes a turn the summary already
+    /// covers. Returns summary rows deleted.
     async fn delete_for_chat<C: DBRunner>(
         &self,
         runner: &C,
