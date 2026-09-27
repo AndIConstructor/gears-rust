@@ -33,6 +33,8 @@ impl Validator {
         resolution_fingerprint: Option<&[u8]>,
         selection: FieldSelection,
     ) -> Self {
+        // TODO(P1): subject visibility-chain version, Context Tenant availability-chain
+        // version, routing generation.
         let mut ctx = Context::new(&SHA256);
         ctx.update(&[VERSION]);
         ctx.update(&resource_version.to_be_bytes());

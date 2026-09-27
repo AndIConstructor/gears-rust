@@ -647,10 +647,8 @@ impl RegistryService {
     /// one row are **not** duplicates of each other — each is a key a caller asked
     /// about and each is echoed.
     ///
-    /// Constant in round trips rather than linear in keys: two identity reads, one
-    /// fingerprint read and two current-state reads per kind, all under one
-    /// snapshot, whatever the batch size. Only the documents `selection` names are
-    /// fetched, and none for a key answered `Unchanged`.
+    /// Constant in round trips, all in one snapshot; selected documents are fetched
+    /// only for `Found` keys.
     ///
     /// # Errors
     /// [`ServiceError::BatchReadOutOfRange`] for an empty or over-long batch,

@@ -1615,7 +1615,7 @@
         "description": "One key in a batch read.",
         "properties": {
           "if_none_match": {
-            "description": "This key's validator from an earlier read, which makes just this key\nconditional. The field the two header names lowercase to — `if_none_match`\ngoing out, `etag` coming back — because one `If-None-Match` header cannot\nrepresent a batch of them (DESIGN §3.3).\n\n**No read emits a validator yet:** T22d adds `etag` to a result and the\ncomparison behind it. Until then no value a caller could hold can match, so\nevery present key is read unconditionally and answers `found` — which is\nwhat a stale validator does after T22d too. The field is declared now so the\nwire shape does not change under the callers T23 migrates.",
+            "description": "A prior `etag` for this key and `$select`; a match returns `unchanged`.\nBatch validators are per item.",
             "maxLength": 1024,
             "type": [
               "string",
@@ -6210,8 +6210,15 @@
               },
               {
                 "$ref": "#/components/schemas/EntityDto",
-                "description": "The selected fields, exactly as the exact read returns them for the same\n`$select`. Absent on `not_found`."
+                "description": "The selected fields, exactly as the exact read returns them for the same\n`$select`. Present only on `found`."
               }
+            ]
+          },
+          "etag": {
+            "description": "The validator for this key under this `$select`, byte-identical to the exact\nread's `ETag`. Present unless `not_found`.",
+            "type": [
+              "string",
+              "null"
             ]
           },
           "key": {
@@ -6228,9 +6235,10 @@
         "type": "object"
       },
       "EntityLookupStatusDto": {
-        "description": "`found` or `not_found`.\n\nDESIGN's `unchanged` arrives with T22d's validators and its `failed` needs\nfederation, which is out of P0 (SPEC §2). Declaring either now would publish a\nvocabulary value this gear never emits, which a generated client would\ntype-check against.",
+        "description": "`found`, `unchanged` or `not_found`.\n\nDESIGN's `failed` needs federation, which is out of P0 (SPEC §2); declaring it\nwould publish a value this gear never emits.",
         "enum": [
           "found",
+          "unchanged",
           "not_found"
         ],
         "type": "string"
@@ -59855,7 +59863,7 @@
         ]
       },
       "get": {
-        "description": "Return one entity, projected by `$select`. The key is either a canonical GTS identifier or the Registry Reference UUID derived from it; a key over 1024 bytes is a 400, and any other key naming no entity is a 404. Absent `$select` is the document-free default `gts_id,gts_uuid,kind,origin,lifecycle_status`; documents are selected individually from `content`, `resolved_schema`, `effective_traits` and `effective_traits_schema` (the last three Type Schemas only), plus the `provenance` group. Names are case-insensitive; an empty, duplicate, unknown or nested name is a 400. `gts_id`, `gts_uuid`, `kind` and `lifecycle_status` are always returned, whether or not `$select` names them, so a deleted entity is still readable and reports it. No other query parameter is accepted.",
+        "description": "Return one entity, projected by `$select`. The key is either a canonical GTS identifier or the Registry Reference UUID derived from it; a key over 1024 bytes is a 400, and any other key naming no entity is a 404. Absent `$select` is the document-free default `gts_id,gts_uuid,kind,origin,lifecycle_status`; documents are selected individually from `content`, `resolved_schema`, `effective_traits` and `effective_traits_schema` (the last three Type Schemas only), plus the `provenance` group. Names are case-insensitive; an empty, duplicate, unknown or nested name is a 400. `gts_id`, `gts_uuid`, `kind` and `lifecycle_status` are always returned, whether or not `$select` names them, so a deleted entity is still readable and reports it. No other query parameter is accepted. The `ETag` is scoped to the `$select`; `If-None-Match` with a current one returns a bodyless 304.",
         "operationId": "types_registry.get_entity",
         "parameters": [
           {
@@ -59863,6 +59871,15 @@
             "in": "path",
             "name": "entity_key",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "An earlier `ETag` of this key under the same `$select`, or `*`",
+            "in": "header",
+            "name": "If-None-Match",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -59886,7 +59903,26 @@
                 }
               }
             },
-            "description": "The requested entity"
+            "description": "The requested entity",
+            "headers": {
+              "ETag": {
+                "description": "The validator of this key under this `$select`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The If-None-Match validator is current",
+            "headers": {
+              "ETag": {
+                "description": "The validator of this key under this `$select`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -60185,7 +60221,7 @@
     },
     "/types-registry/v2/entities:batchGet": {
       "post": {
-        "description": "Read up to 100 entities in one round trip. Each item names one entity in `key` (a canonical GTS identifier or the Registry Reference UUID derived from it), resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves it. A top-level `$select` string applies to every key and follows that route's `$select` rules; absent, the document-free default. Tombstones are `found`. Returns 200 with one result per requested key, in request order and echoing the key it was asked by: `found` with the selected fields, exactly as the exact read returns them and always including `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`, or `not_found`. Query parameters are refused, `$select` included. A key named twice collapses onto its first mention; the two spellings of one entity are two keys and get two results. An absent key is not a 404: one missing key must not lose the answers for the others. The If-None-Match header is refused rather than ignored: validators are per key and belong in each item's `if_none_match`.",
+        "description": "Read up to 100 entities in one round trip. Each item names one entity in `key` (a canonical GTS identifier or the Registry Reference UUID derived from it), resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves it. A top-level `$select` string applies to every key and follows that route's `$select` rules; absent, the document-free default. Tombstones are `found`. Returns 200 with one result per requested key, in request order and echoing the key it was asked by: `found` with the selected fields, exactly as the exact read returns them and always including `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`, or `not_found`. Every result but `not_found` carries the key's `etag`; an item whose `if_none_match` is still current answers `unchanged` without the entity. Query parameters are refused, `$select` included. A key named twice collapses onto its first mention; the two spellings of one entity are two keys and get two results. An absent key is not a 404: one missing key must not lose the answers for the others. The If-None-Match header is refused rather than ignored: validators are per key and belong in each item's `if_none_match`.",
         "operationId": "types_registry.batch_get_entities",
         "requestBody": {
           "content": {

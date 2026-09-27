@@ -2346,7 +2346,7 @@ working implementation slices above.
 
 ---
 
-### - [ ] T22d: Freshness validators and conditional reads
+### - [x] T22d: Freshness validators and conditional reads
 
 **Description:** The per-request validator of DESIGN §3.3 and the conditional reads it
 enables (SPEC §8.5, `plan.md` P9/P19). For a P0 managed platform-plane read the validator is a
@@ -2363,34 +2363,34 @@ SDK models — P9's requirement that the field precede T25/T26 is unaffected. T2
 accepts and length-checks each item's `if_none_match`; this task is where it is first compared.
 
 **Acceptance criteria:**
-- [ ] Validator is **computed per request, never stored** (`cpt-cf-types-registry-principle-derive-not-store`) — no column, no cache entry holds one as authority
-- [ ] Inputs are exactly `resource_version` + `resolution_fingerprint` (Type Schemas; Instances have no derived form) + T22b's normalized field set. A `TODO` names the P1 additions: subject visibility-chain version, Context Tenant availability-chain version, routing generation
-- [ ] Wire form per DESIGN: base64url of a **versioned** JSON object, identical bytes in `ETag` and in batch bodies; 128-bit digest for the managed case. The version field is what lets P1 add inputs without honouring a P0 token
-- [ ] Comparison decodes fields — never compares encoded strings, so serialization differences cannot read as a change
-- [ ] Projection is digested as the **normalized field set**, not the query string; absent `$select` equals the explicit T22b default set (RFC 9110 §8.8.3). A narrow token never produces false `unchanged` for a wider representation, including two selections of the same key in P0
-- [ ] Exact read: response carries `ETag`; a matching `If-None-Match` returns a bodyless `304` **that still carries the `ETag`**, declared through `no_content_response(StatusCode::NOT_MODIFIED, ..)`
-- [ ] `batchGet`: validators travel **beside individual keys**, in each item's `if_none_match`, because one header cannot represent them; a result may be `unchanged`, and the response stays `200` even when all are. The two body fields are the two header names lowercased — request `if_none_match`, response `etag` — so the batch surface reads like the single one
-- [ ] An `unchanged` result **carries its `etag`**, and the exact read's `304` **carries its `ETag`** — RFC 9110 §15.4.5 has a `304` send the validator a `200` would have. Every result but `not_found` therefore has one, so a refresh loop has no special case
-- [ ] Test: `unchanged` and `304` both return the same validator the caller sent, byte for byte
-- [ ] **Discovery pages carry no validator** and are never conditional (DESIGN: validators are for exact reads, *"never discovery pages"*) — `GET /entities` is unaffected
-- [ ] A deleted entity still has a validator, and deletion moves it (deletion increments `resource_version`)
-- [ ] Handlers stay mapping-only: the validator is computed in the domain service, so a future gRPC adapter gets it without new domain methods (SPEC §8.4)
-- [ ] `types-registry-sdk` is untouched: the validator is a domain value, and T23's local client maps it into the SDK models rather than recomputing it (P21)
-- [ ] `ponytail:`-style comment where the digest is built records ceiling C7's absent tenant/visibility dimensions and names the version field as the upgrade path
+- [x] Validator is **computed per request, never stored** (`cpt-cf-types-registry-principle-derive-not-store`) — no column, no cache entry holds one as authority
+- [x] Inputs are exactly `resource_version` + `resolution_fingerprint` (Type Schemas; Instances have no derived form) + T22b's normalized field set. A `TODO` names the P1 additions: subject visibility-chain version, Context Tenant availability-chain version, routing generation
+- [x] Wire form per DESIGN: base64url of a **versioned** JSON object, identical bytes in `ETag` and in batch bodies; 128-bit digest for the managed case. The version field is what lets P1 add inputs without honouring a P0 token
+- [x] Comparison decodes fields — never compares encoded strings, so serialization differences cannot read as a change
+- [x] Projection is digested as the **normalized field set**, not the query string; absent `$select` equals the explicit T22b default set (RFC 9110 §8.8.3). A narrow token never produces false `unchanged` for a wider representation, including two selections of the same key in P0
+- [x] Exact read: response carries `ETag`; a matching `If-None-Match` returns a bodyless `304` **that still carries the `ETag`**, declared through `no_content_response(StatusCode::NOT_MODIFIED, ..)`
+- [x] `batchGet`: validators travel **beside individual keys**, in each item's `if_none_match`, because one header cannot represent them; a result may be `unchanged`, and the response stays `200` even when all are. The two body fields are the two header names lowercased — request `if_none_match`, response `etag` — so the batch surface reads like the single one
+- [x] An `unchanged` result **carries its `etag`**, and the exact read's `304` **carries its `ETag`** — RFC 9110 §15.4.5 has a `304` send the validator a `200` would have. Every result but `not_found` therefore has one, so a refresh loop has no special case
+- [x] Test: `unchanged` and `304` both return the same validator the caller sent, byte for byte
+- [x] **Discovery pages carry no validator** and are never conditional (DESIGN: validators are for exact reads, *"never discovery pages"*) — `GET /entities` is unaffected
+- [x] A deleted entity still has a validator, and deletion moves it (deletion increments `resource_version`)
+- [x] Handlers stay mapping-only: the validator is computed in the domain service, so a future gRPC adapter gets it without new domain methods (SPEC §8.4)
+- [x] `types-registry-sdk` is untouched: the validator is a domain value, and T23's local client maps it into the SDK models rather than recomputing it (P21)
+- [x] `ponytail:`-style comment where the digest is built records ceiling C7's absent tenant/visibility dimensions and names the version field as the upgrade path
 
 **Verification:**
-- [ ] Gear tests, all three backends (see [Commands](#commands))
-- [ ] Test: unchanged entity yields a byte-identical validator across two reads; a revision changes it
-- [ ] Test: a dependent whose `resolved_schema` was refreshed gets a new validator **even when its own `resource_version` did not move** — this is why `resolution_fingerprint` is an input, and it is the case a `resource_version`-only digest gets wrong
-- [ ] Test: `If-None-Match` with the current validator returns `304` with no body; with a stale one returns `200` and the document
-- [ ] Test: `batchGet` with a mix of current and stale validators returns `200`, `unchanged` for the current ones, full snapshots for the rest
-- [ ] Test: an Instance validator omits `resolution_fingerprint` and still changes on revision
-- [ ] Test: decoding rejects a validator whose version field is unknown rather than treating it as a match
-- [ ] Test: one key under two different selected-field sets has two different validators;
+- [x] Gear tests, all three backends (see [Commands](#commands))
+- [x] Test: unchanged entity yields a byte-identical validator across two reads; a revision changes it
+- [x] Test: a dependent whose `resolved_schema` was refreshed gets a new validator **even when its own `resource_version` did not move** — this is why `resolution_fingerprint` is an input, and it is the case a `resource_version`-only digest gets wrong
+- [x] Test: `If-None-Match` with the current validator returns `304` with no body; with a stale one returns `200` and the document
+- [x] Test: `batchGet` with a mix of current and stale validators returns `200`, `unchanged` for the current ones, full snapshots for the rest
+- [x] Test: an Instance validator omits `resolution_fingerprint` and still changes on revision
+- [x] Test: decoding rejects a validator whose version field is unknown rather than treating it as a match
+- [x] Test: one key under two different selected-field sets has two different validators;
   field order, case, an explicit default set and explicitly naming mandatory
   `kind` or `lifecycle_status` do not change the normalized validator when the effective fields match
-- [ ] Test: deletion changes the validator
-- [ ] `make e2e-local` remains green with no e2e file edited — only `/v2/` routes change
+- [x] Test: deletion changes the validator
+- [x] `make e2e-local` remains green with no e2e file edited — only `/v2/` routes change
 
 **Dependencies:** T22a (`batchGet` and its per-item `if_none_match`), T22b (normalized
 projection and the three read routes, Phase 6 per P19). Not T23: the SDK carries the validator
@@ -2398,8 +2398,9 @@ this task computes, not the reverse (P21)
 **Files likely touched:**
 - `TR/src/domain/validator.rs`
 - `TR/src/domain/registry_service.rs` (the database read path; `service.rs` is the legacy in-memory service)
-- `TR/src/api/rest/handlers.rs`, `TR/src/api/rest/routes.rs`, `TR/src/api/rest/dto.rs`
-- `TR/tests/validator_test.rs`
+- `TR/src/api/rest/handlers.rs`, `TR/src/api/rest/routes.rs`, `TR/src/api/rest/dto.rs`,
+  `TR/src/api/rest/etag.rs`
+- `TR/tests/validator_test.rs`, `TR/tests/api_rest_test.rs`, `TR/tests/projected_read_backends_test.rs`
 **Scope:** M
 
 ---

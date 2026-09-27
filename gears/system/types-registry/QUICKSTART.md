@@ -178,8 +178,8 @@ curl -s -X POST "$BASE/types-registry/v2/entities:batchGet" \
 ```json
 {
     "items": [
-        { "key": "gts.cf.core.example.event.v1~", "status": "found", "entity": { "...": "the default fields" } },
-        { "key": "d226dd5b-14c8-56da-a718-9cf29becaba1", "status": "found", "entity": { "...": "..." } },
+        { "key": "gts.cf.core.example.event.v1~", "status": "found", "etag": "\"eyJ2Ijox...\"", "entity": { "...": "the default fields" } },
+        { "key": "d226dd5b-14c8-56da-a718-9cf29becaba1", "status": "found", "etag": "\"eyJ2Ijox...\"", "entity": { "...": "..." } },
         { "key": "gts.cf.core.example.missing.v1~", "status": "not_found" }
     ]
 }
@@ -205,8 +205,27 @@ A key named twice collapses onto its first mention. The two spellings of one ent
 keys and get two results. At most 100 keys per request; an empty `items` is a `400`. The
 key count does not bound response bytes once documents are selected.
 
-`If-None-Match` is refused rather than ignored, because validators are per key: each item
-carries its own `if_none_match` slot.
+### Skip an unchanged body
+
+An exact read's `ETag` and a batch result's `etag` are the same value, quotes included, for
+that key and `$select`. Send it back unchanged and an unchanged entity costs no body:
+
+```bash
+URL="$BASE/types-registry/v2/entities/gts.cf.core.example.event.v1~"
+ETAG=$(curl -si "$URL" | awk 'tolower($1) == "etag:" { print $2 }' | tr -d '\r')
+
+curl -si "$URL" -H "If-None-Match: $ETAG"
+# 304 Not Modified, the same ETag, no body
+
+curl -s -X POST "$BASE/types-registry/v2/entities:batchGet" \
+  -H "Content-Type: application/json" \
+  -d "$(python3 -c 'import json, sys; print(json.dumps({"items": [{"key": sys.argv[1], "if_none_match": sys.argv[2]}]}))' \
+        gts.cf.core.example.event.v1~ "$ETAG")"
+# {"items": [{"key": "...", "status": "unchanged", "etag": "<$ETAG>"}]}
+```
+
+A revision, a refreshed dependency or another `$select` yields a new validator; discovery
+pages carry none. On `:batchGet` the `If-None-Match` header is refused: validators are per key.
 
 ### Discover what exists
 

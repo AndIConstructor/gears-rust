@@ -1017,8 +1017,9 @@ document genuinely changed.
 cache holds one as authority.
 
 **Wire form is DESIGN's**: base64url of a versioned JSON object, byte-identical in the `ETag`
-header and in batch bodies, 128-bit digest for the managed case. Comparison decodes the fields
-rather than matching encoded strings. The version field is load-bearing — it is what lets P1
+header and in batch bodies, 128-bit digest for the managed case. The 48-character payload is
+quoted as an HTTP entity-tag; both REST surfaces carry those 50 bytes. Comparison decodes
+fields, not encoded spelling. The version field is load-bearing — it is what lets P1
 add the chain versions while retaining the projection digest and refusing to honour a P0 token
 (ceiling C7).
 
@@ -1320,7 +1321,7 @@ Business listener, `.authenticated()`, path `/types-registry/v1/...` per DE0801.
 | `POST` | `/types-registry/v1/entities:batchDelete` | `202` + operation; `200` on terminal replay |
 | `DELETE` | `/types-registry/v1/entities/{entity_key}` | `202` + operation; `200` on terminal replay |
 | `POST` | `/types-registry/v1/entities:batchGet` | `200`, one result per requested key |
-| `GET` | `/types-registry/v1/entities/{entity_key}` | `200`; `404` when absent |
+| `GET` | `/types-registry/v1/entities/{entity_key}` | `200`; `304` on a current `If-None-Match`; `404` when absent |
 | `GET` | `/types-registry/v1/entities` | `200` + one bounded page and a cursor; document-free by default |
 | `GET` | `/types-registry/v1/operations/{operation_id}` | `200` |
 
