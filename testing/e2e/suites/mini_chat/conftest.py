@@ -224,7 +224,8 @@ def assert_problem(
     resource_type: str | None = None,
     detail: str | None = None,
 ) -> dict:
-    """Assert `resp` is a canonical Problem of `category` and return its body.
+    """Assert `resp` is a canonical Problem of `category` (RFC 9457,
+    `Content-Type: application/problem+json`) and return its body.
 
     - `reason`: `context.reason` (aborted, permission_denied).
     - `field_reason`: some `context.field_violations[].reason`
@@ -238,6 +239,10 @@ def assert_problem(
     """
     assert resp.status_code == status, (
         f"expected HTTP {status}, got {resp.status_code}: {resp.text[:500]}"
+    )
+    media_type = resp.headers.get("content-type", "").split(";")[0].strip()
+    assert media_type == "application/problem+json", (
+        f"expected Content-Type application/problem+json, got {media_type!r}"
     )
     body = resp.json()
     for key in PROBLEM_FIELDS:

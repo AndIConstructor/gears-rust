@@ -476,6 +476,35 @@ class TestDeleteChat:
         assert_problem(resp, 404, "not_found")
 
 
+class TestJsonContentType:
+    """17-17: a JSON body sent without a JSON `Content-Type` is 415
+    invalid_argument with one violation on `body`, reason
+    `missing_json_content_type` (libs/toolkit/src/api/rest/extract/json.rs).
+    The body is valid JSON; the path ids need not exist, the body is
+    rejected before the handler runs."""
+
+    @pytest.mark.parametrize(("method", "path", "body"), [
+        pytest.param("POST", "/chats", b"{}", id="create_chat"),
+        pytest.param("PATCH", "/chats/{chat_id}", b'{"title": "T"}', id="update_chat"),
+        pytest.param("POST", "/chats/{chat_id}/messages:stream", b'{"content": "Hi"}', id="send"),
+        pytest.param("PATCH", "/chats/{chat_id}/turns/{id}", b'{"content": "Hi"}', id="edit"),
+        pytest.param(
+            "PUT", "/chats/{chat_id}/messages/{id}/reaction", b'{"reaction": "like"}',
+            id="reaction",
+        ),
+    ])
+    @pytest.mark.parametrize("content_type", [None, "text/plain"], ids=["none", "text_plain"])
+    def test_json_body_without_json_content_type_415(
+        self, chat, method, path, body, content_type,
+    ):
+        headers = {"Content-Type": content_type} if content_type else {}
+        url = API_PREFIX + path.format(chat_id=chat["id"], id=uuid.uuid4())
+        resp = httpx.request(method, url, content=body, headers=headers, timeout=10)
+        problem = assert_problem(resp, 415, "invalid_argument", field_reason="missing_json_content_type")
+        assert [v["field"] for v in problem["context"]["field_violations"]] == ["body"], problem
+        assert query_db("SELECT id FROM chat_turns WHERE chat_id = ?", (chat["id"],)) == []
+
+
 class TestPathParameters:
     """17-12: a path parameter that is not a UUID is a canonical 400."""
 

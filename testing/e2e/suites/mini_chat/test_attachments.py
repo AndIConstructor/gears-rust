@@ -723,9 +723,14 @@ class TestUploadSizeEnforcement:
         finally:
             conn.close()
         assert status == 413, (status, body)
-        if "json" in content_type:
-            problem = json.loads(body)
-            assert problem.get("status") == 413, problem
+        # A Problem, but not a canonical one: the gateway's body limit layer
+        # answers `type` about:blank and no category, so assert_problem does
+        # not apply.
+        assert content_type == "application/problem+json", content_type
+        problem = json.loads(body)
+        assert (problem["type"], problem["title"], problem["status"], problem["detail"]) == (
+            "about:blank", "Payload Too Large", 413, "Payload Too Large",
+        ), problem
         assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
         assert _file_upload_calls(mock_provider) == []
 
