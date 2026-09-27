@@ -61,7 +61,8 @@ PREMIUM_DAILY_LIMIT = 50_000_000
 WEB_SEARCH_DAILY_QUOTA = 75  # QuotaConfig default (config.rs), not overridden in base.yaml
 CODE_INTERPRETER_DAILY_QUOTA = 50  # QuotaConfig default (config.rs), not overridden in base.yaml
 
-pytestmark = pytest.mark.timeout(30)
+# Seeds usage of the current day (conftest `same_utc_day`).
+pytestmark = [pytest.mark.timeout(30), pytest.mark.usefixtures("same_utc_day")]
 
 
 class QuotaUser:

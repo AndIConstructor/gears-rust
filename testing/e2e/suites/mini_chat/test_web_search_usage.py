@@ -23,6 +23,9 @@ from .conftest import (
 )
 from .mock_provider.responses import SCENARIOS, Usage
 
+# Compares or seeds daily usage (conftest `same_utc_day`).
+pytestmark = pytest.mark.usefixtures("same_utc_day")
+
 
 def _query_ws_calls(user_id: str = USER_A_ID) -> int:
     """web_search_calls of today's daily `total` quota_usage row (not exposed

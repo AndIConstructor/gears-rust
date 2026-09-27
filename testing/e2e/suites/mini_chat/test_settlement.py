@@ -29,6 +29,9 @@ from .conftest import (
 )
 from .mock_provider.responses import MockEvent, Scenario, Usage
 
+# Compares or seeds daily usage (conftest `same_utc_day`).
+pytestmark = pytest.mark.usefixtures("same_utc_day")
+
 
 def total_daily_used() -> int:
     return find_period(get_quota_status(), "total", "daily")["used_credits_micro"]

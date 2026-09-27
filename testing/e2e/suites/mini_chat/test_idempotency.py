@@ -166,7 +166,7 @@ class TestIdempotency:
             assert delta_text(replay_events) == delta_text(events_a)
             expect_done(b.drain())
 
-    @pytest.mark.usefixtures("offline_only")
+    @pytest.mark.usefixtures("offline_only", "same_utc_day")
     @pytest.mark.timeout(30)
     def test_replay_does_not_modify_quota_or_call_provider(self, chat, mock_provider):
         """Replaying a completed turn changes neither quota nor provider traffic

@@ -228,6 +228,7 @@ class TestCrossChatIds:
         assert httpx.get(f"{chat_url}/attachments/{owned['attachment_id']}").json()["status"] == "ready"
 
 
+@pytest.mark.usefixtures("same_utc_day")
 class TestQuotaIsolation:
     """Usage is accounted per user."""
 

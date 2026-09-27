@@ -11,6 +11,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1210,6 +1211,23 @@ def _await_oagw_upstreams(server, headers, expected, timeout=60.0):
             return
         time.sleep(0.5)
     print(f"[e2e] WARN: OAGW upstreams did not reach >= {expected} within {timeout:.0f}s")
+
+
+@pytest.fixture
+def same_utc_day(request):
+    """Skip the test when it could run past UTC midnight.
+
+    Usage and limits are kept per UTC day (and month): a turn that finishes
+    after midnight is charged to the new period, so a before/after
+    comparison of daily usage, or usage seeded for today, would not match.
+    The margin is the test's timeout plus 10 s (60 s without a timeout)."""
+    marker = request.node.get_closest_marker("timeout")
+    timeout = float(marker.args[0]) if marker is not None and marker.args else 0.0
+    margin = (timeout or 50.0) + 10.0
+    now = datetime.now(timezone.utc)
+    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if (midnight - now).total_seconds() < margin:
+        pytest.skip(f"less than {margin:.0f} s to UTC midnight: the daily quota period rolls over")
 
 
 @pytest.fixture

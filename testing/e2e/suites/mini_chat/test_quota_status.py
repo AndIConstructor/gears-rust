@@ -19,6 +19,9 @@ from .conftest import (
 
 import pytest
 
+# Compares or seeds daily usage (conftest `same_utc_day`).
+pytestmark = pytest.mark.usefixtures("same_utc_day")
+
 # Credit multipliers (credits_micro per token: input, output) of the default
 # models (config/base.yaml, *_tokens_credit_multiplier_micro / 1e6).
 CREDIT_MULTIPLIERS = {"gpt-5.2": (1, 3), "azure-gpt-4.1": (3, 15)}

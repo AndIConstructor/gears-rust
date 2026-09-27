@@ -342,6 +342,7 @@ class TestCleanup:
     """Chat deletion — observable effects."""
 
     @pytest.mark.timeout(30)
+    @pytest.mark.usefixtures("same_utc_day")
     def test_running_turn_completes_and_is_billed_after_chat_delete(self, mock_provider):
         """19-16 (DESIGN, chat deletion): a turn running when its chat is
         deleted is not cancelled: the stream ends with `done`, the turn is
