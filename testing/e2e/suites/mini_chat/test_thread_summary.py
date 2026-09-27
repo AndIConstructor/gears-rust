@@ -16,6 +16,7 @@ messages` (mock_provider/responses.py).
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 
@@ -48,6 +49,7 @@ from .conftest import (
     wait_for,
 )
 from .mock_provider.responses import SUMMARY_OUTPUT_TOKENS
+from .test_cleanup import _dead_letters, _processed_seq
 
 SUMMARY_MODEL_PROVIDER_ID = "gpt-5-mini"  # provider_model_id of summary_model_id
 
@@ -390,7 +392,19 @@ class TestThreadSummaryFailures:
         ):
             time.sleep(0.2)
         assert len(_summary_requests(mock_provider, chat_id)) == SUMMARY_MAX_ATTEMPTS
-        time.sleep(2)  # no further delivery of the dropped task
+        # The third failure rejects the task: it is dead-lettered, and the
+        # processor offset of its partition is past it in the same
+        # transaction, so it is never delivered again (see test_cleanup.py
+        # check_vector_store_delete_500_is_dead_lettered).
+        (dead,) = wait_for(
+            lambda: [
+                d for d in _dead_letters(chat_id)
+                if "frozen_target_message_id" in json.loads(d["payload"])
+            ],
+            "the dead-lettered summary task",
+        )
+        assert f"max attempts ({SUMMARY_MAX_ATTEMPTS})" in dead["last_error"], dead
+        assert _processed_seq(dead["partition_id"]) >= dead["seq"], dead
         assert len(_summary_requests(mock_provider, chat_id)) == SUMMARY_MAX_ATTEMPTS
         assert _summary_rows(chat_id) == []
         compressed = query_db(
