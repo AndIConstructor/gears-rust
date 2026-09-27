@@ -394,7 +394,7 @@ ExecutingTool → (tool executed) → Continuing
 Continuing → Streaming [new SSE stream from continuation request]
 ```
 
-Cap at `max_tool_calls` iterations (already on `LlmRequest`).
+The adapter does not send or apply `max_tool_calls`. The only implemented loop cap is the `search_knowledge` loop in `provider_task.rs` (`knowledge_search.max_calls_per_message + 2` iterations, then `agentic_iterations_exceeded`); see section 12.
 
 ### 6.3 Error Handling
 
@@ -440,6 +440,7 @@ providers:
     kind: anthropic_messages
     host: "api.anthropic.com"
     api_path: "/v1/messages"
+    storage_kind: openai        # required on every entry; registers the /v1/files routes
     rag_provider: "azure_openai"
     auth_plugin_type: "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1"
     auth_config:
@@ -447,6 +448,8 @@ providers:
       prefix: ""
       secret_ref: "cred://anthropic-key"
 ```
+
+`storage_kind` has no default: an entry without it fails to deserialize. On an `anthropic_messages` entry it does not route RAG storage (that is `rag_provider`), but it decides which RAG routes OAGW provisioning registers on the entry's upstream: `storage_kind: openai` registers `POST /v1/files` and `DELETE /v1/files/{file_id}` (plus the `POST`, `DELETE` and `GET` `/v1/vector_stores` routes). `AnthropicFilesClient` sends the image copy to `/{upstream_alias}/v1/files` on the Anthropic entry's upstream, so without these routes OAGW returns 404 and the attachment gets `secondary_status = failed`. `storage_kind: azure` would register `/openai/...` routes instead and would also require `api_version`.
 
 ### 7.2 Microsoft Foundry
 
@@ -456,6 +459,7 @@ providers:
     kind: anthropic_messages
     host: "${AZURE_FOUNDRY_HOST}"
     api_path: "/anthropic/v1/messages"
+    storage_kind: openai        # required; see 7.1
     rag_provider: "azure_openai"
     auth_plugin_type: "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1"
     auth_config:
@@ -482,7 +486,7 @@ providers:
 
 ### 7.4 Custom Tool Configuration
 
-> **Not implemented.** `search_files_tool` and `load_files_tool` are not configuration keys; `MiniChatConfig` uses `deny_unknown_fields`, so these keys are rejected. See [ADR-0007](../ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md).
+> **Not implemented.** `search_files_tool` and `load_files_tool` are not configuration keys; `ProviderEntry` (the `providers.<id>` entry) uses `deny_unknown_fields`, so these keys are rejected. See [ADR-0007](../ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md).
 
 ```yaml
 providers:
@@ -564,6 +568,8 @@ resolve_model() → provider_id: "anthropic"
 4. `DispatchingFileStorage` / `DispatchingVectorStore` — route by resolved storage provider
 5. `resolve_storage_backend()` — resolve from storage provider entry, not LLM provider entry
 6. Validation at startup — if `rag_provider` references a non-existent provider, fail fast
+
+**Limitation — quota downgrade to another provider:** storage is resolved from the chat's model at upload time. After a quota downgrade the turn goes to the effective model's provider, but it still sends the vector store id and file ids of the chat model's storage provider, and the Anthropic file ids exist only if the chat model is on an `anthropic_messages` provider. A downgrade between models whose providers do not share storage does not see the attachments. See DESIGN "Provider after a downgrade".
 
 ---
 

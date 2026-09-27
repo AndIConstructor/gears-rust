@@ -56,13 +56,13 @@ Each catalog model names its `provider_id`, which points at a `providers.<id>` e
 
 **OAGW provisioning.** In `start()` the gear obtains an S2S token via `authn_resolver` client credentials. It then registers an OAGW upstream and route for every provider entry (`mini-chat/src/infra/oagw_provisioning.rs`):
 
-* `init()` fills `upstream_alias` with the host when it is not configured, so the alias is always passed to OAGW. The upstream is created, or reused when it already exists, under that alias, which is the alias `ProviderResolver` uses. The alias OAGW returns is written back into the entry.
+* `init()` fills `upstream_alias` with the host when it is not configured, so the alias is always passed to OAGW. The upstream is created, or reused when it already exists, under that alias. `ProviderResolver` is built in `init()` from these entries and routes by that alias. Registration runs on a copy of the entries: the alias OAGW returns is written into the copy, and the resolver does not see it.
 * A deterministically misconfigured entry fails startup.
 * An entry whose credstore secret is not yet readable is retried by a background reconcile loop.
 
 Requests are sent through the in-process `oagw_sdk::ServiceGatewayClientV1::proxy_request` to `{alias}{api_path}`.
 
-**Storage dispatch.** `DispatchingFileStorage` and `DispatchingVectorStore` pick the file and vector-store implementation by the provider's `storage_kind`. For Anthropic chats, uploaded files also get a secondary copy in the Anthropic Files API (`attachments.secondary_*` columns).
+**Storage dispatch.** `DispatchingFileStorage` and `DispatchingVectorStore` pick the file and vector-store implementation by the provider's `storage_kind`. For chats whose model is served by an `anthropic_messages` provider, uploaded images also get a secondary copy in the Anthropic Files API (`attachments.secondary_*` columns). Documents get no copy, and an image larger than `thumbnail.max_decode_bytes` gets no copy (its bytes are not kept in memory).
 
 The gear therefore declares `deps = [types_registry, authn_resolver, authz_resolver, oagw]` and `capabilities = [db, rest, stateful]`.
 

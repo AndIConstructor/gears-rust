@@ -15,8 +15,8 @@ Mini Chat is a lightweight, self-contained chat gear designed for rapid delivery
 | Aspect | Mini Chat | Main Chat (future) |
 |--------|-----------|---------------------|
 | Agentic flows | Provider built-in tools only, plus the optional `search_knowledge` loop (off by default, bounded per turn) | Custom agentic flows with tool orchestration |
-| File storage | External only (provider-hosted: Azure / OpenAI Files API) | Pluggable storage providers via plugins |
-| Search / retrieval | External only (provider-hosted vector stores, web search via Azure Foundry) | Pluggable search providers via plugins |
+| File storage | External only (provider-hosted: Azure / OpenAI Files API; chats on Anthropic models store files there via `rag_provider`, and images also get a copy in the Anthropic Files API) | Pluggable storage providers via plugins |
+| Search / retrieval | External only (provider-hosted vector stores; web search through the provider's built-in tool: OpenAI / Azure OpenAI Responses `web_search`, Anthropic server-side web search). Anthropic chats have no `file_search`; only `search_knowledge`, when enabled ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)) | Pluggable search providers via plugins |
 | Model orchestration | Single model per chat, locked at creation | Multi-model orchestration, dynamic routing |
 
 Mini Chat is NOT a stepping stone to Main Chat — it is a separate, simpler product. P2+ items in this PRD are design considerations only; feature parity with Main Chat is explicitly out of scope.
@@ -118,7 +118,7 @@ This PRD uses **P1/P2** to describe phased scope. The `p1`/`p2` tags on requirem
 - Model selection per chat at creation time (locked for conversation lifetime)
 - Binary like/dislike reactions on assistant messages (persisted, API-accessible)
 - File search calls per turn bounded by the model's `max_tool_calls` (shared by all built-in tools; sent only by the OpenAI Responses adapter — the vLLM, Chat Completions and Anthropic adapters do not send it). A per-user daily file search limit is not implemented ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md))
-- Web search via provider tooling (Azure Foundry), explicitly enabled per request via API parameter, with per-turn and per-day call limits and a global kill switch
+- Web search via provider tooling (the Responses `web_search` tool; the Anthropic adapter maps it to Anthropic's server-side web search), explicitly enabled per request via API parameter, with per-turn and per-day call limits and a global kill switch
 - Token budget enforcement and context truncation
 - License feature gate (`ai_chat`); in P1 the routes check the platform base license feature as an interim gate ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md))
 - Emit audit events through the audit plugin and the `mini-chat.audit` outbox queue (append-only semantics owned by the audit backend; P1 content scope in [ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md))
@@ -230,7 +230,7 @@ Clients must not auto-retry with the same `request_id` after disconnect; recover
 
 The system MUST persist all user and assistant messages. Conversation history access MUST be limited to the owning user within their tenant. On each new user message, the system MUST include relevant conversation history in the LLM context to maintain conversational coherence.
 
-The system MUST expose conversation history via `GET /v1/chats/{id}/messages` with cursor-based pagination (Page + PageInfo pattern) and OData v4 query support: `$filter` and `$orderby` on `created_at`, `id` and `role`. `$select` is accepted and ignored (its syntax is validated). `limit` defaults to 20; a value above 100 is clamped to 100. An unknown field or a malformed cursor returns 400. Each message MUST include: a required `request_id` (UUID, always present and non-null — within a normal turn, user and assistant messages share the same value; system/background messages use an independently server-generated UUID v4) and a required `attachments` field (always-present array of associated attachment summaries, empty array when none). The `attachments` array MUST be derived only from `message_attachments` (populated from `attachment_ids` at send time); in P1 it lists only attachments that are not deleted ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). Attachment details are not embedded; the UI fetches them individually via `GET /v1/chats/{id}/attachments/{attachment_id}` if needed. Each message also carries `my_reaction` (always present, `"like"`, `"dislike"` or `null`) and, when available, `model`, `input_tokens` and `output_tokens` (omitted otherwise; token counts are omitted when 0).
+The system MUST expose conversation history via `GET /v1/chats/{id}/messages` with cursor-based pagination (Page + PageInfo pattern) and OData v4 query support: `$filter` and `$orderby` on `created_at`, `id` and `role`. `$select` is accepted and ignored (its syntax is validated); it is not declared in the OpenAPI document. `limit` defaults to 20; a value above 100 is clamped to 100. An unknown field or a malformed cursor returns 400. Each message MUST include: a required `request_id` (UUID, always present and non-null — within a normal turn, user and assistant messages share the same value; system/background messages use an independently server-generated UUID v4) and a required `attachments` field (always-present array of associated attachment summaries, empty array when none). The `attachments` array MUST be derived only from `message_attachments` (populated from `attachment_ids` at send time); in P1 it lists only attachments that are not deleted ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). Attachment details are not embedded; the UI fetches them individually via `GET /v1/chats/{id}/attachments/{attachment_id}` if needed. Each message also carries `my_reaction` (always present, `"like"`, `"dislike"` or `null`) and, when available, `model`, `input_tokens` and `output_tokens` (omitted otherwise; token counts are omitted when 0).
 
 **Rationale**: Multi-turn conversations require the AI to remember prior context within the same chat. Cursor pagination ensures efficient history loading for long conversations.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -254,7 +254,7 @@ When a stream is cancelled or disconnects before a terminal completion, the syst
 
 The system MUST allow users to upload document files to a chat. Uploaded documents are extracted, chunked, and indexed into the chat's dedicated vector store with `attachment_id` metadata. Exception: files routed exclusively to `code_interpreter` (currently XLSX) are NOT extracted, chunked, or indexed. The system does NOT include full extracted file text in prompts; only relevant retrieved excerpts (top-k chunks) are included during file search. Attachment access MUST be limited to the owning user within their tenant.
 
-**P1 upload is synchronous** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)): `POST /v1/chats/{id}/attachments` uploads the file to the provider and indexes it within the request, and returns `201 Created` with the attachment identifier and `status: ready`. On failure it returns an HTTP error; the attachment row stays visible via `GET /v1/chats/{id}/attachments/{attachment_id}` with `status: failed` and an `error_code` field (stable internal code, no provider identifiers). `uploaded` is an internal intermediate status and can be observed. Polling the GET endpoint is supported but not required. `doc_summary` is never provided by the client and is always `null` in P1 (see `cpt-cf-mini-chat-fr-doc-summary`).
+**P1 upload is synchronous** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)): `POST /v1/chats/{id}/attachments` uploads the file to the provider and indexes it within the request, and returns `201 Created` with the attachment identifier and `status: ready`. For a document added to the vector store, the request waits until the provider reports indexing `completed` (up to 60 s); if indexing fails or does not finish in time, the attachment becomes `failed` with `error_code = indexing_failed` and the upload returns 503 `service_unavailable`. On failure it returns an HTTP error; the attachment row stays visible via `GET /v1/chats/{id}/attachments/{attachment_id}` with `status: failed` and an `error_code` field (stable internal code, no provider identifiers). `uploaded` is an internal intermediate status and can be observed. Polling the GET endpoint is supported but not required. `doc_summary` is never provided by the client and is always `null` in P1 (see `cpt-cf-mini-chat-fr-doc-summary`).
 
 Maximum document size: configurable (`rag.uploaded_file_max_size_kb`, default 25 MiB). A larger upload is rejected with 400 (`out_of_range`, `FILE_TOO_LARGE`). Mini-chat sets no request body limit of its own: the api-gateway `defaults.body_limit_bytes` (default 16 MiB) applies first and must be at least 25 MiB + 64 KiB (26,279,936 bytes) for 25 MiB documents, otherwise the gateway returns 413; an unsupported MIME type is rejected with 400 (`invalid_argument`, `UNSUPPORTED_CONTENT_TYPE`). Concurrent in-flight uploads per process are bounded (`rag.max_concurrent_uploads`, default 10); excess uploads get 503 with `Retry-After`.
 
@@ -274,7 +274,7 @@ The system MUST allow users to upload image files (PNG, JPEG/JPG, WebP, GIF) to 
 - Maximum image inputs per message: configurable (`rag.max_images_per_message`, default 4). A message with more images is rejected with 400 (`out_of_range`, `TOO_MANY_IMAGES`).
 - Maximum image inputs per user per day: **Not implemented** ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)). The planned default was 50.
 - The `disable_images` kill switch rejects image uploads and messages with image inputs with 400 (`failed_precondition`, `violations[{subject: images, type: FEATURE_DISABLED}]`).
-- Images are uploaded to the RAG provider (OpenAI or Azure OpenAI Files API) with `purpose="assistants"`, the same value used for documents. The secondary copy uploaded to the Anthropic Files API for Anthropic chats carries no `purpose` field.
+- Images are uploaded to the RAG provider (OpenAI or Azure OpenAI Files API) with `purpose="assistants"`, the same value used for documents. Whether providers accept this purpose for images sent as `input_image.file_id` is not verified ([#5022](https://github.com/constructorfabric/gears-rust/issues/5022)). The secondary copy uploaded to the Anthropic Files API for Anthropic chats carries no `purpose` field.
 - Images are included in the Responses API request input as multimodal content items (file ID references), allowing the assistant to reason about image content for that chat turn.
 - Images are NOT summarized on upload (no background summary task for images at P1).
 - Attachment access remains owner-only and tenant-isolated (same access rules as document attachments).
@@ -400,6 +400,8 @@ The system MUST compress older conversation history into a summary when the conv
 
 **P1 scope — simple summarization**: The background worker calls the LLM with a summarization prompt and stores the result. If the provider call fails, the previous summary is kept and the message batch is not marked as compressed. The task runs on the `mini-chat.thread_summary` outbox queue with a lease of `thread_summary_worker.claim_timeout_secs` (default 300 s) and is dead-lettered after `thread_summary_worker.max_attempts` (default 3). No quality gate (length or entropy validation) is applied in P1.
 
+**Retry, edit and delete**: when the mutated turn is already covered by the summary (possible after a DELETE made the previous turn the latest), the mutation deletes the summary in its transaction and returns the messages it covered to the context; the next trigger builds a new summary (DESIGN "Summary Interaction on Turn Mutation").
+
 **P2+ scope — quality gate**: Length and entropy validation with automatic regeneration on obviously-bad summaries is deferred to P2+. See DESIGN.md `cpt-cf-mini-chat-seq-thread-summary` for the full P2+ specification.
 
 **Rationale**: Long conversations would exceed LLM context limits and increase costs without compression. The simple P1 variant prevents context window exhaustion while keeping implementation risk low.
@@ -470,7 +472,7 @@ The system MUST enforce per-user credit-based rate limits across multiple time p
 
 **Tier availability rule**: a tier is considered available only if it has remaining quota in **all** configured periods (daily, monthly) for that tier. If any single period is exhausted, the entire tier is treated as exhausted and the system MUST auto-downgrade to the next tier in the cascade (premium → standard). When all tier quotas are exhausted across all periods, the system MUST reject with HTTP 429 (`resource_exhausted`, `violations[{subject: <quota_scope>}]`).
 
-Quota counting MUST use two phases: Preflight (reserve) before the provider call, and commit actual usage after completion.
+Quota counting MUST use two phases: Preflight (reserve) before the provider call, and commit actual usage after completion. Each downgrade candidate is checked with the reserve it would book, and the reserve write checks the limits again in its transaction, so concurrent requests of one user cannot together book reserves over a limit; the request that no longer fits gets 429 `quota_exceeded` ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)).
 
 The provider-reported token usage (`usage.input_tokens`, `usage.output_tokens`) is the source of truth; the system converts it to credits deterministically using the applied policy version.
 
@@ -903,7 +905,7 @@ The contract has two parts:
 - `mini_chat_quota_reserve_total{period}`
 - `mini_chat_quota_commit_total{period}`
 - `mini_chat_quota_overshoot_total{period}`
-- `mini_chat_quota_estimated_tokens`
+- `mini_chat_quota_estimated_tokens` (the turn's `reserve_tokens`, input estimate plus `max_output_tokens_applied`, recorded after an allow/downgrade preflight and before the reserve is written)
 - `mini_chat_quota_actual_tokens`
 
 ##### Emitted: tools and retrieval
@@ -948,7 +950,7 @@ The contract has two parts:
 
 ##### Emitted: audit and finalization
 
-- `mini_chat_audit_emit_total{result}` (`ok|retry|reject`; delivery outcomes of the outbox audit handler only, nothing is recorded at enqueue)
+- `mini_chat_audit_emit_total{result}` (`ok|retry|reject`; delivery outcomes of the outbox audit handler only, nothing is recorded at enqueue; `reject` includes corrupt payloads, `retry` includes plugin resolution failures; "no plugin registered" is not counted)
 - `mini_chat_finalization_latency_ms`
 
 ##### Declared, deferred (not recorded in P1)
@@ -1156,8 +1158,9 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Invalid chat title on `POST /chats` or `PATCH /chats/{id}` (empty or whitespace-only after trim, or longer than 255 characters) | `invalid_argument` | 400 | `detail` |
 | Invalid reaction value (not `like` or `dislike`); checked before authorization. A body that does not match the schema (e.g. no `reaction` field) is 422, see below | `invalid_argument` | 400 | `detail` |
 | Bad OData query on a list endpoint (`GET /chats`, `GET /chats/{id}/messages`: `$filter`, `$orderby`, `$select`, page size, cursor, unsupported query option) | `invalid_argument` | 400 | `context.resource_type = gts.cf.core.odata.query.v1~` (not the chat type, not a `format` violation), for errors raised by the query extractor and by the repository while paginating. `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER` (`$filter`), `INVALID_ORDERBY_FIELD` (`$orderby`), `INVALID_LIMIT` (field `$top`, `limit=0`), `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR` (`cursor` combined with `$orderby`); from the platform OData extractor (`toolkit::api::odata`): `FILTER_TOO_LONG`, `FILTER_TOO_COMPLEX` (`$filter`), `INVALID_SELECT` (`$select`), `UNSUPPORTED_QUERY_PARAM` (a `$` option the extractor does not bind, e.g. `$skip`, `$count`), `INVALID_QUERY_PARAMS` (unparsable query string). A `limit` above 100 is clamped to 100, not rejected |
-| Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | platform JSON extractor (`toolkit::api::rest::extract::Json`) |
+| Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | `field_violations[body].reason = invalid_json_body` (platform JSON extractor `toolkit::api::rest::extract::Json`) |
 | Malformed JSON body | `invalid_argument` | 400 | `field_violations[body].reason = json_syntax_error` (platform JSON extractor) |
+| JSON body without a JSON `Content-Type` (`POST /chats`, `PATCH /chats/{id}`, `messages:stream`, turn edit, reaction `PUT`) | `invalid_argument` | 415 | `field_violations[body].reason = missing_json_content_type` (platform JSON extractor). Not declared in the OpenAPI document |
 | Path parameter that is not a UUID (chat, message, turn `request_id`, attachment id) | `invalid_argument` | 400 | `field_violations[].reason = invalid_path_params` (platform path extractor) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` (was 415) |
 | Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `detail` |
@@ -1174,9 +1177,10 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Reaction (`PUT` or `DELETE`) on a non-assistant message | `failed_precondition` | 400 | `violations[{subject: reaction_target, type: STATE}]` |
 | Missing, invalid or expired bearer token | `unauthenticated` | 401 | `context.reason`: `MISSING_BEARER` / `AUTHN_FAILED` (api-gateway) |
 | AuthZ denied, or the PDP failed (fail-closed) | `permission_denied` | 403 | `AUTHZ_DENIED` |
+| Retry, edit or delete of a turn whose `requester_user_id` is not the caller | `permission_denied` | 403 | `AUTHZ_DENIED` (`MutationError::Forbidden`) |
 | Tenant lacks the required license feature (platform base license feature `CORE_GLOBAL_BASE_LICENSE_FEATURE`; `ai_chat` is the target, ADR-0008) | `permission_denied` | 403 | `LICENSE_FEATURE_REQUIRED` (api-gateway license middleware) |
-| Another turn is running in the chat (stream, including the insert race) | `aborted` | 409 | `turn_already_running` |
-| `request_id` reused for a non-completed or deleted turn | `aborted` | 409 | `request_id_conflict` |
+| Another turn is running in the chat (stream, including the insert race) | `aborted` | 409 | `context.reason = turn_already_running`; `detail = "Another turn is running in this chat"` |
+| `request_id` reused for a non-completed or deleted turn | `aborted` | 409 | `context.reason = request_id_conflict`; `detail = "request_id is already used by another turn in this chat"`. The `detail` of both reasons is fixed; the internal message (turn ids, driver text) is only logged |
 | Mutation of a turn that is not the latest (including an already deleted turn) | `aborted` | 409 | `NOT_LATEST_TURN` |
 | Concurrent mutation lost the running-turn race | `aborted` | 409 | `GENERATION_IN_PROGRESS` |
 | Deleting an attachment referenced by a message | `already_exists` | 409 | `resource_name = attachment_locked`; `detail = "Attachment is referenced by one or more messages and cannot be deleted"` |
@@ -1191,7 +1195,7 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 
 `StreamError::Replay` maps to 409 `aborted` with reason `REPLAY` in `api/rest/error.rs`. The arm is defensive: the `messages:stream` handler intercepts `Replay` and serves the buffered SSE replay of the completed turn (`api/rest/handlers/messages.rs`), so clients do not receive this error.
 
-Superseded statuses: 413 `file_too_large`, 415 `unsupported_file_type` / `unsupported_media`, 502 `provider_error` and 504 `provider_timeout` are no longer returned by mini-chat REST endpoints (api-gateway can still answer 413 when the body exceeds its `defaults.body_limit_bytes`); the per-chat document limit changed from 400 to 429. `image_bytes_exceeded` and the `uploads` / `image_inputs` quota scopes are not implemented. MCP error codes (`mcp_server_unavailable`, `mcp_server_not_found`, `mcp_assign_denied`) belong to the Future MCP scope ([ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)).
+Superseded statuses: 413 `file_too_large`, 415 `unsupported_file_type` / `unsupported_media`, 502 `provider_error` and 504 `provider_timeout` are no longer returned by mini-chat REST endpoints (api-gateway can still answer 413 when the body exceeds its `defaults.body_limit_bytes`). HTTP 415 is still returned by the platform JSON extractor with reason `missing_json_content_type` (see the table); the per-chat document limit changed from 400 to 429. `image_bytes_exceeded` and the `uploads` / `image_inputs` quota scopes are not implemented. MCP error codes (`mcp_server_unavailable`, `mcp_server_not_found`, `mcp_assign_denied`) belong to the Future MCP scope ([ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)).
 
 **SSE `error` event**: `data: {code, message}`. The envelope is independent of `Problem` and carries no `quota_scope` (quota exhaustion is detected at preflight and returned as a 429 `Problem`). P1 codes:
 
@@ -1712,7 +1716,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 
 ### 13.1 P1 Defaults (configurable)
 
-These defaults are used for P1 and MUST be configurable per tenant/operator. Values are the code defaults (`mini-chat/src/config.rs`, `mini-chat/src/config/background.rs`, the static model policy plugin and `mini-chat-sdk` model catalog types).
+These defaults are used for P1 and are set by the operator for the whole deployment (gear configuration or the static policy plugin configuration); there are no per-tenant overrides except the provider `tenant_overrides` (host, alias, auth). Values are the code defaults (`mini-chat/src/config.rs`, `mini-chat/src/config/background.rs`, the static model policy plugin and `mini-chat-sdk` model catalog types).
 
 - Model catalog: no built-in default. The catalog is supplied by the policy plugin configuration (`model_catalog`, required). The default model for new chats is the first enabled model marked `is_default`, otherwise the first enabled model (see `cpt-cf-mini-chat-fr-model-selection`).
 - Downgrade cascade: premium → standard; when all tiers exhausted → reject with HTTP 429 (`resource_exhausted`)
@@ -1739,7 +1743,7 @@ These defaults are used for P1 and MUST be configurable per tenant/operator. Val
 - Orphan watchdog: timeout 300 s (minimum 90 s), scan interval 60 s (`orphan_watchdog.timeout_secs`, `orphan_watchdog.scan_interval_secs`)
 - SSE ping interval: 15 s (`streaming.sse_ping_interval_seconds`), before the first content event only
 - Knowledge search (`search_knowledge`): disabled (`knowledge_search.enabled: false`)
-- Temporary chat retention window: 24 hours (P2; deployment config example: `temporary_chat_retention_hours: 24`)
+- Temporary chat retention window: P2, not implemented. There is no `temporary_chat_retention_hours` configuration key; the planned value is 24 hours
 
 MCP defaults below are Future ([ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)); no `mcp` configuration section exists in P1.
 
