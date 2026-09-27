@@ -189,6 +189,45 @@ class TestIsolation:
         assert att.json()["status"] == "ready"
 
 
+# Operations addressing a turn, message or attachment inside a chat.
+NESTED_OPERATIONS = [
+    (m, p) for (m, p) in FOREIGN_OPERATIONS
+    if any(k in p for k in ("{request_id}", "{message_id}", "{attachment_id}"))
+]
+
+
+@pytest.fixture(scope="module")
+def other_chat(server) -> str:
+    """A second, empty chat of user A."""
+    resp = httpx.post(f"{API_PREFIX}/chats", json={"title": "other chat of A"})
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+class TestCrossChatIds:
+    """The caller's own turn, message and attachment ids, addressed through
+    another chat of the same caller, are 404: they are looked up within the
+    chat of the path."""
+
+    @pytest.mark.parametrize(("method", "path"), NESTED_OPERATIONS)
+    def test_id_of_another_chat_is_404(self, owned, other_chat, method, path):
+        resp = _call(method, path, {**owned, "chat_id": other_chat}, auth_headers(TOKEN_USER_A))
+        assert_problem(resp, 404, "not_found")
+
+    def test_owner_resources_unchanged(self, owned, other_chat):
+        """The 404 mutations above changed nothing in the chat that holds the ids."""
+        messages_before = list_messages(owned["chat_id"])
+        for method, path in NESTED_OPERATIONS:
+            if method != "GET":
+                ids = {**owned, "chat_id": other_chat}
+                assert _call(method, path, ids, auth_headers(TOKEN_USER_A)).status_code == 404
+        assert list_messages(owned["chat_id"]) == messages_before
+        assert list_messages(other_chat) == []
+        chat_url = f"{API_PREFIX}/chats/{owned['chat_id']}"
+        assert httpx.get(f"{chat_url}/turns/{owned['request_id']}").json()["state"] == "done"
+        assert httpx.get(f"{chat_url}/attachments/{owned['attachment_id']}").json()["status"] == "ready"
+
+
 class TestQuotaIsolation:
     """Usage is accounted per user."""
 
