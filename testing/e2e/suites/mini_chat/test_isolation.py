@@ -8,6 +8,7 @@ must not be able to change them. Requests without valid credentials get 401.
 from __future__ import annotations
 
 import io
+import json
 import uuid
 
 import httpx
@@ -107,6 +108,13 @@ def _call(method: str, path: str, ids: dict, headers: dict) -> httpx.Response:
     return httpx.request(method, url, json=body, headers=headers, timeout=30)
 
 
+def _without_ids(problem: dict, chat_id: str) -> str:
+    """A Problem body without `trace_id`, with `chat_id` replaced by a
+    placeholder, for comparing two 404s."""
+    body = {k: v for k, v in problem.items() if k != "trace_id"}
+    return json.dumps(body, sort_keys=True).replace(chat_id, "<chat_id>")
+
+
 class TestAuthentication:
     """Every operation requires a valid bearer token. The API gateway answers
     401 `unauthenticated` with an RFC 6750 challenge
@@ -143,8 +151,19 @@ class TestIsolation:
 
     @pytest.mark.parametrize(("method", "path"), FOREIGN_OPERATIONS)
     def test_foreign_resource_is_404(self, owned, token, method, path):
+        """17-07: the 404 for A's chat is the one A gets for a chat id that
+        does not exist: same body (resource type, detail, context) once the
+        chat id is masked, so it does not reveal that the chat exists."""
         resp = _call(method, path, owned, auth_headers(token))
-        assert_problem(resp, 404, "not_found")
+        masked = assert_problem(resp, 404, "not_found")
+
+        unknown_ids = {**owned, "chat_id": str(uuid.uuid4())}
+        unknown = assert_problem(
+            _call(method, path, unknown_ids, auth_headers(TOKEN_USER_A)), 404, "not_found",
+        )
+        assert _without_ids(masked, owned["chat_id"]) == _without_ids(
+            unknown, unknown_ids["chat_id"],
+        ), (masked, unknown)
 
     @pytest.mark.usefixtures("offline_only")
     @pytest.mark.parametrize(("method", "path"), FOREIGN_OPERATIONS)

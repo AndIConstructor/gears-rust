@@ -99,6 +99,32 @@ class TestMessages:
             params = {"limit": 1, "cursor": cursor}
         assert ids == [m["id"] for m in full]
 
+    def test_prev_cursor_pages_back(self, server):
+        """03-23: `page_info.prev_cursor` is absent on the first page and set
+        on the next one; following it returns the first page again, and
+        `$top` / `$skiptoken` are the same as `limit` / `cursor`."""
+        chat_id = _create_chat_with_messages(3)
+        url = f"{API_PREFIX}/chats/{chat_id}/messages"
+        ids = [m["id"] for m in httpx.get(url).json()["items"]]
+        assert len(ids) == 6, ids
+
+        first = httpx.get(url, params={"limit": 2}).json()
+        assert [m["id"] for m in first["items"]] == ids[:2]
+        assert first["page_info"].get("prev_cursor") is None, first["page_info"]
+        second = httpx.get(url, params={"limit": 2, "cursor": first["page_info"]["next_cursor"]})
+        assert second.status_code == 200, second.text
+        second = second.json()
+        assert [m["id"] for m in second["items"]] == ids[2:4]
+        prev = second["page_info"].get("prev_cursor")
+        assert prev, second["page_info"]
+
+        back = httpx.get(url, params={"$top": 2, "$skiptoken": prev})
+        assert back.status_code == 200, back.text
+        back = back.json()
+        assert [m["id"] for m in back["items"]] == ids[:2], back
+        assert back["page_info"].get("prev_cursor") is None, back["page_info"]
+        assert back["page_info"].get("next_cursor"), back["page_info"]
+
     def test_unknown_filter_field_400(self, chat):
         resp = httpx.get(
             f"{API_PREFIX}/chats/{chat['id']}/messages", params={"$filter": "nosuchfield eq 'x'"},
