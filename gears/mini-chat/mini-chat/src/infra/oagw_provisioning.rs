@@ -1046,7 +1046,6 @@ mod tests {
             auth_plugin_type: None,
             auth_config: None,
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: crate::config::StorageKind::OpenAi,
             api_version: None,
             rag_provider: None,

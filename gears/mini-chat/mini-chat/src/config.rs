@@ -147,11 +147,6 @@ pub struct ProviderEntry {
     /// Example: `"azure"` for `azure_openai` providers.
     #[serde(default)]
     pub storage_backend: Option<String>,
-    /// Whether this provider supports `file_search` metadata filters.
-    /// Azure `OpenAI` does not support filters — `FilteredByAttachmentIds`
-    /// is degraded to `UnrestrictedChatSearch`. Defaults to `true`.
-    #[serde(default = "default_true")]
-    pub supports_file_search_filters: bool,
     /// Which file/vector-store implementation to use for RAG operations.
     /// Controls URI patterns and dispatch to provider-specific impls.
     /// Required — no default; forces explicit configuration per provider.
@@ -344,7 +339,6 @@ fn default_providers() -> HashMap<String, ProviderEntry> {
                 c
             }),
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::OpenAi,
             api_version: None,
             rag_provider: None,
@@ -394,11 +388,6 @@ pub struct StreamingConfig {
     /// Default 32768 (matching common model limits).
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u32,
-
-    /// Search context size passed to the `web_search` tool.
-    /// Valid values: "low", "medium", "high" (default "low").
-    #[serde(default)]
-    pub web_search_context_size: crate::domain::llm::WebSearchContextSize,
 }
 
 impl Default for StreamingConfig {
@@ -407,7 +396,6 @@ impl Default for StreamingConfig {
             sse_channel_capacity: default_channel_capacity(),
             sse_ping_interval_seconds: default_ping_interval(),
             max_output_tokens: default_max_output_tokens(),
-            web_search_context_size: crate::domain::llm::WebSearchContextSize::default(),
         }
     }
 }
@@ -419,7 +407,7 @@ fn default_max_output_tokens() -> u32 {
 impl StreamingConfig {
     /// Validate configuration values at startup. Returns an error message
     /// describing the first invalid value found.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(self) -> Result<(), String> {
         if !(16..=64).contains(&self.sse_channel_capacity) {
             return Err(format!(
                 "sse_channel_capacity must be 16-64, got {}",
@@ -432,7 +420,6 @@ impl StreamingConfig {
                 self.sse_ping_interval_seconds
             ));
         }
-        // web_search_context_size validated by serde at parse time (enum).
         Ok(())
     }
 }
@@ -1184,7 +1171,6 @@ mod tests {
                 auth_plugin_type: None,
                 auth_config: None,
                 storage_backend: None,
-                supports_file_search_filters: true,
                 storage_kind: StorageKind::OpenAi,
                 api_version: None,
                 rag_provider: None,
@@ -1241,7 +1227,6 @@ mod tests {
             auth_plugin_type: None,
             auth_config: None,
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::Azure,
             api_version: api_version.map(str::to_owned),
             rag_provider: None,
@@ -1482,32 +1467,22 @@ mod tests {
     }
 
     #[test]
-    fn streaming_config_web_search_context_size_enum() {
-        use crate::domain::llm::WebSearchContextSize;
+    fn removed_config_keys_are_rejected() {
+        let err = serde_json::from_str::<StreamingConfig>(r#"{"web_search_context_size": "low"}"#)
+            .unwrap_err();
+        assert!(err.to_string().contains("web_search_context_size"), "{err}");
 
-        // Default is Low
-        let cfg = StreamingConfig::default();
-        assert_eq!(cfg.web_search_context_size, WebSearchContextSize::Low);
-
-        // Valid values deserialize correctly
-        for (json_val, expected) in [
-            ("\"low\"", WebSearchContextSize::Low),
-            ("\"medium\"", WebSearchContextSize::Medium),
-            ("\"high\"", WebSearchContextSize::High),
-        ] {
-            let json = format!(r#"{{"web_search_context_size": {json_val}}}"#);
-            let cfg: StreamingConfig = serde_json::from_str(&json).unwrap();
-            assert_eq!(cfg.web_search_context_size, expected);
-        }
-
-        // Invalid values rejected at parse time
-        for bad in ["\"Low\"", "\"med\"", "\"HIGH\"", "\"none\"", "\"\""] {
-            let json = format!(r#"{{"web_search_context_size": {bad}}}"#);
-            assert!(
-                serde_json::from_str::<StreamingConfig>(&json).is_err(),
-                "expected parse error for {bad}"
-            );
-        }
+        let err = serde_json::from_value::<ProviderEntry>(serde_json::json!({
+            "kind": "openai_responses",
+            "host": "api.openai.com",
+            "storage_kind": "openai",
+            "supports_file_search_filters": false
+        }))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("supports_file_search_filters"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1604,7 +1579,6 @@ mod tests {
             auth_plugin_type: None,
             auth_config: None,
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::Azure,
             api_version: Some("2024-10-21".to_owned()),
             rag_provider: None,
@@ -1670,7 +1644,6 @@ mod tests {
             auth_plugin_type: Some("root-plugin".to_owned()),
             auth_config: Some(root_auth),
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::Azure,
             api_version: Some("2024-10-21".to_owned()),
             rag_provider: None,
@@ -1728,7 +1701,6 @@ mod tests {
             auth_plugin_type: None,
             auth_config: None,
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::Azure,
             api_version: Some("2024-10-21".to_owned()),
             rag_provider: None,
@@ -1763,7 +1735,6 @@ mod tests {
             auth_plugin_type: None,
             auth_config: None,
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::Azure,
             api_version: Some("2024-10-21".to_owned()),
             rag_provider: None,
@@ -1802,7 +1773,6 @@ mod tests {
             auth_plugin_type: None,
             auth_config: None,
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::Azure,
             api_version: Some("2024-10-21".to_owned()),
             rag_provider: None,
@@ -1837,7 +1807,6 @@ mod tests {
             auth_plugin_type: None,
             auth_config: None,
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::Azure,
             api_version: Some("2024-10-21".to_owned()),
             rag_provider: None,
@@ -1870,7 +1839,6 @@ mod tests {
             auth_plugin_type: None,
             auth_config: None,
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::Azure,
             api_version: Some("2024-10-21".to_owned()),
             rag_provider: None,
@@ -1967,7 +1935,6 @@ mod tests {
             auth_plugin_type: None,
             auth_config: None,
             storage_backend: None,
-            supports_file_search_filters: true,
             storage_kind: StorageKind::OpenAi,
             api_version: None,
             rag_provider: rag_provider.map(str::to_owned),
