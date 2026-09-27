@@ -251,8 +251,51 @@ class TestSettlement:
         assert poll_turn(chat["id"], rid)["state"] == "error"
         assert_estimated_settlement(rid, used_before, "failed", "This should fail.")
 
+    @pytest.mark.usefixtures("offline_only")
     @pytest.mark.timeout(30)
-    def test_incomplete_response_is_done_and_settled_on_actual_usage(self, request, chat):
+    @pytest.mark.parametrize("with_usage", [True, False], ids=["with_usage", "usage_null"])
+    def test_response_failed_settles_on_reported_usage(self, chat, mock_provider, with_usage):
+        """A `response.failed` that carries `response.usage` (the provider
+        billed the tokens it produced) ends in SSE `error` and fails the
+        turn; the turn is settled on that usage (billing outcome `failed`,
+        `actual`): azure-gpt-4.1 charges 700 * 3 + 40 * 15 = 2700. With
+        `usage: null` the estimate is charged, as for an HTTP error."""
+        used_before = total_daily_used()
+        mock_provider.set_next_scenario(Scenario(
+            events=[MockEvent("response.output_text.delta", {"delta": "Partial"})],
+            terminal="failed",
+            error={"code": "server_error", "message": "Mock fail"},
+            usage=Usage(input_tokens=700, output_tokens=40, scale_input=False),
+            failed_with_usage=with_usage,
+        ))
+        rid = str(uuid.uuid4())
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat['id']}/messages:stream",
+            json={"content": "This should fail.", "request_id": rid},
+            headers={"Accept": "text/event-stream"},
+            timeout=30,
+        )
+        assert resp.status_code == 200
+        events = parse_sse(resp.text)
+        assert [e.event for e in events] == ["stream_started", "delta", "error"], events
+        assert events[-1].data["code"] == "provider_error", events[-1].data
+        assert poll_turn(chat["id"], rid)["state"] == "error"
+
+        if not with_usage:
+            assert_estimated_settlement(rid, used_before, "failed", "This should fail.")
+            return
+        assert_no_reserves(USER_A_ID)
+        (event,) = usage_events(rid)
+        assert (event["billing_outcome"], event["settlement_method"]) == (
+            "failed", "actual",
+        ), event
+        assert event["actual_credits_micro"] == 700 * 3 + 40 * 15, event
+        assert total_daily_used() - used_before == 700 * 3 + 40 * 15
+
+    @pytest.mark.timeout(30)
+    def test_incomplete_response_is_done_and_settled_on_actual_usage(
+        self, request, chat, mock_provider,
+    ):
         """A provider `response.incomplete` (mock `TRUNCATE`, reason
         max_output_tokens) ends in `done`, not `error`: the turn is completed
         with no error code, the truncated text is persisted, and it is settled

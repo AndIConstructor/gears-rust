@@ -11,7 +11,7 @@ import pytest
 from .conftest import (
     API_PREFIX, expect_stream_started, list_messages, parse_sse, poll_turn, usage_events,
 )
-from .mock_provider.responses import MockEvent, Scenario
+from .mock_provider.responses import MockEvent, Scenario, Usage
 
 # Provider identifiers the sanitizer must scrub (shapes of real IDs; the
 # storage-ID pattern needs at least 12 characters after the prefix).
@@ -230,9 +230,43 @@ class TestErrorMapping:
         turn = poll_turn(chat["id"], rid)
         assert (turn["state"], turn["error_code"]) == ("error", "provider_error"), turn
 
+    @pytest.mark.timeout(30)
+    def test_completed_without_usage_is_provider_error(self, chat, mock_provider):
+        """A `response.completed` without `usage` (the real API always sends
+        it; openai_responses.rs `ResponseObject.usage` is required) is an
+        invalid response: SSE error `provider_error` with the parse error,
+        no `done`, no zero usage reported. The turn fails and is settled on
+        the estimate."""
+        mock_provider.set_next_scenario(Scenario(
+            events=[MockEvent("response.output_text.delta", {"delta": "No usage"})],
+            usage=Usage(omit=True),
+        ))
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat['id']}/messages:stream",
+            json={"content": "trigger error"},
+            headers={"Accept": "text/event-stream"}, timeout=30,
+        )
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        assert [e.event for e in events] == ["stream_started", "delta", "error"], events
+        data = events[-1].data
+        assert data["code"] == "provider_error", data
+        assert data["message"].startswith(
+            "SSE parse error: failed to parse response completed: missing field `usage`",
+        ), data
+        rid = expect_stream_started(events).data["request_id"]
+        turn = poll_turn(chat["id"], rid)
+        assert (turn["state"], turn["error_code"]) == ("error", "provider_error"), turn
+        (event,) = usage_events(rid)
+        assert (event["billing_outcome"], event["settlement_method"]) == (
+            "failed", "estimated",
+        ), event
+
     @pytest.mark.parametrize("source", ["response_failed", "http_500"])
     def test_error_message_no_provider_ids(self, chat, mock_provider, source):
-        """Provider response, file, vector store and assistant IDs never reach the client."""
+        """Provider response, file, vector store and assistant IDs never reach
+        the client; each is replaced by `[provider_id]` (infra/llm/mod.rs
+        `sanitize_provider_message`) and the rest of the message is kept."""
         if source == "response_failed":
             scenario = Scenario(
                 terminal="failed",
