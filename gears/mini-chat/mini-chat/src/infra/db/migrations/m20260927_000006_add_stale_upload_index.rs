@@ -1,8 +1,10 @@
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::ConnectionTrait;
 
-/// Partial index for the upload reaper scan (`pending` / `uploaded` rows
-/// ordered by `updated_at`).
+/// Index for the upload reaper scan (`status IN (pending, uploaded)`
+/// ordered by `updated_at`). Not a partial index: the query binds the status
+/// values as parameters, and `SQLite` uses a partial index only when the
+/// query repeats its `WHERE` literally.
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
@@ -12,8 +14,8 @@ impl MigrationTrait for Migration {
         manager
             .get_connection()
             .execute_unprepared(
-                "CREATE INDEX IF NOT EXISTS idx_attachments_stale_upload ON attachments (updated_at) \
-                 WHERE status IN ('pending', 'uploaded') AND deleted_at IS NULL",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_stale_upload \
+                 ON attachments (status, updated_at)",
             )
             .await?;
         Ok(())

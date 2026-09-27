@@ -33,6 +33,8 @@ pub struct AttachmentRepository;
 
 impl AttachmentRepository {
     /// `pending` / `uploaded` rows not updated since `cutoff`, oldest first.
+    /// Rows with a `cleanup_status` are skipped: chat deletion already owns
+    /// their provider cleanup.
     pub async fn find_stale_uploads<C: DBRunner>(
         &self,
         runner: &C,
@@ -47,6 +49,7 @@ impl AttachmentRepository {
                             .is_in([AttachmentStatus::Pending, AttachmentStatus::Uploaded]),
                     )
                     .add(Column::DeletedAt.is_null())
+                    .add(Column::CleanupStatus.is_null())
                     .add(Column::UpdatedAt.lt(cutoff)),
             )
             .secure()
@@ -92,6 +95,7 @@ impl AttachmentRepository {
                     .add(Column::Id.eq(id))
                     .add(Column::Status.eq(from))
                     .add(Column::DeletedAt.is_null())
+                    .add(Column::CleanupStatus.is_null())
                     .add(Column::UpdatedAt.lt(cutoff)),
             )
             .secure()
@@ -415,7 +419,10 @@ impl crate::domain::repos::AttachmentRepository for AttachmentRepository {
                 Condition::all()
                     .add(Column::ChatId.eq(chat_id))
                     .add(Column::AttachmentKind.eq(AttachmentKind::Document))
-                    .add(Column::DeletedAt.is_null()),
+                    .add(Column::DeletedAt.is_null())
+                    // A failed upload holds no provider document; like
+                    // `sum_size_bytes`, it does not count against the limit.
+                    .add(Column::Status.ne(AttachmentStatus::Failed)),
             )
             .secure()
             .scope_with(scope)

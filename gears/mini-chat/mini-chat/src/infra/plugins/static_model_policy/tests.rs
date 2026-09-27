@@ -266,3 +266,13 @@ fn config_accepts_partial_kill_switches() {
     assert!(!cfg.kill_switches.disable_web_search);
     assert!(!cfg.kill_switches.force_standard_tier);
 }
+
+#[test]
+fn config_rejects_unknown_kill_switch() {
+    let err = serde_json::from_value::<StaticMiniChatPolicyPluginConfig>(serde_json::json!({
+        "model_catalog": [],
+        "kill_switches": { "disable_image": true }
+    }))
+    .expect_err("a misspelled kill switch is a config error");
+    assert!(err.to_string().contains("disable_image"), "{err}");
+}

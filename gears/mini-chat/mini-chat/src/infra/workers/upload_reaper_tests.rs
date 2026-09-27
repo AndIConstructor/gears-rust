@@ -86,6 +86,17 @@ async fn stale_uploaded_row_is_failed_and_cleanup_enqueued() {
     assert_eq!(row.cleanup_status, Some(CleanupStatus::Pending));
     assert!(row.deleted_at.is_none(), "the row stays visible as failed");
 
+    // A failed row stops counting against the per-chat document limit.
+    {
+        use crate::domain::repos::AttachmentRepository as _;
+        let conn = db.conn().unwrap();
+        let docs = crate::infra::db::repo::attachment_repo::AttachmentRepository
+            .count_documents(&conn, &AccessScope::allow_all(), chat_id)
+            .await
+            .unwrap();
+        assert_eq!(docs, 0);
+    }
+
     let events = outbox.cleanup_events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].attachment_id, id);
@@ -145,4 +156,39 @@ fn config_rejects_stale_window_below_gateway_timeout() {
     cfg.stale_after_secs = 300;
     cfg.scan_interval_secs = 0;
     assert!(cfg.validate().is_err());
+}
+
+/// A row whose chat was deleted already has `cleanup_status` set by chat
+/// deletion, which owns its provider cleanup; the reaper leaves it alone.
+#[tokio::test]
+async fn row_owned_by_chat_cleanup_is_left_alone() {
+    let db = mock_db_provider(inmem_db().await);
+    let (id, _) = seed(&db, AttachmentStatus::Uploaded, Some("file-owned"), 600).await;
+    let conn = db.conn().unwrap();
+    Entity::update_many()
+        .col_expr(
+            Column::CleanupStatus,
+            Expr::value(Some(CleanupStatus::Done)),
+        )
+        .filter(Column::Id.eq(id))
+        .secure()
+        .scope_with(&AccessScope::allow_all())
+        .exec(&conn)
+        .await
+        .unwrap();
+    let outbox = Arc::new(RecordingOutboxEnqueuer::new());
+    let deps = UploadReaperDeps {
+        db: Arc::clone(&db),
+        outbox_enqueuer: Arc::clone(&outbox) as _,
+        metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+    };
+
+    scan_and_reap(&deps, &config(), &CancellationToken::new())
+        .await
+        .unwrap();
+
+    let row = load(&db, id).await;
+    assert_eq!(row.status, AttachmentStatus::Uploaded);
+    assert_eq!(row.cleanup_status, Some(CleanupStatus::Done));
+    assert!(outbox.cleanup_events.lock().unwrap().is_empty());
 }

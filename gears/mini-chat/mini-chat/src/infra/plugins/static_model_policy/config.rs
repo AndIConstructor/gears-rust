@@ -19,8 +19,10 @@ pub struct StaticMiniChatPolicyPluginConfig {
     /// Static model catalog entries.
     pub model_catalog: Vec<ModelCatalogEntry>,
 
-    /// Static kill switches (all disabled by default).
-    #[serde(default)]
+    /// Static kill switches (all disabled by default). A missing field is
+    /// `false`; an unknown field is a config error, so a misspelled switch
+    /// does not silently stay off.
+    #[serde(default, deserialize_with = "strict_kill_switches")]
     pub kill_switches: KillSwitches,
 
     /// Static per-user tier limits (used for all users).
@@ -28,6 +30,36 @@ pub struct StaticMiniChatPolicyPluginConfig {
     pub default_standard_limits: TierLimits,
     #[serde(default = "default_premium_limits")]
     pub default_premium_limits: TierLimits,
+}
+
+/// Operator-facing mirror of [`KillSwitches`] that rejects unknown keys.
+/// The SDK type itself stays lenient, because it is also read from policy
+/// plugins that may add fields.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct StrictKillSwitches {
+    disable_premium_tier: bool,
+    force_standard_tier: bool,
+    disable_web_search: bool,
+    disable_file_search: bool,
+    disable_images: bool,
+    disable_code_interpreter: bool,
+}
+
+fn strict_kill_switches<'de, D>(deserializer: D) -> Result<KillSwitches, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = StrictKillSwitches::deserialize(deserializer)?;
+    Ok(KillSwitches {
+        disable_premium_tier: s.disable_premium_tier,
+        force_standard_tier: s.force_standard_tier,
+        disable_web_search: s.disable_web_search,
+        disable_file_search: s.disable_file_search,
+        disable_images: s.disable_images,
+        disable_code_interpreter: s.disable_code_interpreter,
+    })
 }
 
 impl StaticMiniChatPolicyPluginConfig {
