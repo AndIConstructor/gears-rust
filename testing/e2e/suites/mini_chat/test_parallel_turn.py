@@ -7,6 +7,7 @@ import pytest
 
 from .conftest import (
     API_PREFIX,
+    DETAIL_TURN_ALREADY_RUNNING,
     assert_problem,
     expect_done,
     list_messages,
@@ -37,7 +38,10 @@ class TestParallelTurn:
                 headers={"Accept": "text/event-stream"},
                 timeout=30,
             )
-            assert_problem(second, 409, "aborted", reason="turn_already_running")
+            assert_problem(
+                second, 409, "aborted",
+                reason="turn_already_running", detail=DETAIL_TURN_ALREADY_RUNNING,
+            )
 
             expect_done(first.drain())
 

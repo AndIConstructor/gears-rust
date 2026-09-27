@@ -8,6 +8,7 @@ import pytest
 
 from .conftest import (
     API_PREFIX,
+    DETAIL_REQUEST_ID_CONFLICT,
     assert_problem,
     delta_text,
     expect_done,
@@ -43,6 +44,12 @@ def total_daily_used() -> int:
     return find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
 
 
+def assert_request_id_conflict(resp: httpx.Response) -> None:
+    assert_problem(
+        resp, 409, "aborted", reason="request_id_conflict", detail=DETAIL_REQUEST_ID_CONFLICT,
+    )
+
+
 def _require_offline(request):
     if request.config.getoption("mode") == "online":
         pytest.skip("requires mock provider (offline mode)")
@@ -65,7 +72,7 @@ class TestIdempotency:
 
         with open_stream(chat_id, body["content"], request_id=body["request_id"]) as first:
             first.read_until_started()
-            assert_problem(post_stream(chat_id, body), 409, "aborted", reason="request_id_conflict")
+            assert_request_id_conflict(post_stream(chat_id, body))
             expect_done(first.drain())
         assert turn_count(chat_id) == 1
 
@@ -83,7 +90,7 @@ class TestIdempotency:
         assert post_stream(chat_id, body).status_code == 200
         assert poll_turn(chat_id, body["request_id"])["state"] == "error"
 
-        assert_problem(post_stream(chat_id, body), 409, "aborted", reason="request_id_conflict")
+        assert_request_id_conflict(post_stream(chat_id, body))
         assert turn_count(chat_id) == 1
 
     @pytest.mark.timeout(30)
@@ -98,7 +105,7 @@ class TestIdempotency:
             s.read_until(lambda e: e.event == "delta")
         assert poll_turn(chat_id, body["request_id"])["state"] == "cancelled"
 
-        assert_problem(post_stream(chat_id, body), 409, "aborted", reason="request_id_conflict")
+        assert_request_id_conflict(post_stream(chat_id, body))
         assert turn_count(chat_id) == 1
 
     @pytest.mark.timeout(30)
@@ -118,7 +125,7 @@ class TestIdempotency:
         assert resp.status_code == 200, resp.text
         expect_done(parse_sse(resp.text))
 
-        assert_problem(post_stream(chat_id, body), 409, "aborted", reason="request_id_conflict")
+        assert_request_id_conflict(post_stream(chat_id, body))
         assert turn_count(chat_id) == 2
 
     @pytest.mark.timeout(30)
@@ -135,7 +142,7 @@ class TestIdempotency:
         resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/turns/{body['request_id']}", timeout=10)
         assert resp.status_code == 204
 
-        assert_problem(post_stream(chat_id, body), 409, "aborted", reason="request_id_conflict")
+        assert_request_id_conflict(post_stream(chat_id, body))
         assert turn_count(chat_id) == 1
 
     @pytest.mark.timeout(30)
@@ -181,3 +188,4 @@ class TestIdempotency:
         assert total_daily_used() == used_before
         assert mock_provider.get_captured_requests() == []
         assert turn_count(chat_id) == 1
+
