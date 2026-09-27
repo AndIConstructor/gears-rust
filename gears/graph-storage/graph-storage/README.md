@@ -134,6 +134,12 @@ Each is the shipped behaviour, with the contract that fixes it.
   `created_at` and `updated_at` only, which is a scan of the tenant. The audit
   envelope's `updated_at` is when the gear last wrote the row, not when the
   object changed; an object's own time belongs in its payload.
+- **Readiness for a probe is the platform's `/readyz`**, which runs this gear's
+  healthcheck and takes the pod out of traffic when a component is unhealthy;
+  the gear's own `GET /graph-storage/v1/health/ready` is the detailed state
+  document and answers `200` whatever the state, the same split the platform
+  makes between `/readyz` and `/health`. Point a probe at the gateway's
+  `/readyz`, not at the gear's route.
 - **Nodes and edges in one batch** commit or fail together
   (`fr-bulk-ingest`); an importer that writes nodes in one call and edges in
   another has, between the two, a graph with nodes and no edges.
