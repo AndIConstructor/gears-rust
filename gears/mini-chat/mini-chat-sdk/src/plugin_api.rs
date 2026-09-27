@@ -67,23 +67,21 @@ pub trait MiniChatModelPolicyPluginClientV1: Send + Sync {
 /// selects one of them by the configured `vendor`; events go only to that
 /// instance. If no instance matches, audit events are dropped.
 ///
-/// # Caller contract
+/// # Content
 ///
-/// The **caller** (mini-chat domain service) MUST redact secret patterns and
-/// truncate string content (max 8 KiB per field) *before* invoking any method
-/// on this trait. Plugins MUST assume all content fields are already sanitized.
-/// See DESIGN.md "Audit content handling (P1)" for the full redaction rule table.
+/// In P1 the gear leaves the content fields of `TurnAuditEvent` empty
+/// (`prompt` and `response` are `None`, `attachments` is empty,
+/// `policy_decisions.license` and `policy_decisions.quota.quota_scope` are
+/// `None`) and performs no redaction or truncation (ADR-0009). Redaction must
+/// be added in the gear before these fields are filled.
 ///
 /// # Delivery semantics
 ///
-/// Audit emission uses the transactional outbox with leased processing.
-/// Cancellation is handled by the framework via future dropping - no explicit
-/// `CancellationToken` needed.
-///
-/// # Independence
-///
-/// When multiple audit plugin instances are registered, each MUST be
-/// independent. A failure in one plugin MUST NOT prevent delivery to others.
+/// Audit emission uses the transactional outbox with leased processing: at
+/// least once, so a plugin can see the same event more than once.
+/// `Transient` and `PluginTimeout` (30 s deadline) make the outbox retry the
+/// event; `Permanent` dead-letters it. Cancellation is handled by the
+/// framework via future dropping - no explicit `CancellationToken` needed.
 #[async_trait]
 pub trait MiniChatAuditPluginClientV1: Send + Sync {
     /// Emit a turn audit event (turn completed or failed).

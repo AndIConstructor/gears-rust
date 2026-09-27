@@ -111,8 +111,9 @@ pub struct ProviderEntry {
     /// OAGW upstream is registered under that alias. Set it only when the
     /// alias must differ from the host.
     ///
-    /// At runtime: overwritten with the OAGW-assigned alias after
-    /// `create_upstream` succeeds.
+    /// `ProviderResolver` is built in `init()` from this value. OAGW
+    /// registration in `start()` works on a copy, so the alias OAGW returns
+    /// does not reach the resolver.
     #[serde(default)]
     pub upstream_alias: Option<String>,
     /// Upstream hostname (e.g., `api.openai.com`). Used for OAGW upstream
@@ -193,8 +194,8 @@ pub struct ProviderTenantOverride {
     /// sets it to that host. An override needs `host` or `upstream_alias`
     /// (see [`Self::has_distinct_upstream`]).
     ///
-    /// At runtime: overwritten with the OAGW-assigned alias after
-    /// `create_upstream` succeeds.
+    /// As for [`ProviderEntry::upstream_alias`], the resolver uses the
+    /// `init()` value, not the alias OAGW returns.
     #[serde(default)]
     pub upstream_alias: Option<String>,
     /// Override auth plugin type for this tenant.
@@ -971,7 +972,7 @@ pub struct ThumbnailConfig {
     /// Target thumbnail height in pixels.
     #[serde(default = "default_thumbnail_height")]
     pub height: u32,
-    /// Maximum decoded thumbnail size in bytes (128 KiB).
+    /// Maximum encoded (WebP) thumbnail size in bytes (128 KiB).
     #[serde(default = "default_thumbnail_max_bytes")]
     pub max_bytes: usize,
     /// Maximum source image pixel count before skipping thumbnail generation.

@@ -1,8 +1,9 @@
 //! Runtime resolution of LLM provider adapter + OAGW upstream alias.
 //!
-//! Built once at gear startup from `MiniChatConfig.providers` after
-//! OAGW upstream registration has stamped `upstream_alias` on each
-//! [`ProviderEntry`] and [`ProviderTenantOverride`].
+//! Built once in `init()` from `MiniChatConfig.providers`, after `init()`
+//! has filled each missing `upstream_alias` with the host. OAGW upstream
+//! registration runs later in `start()` on a copy of the entries; the
+//! resolver does not see its results.
 //!
 //! Used per turn to resolve which adapter and OAGW alias to use
 //! based on the model's `provider_id`.
@@ -29,11 +30,12 @@ pub struct ResolvedProvider<'a> {
 /// Resolves `(provider adapter, upstream alias)` from a `provider_id`.
 ///
 /// Upstream aliases are read from [`ProviderEntry::upstream_alias`] and
-/// [`ProviderTenantOverride::upstream_alias`], which are set by OAGW at startup.
+/// [`ProviderTenantOverride::upstream_alias`](crate::config::ProviderTenantOverride::upstream_alias)
+/// as configured, or pre-filled with the host in `init()`.
 pub struct ProviderResolver {
     /// One adapter per distinct `ProviderKind`.
     adapters: HashMap<ProviderKind, Arc<dyn LlmProvider>>,
-    /// `provider_id` → `ProviderEntry` from config (with `upstream_alias` set).
+    /// `provider_id` → `ProviderEntry` from config (`upstream_alias` pre-filled in `init()`).
     registry: HashMap<String, ProviderEntry>,
 }
 
@@ -52,9 +54,8 @@ impl ProviderResolver {
     /// Build from config + OAGW gateway. Creates one adapter per distinct
     /// `ProviderKind` (not per `provider_id`).
     ///
-    /// `providers` must have been passed through
-    /// [`register_oagw_upstreams`](crate::infra::oagw_provisioning::register_oagw_upstreams)
-    /// first so that `upstream_alias` is populated.
+    /// `providers` must have `upstream_alias` set (`init()` fills it with the
+    /// host); an entry without one fails in [`Self::resolve`].
     pub fn new(
         gateway: &Arc<dyn ServiceGatewayClientV1>,
         providers: HashMap<String, ProviderEntry>,

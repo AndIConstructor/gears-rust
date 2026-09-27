@@ -46,10 +46,10 @@ pub struct ModelCatalogEntry {
     /// Short description of the model.
     #[serde(default)]
     pub description: String,
-    /// LLM provider CTI identifier.
+    /// Routing key for provider resolution: a key of
+    /// `MiniChatConfig.providers` (e.g. `"openai"`, `"azure_openai"`).
     pub provider_id: String,
-    /// Routing identifier for provider resolution. Maps to a key in
-    /// `MiniChatConfig.providers`. Values: `"openai"`, `"azure_openai"`.
+    /// Provider name for display. Not read by the gear.
     pub provider_display_name: String,
     /// URL to model icon.
     #[serde(default)]
@@ -93,8 +93,9 @@ pub struct ModelCatalogEntry {
     /// Empty string = no system instructions.
     #[serde(default)]
     pub system_prompt: String,
-    /// Prompt template used when generating thread summaries for this model.
-    /// Plumbed through the stack for future use by the summary generation job.
+    /// System prompt for the thread-summary call when this model is the
+    /// summary model (`thread_summary_worker.summary_model_id`). Empty = use
+    /// `thread_summary_worker.summary_system_prompt`, then the built-in default.
     #[serde(default)]
     pub thread_summary_prompt: String,
 }
@@ -148,8 +149,10 @@ pub struct ModelApiParams {
     pub presence_penalty: f64,
     pub stop: Vec<String>,
     /// Provider-specific extra body parameters (e.g. vLLM `top_k`,
-    /// `chat_template_kwargs`). Providers that support it will place this
-    /// value under the `"extra_body"` key in the request payload.
+    /// `chat_template_kwargs`). Must be a JSON object; its keys are merged
+    /// into the top level of the request body (overwriting typed fields) by
+    /// the Responses, Chat Completions and vLLM adapters. The Anthropic
+    /// adapter ignores it. A non-object value is ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
     /// Reasoning effort for o-series models (low/medium/high).

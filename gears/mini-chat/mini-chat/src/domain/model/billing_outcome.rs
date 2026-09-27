@@ -32,9 +32,10 @@ impl BillingOutcome {
 pub struct BillingDerivation {
     pub outcome: BillingOutcome,
     pub settlement_method: SettlementMethod,
-    /// When `true`, the caller MUST log a critical error and increment
-    /// `mini_chat_unknown_error_code_total` after the transaction commits.
-    /// Kept out of the pure function to preserve testability.
+    /// When `true`, the caller logs a critical error after the transaction
+    /// commits. `mini_chat_unknown_error_code_total` is declared but not
+    /// recorded (cardinality of the `code` label). Kept out of the pure
+    /// function to preserve testability.
     pub unknown_error_code: bool,
 }
 
