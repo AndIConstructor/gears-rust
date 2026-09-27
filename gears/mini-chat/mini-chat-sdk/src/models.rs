@@ -21,9 +21,11 @@ pub struct PolicySnapshot {
     pub kill_switches: KillSwitches,
 }
 
-/// Tenant-level kill switches from the policy snapshot.
+/// Tenant-level kill switches from the policy snapshot. A missing field
+/// defaults to `false`, so a partial object is valid.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KillSwitches {
     pub disable_premium_tier: bool,
     pub force_standard_tier: bool,

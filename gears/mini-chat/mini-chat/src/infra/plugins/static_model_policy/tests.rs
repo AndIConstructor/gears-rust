@@ -254,3 +254,15 @@ fn config_rejects_zero_credit_multiplier() {
         "{err}"
     );
 }
+
+#[test]
+fn config_accepts_partial_kill_switches() {
+    let cfg: StaticMiniChatPolicyPluginConfig = serde_json::from_value(serde_json::json!({
+        "model_catalog": [],
+        "kill_switches": { "disable_images": true }
+    }))
+    .expect("a partial kill_switches object parses");
+    assert!(cfg.kill_switches.disable_images);
+    assert!(!cfg.kill_switches.disable_web_search);
+    assert!(!cfg.kill_switches.force_standard_tier);
+}

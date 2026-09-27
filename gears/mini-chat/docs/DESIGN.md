@@ -6823,7 +6823,7 @@ The gear configuration is `MiniChatConfig` (`src/config.rs`, worker sections in 
 | `vendor` | `string` | `constructorfabric` | Vendor of the registered GTS instance; must match the gear's `vendor` to be selected |
 | `priority` | `i16` | `100` | Lower is higher priority |
 | `model_catalog` | list of `ModelCatalogEntry` | `[]` when the section is absent | Required key when the section is present (an empty list is valid). Both credit multipliers of every entry must be in `1..=MAX_MULT`, checked at plugin `init()` |
-| `kill_switches` | `KillSwitches` | all `false` | Static kill switches. The object may be omitted (all `false`), but when present it must list all six fields (`disable_premium_tier`, `force_standard_tier`, `disable_web_search`, `disable_file_search`, `disable_images`, `disable_code_interpreter`): the fields have no serde default, so a partial object fails config parsing |
+| `kill_switches` | `KillSwitches` | all `false` | Static kill switches: `disable_premium_tier`, `force_standard_tier`, `disable_web_search`, `disable_file_search`, `disable_images`, `disable_code_interpreter`. The object and each field may be omitted; a missing field is `false` |
 | `default_standard_limits` | `TierLimits` | daily `100_000_000`, monthly `1_000_000_000` micro-credits | Per-user limits for the `total` bucket, same for every user |
 | `default_premium_limits` | `TierLimits` | daily `50_000_000`, monthly `500_000_000` micro-credits | Per-user limits for the `tier:premium` bucket, same for every user |
 
