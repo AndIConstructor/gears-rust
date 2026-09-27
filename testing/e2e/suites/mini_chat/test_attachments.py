@@ -1359,6 +1359,7 @@ class TestAttachmentsInProviderRequest:
     """Offline counterparts of the online attachment tests: the provider
     request, not the model's answer."""
 
+    @pytest.mark.timeout(30)
     def test_document_and_image_in_one_request(self, provider_chat, mock_provider):
         """10-24 (offline part): a message with a ready document and an image
         sends one request with the text and `input_image` (the image's

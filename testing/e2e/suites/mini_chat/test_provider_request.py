@@ -169,6 +169,7 @@ class TestProviderIdentity:
             search["metadata"]
         )
 
+    @pytest.mark.timeout(30)
     def test_metadata_feature_of_attachment_tools(self, provider_chat, chat_with_model,
                                                   mock_provider):
         """`metadata.feature` names the attachment tools of the request
@@ -204,6 +205,7 @@ class TestProviderRequestPaths:
     path (mock_provider/server.py, `path_error`), and every test fails on
     such a request (conftest `reset_mock_provider_state`)."""
 
+    @pytest.mark.timeout(30)
     def test_requests_hit_the_configured_paths(self, provider, provider_chat, mock_provider):
         """A document upload and a message: OpenAI calls /v1/files,
         /v1/vector_stores, /v1/vector_stores/{id}/files and /v1/responses
