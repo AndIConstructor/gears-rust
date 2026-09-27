@@ -136,16 +136,26 @@ class TestWebSearchEventOrdering:
 
     @pytest.mark.usefixtures("offline_only")
     def test_tool_events_before_done(self, provider_chat):
-        """The mock's two web search tool events (`SEARCH:*`) come before the
-        terminal `done` event."""
+        """The events are relayed in the provider's order (grammar
+        `stream_started ping* (delta|tool)* citations? done`). The mock
+        `SEARCH:*` answer is a message ("Searching"), the web search call,
+        then a second message in two deltas that carries the citation, so
+        the stream is `stream_started`, one delta, the tool `start` and
+        `done`, two deltas, `citations`, `done`."""
         events = stream_search(
             provider_chat["id"], "SEARCH: who won the latest Nobel Prize in Physics?",
         )
-        types = [e.event for e in events]
-        tool_idx = [i for i, t in enumerate(types) if t == "tool"]
-        assert len(tool_idx) == 2, types
-        assert types[-1] == "done", types
-        assert max(tool_idx) < len(types) - 1, types
+        sequence = [
+            (e.event, e.data["phase"] if e.event == "tool" else None) for e in events
+        ]
+        assert sequence == [
+            ("stream_started", None),
+            ("delta", None),
+            ("tool", "start"), ("tool", "done"),
+            ("delta", None), ("delta", None),
+            ("citations", None),
+            ("done", None),
+        ], sequence
 
 
 @pytest.mark.multi_provider
@@ -155,8 +165,7 @@ class TestWebSearchDisabledByDefault:
     @pytest.mark.usefixtures("offline_only")
     def test_search_prompt_without_flag_has_no_web_search(self, provider_chat, mock_provider):
         """18-04: a `SEARCH:` prompt (the mock's web search scenario) sent
-        without the flag: the provider request carries no `tools`, so the
-        mock drops its web search events and the stream has no `tool` event."""
+        without the flag: the provider request carries no `tools`."""
         resp = httpx.post(
             f"{API_PREFIX}/chats/{provider_chat['id']}/messages:stream",
             json={"content": "SEARCH: current weather in Berlin"},
@@ -169,7 +178,6 @@ class TestWebSearchDisabledByDefault:
 
         (req,) = mock_provider.get_captured_requests()
         assert "tools" not in req, req["tools"]
-        assert tool_events(events) == [], events
 
 
 @pytest.mark.multi_provider

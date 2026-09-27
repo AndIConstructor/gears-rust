@@ -472,7 +472,11 @@ class TestCodeInterpreterEventOrdering:
 
     @pytest.mark.usefixtures("offline_only")
     def test_tool_events_before_done(self, openai_chat):
-        """The mock's code interpreter tool events (`CODEINTERP:*`) come before `done`."""
+        """The events are relayed in the provider's order (grammar
+        `stream_started ping* (delta|tool)* citations? done`): the mock
+        `CODEINTERP:*` answer runs the code interpreter first and then
+        streams three text deltas, so the stream is `stream_started`, the
+        tool `start` and `done`, the three deltas, `done`."""
         chat_id = openai_chat["id"]
         xlsx = _make_minimal_xlsx()
 
@@ -490,10 +494,15 @@ class TestCodeInterpreterEventOrdering:
         assert status == 200
         expect_done(events)
 
-        tool_idx = [i for i, e in enumerate(events) if e.event == "tool"]
-        assert len(tool_idx) == 2, [e.event for e in events]
-        assert events[-1].event == "done", [e.event for e in events]
-        assert max(tool_idx) < len(events) - 1, [e.event for e in events]
+        sequence = [
+            (e.event, e.data["phase"] if e.event == "tool" else None) for e in events
+        ]
+        assert sequence == [
+            ("stream_started", None),
+            ("tool", "start"), ("tool", "done"),
+            ("delta", None), ("delta", None), ("delta", None),
+            ("done", None),
+        ], sequence
 
 
 class TestCodeInterpreterPerMessageLimit:
