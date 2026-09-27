@@ -692,7 +692,7 @@ Implemented. When an attachment with `secondary_status = uploaded` is deleted, `
 
 ### 9.2 Tool Call Tracking
 
-Add `file_search_calls: u32` with `#[serde(default)]` to `UsageEvent`. Count `Tool { Done, "file_search" }` events (same pattern as `web_search_completed_count`).
+**Implemented.** `UsageEvent` carries `file_search_calls: u32` (`mini-chat-sdk/src/models.rs`), reported from `chat_turns.file_search_completed_count`. The counter is incremented for provider-native `file_search` tool `done` events and for successful `search_knowledge` retrievals (the two tools are never sent in the same request). The Anthropic adapter sends no `file_search`, so on Anthropic chats the count comes from `search_knowledge` only.
 
 ### 9.3 Cost Considerations
 
@@ -781,9 +781,9 @@ Prompt caching mitigates tool loop re-send cost (~10% for cached content).
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
 | Tool loop stream complexity | High dev effort | `async_stream::stream!` macro for generator-style impl |
-| OAGW stripping `anthropic-version` header | Requests rejected | Adapter adds per-request via `proxy_request()` |
+| OAGW stripping `anthropic-version` header | Requests rejected | Set as an upstream header rule (`set`) when the gear provisions the OAGW upstream (`anthropic_messages.rs::upstream_headers`, applied in `oagw_provisioning.rs`), not per request |
 | Microsoft Foundry SSE bug (concatenated events) | Parse failures | Resilient SSE parser handling missing `\n\n` |
-| Tool loop infinite iteration | Runaway costs | Cap at `max_tool_calls` from `LlmRequest` |
+| Tool loop infinite iteration | Runaway costs | The `search_knowledge` loop in `provider_task.rs` is hard-capped at `knowledge_search.max_calls_per_message + 2` iterations (then `agentic_iterations_exceeded`); `max_tool_calls` is not sent by the Anthropic adapter |
 | Tool execution failure mid-loop | Lost context | Graceful degradation via error `tool_result` |
 | Storage auth ≠ LLM auth | Search/upload fails | `rag_provider` config separation |
 | Files API beta instability | Breaking changes | Azure/OpenAI is primary store; Anthropic Files API is a re-populatable cache |

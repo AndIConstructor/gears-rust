@@ -52,7 +52,7 @@ Current gaps: no native chat experience within the platform; no way to query upl
 | Temporary Chat | A chat marked for automatic deletion after 24 hours (P2) |
 | OAGW | Outbound API Gateway - platform service that handles external API calls and credential injection |
 | Multimodal Input | Responses API input that includes both text and image references (file IDs) in the content array |
-| Image Attachment | An image file (PNG, JPEG, WebP) uploaded to a chat via the provider Files API, included in LLM requests as multimodal input; not indexed in vector stores and not eligible for file_search |
+| Image Attachment | An image file (PNG, JPEG, WebP, GIF) uploaded to a chat via the provider Files API, included in LLM requests as multimodal input; not indexed in vector stores and not eligible for file_search |
 | MCP (Model Context Protocol) | A standardized JSON-RPC 2.0 protocol for exposing external tools (functions) to LLMs. MCP servers expose tools via `tools/list` and execute them via `tools/call`. |
 | MCP Server | An external service that exposes one or more tools via the MCP protocol, accessed over HTTP Streamable transport. |
 | MCP Tool | A function exposed by an MCP server. Planned design (Future, not implemented — [ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)): persisted in an `mcp_server_tools` table via background `tools/list` sync, resolved at stream time from cache/DB, mapped to `LlmTool::Function`, and executed via `tools/call` during the agentic loop. |
@@ -124,7 +124,7 @@ This PRD uses **P1/P2** to describe phased scope. The `p1`/`p2` tags on requirem
 - Emit audit events through the audit plugin and the `mini-chat.audit` outbox queue (append-only semantics owned by the audit backend; P1 content scope in [ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md))
 - Retry, edit, and delete for the last turn only (tail-only mutation)
 - Streaming cancellation when client disconnects
-- Image upload and image-aware chat (PNG/JPEG/WebP) via multimodal Responses API, stored via provider Files API
+- Image upload and image-aware chat (PNG/JPEG/WebP/GIF) via multimodal Responses API, stored via provider Files API
 - Images are supported as attachments; they are not searchable via file_search and not indexed in vector stores
 - Code interpreter tool support: XLSX spreadsheet uploads are routed to the `code_interpreter` tool for data analysis; the model can execute code in a sandboxed environment to process the file. Kill switch and per-model capability gating apply.
 - Multi-purpose attachment routing: each attachment carries boolean purpose flags (`for_file_search`, `for_code_interpreter`) derived from MIME type. A single attachment may serve multiple purposes (both flags `true`).
@@ -256,7 +256,7 @@ The system MUST allow users to upload document files to a chat. Uploaded documen
 
 **P1 upload is synchronous** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)): `POST /v1/chats/{id}/attachments` uploads the file to the provider and indexes it within the request, and returns `201 Created` with the attachment identifier and `status: ready`. On failure it returns an HTTP error; the attachment row stays visible via `GET /v1/chats/{id}/attachments/{attachment_id}` with `status: failed` and an `error_code` field (stable internal code, no provider identifiers). `uploaded` is an internal intermediate status and can be observed. Polling the GET endpoint is supported but not required. `doc_summary` is never provided by the client and is always `null` in P1 (see `cpt-cf-mini-chat-fr-doc-summary`).
 
-Maximum document size: configurable (`rag.uploaded_file_max_size_kb`, default 25 MiB). A larger upload is rejected with 400 (`out_of_range`, `FILE_TOO_LARGE`); an unsupported MIME type is rejected with 400 (`invalid_argument`, `UNSUPPORTED_CONTENT_TYPE`). Concurrent in-flight uploads per process are bounded (`rag.max_concurrent_uploads`, default 10); excess uploads get 503 with `Retry-After`.
+Maximum document size: configurable (`rag.uploaded_file_max_size_kb`, default 25 MiB). A larger upload is rejected with 400 (`out_of_range`, `FILE_TOO_LARGE`). Mini-chat sets no request body limit of its own: the api-gateway `defaults.body_limit_bytes` (default 16 MiB) applies first and must be at least 25 MiB + 64 KiB (26,279,936 bytes) for 25 MiB documents, otherwise the gateway returns 413; an unsupported MIME type is rejected with 400 (`invalid_argument`, `UNSUPPORTED_CONTENT_TYPE`). Concurrent in-flight uploads per process are bounded (`rag.max_concurrent_uploads`, default 10); excess uploads get 503 with `Retry-After`.
 
 **Rationale**: Users need to ground AI conversations in their own documents (contracts, policies, reports).
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -265,16 +265,16 @@ Maximum document size: configurable (`rag.uploaded_file_max_size_kb`, default 25
 
 - [ ] `p1` - **ID**: `cpt-cf-mini-chat-fr-image-upload`
 
-The system MUST allow users to upload image files (PNG, JPEG/JPG, WebP) to a chat as image attachments. Image attachments are stored via the provider Files API and referenced in Responses API calls as multimodal input. Image attachments are NOT indexed in vector stores and do NOT participate in file_search tool calls. Upload is synchronous, as for documents: the response is `201 Created` with the attachment identifier and `status: ready`, or an HTTP error with the row kept as `status: failed` ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). For image attachments, the server MAY return `img_thumbnail` (a server-generated preview thumbnail sized to configured WxH); null otherwise. `img_thumbnail` is server-generated only (never provided by the client); maximum decoded size (raw bytes) is 128 KiB by default (configurable via `thumbnail.max_bytes`); stored internally in Mini Chat database only (never uploaded to provider); contains no provider identifiers. `doc_summary` remains always null for images.
+The system MUST allow users to upload image files (PNG, JPEG/JPG, WebP, GIF) to a chat as image attachments. Image attachments are stored via the provider Files API and referenced in Responses API calls as multimodal input. Image attachments are NOT indexed in vector stores and do NOT participate in file_search tool calls. Upload is synchronous, as for documents: the response is `201 Created` with the attachment identifier and `status: ready`, or an HTTP error with the row kept as `status: failed` ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). For image attachments, the server MAY return `img_thumbnail` (a server-generated preview thumbnail sized to configured WxH); null otherwise. `img_thumbnail` is server-generated only (never provided by the client); maximum decoded size (raw bytes) is 128 KiB by default (configurable via `thumbnail.max_bytes`); stored internally in Mini Chat database only (never uploaded to provider); contains no provider identifiers. `doc_summary` remains always null for images.
 
 **Image upload rules**:
 
-- Supported image types: `image/png`, `image/jpeg`, `image/webp`.
+- Supported image types: `image/png`, `image/jpeg`, `image/webp`, `image/gif`.
 - Maximum file size per image: configurable per deployment (`rag.uploaded_image_max_size_kb`, default 5 MiB). Documents use the separate `rag.uploaded_file_max_size_kb` (default 25 MiB).
 - Maximum image inputs per message: configurable (`rag.max_images_per_message`, default 4). A message with more images is rejected with 400 (`out_of_range`, `TOO_MANY_IMAGES`).
 - Maximum image inputs per user per day: **Not implemented** ([ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)). The planned default was 50.
 - The `disable_images` kill switch rejects image uploads and messages with image inputs with 400 (`failed_precondition`, `violations[{subject: images, type: FEATURE_DISABLED}]`).
-- Images are uploaded to the provider via Files API with `purpose="assistants"`, the same value used for documents, on every provider.
+- Images are uploaded to the RAG provider (OpenAI or Azure OpenAI Files API) with `purpose="assistants"`, the same value used for documents. The secondary copy uploaded to the Anthropic Files API for Anthropic chats carries no `purpose` field.
 - Images are included in the Responses API request input as multimodal content items (file ID references), allowing the assistant to reason about image content for that chat turn.
 - Images are NOT summarized on upload (no background summary task for images at P1).
 - Attachment access remains owner-only and tenant-isolated (same access rules as document attachments).
@@ -316,7 +316,7 @@ The system MUST support the `code_interpreter` LLM tool for data analysis of upl
 
 **Kill switch**: The `disable_code_interpreter` kill switch MUST prevent code interpreter usage at runtime. When active, uploads where `for_code_interpreter` would be the only purpose (currently: XLSX) MUST be rejected with a validation error. If the attachment also has `for_file_search = true`, `for_code_interpreter` is set to `false` and the upload proceeds.
 
-**Model capability gating**: At upload time the check uses the chat's model (`chats.model`, resolved in the model catalog), not a per-turn effective model. If that model does not support code interpreter (`tool_support.code_interpreter = false`), the same filtering logic applies: `for_code_interpreter` is set to `false`, and if no purposes remain, the upload is rejected with HTTP 400 `invalid_argument`. If the model cannot be resolved, a code-interpreter upload gets HTTP 503 so the client can retry.
+**Model capability gating**: At upload time the check uses the chat's model (`chats.model`, resolved in the model catalog), not a per-turn effective model. If that model does not support code interpreter (`tool_support.code_interpreter = false`), the same filtering logic applies: `for_code_interpreter` is set to `false`, and if no purposes remain, the upload is rejected with HTTP 400 `invalid_argument`. If the chat's model is no longer in the catalog, every upload into the chat (not only code-interpreter files) is rejected with HTTP 400 `invalid_argument` (`field_violations[model].reason = INVALID_MODEL`) before the body is read; other model-resolution errors are returned as is. There is no fallback provider or fallback limit.
 
 **Tool assembly**: When a chat contains ready `code_interpreter` attachments, the `disable_code_interpreter` kill switch is `false`, and the effective model supports code interpreter (`tool_support.code_interpreter = true`), the backend includes the `code_interpreter` tool in the Responses API request with the corresponding provider file IDs (via `tools[].container.file_ids`). The provider decides whether to invoke the tool.
 
@@ -329,13 +329,13 @@ The system MUST support the `code_interpreter` LLM tool for data analysis of upl
 
 - [ ] `p1` - **ID**: `cpt-cf-mini-chat-fr-web-search`
 
-The system MUST support web search as an LLM tool, explicitly enabled per request via an API parameter (`web_search.enabled`). When enabled, the backend includes the `web_search` tool in the provider request (Azure Foundry API tooling). The provider decides whether to invoke the tool based on the query; explicit enablement means "tool is available and allowed", not "force a call every time". Web search MUST be disabled by default (safe default for backward compatibility).
+The system MUST support web search as an LLM tool, explicitly enabled per request via an API parameter (`web_search.enabled`). When enabled, the backend includes the `web_search` tool in the provider request (Azure Foundry API tooling) only if the effective model (after any quota downgrade) supports web search (`tool_support.web_search = true`); otherwise the turn proceeds without the tool, and the requested flag is still stored on the turn for retry/edit. The provider decides whether to invoke the tool based on the query; explicit enablement means "tool is available and allowed", not "force a call every time". Web search MUST be disabled by default (safe default for backward compatibility).
 
 **Rate limits**: The system MUST enforce configurable per-turn web search call limits (default: 2 calls per turn) and per-user daily web search quota (default: 75 calls per day), tracked in `quota_usage.web_search_calls`. When the daily web search quota is exhausted, the system MUST reject with HTTP 429 (`resource_exhausted`, quota scope `web_search`) at preflight (before any provider call). This is part of cost control / quotas and MUST NOT be reported as the token quota scope. The daily quota is checked only when the request has `web_search.enabled=true` and the effective model (after any quota downgrade) supports web search (`tool_support.web_search = true`); other messages are not affected. With `disable_web_search` on, a request with `web_search.enabled=true` is rejected before the quota check. Exceeding the per-turn limit mid-stream ends the stream with SSE `error{code: "web_search_calls_exceeded"}`.
 
 **Kill switch**: A global `disable_web_search` flag MUST allow operators to disable web search at runtime. When the kill switch is active and a request includes `web_search.enabled=true`, the system MUST reject with HTTP 400 (`failed_precondition`, `violations[{subject: web_search, type: FEATURE_DISABLED}]`) before opening an SSE stream. The system MUST NOT silently ignore the parameter.
 
-**System prompt guard**: When web search is enabled for a turn, the system prompt MUST instruct the model: *"Use web_search only if the answer cannot be obtained from the provided context or your training data. Never use it for general knowledge questions. At most one web_search call per request."* **Two enforcement layers**: (1) system prompt soft guidance — at most 1 call; (2) `quota_service` hard limit — configurable, default 2 calls per message. The soft constraint reduces unnecessary calls; the hard limit is the backstop. Tests MUST NOT assume exactly 1 call per turn — up to 2 calls are valid under the hard limit.
+**System prompt guard**: When the `web_search` tool is sent for a turn, the system prompt MUST instruct the model: *"Use web_search only if the answer cannot be obtained from the provided context or your training data. Never use it for general knowledge questions. At most one web_search call per request."* **Two enforcement layers**: (1) system prompt soft guidance — at most 1 call; (2) `quota_service` hard limit — configurable, default 2 calls per message. The soft constraint reduces unnecessary calls; the hard limit is the backstop. Tests MUST NOT assume exactly 1 call per turn — up to 2 calls are valid under the hard limit.
 
 **Citations**: When web search results contribute to the assistant response, the system MUST include citations with `source: "web"`, `url`, `title`, and `snippet` in the existing SSE `citations` event.
 
@@ -385,7 +385,7 @@ The system MUST allow users to delete individual attachments from a chat via `DE
 
 Historical messages that reference deleted attachments MUST NOT be modified. In P1 the `attachments` array of a message lists only non-deleted attachments ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)); a deleted file is not available for retrieval or download.
 
-**Attachment Removal Rules**: Users may remove attachments while composing a message. After a message is sent, its attachment references become immutable. An attachment cannot be deleted if it is referenced by any submitted message: the request is rejected with HTTP 409 (`already_exists`, `resource_name = attachment_locked`). An attachment that is not referenced by any submitted message may still be deleted.
+**Attachment Removal Rules**: Users may remove attachments while composing a message. After a message is sent, its attachment references become immutable. An attachment cannot be deleted if it is referenced by any submitted message: the request is rejected with HTTP 409 (`already_exists`, `resource_name = attachment_locked`). An attachment that is not referenced by any submitted message may still be deleted. `GET` and `DELETE` of an attachment uploaded by another user return 404 (`not_found`, attachment `resource_type`), the same response as for an unknown id.
 
 **Rationale**: Users need the ability to remove documents from a chat's knowledge base without deleting the entire chat.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -520,8 +520,8 @@ The system MUST emit structured audit events to the platform's `audit_service` f
 
 **P1 status** ([ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md)):
 
-- **Transport**: audit events are enqueued in the finalization or mutation transaction to the outbox queue `mini-chat.audit` and delivered to the audit plugin selected through types-registry (`MiniChatAuditPluginClientV1`). The bundled `static_audit` plugin logs them. When no plugin is registered, events are acknowledged and dropped, and a warning is logged once on the first delivery attempt.
-- **Events**: turn finalization and turn mutations (retry, edit, delete) are audited. Chat deletion is **not** audited.
+- **Transport**: audit events are enqueued in the finalization or mutation transaction to the outbox queue `mini-chat.audit` and delivered to the audit plugin selected through types-registry (`MiniChatAuditPluginClientV1`). The bundled `static_audit` plugin logs them. When no plugin is registered, events are acknowledged and dropped. This result is not cached: every delivery looks the plugin up again, so a plugin registered later is used, and the warning is logged once per period without a plugin. If the plugin instance is found in types-registry but its client is not in ClientHub, the event is retried, not dropped.
+- **Events**: turn finalization and turn mutations (retry, edit, delete) are audited. Chat deletion is **not** audited. `event_type` values: `turn_completed` (completed turn), `turn_failed` (every other terminal state: failed, cancelled and orphan-watchdog turns all emit `turn_failed`), `turn_retry`, `turn_edit`, `turn_delete`.
 - **Populated fields**: tenant, user, chat and turn identities, model, token usage, latency, tool-call counts (web search calls, and file search calls: provider-native `file_search` plus `search_knowledge`) and the quota decision.
 - **Not populated**: `prompt`, `response`, `attachments`, `license` and `quota_scope` are empty. Because no content is included, the redaction and truncation rules below are **not implemented**; they become mandatory when content is added.
 
@@ -838,9 +838,9 @@ Per-user LLM costs MUST be bounded by configurable token-based rate limits acros
 
 - [ ] `p1` - **ID**: `cpt-cf-mini-chat-nfr-streaming-latency`
 
-The system MUST minimize platform overhead beyond provider latency. Define `mini_chat_ttft_overhead_ms = t_first_token_ui - t_first_byte_from_provider`. Streaming events MUST be relayed without buffering.
+The system MUST minimize platform overhead beyond provider latency. Define `mini_chat_ttft_overhead_ms = t_first_token_sent_to_sse_channel - t_first_byte_from_provider`: the time from the provider's first streamed token to its send on the internal channel to the SSE writer (`provider_task.rs`). Time after that send (SSE writer, network, UI) is not measured. Streaming events MUST be relayed without buffering.
 
-**Threshold**: `mini_chat_ttft_overhead_ms` p99 < 50 ms (platform overhead excluding provider latency)
+**Threshold**: `mini_chat_ttft_overhead_ms` p99 < 50 ms (in-gear overhead from the provider's first byte to the internal SSE channel, excluding provider latency)
 **Rationale**: Users expect near-instant response start in a chat interface.
 **Architecture Allocation**: See DESIGN.md section 2.1 (Streaming-First principle)
 
@@ -867,9 +867,9 @@ Mini Chat MUST provide an explicit operational contract to support on-call, SRE,
 - Every completed provider request MUST be correlated via `provider_response_id` and MUST be persisted and searchable by operators.
 - Support tooling MUST be able to determine turn state using server-side state (not inferred from client retry behavior).
 
-#### Prometheus metrics contract (P1)
+#### Metrics contract (P1)
 
-The service MUST expose Prometheus metrics with the series names below. The instruments are defined in `mini-chat/src/infra/metrics.rs`; names use the configurable prefix (default `mini_chat`). Metrics are exported over OTLP; counter instrument names carry no `_total` suffix, and whether `_total` is appended depends on the OTLP-to-Prometheus conversion downstream (usually it is), not on this gear; the counters below are written with `_total` on that assumption. Label sets below are the ones recorded by the code.
+The service MUST record OpenTelemetry metrics with the series names below and export them over OTLP (there is no Prometheus endpoint in the process). The instruments are defined in `mini-chat/src/infra/metrics.rs`; names use the configurable prefix (default `mini_chat`). Metrics are exported over OTLP; counter instrument names carry no `_total` suffix, and whether `_total` is appended depends on the OTLP-to-Prometheus conversion downstream (usually it is), not on this gear; the counters below are written with `_total` on that assumption. Label sets below are the ones recorded by the code.
 
 Prometheus labels MUST NOT include high-cardinality identifiers such as `tenant_id`, `user_id`, `chat_id`, `request_id`, or `provider_response_id`.
 
@@ -976,7 +976,7 @@ Specified but not declared:
 
 #### SLOs / thresholds (P1)
 
-- `mini_chat_ttft_overhead_ms` p99 < 50 ms
+- `mini_chat_ttft_overhead_ms` p99 < 50 ms (provider first byte to internal SSE channel send)
 - `mini_chat_time_to_abort_ms` p99 < 200 ms
 - Provider cleanup target completion within 1 hour under normal conditions (eventual with retry)
 
@@ -1039,7 +1039,7 @@ Turns stuck in `running` state beyond a configurable timeout (e.g. pod crash wit
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/v1/chats` | Create a chat (201 with a `Location` header; optional `title` is trimmed and must be 1–255 characters, a whitespace-only title is 400) |
+| POST | `/v1/chats` | Create a chat (201 with `Location: /mini-chat/v1/chats/{id}`, without the api-gateway `prefix_path`; optional `title` is trimmed and must be 1–255 characters, a whitespace-only title is 400) |
 | GET | `/v1/chats` | List chats (cursor pagination, `$filter`/`$orderby` on `updated_at`, `id`, `title`) |
 | GET | `/v1/chats/{id}` | Get chat metadata and `message_count` |
 | PATCH | `/v1/chats/{id}` | Rename a chat |
@@ -1149,9 +1149,9 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 
 | Condition | Category | HTTP | Reason / violation |
 |---|---|---|---|
-| Chat, message, turn, attachment or model not found (including another user's resource, or a soft-deleted one) | `not_found` | 404 | `context.resource_type` names the missing resource: `gts.cf.core.mini_chat.{chat,message,turn,attachment,model}.v1~`. A missing attachment reports the attachment type; an upload into an unknown chat reports the chat type. Exception: a repeated `DELETE` of an attachment returns 204 (idempotent) |
+| Chat, message, turn, attachment or model not found (including another user's resource, an attachment uploaded by another user in the caller's chat on `GET` or `DELETE`, or a soft-deleted one) | `not_found` | 404 | `context.resource_type` names the missing resource: `gts.cf.core.mini_chat.{chat,message,turn,attachment,model}.v1~`. A missing attachment reports the attachment type; an upload into an unknown chat reports the chat type. Exception: a repeated `DELETE` of an attachment returns 204 (idempotent) |
 | Unknown or disabled model on `POST /chats` | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
-| The chat's model is no longer in the catalog (`messages:stream`, retry, edit) | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
+| The chat's model is no longer in the catalog (`messages:stream`, retry, edit, attachment upload) | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL`. The upload checks it before reading the body |
 | Empty or whitespace-only `content` on `messages:stream` or turn edit | `invalid_argument` | 400 | `field_violations[content].reason = EMPTY_CONTENT` |
 | Invalid chat title on `POST /chats` or `PATCH /chats/{id}` (empty or whitespace-only after trim, or longer than 255 characters) | `invalid_argument` | 400 | `detail` |
 | Invalid reaction value (not `like` or `dislike`); checked before authorization. A body that does not match the schema (e.g. no `reaction` field) is 422, see below | `invalid_argument` | 400 | `detail` |
@@ -1159,13 +1159,13 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | platform JSON extractor (`toolkit::api::rest::extract::Json`) |
 | Malformed JSON body | `invalid_argument` | 400 | `field_violations[body].reason = json_syntax_error` (platform JSON extractor) |
 | Path parameter that is not a UUID (chat, message, turn `request_id`, attachment id) | `invalid_argument` | 400 | `field_violations[].reason = invalid_path_params` (platform path extractor) |
-| Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` |
+| Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` (was 415) |
 | Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `detail` |
 | Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
 | Outbox payload built for the request exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail` |
-| Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` |
+| Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` (was 415) |
 | Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
-| Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` |
+| Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` (was 413). A body above api-gateway `defaults.body_limit_bytes` (default 16 MiB) gets 413 from the gateway before it reaches mini-chat |
 | Too many images in one message | `out_of_range` | 400 | `TOO_MANY_IMAGES` |
 | Message exceeds `max_input_tokens` | `out_of_range` | 400 | `INPUT_TOO_LONG` |
 | Mandatory context does not fit the budget | `out_of_range` | 400 | `CONTEXT_BUDGET_EXCEEDED` |
@@ -1174,24 +1174,24 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Reaction (`PUT` or `DELETE`) on a non-assistant message | `failed_precondition` | 400 | `violations[{subject: reaction_target, type: STATE}]` |
 | Missing, invalid or expired bearer token | `unauthenticated` | 401 | `context.reason`: `MISSING_BEARER` / `AUTHN_FAILED` (api-gateway) |
 | AuthZ denied, or the PDP failed (fail-closed) | `permission_denied` | 403 | `AUTHZ_DENIED` |
-| Tenant lacks the required license feature (`ai_chat`) | `permission_denied` | 403 | `LICENSE_FEATURE_REQUIRED` (api-gateway license middleware) |
+| Tenant lacks the required license feature (platform base license feature `CORE_GLOBAL_BASE_LICENSE_FEATURE`; `ai_chat` is the target, ADR-0008) | `permission_denied` | 403 | `LICENSE_FEATURE_REQUIRED` (api-gateway license middleware) |
 | Another turn is running in the chat (stream, including the insert race) | `aborted` | 409 | `turn_already_running` |
 | `request_id` reused for a non-completed or deleted turn | `aborted` | 409 | `request_id_conflict` |
 | Mutation of a turn that is not the latest (including an already deleted turn) | `aborted` | 409 | `NOT_LATEST_TURN` |
 | Concurrent mutation lost the running-turn race | `aborted` | 409 | `GENERATION_IN_PROGRESS` |
-| Deleting an attachment referenced by a message | `already_exists` | 409 | `resource_name = attachment_locked` |
-| Upload into a chat whose vector store was created for another provider backend | `already_exists` | 409 | `resource_name = provider_mismatch` |
-| Any other unique-constraint violation that the caller does not handle (`DomainError::Conflict` from the DB layer) | `already_exists` | 409 | `resource_name = unique_violation` |
+| Deleting an attachment referenced by a message | `already_exists` | 409 | `resource_name = attachment_locked`; `detail = "Attachment is referenced by one or more messages and cannot be deleted"` |
+| Upload into a chat whose vector store was created for another provider backend | `already_exists` | 409 | `resource_name = provider_mismatch`; `detail = "chat vector store belongs to another provider"` |
+| Any other unique-constraint violation that the caller does not handle (`DomainError::Conflict` from the DB layer) | `already_exists` | 409 | `resource_name = unique_violation`; `detail = "resource already exists"` (also for any other conflict code). The `detail` of every 409 `already_exists` is a fixed string per code; the driver or backend message is only logged |
 | Quota exhausted (tokens, daily web search, daily code interpreter) | `resource_exhausted` | 429 | `violations[{subject: <quota_scope>, description: "quota_exceeded"}]`; `quota_scope` is `tokens`, `web_search` or `code_interpreter` |
-| Per-chat document count or storage limit | `resource_exhausted` | 429 | `document_limit` / `storage_limit` |
-| Storage backend (provider Files / vector store API) failure on attachment upload | `service_unavailable` | 503 + `Retry-After` |  |
-| Provider or policy resolution failure before streaming (`messages:stream`, retry, edit) | `internal` | 500 | provider failures after the stream opens are SSE `error` events |
+| Per-chat document count or storage limit | `resource_exhausted` | 429 | `document_limit` / `storage_limit` (was 400) |
+| Storage backend (provider Files / vector store API) failure on attachment upload | `service_unavailable` | 503 + `Retry-After` | (was 502/504) |
+| Provider or policy resolution failure before streaming (`messages:stream`, retry, edit) or before an upload reads the body | `internal` | 500 | provider failures after the stream opens are SSE `error` events |
 | Upload concurrency limit | `service_unavailable` | 503 + `Retry-After` | |
 | Internal / database error | `internal` | 500 | |
 
 `StreamError::Replay` maps to 409 `aborted` with reason `REPLAY` in `api/rest/error.rs`. The arm is defensive: the `messages:stream` handler intercepts `Replay` and serves the buffered SSE replay of the completed turn (`api/rest/handlers/messages.rs`), so clients do not receive this error.
 
-Superseded statuses: 413 `file_too_large`, 415 `unsupported_file_type` / `unsupported_media`, 502 `provider_error` and 504 `provider_timeout` are no longer returned by REST endpoints; the per-chat document limit changed from 400 to 429. `image_bytes_exceeded` and the `uploads` / `image_inputs` quota scopes are not implemented. MCP error codes (`mcp_server_unavailable`, `mcp_server_not_found`, `mcp_assign_denied`) belong to the Future MCP scope ([ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)).
+Superseded statuses: 413 `file_too_large`, 415 `unsupported_file_type` / `unsupported_media`, 502 `provider_error` and 504 `provider_timeout` are no longer returned by mini-chat REST endpoints (api-gateway can still answer 413 when the body exceeds its `defaults.body_limit_bytes`); the per-chat document limit changed from 400 to 429. `image_bytes_exceeded` and the `uploads` / `image_inputs` quota scopes are not implemented. MCP error codes (`mcp_server_unavailable`, `mcp_server_not_found`, `mcp_assign_denied`) belong to the Future MCP scope ([ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)).
 
 **SSE `error` event**: `data: {code, message}`. The envelope is independent of `Problem` and carries no `quota_scope` (quota exhaustion is detected at preflight and returned as a 429 `Problem`). P1 codes:
 
@@ -1205,7 +1205,7 @@ Superseded statuses: 413 `file_too_large`, 415 `unsupported_file_type` / `unsupp
 | `agentic_iterations_exceeded` | Tool-use iteration cap exceeded |
 | `unexpected_tool_use` | Model requested a tool the turn does not handle |
 | `message_persistence_failed` | The answer could not be persisted; the turn is `failed` |
-| `finalization_failed` | The finalization transaction did not commit; the turn stays `running` until the orphan watchdog fails it |
+| `finalization_failed` | The finalization transaction of a completed or incomplete stream did not commit; the turn stays `running` until the orphan watchdog fails it. When finalization of a failed stream does not commit, the client gets the original error code instead |
 | `stream_interrupted` | The provider task ended without a terminal event (for example, the orphan watchdog won the finalization CAS) |
 
 A 429 `resource_exhausted` `Problem` is user quota exhaustion; provider throttling after the stream opened is the SSE code `rate_limited`.
@@ -1321,7 +1321,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 **Preconditions**:
 - User is authenticated and tenant has `ai_chat` license
 - Chat exists and belongs to the user
-- File is a supported image type (PNG, JPEG, WebP) and within size limits
+- File is a supported image type (PNG, JPEG, WebP, GIF) and within size limits
 - Effective model supports image input
 
 **Main Flow**:
@@ -1557,7 +1557,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 
 ## 9. Acceptance Criteria
 
-- [ ] User can create a chat, send messages, and receive streamed AI responses with `mini_chat_ttft_overhead_ms` p99 < 50 ms platform overhead (excluding provider latency)
+- [ ] User can create a chat, send messages, and receive streamed AI responses with `mini_chat_ttft_overhead_ms` p99 < 50 ms in-gear overhead (provider first byte to internal SSE channel send; excluding provider latency)
 - [ ] Cancellation propagation meets design thresholds: `mini_chat_time_to_abort_ms` p99 < 200 ms (measured from the observed disconnect) and `mini_chat_tokens_after_cancel` p99 < 50 tokens (`tokens_after_cancel` is declared but not recorded in P1; see §6.2)
 - [ ] User can upload a document and ask questions that are answered using document content
 - [ ] Users from different tenants cannot access each other's chats, documents, or search results
@@ -1573,7 +1573,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 - [ ] Every completed chat turn emits a structured audit event through the audit plugin (one event per completed turn) including usage metrics; prompt, response and attachment content are not included in P1 ([ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md))
 - [ ] Long conversations (50+ turns) remain functional via thread summary compression; compression triggers when context assembly truncated older messages, or when no summary exists yet and the assembled context reaches `compression_threshold_pct` (default 80%) of the input budget (see `cpt-cf-mini-chat-fr-thread-summary`)
 - [ ] User can retry, edit, or delete the last turn; operations on non-latest turns are rejected with `409 Conflict` (`NOT_LATEST_TURN`); a quota rejection of retry or edit leaves the previous turn intact; retry and edit re-send the original message's images
-- [ ] User can upload an image attachment (PNG/JPEG/WebP) and ask "what is in this image" and receive a relevant answer
+- [ ] User can upload an image attachment (PNG/JPEG/WebP/GIF) and ask "what is in this image" and receive a relevant answer
 - [ ] Image attachments do not appear in file_search citations
 - [ ] Quota limits for images are enforced: per-turn image input limit (implemented, 400 `TOO_MANY_IMAGES`) and per-day image input limit (not implemented — [ADR-0008](./ADR/0008-cpt-cf-mini-chat-adr-quota-policy-scope.md)) reject requests that exceed configured caps
 - [ ] Audit events for turns with image input do not include raw image bytes; only attachment metadata (attachment_id, content_type, size_bytes, filename) is included (attachment metadata: not implemented — [ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md); P1 audit events carry no attachment data)
@@ -1697,7 +1697,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 
 ## 13. Open Questions
 
-- What document file types are supported in P1 beyond `pdf`, `docx`, and plain text?
+- ~~What document file types are supported in P1 beyond `pdf`, `docx`, and plain text?~~ **Resolved**: the upload allowlist is `ACCEPTED_MIMES` in `mini-chat/src/domain/mime_validation.rs`: PDF, DOCX, PPTX, XLSX (code interpreter only), plain text, Markdown, HTML, JSON, source code (Python, Java, JavaScript, TypeScript, Rust, Go, C#, Ruby, SQL), and the images PNG, JPEG, WebP and GIF. CSV is accepted as `text/plain` when `rag.allow_csv_upload` is on (default).
 - What is the exact UX when `state=running` is returned from Turn Status API (poll cadence, max wait, and banner text)?
 - ~~Thread summary trigger thresholds~~ **Resolved**: token-based trigger (context truncation, or `compression_threshold_pct` of the input budget); see `cpt-cf-mini-chat-fr-thread-summary`
 - Is the system prompt configurable per tenant, or fixed platform-wide?

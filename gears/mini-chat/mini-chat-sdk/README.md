@@ -21,7 +21,7 @@ Implement the plugin trait:
 use async_trait::async_trait;
 use mini_chat_sdk::{
     MiniChatModelPolicyPluginClientV1, MiniChatModelPolicyPluginError,
-    PolicySnapshot, PolicyVersionInfo, UserLimits,
+    PolicySnapshot, PolicyVersionInfo, PublishError, UsageEvent, UserLimits,
 };
 use uuid::Uuid;
 
@@ -47,6 +47,12 @@ impl MiniChatModelPolicyPluginClientV1 for MyPolicyPlugin {
         user_id: Uuid,
         policy_version: u64,
     ) -> Result<UserLimits, MiniChatModelPolicyPluginError> {
+        // ...
+    }
+
+    // Required: no default body. Called by the usage outbox handler after
+    // the finalization transaction commits.
+    async fn publish_usage(&self, payload: UsageEvent) -> Result<(), PublishError> {
         // ...
     }
 }
