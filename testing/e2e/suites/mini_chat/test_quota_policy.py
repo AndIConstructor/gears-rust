@@ -339,11 +339,16 @@ class TestDowngrade:
             "/v1/responses",
         ]
         (turn,) = query_db(
-            "SELECT reserved_credits_micro FROM chat_turns WHERE request_id = ?", (rid,),
+            "SELECT reserve_tokens, reserved_credits_micro FROM chat_turns WHERE request_id = ?",
+            (rid,),
         )
-        # The booked (standard) reserve fits in the headroom; the premium
-        # one, 8192 output tokens at 15 credits_micro alone, does not.
-        assert turn["reserved_credits_micro"] <= headroom < 8192 * 15, turn
+        # The booked standard reserve fits in the headroom.
+        assert turn["reserved_credits_micro"] <= headroom, turn
+        # The premium reserve of the same request would not: its estimated
+        # input tokens (reserve_tokens less the 8192 output cap) at 3
+        # credits_micro plus 8192 output tokens at 15 (azure-gpt-4.1).
+        premium_reserve = (turn["reserve_tokens"] - 8192) * 3 + 8192 * 15
+        assert premium_reserve > headroom, (premium_reserve, turn)
 
     def test_disabled_chat_model_downgrades(self, user3):
         """A chat locked to a model that was disabled later is downgraded with model_disabled."""
@@ -435,6 +440,20 @@ class TestWebSearchDailyQuota:
         )
         user3.assert_mutation_rejected(mutation, chat_id, rid, "web_search", mock_provider)
 
+    @pytest.mark.parametrize("mutation", ["retry", "edit"])
+    def test_web_search_quota_allows_mutation_of_plain_turn(self, user3, mutation):
+        """Control for the case above: at the same exhausted web_search
+        quota, a retry or edit of a turn without web search runs."""
+        chat_id = user3.create_chat(DEFAULT_MODEL)
+        rid, _ = user3.complete_turn(chat_id, "No tools needed.")
+        user3.seed(
+            bucket="total", period_type="daily", web_search_calls=WEB_SEARCH_DAILY_QUOTA,
+        )
+        resp = user3.mutate(mutation, chat_id, rid)
+        assert resp.status_code == 200, resp.text
+        expect_done(parse_sse(resp.text))
+        assert_no_reserves(user3.user_id)
+
     def test_web_search_below_quota_allowed(self, user3):
         chat_id = user3.create_chat(DEFAULT_MODEL)
         user3.seed(
@@ -495,6 +514,21 @@ class TestCodeInterpreterDailyQuota:
             code_interpreter_calls=CODE_INTERPRETER_DAILY_QUOTA,
         )
         user3.assert_mutation_rejected(mutation, chat_id, rid, "code_interpreter", mock_provider)
+
+    @pytest.mark.parametrize("mutation", ["retry", "edit"])
+    def test_code_interpreter_quota_allows_mutation_without_xlsx(self, user3, mutation):
+        """Control for the case above: at the same exhausted code_interpreter
+        quota, a retry or edit in a chat without an XLSX runs."""
+        chat_id = user3.create_chat(STANDARD_MODEL)
+        rid, _ = user3.complete_turn(chat_id, "No files here.")
+        user3.seed(
+            bucket="total", period_type="daily",
+            code_interpreter_calls=CODE_INTERPRETER_DAILY_QUOTA,
+        )
+        resp = user3.mutate(mutation, chat_id, rid)
+        assert resp.status_code == 200, resp.text
+        expect_done(parse_sse(resp.text))
+        assert_no_reserves(user3.user_id)
 
 
 class TestQuotaStatusFlags:
