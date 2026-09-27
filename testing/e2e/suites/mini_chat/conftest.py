@@ -932,6 +932,10 @@ def pytest_addoption(parser):
     )
 
 
+# Lower bound of a test's timeout in online mode (see pytest_collection_modifyitems).
+ONLINE_MIN_TIMEOUT_SECS = 300.0
+
+
 def pytest_collection_modifyitems(config, items):
     """Auto-skip online_only tests in offline mode; time the test body only.
 
@@ -939,7 +943,9 @@ def pytest_collection_modifyitems(config, items):
     the session fixtures (server start, credstore provisioning; each bounded
     by its own wait) would count against whichever test runs first. Each
     mini-chat test gets its timeout (its own `timeout` marker, else the ini
-    value) with `func_only=True`.
+    value) with `func_only=True`. In online mode each timeout is raised to at
+    least ONLINE_MIN_TIMEOUT_SECS: the offline budgets fit the mock, and a
+    real provider takes seconds per answer.
     """
     if config.getoption("mode") == "offline":
         skip = pytest.mark.skip(reason="requires --mode online")
@@ -955,6 +961,8 @@ def pytest_collection_modifyitems(config, items):
             marker.kwargs.get("timeout", default_timeout) if marker is not None
             else default_timeout
         )
+        if config.getoption("mode") == "online" and timeout:
+            timeout = max(float(timeout), ONLINE_MIN_TIMEOUT_SECS)
         item.add_marker(pytest.mark.timeout(timeout, func_only=True), append=False)
 
 
