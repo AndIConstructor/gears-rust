@@ -90,15 +90,28 @@ class TestSettlement:
     """Quota settlement after various turn outcomes."""
 
     @pytest.mark.multi_provider
-    def test_completed_turn_releases_reserve(self, provider_chat):
-        """A completed turn leaves no reserve behind and its turn is done."""
+    @pytest.mark.timeout(30)
+    def test_completed_turn_releases_reserve(self, provider, provider_chat):
+        """A completed turn leaves no reserve behind, its turn is done, and it
+        is settled on the token counts the provider reported (the real ones
+        in online mode): one usage event, `actual`, with the credits of the
+        `done` usage (base.yaml multipliers in credits_micro per token:
+        gpt-5.2 1 in / 3 out, azure-gpt-4.1 3 in / 15 out)."""
         rid = str(uuid.uuid4())
-        status, events, _ = stream_message(provider_chat["id"], "Say OK.", request_id=rid)
-        assert status == 200
-        expect_done(events)
+        status, events, raw = stream_message(provider_chat["id"], "Say OK.", request_id=rid)
+        assert status == 200, raw
+        usage = expect_done(events).data["usage"]
 
         assert poll_turn(provider_chat["id"], rid)["state"] == "done"
         assert_no_reserves(USER_A_ID)
+        in_mult, out_mult = {"openai": (1, 3), "azure": (3, 15)}[provider]
+        (event,) = usage_events(rid)
+        assert (event["billing_outcome"], event["settlement_method"]) == (
+            "completed", "actual",
+        ), event
+        assert event["actual_credits_micro"] == (
+            usage["input_tokens"] * in_mult + usage["output_tokens"] * out_mult
+        ), (event, usage)
 
     @pytest.mark.timeout(30)
     def test_reservation_snapshot_persisted(self, request, chat, mock_provider):
@@ -340,18 +353,3 @@ class TestSettlement:
         # dedupe_key = {tenant_id}/{turn_id}/{request_id} (UUIDs in simple form).
         expected = "/".join(uuid.UUID(v).hex for v in (TENANT_A_ID, event["turn_id"], rid))
         assert event["dedupe_key"] == expected
-
-
-@pytest.mark.multi_provider
-@pytest.mark.online_only
-class TestSettlementPerProvider:
-    """Settlement with real provider token counts."""
-
-    def test_completed_settlement_per_provider(self, provider_chat):
-        status, events, _ = stream_message(provider_chat["id"], "Say hello in exactly three words.")
-        assert status == 200
-        done = expect_done(events)
-        usage = done.data["usage"]
-        assert usage["input_tokens"] > 0
-        assert usage["output_tokens"] > 0
-        assert_no_reserves(USER_A_ID)
