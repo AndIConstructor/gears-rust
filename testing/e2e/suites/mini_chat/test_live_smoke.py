@@ -131,7 +131,7 @@ def upload_file(chat_id: str, filename: str, content: bytes, content_type: str =
     return resp.json()["id"]
 
 
-def poll_attachment_ready(chat_id: str, att_id: str, timeout_secs: int = 30) -> dict:
+def poll_attachment_ready(chat_id: str, att_id: str, timeout_secs: int = 180) -> dict:
     """Poll until attachment is ready or failed."""
     deadline = time.time() + timeout_secs
     while time.time() < deadline:

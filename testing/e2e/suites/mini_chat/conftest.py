@@ -212,6 +212,22 @@ RESOURCE_ODATA = "cf.core.odata.query.v1~"
 RESOURCE_HTTP_REQUEST = "cf.core.http.request.v1~"
 
 
+def settled_attachment(chat_id: str, body: dict, timeout: float = 180.0) -> dict:
+    """Return the attachment once indexing settled.
+
+    An upload returns `uploaded` when the vector store is still indexing at
+    the request deadline (real providers; the mock finishes within the
+    request). Poll GET until the status leaves `uploaded`.
+    """
+    deadline = time.monotonic() + timeout
+    while body.get("status") == "uploaded" and time.monotonic() < deadline:
+        time.sleep(1.0)
+        body = httpx.get(
+            f"{API_PREFIX}/chats/{chat_id}/attachments/{body['id']}", timeout=10,
+        ).json()
+    return body
+
+
 def assert_problem(
     resp: httpx.Response,
     status: int,
@@ -779,6 +795,9 @@ def _patch_mini_chat_config(config_text: str, env) -> str:
     else:
         # Online mode — real creds from env
         creds = load_credentials()
+        # The rig's 8 s upstream read timeout fits the mock; a real provider
+        # can stay silent longer (web search, first token).
+        config_text = config_text.replace("proxy_timeout_secs: 8", "proxy_timeout_secs: 60", 1)
         config_text = config_text.replace("REPLACE_WITH_OPENAI_KEY", creds.get("OPENAI_API_KEY", ""))
         config_text = config_text.replace("REPLACE_WITH_AZURE_KEY", creds.get("AZURE_OPENAI_API_KEY", ""))
         azure_host = creds.get("AZURE_OPENAI_HOST")

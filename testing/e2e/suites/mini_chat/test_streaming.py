@@ -3,6 +3,7 @@ SSE contract, pre-stream errors and message persistence."""
 
 import dataclasses
 import threading
+import time
 import uuid
 
 import pytest
@@ -392,6 +393,38 @@ class TestStreamInvalidAttachments:
             thread.join(timeout=30)
         assert result["resp"].status_code == 201, result["resp"].text
         assert result["resp"].json()["status"] == "ready"
+
+
+    @pytest.mark.timeout(90)
+    def test_indexing_past_request_deadline_returns_uploaded_then_ready(
+        self, chat, mock_provider,
+    ):
+        """Indexing still `in_progress` when the upload's 25 s deadline passes:
+        the upload answers 201 `uploaded`, a send with it is rejected, and
+        once the vector store reports `completed` the background wait makes
+        the attachment `ready` and usable."""
+        chat_id = chat["id"]
+        mock_provider.hold_indexing()
+        try:
+            started = time.monotonic()
+            resp = _upload(chat_id, "slow-index.txt", b"slowly indexed", "text/plain")
+            assert resp.status_code == 201, resp.text
+            assert resp.json()["status"] == "uploaded", resp.json()
+            assert time.monotonic() - started >= 20, "returned before the request deadline"
+            att_id = resp.json()["id"]
+            self._assert_rejected(chat_id, [att_id], mock_provider)
+        finally:
+            mock_provider.hold_indexing(False)
+        detail = wait_for(
+            lambda: (
+                d if (d := httpx.get(
+                    f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10,
+                ).json())["status"] != "uploaded" else None
+            ),
+            "the background indexing wait to settle the attachment",
+            timeout=30,
+        )
+        assert detail["status"] == "ready", detail
 
 
 @pytest.mark.usefixtures("offline_only")

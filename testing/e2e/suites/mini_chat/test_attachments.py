@@ -36,6 +36,7 @@ from .conftest import (
     uuid_from_db,
     wait_cleanup_terminal,
     wait_for,
+    settled_attachment,
 )
 from .mock_provider.responses import SCENARIOS, Scenario
 from .mock_provider.server import FILES_PATH
@@ -81,7 +82,9 @@ class TestUploadAndGet:
         assert body["content_type"] == "text/plain"
         assert body["size_bytes"] == len(content)
         assert body["kind"] == "document"
-        # Upload is synchronous (ADR-0007): the 201 already reports `ready`.
+        # Upload waits for indexing (ADR-0007); a real provider can still be
+        # indexing at the request deadline, then the row settles later.
+        body = settled_attachment(chat_id, body)
         assert body["status"] == "ready", body
 
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
@@ -443,6 +446,7 @@ class TestImageUploadAndSend:
         att_id = body["id"]
         assert body["kind"] == "image", f"Expected image kind, got: {body['kind']}"
         assert body["content_type"] == "image/png"
+        body = settled_attachment(chat_id, body)
         assert body["status"] == "ready", body
 
         detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10).json()
@@ -516,6 +520,7 @@ class TestImageRecognition:
         body = resp.json()
         att_id = body["id"]
         assert body["kind"] == "image"
+        body = settled_attachment(chat_id, body)
         assert body["status"] == "ready", f"[{provider_label}] Expected ready, got: {body}"
         detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10).json()
 
@@ -737,8 +742,10 @@ class TestUploadSizeEnforcement:
     def test_document_within_limit_succeeds(self, provider_chat):
         """Upload a document just under the limit → succeeds."""
         chat_id = provider_chat["id"]
-        # 1 MB — well under 25 MB
-        payload = b"x" * (1 * 1024 * 1024)
+        # 1 MB — well under 25 MB. Real text: a real vector store does not
+        # finish indexing a megabyte of a single repeated character.
+        line = b"The quick brown fox jumps over the lazy dog near the river bank.\n"
+        payload = (line * (1024 * 1024 // len(line) + 1))[: 1024 * 1024]
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/attachments",
             files={"file": ("medium.txt", io.BytesIO(payload), "text/plain")},
@@ -747,7 +754,8 @@ class TestUploadSizeEnforcement:
         assert resp.status_code == 201, (
             f"Expected 201 for within-limit doc, got {resp.status_code}: {resp.text}"
         )
-        assert resp.json()["status"] == "ready", resp.json()
+        body = settled_attachment(chat_id, resp.json())
+        assert body["status"] == "ready", body
 
 
 @pytest.mark.multi_provider
@@ -766,7 +774,7 @@ class TestUploadSizeBytesAccuracy:
             timeout=60,
         )
         assert resp.status_code == 201
-        assert resp.json()["status"] == "ready", resp.json()
+        assert settled_attachment(chat_id, resp.json())["status"] == "ready", resp.json()
         att_id = resp.json()["id"]
         detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10).json()
         assert detail["size_bytes"] == 123_456, (
@@ -832,8 +840,9 @@ def _upload_ready(chat_id: str, filename: str, payload: bytes, content_type: str
     `ready` (ADR-0007). Return the attachment id."""
     resp = _upload(chat_id, filename, payload, content_type)
     assert resp.status_code == 201, f"upload failed: {resp.status_code} {resp.text}"
-    assert resp.json()["status"] == "ready", resp.json()
-    return resp.json()["id"]
+    body = settled_attachment(chat_id, resp.json())
+    assert body["status"] == "ready", body
+    return body["id"]
 
 
 def _clone_attachment(src_id: str, *, size_bytes: int | None = None) -> str:
