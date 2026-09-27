@@ -22,11 +22,11 @@ from .conftest import (
     exec_db,
     expect_done,
     expect_stream_started,
-    outbox_payloads,
     parse_sse,
     provider_file_id,
     query_db,
     stream_message,
+    usage_events,
     uuid_from_db,
     wait_cleanup_terminal,
 )
@@ -1253,9 +1253,6 @@ class TestFileSearchToolEvents:
             "SELECT file_search_completed_count FROM chat_turns WHERE request_id = ?", (rid,),
         )
         assert rows == [{"file_search_completed_count": 1}], rows
-        usage = [
-            p for p in outbox_payloads(rid)
-            if p.get("request_id") == rid and "settlement_method" in p
-        ]
+        usage = usage_events(rid)
         assert [u["file_search_calls"] for u in usage] == [1], usage
 

@@ -20,26 +20,18 @@ from .conftest import (
     find_period,
     get_quota_status,
     open_stream,
-    outbox_payloads,
     parse_sse,
     poll_turn,
     query_db,
     slow_scenario,
     stream_message,
+    usage_events,
 )
 from .mock_provider.responses import MockEvent, Scenario, Usage
 
 
 def total_daily_used() -> int:
     return find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
-
-
-def usage_events(rid: str) -> list[dict]:
-    """Usage outbox payloads of the turn with `rid`."""
-    return [
-        p for p in outbox_payloads(rid)
-        if p.get("request_id") == rid and "settlement_method" in p
-    ]
 
 
 # ── Preflight estimate of a first message in a fresh azure-gpt-4.1 chat ──

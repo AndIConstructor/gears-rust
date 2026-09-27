@@ -2,7 +2,7 @@
 
 Background cleanup is not visible over HTTP. These tests check the effects:
 DELETE status codes, 404 after deletion, attachment `cleanup_status` and the
-cleanup outbox payloads (read directly from the DB).
+enqueued cleanup outbox messages (conftest "Outbox capture").
 
 Orphan-watchdog finalization is covered by unit tests (turn_repo.rs,
 finalization_service.rs): the minimum watchdog timeout (90 s) does not fit
@@ -21,6 +21,7 @@ import pytest
 
 from .conftest import (
     API_PREFIX,
+    ATTACHMENT_CLEANUP_QUEUE,
     DEFAULT_MODEL,
     STANDARD_MODEL,
     USER_A_ID,
@@ -435,7 +436,10 @@ class TestCleanupWorkerDB:
         resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
         assert resp.status_code == 204
 
-        payloads = [p for p in outbox_payloads(att_id) if p.get("attachment_id") == att_id]
+        payloads = [
+            p for p in outbox_payloads(att_id, ATTACHMENT_CLEANUP_QUEUE)
+            if p.get("attachment_id") == att_id
+        ]
         assert len(payloads) == 1, payloads
         payload = payloads[0]
         assert payload["event_type"] == "attachment_deleted"

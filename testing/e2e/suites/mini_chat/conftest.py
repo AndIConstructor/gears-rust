@@ -42,6 +42,7 @@ TOKEN_USER_A = "mini-chat-e2e"
 TOKEN_USER_B = "mini-chat-e2e-user-b"
 TOKEN_TENANT_B = "mini-chat-e2e-tenant-b"
 USER_A_ID = "11111111-6a88-4768-9dfc-6bcd5187d9ed"
+USER_B_ID = "44444444-6a88-4768-9dfc-6bcd5187d9ed"
 TENANT_A_ID = "00000000-df51-5b42-9538-d2b56b7ee953"
 
 # Dedicated users for quota-policy tests (test_quota_policy.py). Their usage
@@ -333,18 +334,93 @@ def provider_file_id(attachment_id: str) -> str:
     return rows[0]["provider_file_id"]
 
 
-def outbox_payloads(needle: str) -> list[dict]:
-    """JSON payloads of the outbox body table that contain `needle`."""
-    rows = query_db(
-        "SELECT payload FROM toolkit_outbox_body WHERE payload LIKE ?", (f"%{needle}%",),
-    )
+# ── Outbox capture ───────────────────────────────────────────────────────
+#
+# The toolkit-db outbox deletes a message's `toolkit_outbox_body` row about
+# a second after its handler succeeded (vacuum worker,
+# libs/toolkit-db/src/outbox/workers/vacuum.rs; its tuning is not part of
+# the mini-chat config), so the body table cannot tell "never enqueued" from
+# "already handled". The handlers keep nothing either: usage events go to
+# the static model policy plugin, audit events to the static audit plugin.
+#
+# Instead a SQLite trigger on `toolkit_outbox_incoming` copies each message
+# (queue and payload) into E2E_OUTBOX_CAPTURE when it is enqueued. The
+# trigger runs inside the enqueuing transaction, so a message is captured
+# exactly when it commits, and the copy is never vacuumed. Once the
+# transaction that would enqueue a message has committed (e.g. the turn is
+# terminal), its absence from the capture means it was not enqueued.
+
+E2E_OUTBOX_CAPTURE = "e2e_outbox_capture"
+
+# Outbox queue names (OutboxConfig defaults, src/config.rs; base.yaml does
+# not override them).
+USAGE_QUEUE = "mini-chat.usage_snapshot"
+ATTACHMENT_CLEANUP_QUEUE = "mini-chat.attachment_cleanup"
+CHAT_CLEANUP_QUEUE = "mini-chat.chat_cleanup"
+THREAD_SUMMARY_QUEUE = "mini-chat.thread_summary"
+
+_OUTBOX_TABLES = ("toolkit_outbox_body", "toolkit_outbox_incoming", "toolkit_outbox_partitions")
+
+
+def _install_outbox_capture(timeout: float = 60.0) -> None:
+    """Create the capture table and trigger once the outbox schema exists."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if os.path.exists(DB_PATH):
+            names = {
+                r["name"] for r in query_db("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            if all(t in names for t in _OUTBOX_TABLES):
+                break
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"outbox tables {_OUTBOX_TABLES} not created within {timeout}s")
+        time.sleep(0.2)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    try:
+        conn.executescript(f"""
+            CREATE TABLE IF NOT EXISTS {E2E_OUTBOX_CAPTURE} (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                body_id INTEGER NOT NULL,
+                queue   TEXT    NOT NULL,
+                payload BLOB    NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS {E2E_OUTBOX_CAPTURE}_on_enqueue
+            AFTER INSERT ON toolkit_outbox_incoming
+            BEGIN
+                INSERT INTO {E2E_OUTBOX_CAPTURE} (body_id, queue, payload)
+                SELECT b.id, p.queue, b.payload
+                FROM toolkit_outbox_body b, toolkit_outbox_partitions p
+                WHERE b.id = NEW.body_id AND p.id = NEW.partition_id;
+            END;
+        """)
+    finally:
+        conn.close()
+
+
+def outbox_payloads(needle: str, queue: str | None = None) -> list[dict]:
+    """JSON payloads of the outbox messages enqueued so far (see "Outbox
+    capture") that contain `needle`, oldest first; only `queue` if given."""
+    sql = f"SELECT payload FROM {E2E_OUTBOX_CAPTURE} WHERE payload LIKE ?"
+    params: tuple = (f"%{needle}%",)
+    if queue is not None:
+        sql += " AND queue = ?"
+        params += (queue,)
+    rows = query_db(sql + " ORDER BY id", params)
     return [json.loads(r["payload"]) for r in rows]
 
 
-def chat_cleanup_payloads(chat_id: str) -> list[dict]:
-    """Chat soft-delete cleanup payloads of `chat_id` in the outbox body table."""
+def usage_events(request_id: str) -> list[dict]:
+    """Usage events enqueued for the turn with `request_id`."""
     return [
-        p for p in outbox_payloads(chat_id)
+        p for p in outbox_payloads(request_id, USAGE_QUEUE)
+        if p.get("request_id") == request_id
+    ]
+
+
+def chat_cleanup_payloads(chat_id: str) -> list[dict]:
+    """Chat soft-delete cleanup messages enqueued for `chat_id`."""
+    return [
+        p for p in outbox_payloads(chat_id, CHAT_CLEANUP_QUEUE)
         if p.get("chat_id") == chat_id and p.get("reason") == "chat_soft_delete"
     ]
 
@@ -942,6 +1018,7 @@ def gear_test_env(request):
 def server(test_env):
     """Alias for backward compat — yields base URL after server is running."""
     global _db_summary_text
+    _install_outbox_capture()
     yield test_env.base_url
     # DB summary on teardown, once no turn is still running.
     _wait_no_running_turns()

@@ -26,7 +26,14 @@ from .conftest import (
     API_PREFIX,
     CATALOG_SYSTEM_PROMPT,
     TENANT_A_ID,
+    THREAD_SUMMARY_QUEUE,
     TINY_CTX_MODEL,
+    TOKEN_USER_A,
+    TOKEN_USER_B,
+    USAGE_QUEUE,
+    USER_A_ID,
+    USER_B_ID,
+    auth_headers,
     expect_done,
     expect_stream_started,
     list_messages,
@@ -36,6 +43,7 @@ from .conftest import (
     provider_input,
     query_db,
     stream_message,
+    usage_events,
     uuid_from_db,
 )
 from .mock_provider.responses import SUMMARY_OUTPUT_TOKENS
@@ -44,7 +52,10 @@ SUMMARY_MODEL_PROVIDER_ID = "gpt-5-mini"  # provider_model_id of summary_model_i
 
 # Subject of the summary request: the platform default subject
 # (toolkit_security::constants::DEFAULT_SUBJECT_ID, libs/toolkit-security/src/constants.rs).
+# It is also user A's id (config/base.yaml), so the summary test runs in a
+# chat of user B, where the two differ.
 DEFAULT_SUBJECT_ID = "11111111-6a88-4768-9dfc-6bcd5187d9ed"
+assert DEFAULT_SUBJECT_ID == USER_A_ID != USER_B_ID
 
 # Prefix of the summary message in the provider input
 # (SUMMARY_PREAMBLE, domain/service/context_assembly.rs).
@@ -60,26 +71,28 @@ def _require_offline(request):
         pytest.skip("inspects the mock provider's captured requests")
 
 
-def _complete_turn(chat_id: str, content: str, request_id: str | None = None):
+def _complete_turn(chat_id: str, content: str, request_id: str | None = None,
+                   *, token: str = TOKEN_USER_A):
     rid = request_id or str(uuid.uuid4())
-    status, events, raw = stream_message(chat_id, content, request_id=rid)
+    status, events, raw = stream_message(chat_id, content, request_id=rid, token=token)
     assert status == 200, raw
     expect_done(events)
-    poll_turn(chat_id, rid, ("done",))
+    poll_turn(chat_id, rid, ("done",), token=token)
+    # The turn's usage event is enqueued in its finalization transaction,
+    # the same one that would enqueue a summary task.
+    assert len(usage_events(rid)) == 1, usage_events(rid)
     return events
 
 
 def _summary_tasks(chat_id: str) -> list[dict]:
-    """Thread-summary task payloads of the chat in the outbox body table.
+    """Thread-summary tasks enqueued for the chat (conftest "Outbox capture").
 
     The task is enqueued in the transaction that finalizes the turn
     (finalization_service.rs), so once the turn is `done` it is either
-    there or not enqueued at all."""
+    captured or was not enqueued at all."""
     return [
-        p for p in outbox_payloads(chat_id)
+        p for p in outbox_payloads(chat_id, THREAD_SUMMARY_QUEUE)
         if p.get("chat_id") == chat_id
-        and p.get("system_task_type") == "thread_summary_update"
-        and "frozen_target_message_id" in p  # not the summary turn's usage event
     ]
 
 
@@ -110,19 +123,27 @@ class TestThreadSummary:
         messages before it (the finalized turn stays out: retry, edit and
         delete may still replace it); the worker stores the summary and marks
         those messages compressed; the next turn sends the summary instead of
-        them, followed by the unsummarized turn."""
-        _require_offline(request)
-        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        them, followed by the unsummarized turn.
 
-        _complete_turn(chat_id, "First question.")
+        The chat belongs to user B: the summary runs as the platform default
+        subject, which is user A's id in this rig."""
+        _require_offline(request)
+        resp = httpx.post(
+            f"{API_PREFIX}/chats", json={"model": TINY_CTX_MODEL},
+            headers=auth_headers(TOKEN_USER_B), timeout=10,
+        )
+        assert resp.status_code == 201, resp.text
+        chat_id = resp.json()["id"]
+
+        _complete_turn(chat_id, "First question.", token=TOKEN_USER_B)
         assert _summary_tasks(chat_id) == [], "one turn is below the threshold"
 
-        _complete_turn(chat_id, "Second question.")
-        summary = _wait_for_summary(chat_id)
+        _complete_turn(chat_id, "Second question.", token=TOKEN_USER_B)
         tasks = _summary_tasks(chat_id)
         assert len(tasks) == 1, tasks
+        summary = _wait_for_summary(chat_id)
 
-        messages = list_messages(chat_id)
+        messages = list_messages(chat_id, token=TOKEN_USER_B)
         assert [m["role"] for m in messages] == ["user", "assistant"] * 2
         assert summary["summary_text"] == "MOCK-SUMMARY 1 user and 1 assistant messages"
         assert summary["token_estimate"] == SUMMARY_OUTPUT_TOKENS
@@ -138,10 +159,9 @@ class TestThreadSummary:
         # The summary's usage event, enqueued in the transaction that stored
         # the summary: a system task, with no user and no turn.
         (summary_usage,) = [
-            p for p in outbox_payloads(chat_id)
+            p for p in outbox_payloads(chat_id, USAGE_QUEUE)
             if p.get("chat_id") == chat_id
             and p.get("system_task_type") == "thread_summary_update"
-            and "settlement_method" in p
         ]
         assert summary_usage["requester_type"] == "system", summary_usage
         assert "user_id" not in summary_usage and "turn_id" not in summary_usage, summary_usage
@@ -153,7 +173,8 @@ class TestThreadSummary:
         ]
         assert len(summary_requests) == 1, summary_requests
         assert summary_requests[0]["model"] == SUMMARY_MODEL_PROVIDER_ID
-        # A system task: the tenant with the default subject, request_type summary.
+        # A system task: the tenant with the default subject (not the chat
+        # owner, user B), request_type summary.
         assert summary_requests[0]["user"] == f"{TENANT_A_ID}:{DEFAULT_SUBJECT_ID}"
         assert summary_requests[0]["metadata"] == {
             "tenant_id": TENANT_A_ID,
@@ -168,7 +189,7 @@ class TestThreadSummary:
         assert "Second question." not in prompt, prompt
 
         mock_provider.clear_captured_requests()
-        events = _complete_turn(chat_id, "Third question.")
+        events = _complete_turn(chat_id, "Third question.", token=TOKEN_USER_B)
         assert expect_stream_started(events).data["thread_summary_applied"] == {
             "token_estimate": SUMMARY_OUTPUT_TOKENS,
         }
