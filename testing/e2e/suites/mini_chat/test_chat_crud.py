@@ -84,6 +84,15 @@ class TestCreateChat:
         resp = httpx.post(f"{API_PREFIX}/chats", json={"model": DISABLED_MODEL})
         assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_MODEL")
 
+    def test_create_chat_title_trimmed(self, server):
+        """02-36: leading and trailing whitespace of the title is trimmed
+        (domain/service/chat_service.rs)."""
+        resp = httpx.post(f"{API_PREFIX}/chats", json={"title": "  \tPadded title \n "})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["title"] == "Padded title"
+        fetched = httpx.get(f"{API_PREFIX}/chats/{resp.json()['id']}").json()
+        assert fetched["title"] == "Padded title", fetched
+
     def test_create_chat_title_length_boundary(self, server):
         """Title of 255 characters is accepted, 256 is rejected."""
         resp = httpx.post(f"{API_PREFIX}/chats", json={"title": "T" * 255})
@@ -101,7 +110,8 @@ class TestCreateChat:
     def test_create_chat_schema_invalid_is_422(self, server):
         """A body that does not match the schema (`model` is not a string) is 422."""
         resp = httpx.post(f"{API_PREFIX}/chats", json={"model": 123})
-        assert_problem(resp, 422, "invalid_argument")
+        body = assert_problem(resp, 422, "invalid_argument", field_reason="invalid_json_body")
+        assert [v["field"] for v in body["context"]["field_violations"]] == ["body"], body
 
     def test_create_chat_malformed_json_is_400(self, server):
         resp = httpx.post(
@@ -274,6 +284,105 @@ class TestListChats:
         assert ids[0] == older
 
 
+def _tagged_chats(titles: list[str]) -> tuple[str, list[dict]]:
+    """Create chats titled `<tag> <title>` in this order; return (tag, chats)."""
+    tag = f"q-{uuid.uuid4().hex}"
+    chats = []
+    for title in titles:
+        r = httpx.post(f"{API_PREFIX}/chats", json={"title": f"{tag} {title}"})
+        assert r.status_code == 201, r.text
+        chats.append(r.json())
+    return tag, chats
+
+
+def _list(params: dict) -> dict:
+    resp = httpx.get(f"{API_PREFIX}/chats", params=params)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+class TestListChatsQuery:
+    """02-32..02-35: valid OData options on GET /chats (fields `updated_at`,
+    `id`, `title`, infra/db/odata_mapper.rs `ChatCursorField`). Each test
+    narrows the list to its own chats with a unique title tag."""
+
+    def test_filter_on_each_field(self, server):
+        """`title eq`, `contains(title, ...)`, `id eq` and `updated_at ge`
+        return exactly the matching chats, newest first."""
+        tag, chats = _tagged_chats(["one", "two", "three"])
+        ids = [c["id"] for c in chats]
+        in_tag = f"contains(title, '{tag}')"
+
+        items = _list({"$filter": f"title eq '{tag} two'"})["items"]
+        assert [c["id"] for c in items] == [ids[1]], items
+        items = _list({"$filter": in_tag})["items"]
+        assert [c["id"] for c in items] == ids[::-1], items
+        items = _list({"$filter": f"id eq {ids[2]}"})["items"]
+        assert [c["id"] for c in items] == [ids[2]], items
+        since = chats[1]["updated_at"]
+        items = _list({"$filter": f"{in_tag} and updated_at ge {since}"})["items"]
+        assert [c["id"] for c in items] == [ids[2], ids[1]], items
+
+    @pytest.mark.parametrize(("orderby", "key", "reverse"), [
+        pytest.param("title asc", "title", False, id="title_asc"),
+        pytest.param("title desc", "title", True, id="title_desc"),
+        pytest.param("updated_at asc", "updated_at", False, id="updated_at_asc"),
+        pytest.param("id asc", "id", False, id="id_asc"),
+        pytest.param("id desc", "id", True, id="id_desc"),
+    ])
+    def test_orderby_each_field(self, server, orderby, key, reverse):
+        """`$orderby` on each field sorts the page by that field."""
+        tag, chats = _tagged_chats(["bravo", "alpha", "charlie"])
+        items = _list({"$filter": f"contains(title, '{tag}')", "$orderby": orderby})["items"]
+        if key == "updated_at":
+            expected = [c["id"] for c in chats]
+        else:
+            expected = [c["id"] for c in sorted(chats, key=lambda c: c[key], reverse=reverse)]
+        assert [c["id"] for c in items] == expected, items
+
+    def test_prev_cursor_pages_back(self, server):
+        """`page_info.prev_cursor`: absent on the first page, present on the
+        next one, and following it returns the first page again (with a
+        `next_cursor` and no `prev_cursor`)."""
+        tag, chats = _tagged_chats([str(i) for i in range(5)])
+        newest_first = [c["id"] for c in chats][::-1]
+        flt = {"$filter": f"contains(title, '{tag}')", "limit": 2}
+
+        first = _list(flt)
+        assert [c["id"] for c in first["items"]] == newest_first[:2]
+        assert first["page_info"].get("prev_cursor") is None, first["page_info"]
+        second = _list({**flt, "cursor": first["page_info"]["next_cursor"]})
+        assert [c["id"] for c in second["items"]] == newest_first[2:4]
+        prev = second["page_info"].get("prev_cursor")
+        assert prev, second["page_info"]
+
+        back = _list({**flt, "cursor": prev})
+        assert [c["id"] for c in back["items"]] == newest_first[:2], back
+        assert back["page_info"].get("prev_cursor") is None, back["page_info"]
+        assert back["page_info"].get("next_cursor"), back["page_info"]
+
+    def test_top_and_skiptoken_aliases(self, server):
+        """`$top` is an alias of `limit` and `$skiptoken` of `cursor`
+        (libs/toolkit/src/api/odata.rs): the same pages as with the plain
+        names. Both spellings of one option in a request are 400."""
+        tag, chats = _tagged_chats([str(i) for i in range(3)])
+        flt = {"$filter": f"contains(title, '{tag}')"}
+        plain = _list({**flt, "limit": 2})
+        aliased = _list({**flt, "$top": 2})
+        assert aliased == plain
+        assert aliased["page_info"]["limit"] == 2, aliased["page_info"]
+        cursor = plain["page_info"]["next_cursor"]
+        assert _list({**flt, "$top": 2, "$skiptoken": cursor}) == _list(
+            {**flt, "limit": 2, "cursor": cursor},
+        )
+        assert [c["id"] for c in _list({**flt, "$top": 2, "$skiptoken": cursor})["items"]] == [
+            chats[0]["id"],
+        ]
+
+        resp = httpx.get(f"{API_PREFIX}/chats", params={**flt, "limit": 2, "$top": 2})
+        assert_problem(resp, 400, "invalid_argument", resource_type=RESOURCE_ODATA)
+
+
 class TestUpdateChat:
     """PATCH /v1/chats/{id}"""
 
@@ -291,6 +400,13 @@ class TestUpdateChat:
         fetched = httpx.get(f"{API_PREFIX}/chats/{chat_id}").json()
         assert fetched["title"] == "Updated Title"
         assert _ts(fetched["updated_at"]) > _ts(provider_chat["updated_at"])
+
+    def test_update_title_trimmed(self, chat):
+        """02-36: PATCH trims the title too."""
+        resp = httpx.patch(f"{API_PREFIX}/chats/{chat['id']}", json={"title": "  Renamed  "})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["title"] == "Renamed"
+        assert httpx.get(f"{API_PREFIX}/chats/{chat['id']}").json()["title"] == "Renamed"
 
     def test_update_not_found(self, server):
         fake_id = str(uuid.uuid4())
