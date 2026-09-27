@@ -24,6 +24,7 @@ from .conftest import (
     parse_sse,
     poll_turn,
     provider_file_id,
+    provider_input,
     query_db,
     slow_scenario,
     stream_message,
@@ -118,6 +119,34 @@ class TestTurnRetry:
 
         assert_problem(retry(chat_id, rid1), 409, "aborted", reason="NOT_LATEST_TURN")
         assert list_messages(chat_id) == before
+
+    @pytest.mark.timeout(30)
+    @pytest.mark.parametrize("mutation", ["retry", "edit"])
+    @pytest.mark.parametrize("earlier_turns", [0, 1])
+    def test_mutation_sends_the_question_once(
+        self, request, chat, mock_provider, mutation, earlier_turns,
+    ):
+        """The provider request of a retry or edit holds the history before
+        the turn and the (new) question once, with or without earlier turns."""
+        _require_offline(request)
+        chat_id = chat["id"]
+        history = []
+        for i in range(earlier_turns):
+            complete_turn(chat_id, f"Earlier {i}.")
+            history += [("user", f"Earlier {i}."), ("assistant", "Hello! How can I help?")]
+        rid = complete_turn(chat_id, "Mutate me.")
+
+        mock_provider.clear_captured_requests()
+        if mutation == "retry":
+            question = "Mutate me."
+            resp = retry(chat_id, rid)
+        else:
+            question = "Mutated."
+            resp = edit(chat_id, rid, question)
+        assert resp.status_code == 200, resp.text
+        expect_done(parse_sse(resp.text))
+        (req,) = mock_provider.get_captured_requests()
+        assert provider_input(req) == [*history, ("user", question)]
 
     @pytest.mark.timeout(30)
     def test_retry_replaces_the_answer(self, chat):
