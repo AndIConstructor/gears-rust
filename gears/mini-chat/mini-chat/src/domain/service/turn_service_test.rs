@@ -1242,3 +1242,160 @@ async fn retry_via_preview_asks_the_pdp_once() {
         .unwrap();
     assert_eq!(*resolver.actions.lock().unwrap(), [actions::RETRY_TURN]);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Thread summary covering the mutated turn
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Store a summary whose frontier is the assistant message of `request_id`,
+/// as the finalization of the next turn would.
+async fn insert_summary_covering(
+    svc: &TurnService<
+        repo::turn_repo::TurnRepository,
+        repo::message_repo::MessageRepository,
+        repo::chat_repo::ChatRepository,
+        repo::message_attachment_repo::MessageAttachmentRepository,
+    >,
+    tenant_id: Uuid,
+    chat_id: Uuid,
+    request_id: Uuid,
+) {
+    use crate::domain::repos::ThreadSummaryRepository as _;
+    let scope = AccessScope::for_tenant(tenant_id);
+    let conn = svc.db.conn().unwrap();
+    let assistant = svc
+        .message_repo
+        .find_by_chat_and_request_id(&conn, &scope, chat_id, request_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.role == crate::infra::db::entity::message::MessageRole::Assistant)
+        .expect("assistant message");
+    let rows = repo::thread_summary_repo::ThreadSummaryRepository
+        .upsert_with_cas(
+            &conn,
+            chat_id,
+            tenant_id,
+            None,
+            &crate::domain::repos::SummaryFrontier {
+                created_at: assistant.created_at,
+                message_id: assistant.id,
+            },
+            "summary text",
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+async fn summary_exists(
+    svc: &TurnService<
+        repo::turn_repo::TurnRepository,
+        repo::message_repo::MessageRepository,
+        repo::chat_repo::ChatRepository,
+        repo::message_attachment_repo::MessageAttachmentRepository,
+    >,
+    tenant_id: Uuid,
+    chat_id: Uuid,
+) -> bool {
+    use crate::domain::repos::ThreadSummaryRepository as _;
+    let conn = svc.db.conn().unwrap();
+    repo::thread_summary_repo::ThreadSummaryRepository
+        .get_latest(&conn, &AccessScope::for_tenant(tenant_id), chat_id)
+        .await
+        .unwrap()
+        .is_some()
+}
+
+/// Two completed turns; the summary covers the first one. Returns both
+/// request ids.
+async fn two_turns_with_summary_of_first(
+    svc: &TurnService<
+        repo::turn_repo::TurnRepository,
+        repo::message_repo::MessageRepository,
+        repo::chat_repo::ChatRepository,
+        repo::message_attachment_repo::MessageAttachmentRepository,
+    >,
+    ctx: &toolkit_security::SecurityContext,
+    tenant_id: Uuid,
+    chat_id: Uuid,
+) -> (Uuid, Uuid) {
+    let first = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+    // Distinct created_at values keep the (created_at, id) order deterministic.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let second = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+    insert_summary_covering(svc, tenant_id, chat_id, first).await;
+    (first, second)
+}
+
+#[tokio::test]
+async fn delete_of_uncovered_turn_keeps_summary() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+    let (_first, second) = two_turns_with_summary_of_first(&svc, &ctx, tenant_id, chat_id).await;
+
+    svc.delete(&ctx, chat_id, second).await.unwrap();
+
+    assert!(summary_exists(&svc, tenant_id, chat_id).await);
+}
+
+#[tokio::test]
+async fn retry_of_covered_turn_drops_summary() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+    let (first, second) = two_turns_with_summary_of_first(&svc, &ctx, tenant_id, chat_id).await;
+    svc.delete(&ctx, chat_id, second).await.unwrap();
+
+    svc.retry(&ctx, chat_id, first).await.unwrap();
+
+    assert!(!summary_exists(&svc, tenant_id, chat_id).await);
+}
+
+#[tokio::test]
+async fn edit_of_covered_turn_drops_summary() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+    let (first, second) = two_turns_with_summary_of_first(&svc, &ctx, tenant_id, chat_id).await;
+    svc.delete(&ctx, chat_id, second).await.unwrap();
+
+    svc.edit(&ctx, chat_id, first, "changed".to_owned())
+        .await
+        .unwrap();
+
+    assert!(!summary_exists(&svc, tenant_id, chat_id).await);
+}
+
+#[tokio::test]
+async fn delete_of_covered_turn_drops_summary() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+    let (first, second) = two_turns_with_summary_of_first(&svc, &ctx, tenant_id, chat_id).await;
+    svc.delete(&ctx, chat_id, second).await.unwrap();
+
+    svc.delete(&ctx, chat_id, first).await.unwrap();
+
+    assert!(!summary_exists(&svc, tenant_id, chat_id).await);
+}
+
+#[tokio::test]
+async fn retry_of_uncovered_turn_keeps_summary() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+    let (_first, second) = two_turns_with_summary_of_first(&svc, &ctx, tenant_id, chat_id).await;
+
+    svc.retry(&ctx, chat_id, second).await.unwrap();
+
+    assert!(summary_exists(&svc, tenant_id, chat_id).await);
+}

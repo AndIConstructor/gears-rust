@@ -269,6 +269,11 @@ impl<
                     .await
                     .map_err(mutation_to_db_err)?;
 
+                    let user_msg = message_repo
+                        .find_user_message_by_request_id(tx, &scope, chat_id, request_id)
+                        .await
+                        .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
+
                     turn_repo
                         .soft_delete(tx, &scope, target.id, None)
                         .await
@@ -277,6 +282,10 @@ impl<
                         .soft_delete_by_request_id(tx, &scope, chat_id, request_id)
                         .await
                         .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
+
+                    if let Some(user_msg) = &user_msg {
+                        drop_summary_covering_turn(tx, &scope, chat_id, user_msg).await?;
+                    }
 
                     // Enqueue audit event atomically within the same transaction.
                     let audit_event = AuditEnvelope::Delete(TurnDeleteAuditEvent {
@@ -533,7 +542,8 @@ impl<
 
                     // Determine event type before consuming override_content.
                     let is_edit = override_content.is_some();
-                    let user_content = override_content.unwrap_or(original_msg.content);
+                    let user_content =
+                        override_content.unwrap_or_else(|| original_msg.content.clone());
 
                     // Soft-delete old turn and its messages
                     turn_repo
@@ -544,6 +554,7 @@ impl<
                         .soft_delete_by_request_id(tx, &scope, chat_id, request_id)
                         .await
                         .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
+                    drop_summary_covering_turn(tx, &scope, chat_id, &original_msg).await?;
 
                     // Insert new running turn
                     let tenant_id = ctx_clone.subject_tenant_id();
@@ -735,6 +746,44 @@ async fn validate_mutation<CR: ChatRepository, TR: TurnRepository>(
     }
 
     Ok((scope, target, chat_model))
+}
+
+/// Delete the chat's thread summary when it covers the target turn.
+///
+/// The summary frontier is the last message before the turn whose completion
+/// triggered it. After a DELETE of the latest turn the previous turn becomes
+/// the latest and can be retried, edited or deleted while the summary still
+/// holds its old content. Such a summary is dropped; the next trigger builds a
+/// full one. Runs in the mutation transaction after the messages are
+/// soft-deleted: those row locks order it after a summary worker commit that
+/// locked the same frontier message (see `thread_summary_worker`).
+async fn drop_summary_covering_turn(
+    tx: &impl toolkit_db::secure::DBRunner,
+    scope: &AccessScope,
+    chat_id: Uuid,
+    user_msg: &crate::infra::db::entity::message::Model,
+) -> Result<(), toolkit_db::DbError> {
+    use crate::domain::repos::ThreadSummaryRepository as _;
+    use crate::infra::db::repo::thread_summary_repo::ThreadSummaryRepository;
+
+    let to_db =
+        |e: crate::domain::error::DomainError| toolkit_db::DbError::Other(anyhow::Error::new(e));
+    let Some(summary) = ThreadSummaryRepository
+        .get_latest(tx, scope, chat_id)
+        .await
+        .map_err(to_db)?
+    else {
+        return Ok(());
+    };
+    let frontier = (summary.frontier.created_at, summary.frontier.message_id);
+    if frontier >= (user_msg.created_at, user_msg.id) {
+        let deleted = ThreadSummaryRepository
+            .delete_for_chat(tx, scope, chat_id)
+            .await
+            .map_err(to_db)?;
+        info!(%chat_id, request_id = ?user_msg.request_id, deleted, "thread summary covered the mutated turn; dropped");
+    }
+    Ok(())
 }
 
 // ════════════════════════════════════════════════════════════════════════════

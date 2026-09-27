@@ -451,6 +451,15 @@ impl ThreadSummaryRepository for MockThreadSummaryRepo {
     ) -> Result<u64, crate::domain::error::DomainError> {
         Ok(1)
     }
+
+    async fn delete_for_chat<C: toolkit_db::secure::DBRunner>(
+        &self,
+        _runner: &C,
+        _scope: &toolkit_security::AccessScope,
+        _chat_id: uuid::Uuid,
+    ) -> Result<u64, crate::domain::error::DomainError> {
+        Ok(0)
+    }
 }
 
 pub fn mock_thread_summary_repo() -> Arc<MockThreadSummaryRepo> {

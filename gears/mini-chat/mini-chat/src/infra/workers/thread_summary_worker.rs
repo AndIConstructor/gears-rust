@@ -369,7 +369,23 @@ impl ThreadSummaryHandler {
                 let payload_clone = payload_clone.clone();
                 let model_id_clone = model_id_clone.clone();
                 Box::pin(async move {
-                    // 5a. Upsert summary with CAS
+                    // 5a. A retry, edit or delete may have removed the target
+                    //     frontier message while the summary was generated;
+                    //     the summary would then hold content of a turn that
+                    //     no longer exists. The row lock orders this check
+                    //     against that mutation, which drops a summary covering
+                    //     its turn after soft-deleting the messages.
+                    if !frontier_message_is_live(tx, &scope, payload_clone.chat_id, &target_clone)
+                        .await?
+                    {
+                        info!(
+                            chat_id = %payload_clone.chat_id,
+                            "thread summary: target frontier message deleted, skipping"
+                        );
+                        return Ok((false, crate::domain::repos::Wake::empty()));
+                    }
+
+                    // 5b. Upsert summary with CAS
                     let rows = deps
                         .thread_summary_repo
                         .upsert_with_cas(
@@ -388,7 +404,7 @@ impl ThreadSummaryHandler {
                         return Ok((false, crate::domain::repos::Wake::empty()));
                     }
 
-                    // 5b. Mark messages as compressed
+                    // 5c. Mark messages as compressed
                     crate::domain::repos::MessageRepository::mark_messages_compressed(
                         deps.message_repo.as_ref(),
                         tx,
@@ -400,7 +416,7 @@ impl ThreadSummaryHandler {
                     .await
                     .map_err(|e| toolkit_db::DbError::Other(anyhow::anyhow!("{e}")))?;
 
-                    // 5c. Enqueue system usage event
+                    // 5d. Enqueue system usage event
                     let usage_event = mini_chat_sdk::UsageEvent {
                         tenant_id: payload_clone.tenant_id,
                         user_id: None,
@@ -507,6 +523,31 @@ Your summary MUST include these sections:
 5. Current Topic: What was being discussed most recently, with enough detail to continue naturally
 
 Respond with an <analysis> block followed by a <summary> block.";
+
+/// Whether the frontier message still exists (not soft-deleted). Locks the
+/// row on Postgres for the rest of the transaction.
+async fn frontier_message_is_live(
+    tx: &impl toolkit_db::secure::DBRunner,
+    scope: &AccessScope,
+    chat_id: uuid::Uuid,
+    frontier: &SummaryFrontier,
+) -> Result<bool, toolkit_db::DbError> {
+    use crate::infra::db::entity::message::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    use toolkit_db::secure::SecureEntityExt;
+
+    let row = Entity::find()
+        .filter(Column::Id.eq(frontier.message_id))
+        .filter(Column::ChatId.eq(chat_id))
+        .filter(Column::DeletedAt.is_null())
+        .lock(sea_orm::sea_query::LockType::Update)
+        .secure()
+        .scope_with(scope)
+        .one(tx)
+        .await
+        .map_err(|e| toolkit_db::DbError::Other(anyhow::anyhow!("{e}")))?;
+    Ok(row.is_some())
+}
 
 /// Build the user-message prompt for summary generation.
 ///
@@ -1095,6 +1136,53 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rows, 0, "CAS should fail - frontier doesn't match");
+    }
+
+    #[tokio::test]
+    async fn frontier_message_is_live_false_after_soft_delete() {
+        use crate::infra::db::entity::message::{Column, Entity as MessageEntity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, sea_query::Expr};
+        use toolkit_db::secure::SecureUpdateExt;
+
+        let db = crate::domain::service::test_helpers::inmem_db().await;
+        let tenant_id = uuid::Uuid::new_v4();
+        let chat_id = uuid::Uuid::new_v4();
+        insert_chat(&db, tenant_id, chat_id).await;
+        let created_at = time::OffsetDateTime::now_utc();
+        let msg_id = insert_message(
+            &db,
+            tenant_id,
+            chat_id,
+            MessageRole::Assistant,
+            "a",
+            created_at,
+        )
+        .await;
+        let frontier = SummaryFrontier {
+            created_at,
+            message_id: msg_id,
+        };
+        let scope = AccessScope::for_tenant(tenant_id);
+        let conn = db.conn().unwrap();
+        assert!(
+            frontier_message_is_live(&conn, &scope, chat_id, &frontier)
+                .await
+                .unwrap()
+        );
+
+        MessageEntity::update_many()
+            .col_expr(Column::DeletedAt, Expr::value(Some(created_at)))
+            .filter(Column::Id.eq(msg_id))
+            .secure()
+            .scope_with(&AccessScope::allow_all())
+            .exec(&conn)
+            .await
+            .unwrap();
+        assert!(
+            !frontier_message_is_live(&conn, &scope, chat_id, &frontier)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
