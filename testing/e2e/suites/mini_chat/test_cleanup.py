@@ -35,6 +35,7 @@ from .conftest import (
     open_stream,
     outbox_payloads,
     provider_file_id,
+    provider_usage,
     query_db,
     slow_scenario,
     wait_cleanup_terminal,
@@ -352,11 +353,12 @@ class TestCleanup:
         rid = str(uuid.uuid4())
         used_before = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
         mock_provider.set_next_scenario(slow_scenario(10, slow=0.3))
+        mock_provider.clear_captured_requests()
 
         with open_stream(chat_id, "Keep answering.", request_id=rid) as s:
             s.read_until_started()
             assert delete_chat(chat_id).status_code == 204
-            usage = expect_done(s.drain()).data["usage"]
+            usage = provider_usage(mock_provider, expect_done(s.drain()).data["usage"])
 
         assert_no_reserves(USER_A_ID)
         rows = query_db("SELECT state FROM chat_turns WHERE request_id = ?", (rid,))

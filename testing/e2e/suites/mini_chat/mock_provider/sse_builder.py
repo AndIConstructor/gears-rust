@@ -70,6 +70,20 @@ def _usage(scenario: "Scenario", request_body: dict | None) -> dict:
     }
 
 
+def sent_usage(scenario: "Scenario", request_body: dict | None) -> dict | None:
+    """The `response.usage` the stream of `scenario` carries in its terminal
+    event, or None when it carries none."""
+    if scenario.http_error_status is not None or scenario.terminal == "none":
+        return None
+    if any(ev.event_type == "error" for ev in scenario.events):
+        return None
+    if scenario.terminal == "failed" and not scenario.failed_with_usage:
+        return None
+    if scenario.terminal == "completed" and scenario.usage.omit:
+        return None
+    return _usage(scenario, request_body)
+
+
 def _completed_output(scenario: "Scenario", text: str, request_body: dict | None) -> list[dict]:
     from .responses import has_tool
 
@@ -100,20 +114,21 @@ def _build_completed_data(
     request_body: dict | None = None,
 ) -> dict:
     # OpenAI wraps the response object inside a "response" key
-    return {
-        "type": "response.completed",
-        "response": {
-            "id": response_id,
-            "object": "response",
-            "status": "completed",
-            "model": model,
-            "output": _completed_output(scenario, text, request_body),
-            "usage": _usage(scenario, request_body),
-        },
+    response = {
+        "id": response_id,
+        "object": "response",
+        "status": "completed",
+        "model": model,
+        "output": _completed_output(scenario, text, request_body),
     }
+    if not scenario.usage.omit:
+        response["usage"] = _usage(scenario, request_body)
+    return {"type": "response.completed", "response": response}
 
 
-def _build_failed_data(scenario: "Scenario", model: str, response_id: str) -> dict:
+def _build_failed_data(
+    scenario: "Scenario", model: str, response_id: str, request_body: dict | None = None,
+) -> dict:
     # OpenAI puts the error inside the response object: response.error.
     return {
         "type": "response.failed",
@@ -125,7 +140,7 @@ def _build_failed_data(scenario: "Scenario", model: str, response_id: str) -> di
             "error": scenario.error or {"code": "server_error", "message": "Unknown error"},
             "incomplete_details": None,
             "output": [],
-            "usage": None,
+            "usage": _usage(scenario, request_body) if scenario.failed_with_usage else None,
         },
     }
 
@@ -176,6 +191,48 @@ def _event_data(ev, request_body: dict | None) -> dict:
     return ev.data
 
 
+def build_sse_chunks(
+    scenario: "Scenario",
+    model: str,
+    response_id: str,
+    request_body: dict | None = None,
+) -> list[tuple[float, bytes]]:
+    """The SSE events of a scenario, one (delay before it, bytes) per event."""
+    from .responses import should_include_tool_event
+
+    chunks: list[tuple[float, bytes]] = []
+    _sse_event = _EventWriter(event_lines=not scenario.omit_event_lines)
+
+    for ev in scenario.events:
+        if request_body and not should_include_tool_event(ev, request_body):
+            continue
+        chunks.append((ev.delay, _sse_event(ev.event_type, _event_data(ev, request_body))))
+        if ev.event_type == "error":
+            # A flat `error` event ends a real stream: no terminal event follows.
+            return chunks
+
+    text = _accumulate_text(scenario)
+
+    if scenario.terminal == "none":
+        return chunks
+    if scenario.terminal == "failed":
+        chunks.append((0, _sse_event(
+            "response.failed", _build_failed_data(scenario, model, response_id, request_body),
+        )))
+    elif scenario.terminal == "incomplete":
+        chunks.append((0, _sse_event(
+            "response.incomplete",
+            _build_incomplete_data(scenario, model, response_id, text, request_body),
+        )))
+    else:
+        chunks.append((0, _sse_event(
+            "response.completed",
+            _build_completed_data(scenario, model, response_id, text, request_body),
+        )))
+
+    return chunks
+
+
 def build_sse_stream(
     scenario: "Scenario",
     model: str,
@@ -183,36 +240,4 @@ def build_sse_stream(
     request_body: dict | None = None,
 ) -> bytes:
     """Build the full SSE byte stream for a scenario."""
-    from .responses import should_include_tool_event
-
-    chunks: list[bytes] = []
-    _sse_event = _EventWriter(event_lines=not scenario.omit_event_lines)
-
-    for ev in scenario.events:
-        if request_body and not should_include_tool_event(ev, request_body):
-            continue
-        chunks.append(_sse_event(ev.event_type, _event_data(ev, request_body)))
-        if ev.event_type == "error":
-            # A flat `error` event ends a real stream: no terminal event follows.
-            return b"".join(chunks)
-
-    text = _accumulate_text(scenario)
-
-    if scenario.terminal == "none":
-        return b"".join(chunks)
-    if scenario.terminal == "failed":
-        chunks.append(_sse_event(
-            "response.failed", _build_failed_data(scenario, model, response_id),
-        ))
-    elif scenario.terminal == "incomplete":
-        chunks.append(_sse_event(
-            "response.incomplete",
-            _build_incomplete_data(scenario, model, response_id, text, request_body),
-        ))
-    else:
-        chunks.append(_sse_event(
-            "response.completed",
-            _build_completed_data(scenario, model, response_id, text, request_body),
-        ))
-
-    return b"".join(chunks)
+    return b"".join(c for _, c in build_sse_chunks(scenario, model, response_id, request_body))

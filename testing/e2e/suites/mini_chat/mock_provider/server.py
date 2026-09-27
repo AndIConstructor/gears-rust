@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .responses import (
     Scenario, build_summary_response, extract_last_user_message, match_scenario,
 )
-from .sse_builder import build_sse_stream
+from .sse_builder import build_sse_chunks, sent_usage
 
 _response_counter = 0
 _counter_lock = threading.Lock()
@@ -218,7 +218,10 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
 
-        sse_bytes = build_sse_stream(scenario, model, response_id, request_body=body)
+        chunks = build_sse_chunks(scenario, model, response_id, request_body=body)
+        usage = sent_usage(scenario, body)
+        if usage is not None:
+            server.capture_sent_usage(usage)
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -226,23 +229,23 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
 
-        if scenario.slow or scenario.initial_delay:
+        if scenario.slow or scenario.initial_delay or any(d for d, _ in chunks):
             # Stream events with delays so tests can disconnect mid-stream
             try:
                 self.wfile.flush()
             except BrokenPipeError:
                 return
             time.sleep(scenario.initial_delay)
-            for chunk in sse_bytes.split(b"\n\n"):
-                if chunk:
-                    try:
-                        self.wfile.write(chunk + b"\n\n")
-                        self.wfile.flush()
-                        time.sleep(scenario.slow)
-                    except BrokenPipeError:
-                        return
+            for delay, chunk in chunks:
+                try:
+                    time.sleep(delay)
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                    time.sleep(scenario.slow)
+                except BrokenPipeError:
+                    return
         else:
-            self.wfile.write(sse_bytes)
+            self.wfile.write(b"".join(c for _, c in chunks))
 
     # ── Files API ───────────────────────────────────────────────────────
 
@@ -463,6 +466,8 @@ class MockProviderServer(ThreadingHTTPServer):
         self._files: dict[str, dict] = {}
         self._vector_stores: dict[str, dict] = {}
         self._captured_requests: list[dict] = []
+        # `response.usage` of each streaming response, as sent.
+        self._sent_usages: list[dict] = []
         # Non-streaming Responses requests (thread summary, background work).
         self._summary_requests: list[dict] = []
         self._request_paths: list[tuple[str, str]] = []
@@ -498,6 +503,18 @@ class MockProviderServer(ThreadingHTTPServer):
         """Store a streaming Responses request body (thread-safe)."""
         with self._capture_lock:
             self._captured_requests.append(body)
+
+    def capture_sent_usage(self, usage: dict) -> None:
+        with self._capture_lock:
+            self._sent_usages.append(usage)
+
+    def get_sent_usages(self) -> list[dict]:
+        """`response.usage` of each streaming response the mock sent (the
+        turns), oldest first, since the last clear. A response without
+        usage (HTTP error, `error` event, `response.failed` without usage)
+        adds nothing."""
+        with self._capture_lock:
+            return [dict(u) for u in self._sent_usages]
 
     def capture_summary_request(self, body: dict) -> None:
         """Store a non-streaming Responses request body (thread-safe)."""
@@ -563,6 +580,7 @@ class MockProviderServer(ThreadingHTTPServer):
         """Clear all captured request bodies, request paths and path errors."""
         with self._capture_lock:
             self._captured_requests.clear()
+            self._sent_usages.clear()
             self._summary_requests.clear()
             self._request_paths.clear()
             self._path_errors.clear()
@@ -756,6 +774,9 @@ class _DummyMockProvider:
         return []
 
     def get_summary_requests(self) -> list[dict]:
+        return []
+
+    def get_sent_usages(self) -> list[dict]:
         return []
 
     def set_summary_fault(

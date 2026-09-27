@@ -22,6 +22,7 @@ from .conftest import (
     open_stream,
     parse_sse,
     poll_turn,
+    provider_usage,
     query_db,
     slow_scenario,
     stream_message,
@@ -94,16 +95,17 @@ class TestSettlement:
 
     @pytest.mark.multi_provider
     @pytest.mark.timeout(30)
-    def test_completed_turn_releases_reserve(self, provider, provider_chat):
+    def test_completed_turn_releases_reserve(self, provider, provider_chat, mock_provider):
         """A completed turn leaves no reserve behind, its turn is done, and it
-        is settled on the token counts the provider reported (the real ones
-        in online mode): one usage event, `actual`, with the credits of the
-        `done` usage (base.yaml multipliers in credits_micro per token:
-        gpt-5.2 1 in / 3 out, azure-gpt-4.1 3 in / 15 out)."""
+        is settled on the token counts the provider reported (offline the
+        mock's `response.usage`, online the `done` usage): one usage event,
+        `actual`, with their credits (base.yaml multipliers in credits_micro
+        per token: gpt-5.2 1 in / 3 out, azure-gpt-4.1 3 in / 15 out)."""
         rid = str(uuid.uuid4())
+        mock_provider.clear_captured_requests()
         status, events, raw = stream_message(provider_chat["id"], "Say OK.", request_id=rid)
         assert status == 200, raw
-        usage = expect_done(events).data["usage"]
+        usage = provider_usage(mock_provider, expect_done(events).data["usage"])
 
         assert poll_turn(provider_chat["id"], rid)["state"] == "done"
         assert_no_reserves(USER_A_ID)
@@ -258,9 +260,10 @@ class TestSettlement:
         _require_offline(request)
         rid = str(uuid.uuid4())
         used_before = total_daily_used()
+        mock_provider.clear_captured_requests()
         status, events, raw = stream_message(chat["id"], "TRUNCATE", request_id=rid)
         assert status == 200, raw
-        usage = expect_done(events).data["usage"]
+        usage = provider_usage(mock_provider, expect_done(events).data["usage"])
         assert usage["output_tokens"] == 100, usage
 
         assert poll_turn(chat["id"], rid)["state"] == "done"

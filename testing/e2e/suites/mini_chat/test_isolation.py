@@ -28,6 +28,7 @@ from .conftest import (
     find_period,
     get_quota_status,
     list_messages,
+    provider_usage,
     stream_message,
 )
 
@@ -233,7 +234,7 @@ class TestQuotaIsolation:
     """Usage is accounted per user."""
 
     @pytest.mark.timeout(20)
-    def test_other_user_usage_is_not_charged(self, chat):
+    def test_other_user_usage_is_not_charged(self, chat, mock_provider):
         """A's turn is charged to A (total daily grows by the turn's cost) and
         leaves B's usage unchanged. The turn runs in a chat of its own, so
         the module chat of TestIsolation stays at one turn."""
@@ -249,9 +250,10 @@ class TestQuotaIsolation:
 
         before_a = used_total_daily(TOKEN_USER_A)
         before_b = used(TOKEN_USER_B)
+        mock_provider.clear_captured_requests()
         status, events, _ = stream_message(chat["id"], "Say OK again.")
         assert status == 200
-        usage = expect_done(events).data["usage"]
+        usage = provider_usage(mock_provider, expect_done(events).data["usage"])
         assert_no_reserves(USER_A_ID)
 
         # azure-gpt-4.1 multipliers (base.yaml): 3 credits_micro per input

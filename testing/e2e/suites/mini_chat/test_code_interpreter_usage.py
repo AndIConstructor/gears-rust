@@ -16,7 +16,8 @@ import httpx
 
 from .conftest import (
     API_PREFIX, PROVIDER_DEFAULT_MODEL, USER_A_ID,
-    assert_no_reserves, expect_done, find_period, get_quota_status, query_db, stream_message,
+    assert_no_reserves, expect_done, find_period, get_quota_status, provider_usage, query_db,
+    stream_message, usage_events,
 )
 from .test_attachments import _upload_ready
 from .test_code_interpreter import XLSX_CONTENT_TYPE, _make_minimal_xlsx
@@ -67,7 +68,7 @@ class TestCodeInterpreterUsageAccounting:
     Offline only: the code interpreter call comes from the mock scenario."""
 
     @pytest.mark.timeout(20)
-    def test_code_interpreter_usage_correct(self, provider, server, xlsx_chat):
+    def test_code_interpreter_usage_correct(self, provider, server, xlsx_chat, mock_provider):
         """Single CI turn: verify credits, messages, tool events, and turn state."""
         chat_id = xlsx_chat["chat_id"]
         att_id = xlsx_chat["att_id"]
@@ -76,6 +77,7 @@ class TestCodeInterpreterUsageAccounting:
         spent_before = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
 
         rid = str(uuid.uuid4())
+        mock_provider.clear_captured_requests()
         status, events, _ = stream_message(
             chat_id,
             "CODEINTERP: analyze the spreadsheet data",
@@ -85,7 +87,7 @@ class TestCodeInterpreterUsageAccounting:
         assert status == 200
         done = expect_done(events)
 
-        sse_usage = done.data["usage"]
+        sse_usage = provider_usage(mock_provider, done.data["usage"])
         sse_input = sse_usage["input_tokens"]
         sse_output = sse_usage["output_tokens"]
 

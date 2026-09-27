@@ -14,7 +14,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from .conftest import (
-    USER_A_ID, assert_no_reserves, expect_done, find_period, get_quota_status, stream_message,
+    USER_A_ID, assert_no_reserves, expect_done, find_period, get_quota_status, provider_usage,
+    stream_message,
 )
 
 import pytest
@@ -88,12 +89,13 @@ class TestQuotaUsageTracking:
     """Quota usage increases after sending messages."""
 
     @pytest.mark.timeout(20)
-    def test_used_credits_increase_after_send(self, provider_chat):
+    def test_used_credits_increase_after_send(self, provider_chat, mock_provider):
         """Each completed turn adds its cost to the total daily usage.
 
         cost = input_tokens * input multiplier + output_tokens * output
         multiplier, in credits_micro per token (base.yaml: gpt-5.2 1 and 3,
-        azure-gpt-4.1 3 and 15); the token counts are the ones in `done`.
+        azure-gpt-4.1 3 and 15); the token counts are the ones the provider
+        reported (conftest `provider_usage`).
         """
         chat_id = provider_chat["id"]
         in_mult, out_mult = CREDIT_MULTIPLIERS[provider_chat["model"]]
@@ -101,9 +103,10 @@ class TestQuotaUsageTracking:
 
         cost = 0
         for content in ("Say A.", "Say B."):
+            mock_provider.clear_captured_requests()
             status, events, _ = stream_message(chat_id, content)
             assert status == 200
-            usage = expect_done(events).data["usage"]
+            usage = provider_usage(mock_provider, expect_done(events).data["usage"])
             cost += usage["input_tokens"] * in_mult + usage["output_tokens"] * out_mult
         assert_no_reserves(USER_A_ID)
 

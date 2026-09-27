@@ -648,6 +648,24 @@ def list_messages(chat_id: str, *, token: str = TOKEN_USER_A) -> list[dict]:
     return resp.json()["items"]
 
 
+def provider_usage(mock_provider, done_usage: dict) -> dict:
+    """{input_tokens, output_tokens} the provider reported for the last turn,
+    for computing its expected credits.
+
+    Offline: the `response.usage` the mock sent in its last streaming
+    response, which must also be the `done` usage; a charge computed from
+    it catches a server that reads the wrong token source for both `done`
+    and settlement. Online (no mock): the `done` usage."""
+    reported = {k: done_usage[k] for k in ("input_tokens", "output_tokens")}
+    if getattr(mock_provider, "port", None) is None:
+        return reported
+    sent = mock_provider.get_sent_usages()
+    assert sent, "the mock sent no usage"
+    expected = {k: sent[-1][k] for k in ("input_tokens", "output_tokens")}
+    assert reported == expected, f"done usage {reported} != provider usage {expected}"
+    return expected
+
+
 def get_quota_status(*, token: str = TOKEN_USER_A) -> dict:
     resp = httpx.get(f"{API_PREFIX}/quota/status", headers=auth_headers(token), timeout=10)
     assert resp.status_code == 200, f"GET /quota/status: {resp.status_code} {resp.text}"

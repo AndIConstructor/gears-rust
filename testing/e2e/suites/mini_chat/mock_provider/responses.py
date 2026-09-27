@@ -17,6 +17,9 @@ class Usage:
     # True: input_tokens is a floor that grows with the request's input items
     # (sse_builder._count_input_tokens). False: input_tokens is sent as is.
     scale_input: bool = True
+    # True: `response.completed` has no `usage` field (a protocol violation;
+    # the real API always sends it).
+    omit: bool = False
 
 
 @dataclass
@@ -24,6 +27,8 @@ class MockEvent:
     """A single SSE event in a scenario."""
     event_type: str  # e.g. "response.output_text.delta"
     data: dict = field(default_factory=dict)
+    # Seconds to wait before sending this event (on top of `Scenario.slow`).
+    delay: float = 0
 
 
 @dataclass
@@ -47,6 +52,9 @@ class Scenario:
     # terminal event.
     terminal: str = "completed"
     error: dict | None = None
+    # `response.failed` carries `usage` (built from `usage`) instead of null;
+    # the real API sends it when the model produced tokens before failing.
+    failed_with_usage: bool = False
     incomplete_reason: str | None = None
     # Seconds to sleep between SSE events (0 = instant). Used for cancellation tests.
     slow: float = 0
