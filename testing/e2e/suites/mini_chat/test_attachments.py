@@ -1,5 +1,6 @@
 """E2E tests for the attachment API (upload, get, delete, send-message with attachments)."""
 
+import base64
 import http.client
 import io
 import json
@@ -26,6 +27,7 @@ from .conftest import (
     exec_db,
     expect_done,
     expect_stream_started,
+    list_messages,
     parse_sse,
     provider_file_id,
     query_db,
@@ -43,6 +45,9 @@ FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
 # `detail` of a canonical service_unavailable Problem (a provider error,
 # src/api/rest/error.rs `DomainError::ProviderError`).
 DETAIL_SERVICE_UNAVAILABLE = "Service temporarily unavailable"
+
+# ThumbnailConfig default width and height (config.rs), not overridden in base.yaml.
+THUMBNAIL_MAX_SIDE = 128
 
 # api-gateway `defaults.body_limit_bytes` (config/base.yaml).
 GATEWAY_BODY_LIMIT_BYTES = 64_000_000
@@ -191,7 +196,12 @@ class TestDeleteReferencedAttachment:
 class TestSendMessageWithAttachments:
     """Upload 2 files, send message with attachment_ids, verify stream completes."""
 
-    def test_send_message_with_attachments(self, provider_chat):
+    def test_send_message_with_attachments(self, request, provider_chat, mock_provider):
+        """The stream ends in `done`; GET /messages lists both documents on
+        the user message as attachment summaries (`attachment_id`, `kind`,
+        `filename`, `status`, no `img_thumbnail`). Offline, the provider
+        request carries `file_search` on the chat's vector store and no
+        `input_image`."""
         chat_id = provider_chat["id"]
 
         att_ids = [
@@ -202,6 +212,7 @@ class TestSendMessageWithAttachments:
         ]
 
         # Send message referencing both attachments
+        mock_provider.clear_captured_requests()
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",
             json={"content": "What answers are in the attached documents?", "attachment_ids": att_ids},
@@ -213,6 +224,24 @@ class TestSendMessageWithAttachments:
         expect_done(events)
         ss = expect_stream_started(events)
         assert ss.data.get("message_id")
+
+        user_msg, assistant_msg = list_messages(chat_id)
+        assert sorted(user_msg["attachments"], key=lambda a: a["filename"]) == [
+            {"attachment_id": att_ids[i], "kind": "document", "filename": f"doc{i}.txt",
+             "status": "ready"}
+            for i in range(2)
+        ], user_msg
+        assert assistant_msg["attachments"] == [], assistant_msg
+
+        if request.config.getoption("mode") == "online":
+            return
+        (req,) = mock_provider.get_captured_requests()
+        assert [(t["type"], t["vector_store_ids"]) for t in req["tools"]] == [
+            ("file_search", [_vector_store_id(chat_id)]),
+        ], req["tools"]
+        parts = [p for i in req["input"] if i.get("role") == "user"
+                 for p in (i["content"] if isinstance(i["content"], list) else [])]
+        assert [p for p in parts if p.get("type") == "input_image"] == [], parts
 
 
 # ---------------------------------------------------------------------------
@@ -394,10 +423,14 @@ class TestImageUploadAndSend:
     Offline only: it checks the provider traffic seen by the mock."""
 
     def test_image_upload_and_send(self, provider_chat, mock_provider):
+        """10-15: a 200x100 PNG is `ready` with a WebP thumbnail fitted into
+        128x128 keeping the aspect ratio (128x64). The message sends the
+        image as `input_image` with its provider file id and no
+        `file_search` (no vector store); GET /messages lists the image on
+        the user message with the same thumbnail."""
         chat_id = provider_chat["id"]
 
-        # Generate a small red PNG
-        png_bytes = make_minimal_png(width=4, height=4, color=(255, 0, 0))
+        png_bytes = make_minimal_png(width=200, height=100, color=(255, 0, 0))
 
         # Upload
         resp = httpx.post(
@@ -413,12 +446,19 @@ class TestImageUploadAndSend:
         assert body["status"] == "ready", body
 
         detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10).json()
-        assert detail["img_thumbnail"] is not None, "ready image must have a thumbnail"
+        thumb = detail["img_thumbnail"]
+        assert set(thumb) == {"content_type", "width", "height", "data_base64"}, thumb
+        assert (thumb["content_type"], thumb["width"], thumb["height"]) == (
+            "image/webp", THUMBNAIL_MAX_SIDE, THUMBNAIL_MAX_SIDE // 2,
+        ), thumb
+        webp = base64.b64decode(thumb["data_base64"], validate=True)
+        assert webp[:4] == b"RIFF" and webp[8:12] == b"WEBP", webp[:16]
         # An image is not indexed for file_search: no vector store is created.
         vector_store_calls = [p for p in mock_provider.get_post_paths() if "/vector_stores" in p]
         assert vector_store_calls == []
 
         # Send a message referencing the image
+        mock_provider.clear_captured_requests()
         resp = httpx.post(
             f"{API_PREFIX}/chats/{chat_id}/messages:stream",
             json={"content": "Describe the attached image. What color is it?", "attachment_ids": [att_id]},
@@ -430,6 +470,20 @@ class TestImageUploadAndSend:
         expect_done(events)
         ss = expect_stream_started(events)
         assert ss.data.get("message_id"), "Expected message_id in stream_started event"
+
+        (req,) = mock_provider.get_captured_requests()
+        user_items = [i for i in req["input"] if i.get("role") == "user"]
+        assert user_items[-1]["content"] == [
+            {"type": "input_text", "text": "Describe the attached image. What color is it?"},
+            {"type": "input_image", "file_id": provider_file_id(att_id)},
+        ], user_items[-1]
+        assert "file_search" not in [t.get("type") for t in req.get("tools") or []], req.get("tools")
+
+        user_msg = list_messages(chat_id)[0]
+        assert user_msg["attachments"] == [{
+            "attachment_id": att_id, "kind": "image", "filename": "red.png",
+            "status": "ready", "img_thumbnail": thumb,
+        }], user_msg
 
 
 @pytest.mark.multi_provider
