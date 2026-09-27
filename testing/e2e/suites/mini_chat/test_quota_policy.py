@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import uuid
+from datetime import datetime
 
 import httpx
 import pytest
@@ -60,6 +61,11 @@ TOTAL_DAILY_LIMIT = 100_000_000
 PREMIUM_DAILY_LIMIT = 50_000_000
 WEB_SEARCH_DAILY_QUOTA = 75  # QuotaConfig default (config.rs), not overridden in base.yaml
 CODE_INTERPRETER_DAILY_QUOTA = 50  # QuotaConfig default (config.rs), not overridden in base.yaml
+
+
+def _ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
 
 # Seeds usage of the current day (conftest `same_utc_day`).
 pytestmark = [pytest.mark.timeout(30), pytest.mark.usefixtures("same_utc_day")]
@@ -468,16 +474,33 @@ class TestWebSearchDailyQuota:
         expect_done(parse_sse(resp.text))
         assert_no_reserves(user3.user_id)
 
-    def test_web_search_below_quota_allowed(self, user3):
+    @pytest.mark.usefixtures("offline_only")
+    def test_web_search_below_quota_allowed(self, user3, mock_provider):
+        """One call below the daily web_search quota: the turn runs with the
+        `web_search` tool, and its one search is counted, which brings the
+        daily row to the quota."""
         chat_id = user3.create_chat(DEFAULT_MODEL)
         user3.seed(
             bucket="total", period_type="daily", web_search_calls=WEB_SEARCH_DAILY_QUOTA - 1,
         )
+        mock_provider.clear_captured_requests()
+        rid = str(uuid.uuid4())
         resp = user3.post_stream(chat_id, {
-            "content": "SEARCH: weather", "web_search": {"enabled": True},
+            "content": "SEARCH: weather", "web_search": {"enabled": True}, "request_id": rid,
         })
         assert resp.status_code == 200, resp.text
         expect_done(parse_sse(resp.text))
+        poll_turn(chat_id, rid, ("done",), token=user3.token)
+        assert_no_reserves(user3.user_id)
+
+        (req,) = mock_provider.get_captured_requests()
+        assert [t["type"] for t in req["tools"]] == ["web_search"], req["tools"]
+        assert [e["web_search_calls"] for e in usage_events(rid)] == [1]
+        assert query_db(
+            "SELECT web_search_calls FROM quota_usage "
+            "WHERE user_id = ? AND bucket = 'total' AND period_type = 'daily'",
+            (user3.user_id,),
+        ) == [{"web_search_calls": WEB_SEARCH_DAILY_QUOTA}]
 
 
 class TestCodeInterpreterDailyQuota:
@@ -581,7 +604,10 @@ class TestQuotaStatusFlags:
             assert (p["used_credits_micro"], p["warning"], p["exhausted"]) == (0, False, False)
 
     def test_done_quota_warnings_match_status(self, user2):
-        """The SSE done `quota_warnings` report the same flags as GET /quota/status."""
+        """The SSE done `quota_warnings` report the same flags as GET
+        /quota/status. `next_reset` is sent only on an entry with `warning`
+        or `exhausted` (domain/service/quota_service.rs), and then equals
+        the status endpoint's."""
         user2.seed_spent(total=90_000_000)
         chat_id = user2.create_chat(STANDARD_MODEL)
         _, done = user2.complete_turn(chat_id, "Near the limit.")
@@ -593,3 +619,9 @@ class TestQuotaStatusFlags:
         for (tier, period), w in sse.items():
             rest = find_period(status, tier, period)
             assert (w["warning"], w["exhausted"]) == (rest["warning"], rest["exhausted"])
+            if w["warning"] or w["exhausted"]:
+                assert _ts(w["next_reset"]) == _ts(rest["next_reset"]), (w, rest)
+            else:
+                assert "next_reset" not in w, w
+        # The other entries are far from their limits.
+        assert [k for k, w in sse.items() if w["warning"]] == [("total", "daily")], sse
