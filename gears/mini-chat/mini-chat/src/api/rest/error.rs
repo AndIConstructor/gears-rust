@@ -94,9 +94,14 @@ impl From<DomainError> for CanonicalError {
                 .with_reason("AUTHZ_DENIED")
                 .create(),
 
-            DomainError::Conflict { code, message } => MiniChatChatError::already_exists(message)
-                .with_resource(code)
-                .create(),
+            DomainError::Conflict { code, message } => {
+                // `message` can carry driver constraint text or backend
+                // names; it goes to the log, never to the client.
+                tracing::warn!(conflict_code = %code, error_message = %message, "mini-chat conflict");
+                MiniChatChatError::already_exists(conflict_detail(&code))
+                    .with_resource(code)
+                    .create()
+            }
 
             DomainError::InvalidReactionTarget { id } => {
                 MiniChatMessageError::failed_precondition()
@@ -199,6 +204,17 @@ impl From<DomainError> for CanonicalError {
                     .create()
             }
         }
+    }
+}
+
+/// Client-facing detail for a `DomainError::Conflict` code.
+fn conflict_detail(code: &str) -> &'static str {
+    match code {
+        "provider_mismatch" => "chat vector store belongs to another provider",
+        "attachment_locked" => {
+            "Attachment is referenced by one or more messages and cannot be deleted"
+        }
+        _ => "resource already exists",
     }
 }
 
@@ -766,6 +782,39 @@ mod tests {
         .into_test_problem();
         assert_eq!(p.status, Some(409));
         assert_eq!(p.context["resource_name"], "unique_violation");
+    }
+
+    #[test]
+    fn conflict_detail_hides_raw_message() {
+        for (code, raw, detail) in [
+            (
+                "unique_violation",
+                "duplicate key value violates unique constraint \"uq_chat_vector_stores_chat\"",
+                "resource already exists",
+            ),
+            (
+                "provider_mismatch",
+                "vector store provider mismatch: existing='openai', current='azure_openai'",
+                "chat vector store belongs to another provider",
+            ),
+            (
+                "attachment_locked",
+                "internal text",
+                "Attachment is referenced by one or more messages and cannot be deleted",
+            ),
+            ("some_new_code", "internal text", "resource already exists"),
+        ] {
+            let p: Problem = DomainError::Conflict {
+                code: code.into(),
+                message: raw.into(),
+            }
+            .into_test_problem();
+            assert_eq!(p.status, Some(409), "{code}");
+            assert_eq!(p.detail, detail, "{code}");
+            assert_eq!(p.context["resource_name"], code);
+            let wire = serde_json::to_string(&p).unwrap();
+            assert!(!wire.contains(raw), "{code}: raw message leaked: {wire}");
+        }
     }
 
     // ── MutationError / StreamError dedicated coverage ───────────────────
