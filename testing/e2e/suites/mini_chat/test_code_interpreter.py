@@ -151,7 +151,8 @@ class TestXlsxUploadAccepted:
 
         detail = httpx.get(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10).json()
         assert detail["status"] == "ready"
-        assert detail.get("doc_summary") is None, "XLSX (code_interpreter) should not have doc_summary"
+        # doc_summary is not generated (ADR-0007): the field is omitted.
+        assert "doc_summary" not in detail, detail
 
 
 # ---------------------------------------------------------------------------

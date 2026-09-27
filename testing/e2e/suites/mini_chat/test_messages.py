@@ -53,7 +53,7 @@ class TestMessages:
         assert [(m["id"], m["role"]) for m in items] == [(a, "assistant") for a in answers], items
 
     def test_my_reaction_field(self, server):
-        """Assistant messages should include a 'my_reaction' field (null when no reaction set)."""
+        """Every message has the required `my_reaction` field: null when no reaction is set."""
         chat_id = _create_chat_with_messages(1)
 
         resp = httpx.get(f"{API_PREFIX}/chats/{chat_id}/messages")
@@ -75,10 +75,9 @@ class TestMessages:
         user_msgs = [m for m in items if m["role"] == "user"]
         assert len(user_msgs) >= 1, "No user messages found"
         for user_msg in user_msgs:
-            assert user_msg.get("my_reaction") is None, (
-                f"Expected my_reaction=null for user message {user_msg['id']}, "
-                f"got: {user_msg.get('my_reaction')}"
-            )
+            # A required field: present (null) on user messages too.
+            assert "my_reaction" in user_msg, user_msg
+            assert user_msg["my_reaction"] is None, user_msg
 
     def test_cursor_pagination(self, server):
         """Following next_cursor with limit=1 visits every message exactly once, in order."""
