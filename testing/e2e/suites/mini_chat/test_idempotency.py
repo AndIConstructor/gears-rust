@@ -189,3 +189,34 @@ class TestIdempotency:
         assert mock_provider.get_captured_requests() == []
         assert turn_count(chat_id) == 1
 
+    @pytest.mark.timeout(30)
+    def test_request_id_of_another_chat_starts_a_new_turn(self, chat):
+        """The idempotency key is (chat_id, request_id): the request_id of a
+        completed turn in another chat of the same user starts a new turn
+        here, not a replay and not a conflict."""
+        other_chat = httpx.post(f"{API_PREFIX}/chats", json={}, timeout=10)
+        assert other_chat.status_code == 201, other_chat.text
+        other_id = other_chat.json()["id"]
+        rid = str(uuid.uuid4())
+        status, events, _ = stream_message(other_id, "Say OK.", request_id=rid)
+        assert status == 200
+        expect_done(events)
+
+        resp = post_stream(chat["id"], {"content": "Same key, other chat.", "request_id": rid})
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        started = expect_stream_started(events)
+        assert (started.data["request_id"], started.data["is_new_turn"]) == (rid, True)
+        expect_done(events)
+        assert poll_turn(chat["id"], rid, ("done",))["state"] == "done"
+        assert turn_count(chat["id"]) == 1
+        assert turn_count(other_id) == 1
+
+    def test_request_id_not_a_uuid_422(self, chat, mock_provider):
+        """A `request_id` that is not a UUID fails body deserialization: 422
+        invalid_argument, no turn, provider not called."""
+        mock_provider.clear_captured_requests()
+        resp = post_stream(chat["id"], {"content": "Hello.", "request_id": "not-a-uuid"})
+        assert_problem(resp, 422, "invalid_argument")
+        assert turn_count(chat["id"]) == 0
+        assert mock_provider.get_captured_requests() == []
