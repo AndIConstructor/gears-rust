@@ -1022,6 +1022,12 @@ async fn test_delete_attachment_uploaded_by_other_user_not_found() {
         RagConfig::default(),
     );
 
+    // GET masks the same attachment as 404 too.
+    assert!(matches!(
+        svc.get_attachment(&ctx, chat_id, att_id).await,
+        Err(crate::domain::error::DomainError::NotFound { .. })
+    ));
+
     let err = svc
         .delete_attachment(&ctx, chat_id, att_id)
         .await

@@ -432,6 +432,11 @@ impl<
             return Err(DomainError::attachment_not_found(attachment_id));
         }
 
+        // Another user's upload is invisible, as on DELETE.
+        if row.uploaded_by_user_id != ctx.subject_id() {
+            return Err(DomainError::attachment_not_found(attachment_id));
+        }
+
         Ok(row)
     }
 
