@@ -300,7 +300,7 @@ class TestDowngrade:
         premium_before = find_period(get_quota_status(token=user2.token), "premium", "daily")
 
         mock_provider.clear_captured_requests()
-        _, done = user2.complete_turn(chat_id, "Downgrade me.")
+        rid, done = user2.complete_turn(chat_id, "Downgrade me.")
 
         assert done["quota_decision"] == "downgrade"
         assert done["selected_model"] == DEFAULT_MODEL
@@ -316,6 +316,20 @@ class TestDowngrade:
         # A standard turn does not charge the premium bucket.
         premium_after = find_period(get_quota_status(token=user2.token), "premium", "daily")
         assert premium_after["used_credits_micro"] == premium_before["used_credits_micro"]
+
+        # A replay of the turn rebuilds the downgrade from the stored turn
+        # (domain/service/replay.rs); `downgrade_reason` is not stored.
+        mock_provider.clear_captured_requests()
+        resp = user2.post_stream(chat_id, {"content": "Downgrade me.", "request_id": rid})
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        assert events[0].data["is_new_turn"] is False, events[0]
+        replayed = expect_done(events).data
+        fields = ("usage", "effective_model", "selected_model", "quota_decision", "downgrade_from")
+        assert {k: replayed.get(k) for k in fields} == {k: done.get(k) for k in fields}, (
+            done, replayed,
+        )
+        assert mock_provider.get_captured_requests() == []
 
     def test_standard_reserve_fits_where_premium_does_not(self, user2, mock_provider):
         """Each cascade candidate is checked with its own reserve. With

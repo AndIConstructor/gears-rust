@@ -209,8 +209,15 @@ class TestStreamStartedOnReplay:
         assert ss_replay.data["is_new_turn"] is False
         assert ss_replay.data["message_id"] == orig_msg_id
         assert ss_replay.data["request_id"] == rid
-        expect_done(events2)
         assert delta_text(events2) == delta_text(events)
+        # `done` is rebuilt from the stored turn and message.
+        done, replayed = expect_done(events).data, expect_done(events2).data
+        fields = ("usage", "effective_model", "selected_model", "quota_decision")
+        assert {k: replayed.get(k) for k in fields} == {k: done.get(k) for k in fields}, (
+            done, replayed,
+        )
+        assert replayed["quota_decision"] == "allow", replayed
+        assert "downgrade_from" not in replayed, replayed
 
 
 # ---------------------------------------------------------------------------
