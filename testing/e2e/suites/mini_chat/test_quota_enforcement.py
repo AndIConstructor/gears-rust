@@ -22,6 +22,9 @@ from .conftest import (
     stream_message,
 )
 
+# Compares or seeds daily usage (conftest `same_utc_day`).
+pytestmark = pytest.mark.usefixtures("same_utc_day")
+
 
 def daily_used() -> tuple[int, int]:
     """(total daily, premium daily) used_credits_micro."""
@@ -32,50 +35,51 @@ def daily_used() -> tuple[int, int]:
     )
 
 
-def send_first_message(chat_id: str) -> None:
+def send_first_message(chat_id: str) -> dict:
+    """Send one message; return the `done` usage."""
     rid = str(uuid.uuid4())
     status, events, _ = stream_message(chat_id, "Say OK.", request_id=rid)
     assert status == 200
-    done = expect_done(events)
-    # First message of a chat: mock usage input = max(50, 50 * 1 item), output 12.
-    assert done.data["usage"] == {"input_tokens": 50, "output_tokens": 12}
+    usage = expect_done(events).data["usage"]
+    assert usage["input_tokens"] > 0 and usage["output_tokens"] > 0, usage
     poll_turn(chat_id, rid, ("done",))
     assert_no_reserves(USER_A_ID)
+    return usage
+
+
+def credits_micro(usage: dict, in_mult: int, out_mult: int) -> int:
+    """ceil(tokens x multiplier_micro / 1e6) for input and for output."""
+    return (
+        -(-usage["input_tokens"] * in_mult // 1_000_000)
+        + -(-usage["output_tokens"] * out_mult // 1_000_000)
+    )
 
 
 class TestQuotaEnforcement:
     """Bucket accounting for premium and standard models."""
 
-    @pytest.fixture(autouse=True)
-    def _offline_only(self, request):
-        if request.config.getoption("mode") == "online":
-            pytest.skip("literal credit amounts depend on the mock's fixed usage")
-
     @pytest.mark.timeout(30)
     def test_bucket_model_premium_counts_total(self, chat):
-        """A premium turn charges both `total` and `tier:premium` by its cost.
-
-        azure-gpt-4.1: ceil(50 * 3_000_000 / 1e6) + ceil(12 * 15_000_000 / 1e6) = 150 + 180 = 330.
-        """
+        """A premium turn charges both `total` and `tier:premium` by its cost:
+        the `done` usage times the azure-gpt-4.1 multipliers (3x input, 15x
+        output, config/base.yaml)."""
         total_before, premium_before = daily_used()
-        send_first_message(chat["id"])
+        cost = credits_micro(send_first_message(chat["id"]), 3_000_000, 15_000_000)
         total_after, premium_after = daily_used()
 
-        assert total_after - total_before == 330
-        assert premium_after - premium_before == 330
+        assert total_after - total_before == cost
+        assert premium_after - premium_before == cost
 
     @pytest.mark.timeout(30)
     def test_bucket_model_standard_counts_total(self, chat_with_model):
-        """A standard turn charges `total` only.
-
-        gpt-5.2: ceil(50 * 1_000_000 / 1e6) + ceil(12 * 3_000_000 / 1e6) = 50 + 36 = 86.
-        """
+        """A standard turn charges `total` only, by the `done` usage times
+        the gpt-5.2 multipliers (1x input, 3x output, config/base.yaml)."""
         chat = chat_with_model(STANDARD_MODEL)
         total_before, premium_before = daily_used()
-        send_first_message(chat["id"])
+        cost = credits_micro(send_first_message(chat["id"]), 1_000_000, 3_000_000)
         total_after, premium_after = daily_used()
 
-        assert total_after - total_before == 86
+        assert total_after - total_before == cost
         assert premium_after == premium_before
 
     @pytest.mark.timeout(30)

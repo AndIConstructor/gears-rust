@@ -1,8 +1,8 @@
 """Code interpreter usage verification tests.
 
 Exercises code interpreter (XLSX upload) with the mock provider, then checks
-quota usage via the REST quota endpoint (literal expected credits, see
-EXPECTED_CREDITS), message tokens via the messages API, and the
+quota usage via the REST quota endpoint (the `done` usage times the model's
+multipliers), message tokens via the messages API, and the
 code_interpreter_calls counter and reserves in the DB.
 """
 
@@ -21,6 +21,9 @@ from .conftest import (
 from .test_attachments import _upload_ready
 from .test_code_interpreter import XLSX_CONTENT_TYPE, _make_minimal_xlsx
 
+# Compares or seeds daily usage (conftest `same_utc_day`).
+pytestmark = pytest.mark.usefixtures("same_utc_day")
+
 
 # ── DB helpers (quota_usage tool counters are not exposed via REST) ─────
 
@@ -35,16 +38,9 @@ def _query_ci_calls(user_id: str = USER_A_ID) -> int:
     return rows[0]["code_interpreter_calls"] if rows else 0
 
 
-# ── Expected charges ─────────────────────────────────────────────────────
-#
-# Mock "CODEINTERP:*" scenario: usage input = max(300, 50 * input items) and
-# output = 20. A first message sends one input item, so input = 300.
-# credits_micro = ceil(input * in_mult / 1e6) + ceil(output * out_mult / 1e6)
-# with the base.yaml multipliers:
-#   gpt-5.2        (openai): 300 * 1.0 + 20 * 3.0  = 300 +  60 =  360
-#   azure-gpt-4.1  (azure):  300 * 3.0 + 20 * 15.0 = 900 + 300 = 1200
-EXPECTED_USAGE = {"input_tokens": 300, "output_tokens": 20}
-EXPECTED_CREDITS = {"openai": 360, "azure": 1200}
+# (input, output) credit multipliers in credits_micro per token of each
+# provider's default model (config/base.yaml).
+MULTIPLIERS = {"openai": (1_000_000, 3_000_000), "azure": (3_000_000, 15_000_000)}
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -68,7 +64,7 @@ def xlsx_chat(provider):
 class TestCodeInterpreterUsageAccounting:
     """Verify that code interpreter turns produce correct quota and message records.
 
-    Offline only: the literal credit amounts depend on the mock's fixed usage."""
+    Offline only: the code interpreter call comes from the mock scenario."""
 
     @pytest.mark.timeout(20)
     def test_code_interpreter_usage_correct(self, provider, server, xlsx_chat):
@@ -129,10 +125,12 @@ class TestCodeInterpreterUsageAccounting:
         )
 
         # ── Verify credits via quota endpoint ──
-        assert sse_usage == EXPECTED_USAGE
+        assert sse_input > 0 and sse_output > 0, sse_usage
         assert_no_reserves(USER_A_ID)
         spent_after = find_period(get_quota_status(), "total", "daily")["used_credits_micro"]
-        assert spent_after - spent_before == EXPECTED_CREDITS[provider]
+        in_mult, out_mult = MULTIPLIERS[provider]
+        cost = -(-sse_input * in_mult // 1_000_000) + -(-sse_output * out_mult // 1_000_000)
+        assert spent_after - spent_before == cost
 
     @pytest.mark.timeout(20)
     def test_code_interpreter_calls_tracked_in_db(self, provider, server, xlsx_chat):
