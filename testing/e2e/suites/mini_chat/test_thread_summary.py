@@ -215,8 +215,8 @@ class TestThreadSummary:
         self, request, chat_with_model, mock_provider,
     ):
         """Retrying the turn that triggered the summary: the summary does not
-        contain that turn, so the retried request carries the summary, the
-        original question and nothing of the replaced answer."""
+        contain that turn, so it is kept, and the retried request carries the
+        summary, the original question and nothing of the replaced answer."""
         _require_offline(request)
         chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
         _complete_turn(chat_id, "First question.")
@@ -240,3 +240,59 @@ class TestThreadSummary:
             ("user", "Second question."),
         ]
         assert replaced_answer not in str(captured[0]), "replaced answer resent"
+        assert _summary_rows(chat_id) == [summary], "a summary that does not cover the turn is kept"
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize("mutation", ["retry", "edit", "delete"])
+    def test_mutation_of_summarized_turn_drops_summary(
+        self, request, chat_with_model, mock_provider, mutation,
+    ):
+        """After DELETE of the turn that triggered the summary, the first
+        turn is the latest again, and the summary covers it. A retry, edit or
+        delete of that turn deletes the summary in the mutation transaction:
+        a retry or edit sends the (new) question without the summary, and no
+        summary row is left."""
+        _require_offline(request)
+        chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        first_rid = str(uuid.uuid4())
+        _complete_turn(chat_id, "First question.", request_id=first_rid)
+        second_rid = str(uuid.uuid4())
+        _complete_turn(chat_id, "Second question.", request_id=second_rid)
+        summary = _wait_for_summary(chat_id)
+        assert uuid_from_db(summary["summarized_up_to_message_id"]) == list_messages(chat_id)[1]["id"]
+
+        turn_url = f"{API_PREFIX}/chats/{chat_id}/turns"
+        resp = httpx.delete(f"{turn_url}/{second_rid}", timeout=10)
+        assert resp.status_code == 204, resp.text
+        # The deleted turn is after the summary frontier: the summary stays.
+        assert _summary_rows(chat_id) == [summary]
+
+        mock_provider.clear_captured_requests()
+        if mutation == "delete":
+            resp = httpx.delete(f"{turn_url}/{first_rid}", timeout=10)
+            assert resp.status_code == 204, resp.text
+            assert _summary_rows(chat_id) == []
+            return
+
+        if mutation == "retry":
+            question = "First question."
+            resp = httpx.post(
+                f"{turn_url}/{first_rid}/retry",
+                headers={"Accept": "text/event-stream"}, timeout=90,
+            )
+        else:
+            question = "First question, edited."
+            resp = httpx.patch(
+                f"{turn_url}/{first_rid}", json={"content": question},
+                headers={"Accept": "text/event-stream"}, timeout=90,
+            )
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        expect_done(events)
+        assert expect_stream_started(events).data.get("thread_summary_applied") is None
+        assert _summary_rows(chat_id) == []
+
+        captured = mock_provider.get_captured_requests()
+        assert len(captured) == 1, captured
+        assert provider_input(captured[0]) == [("user", question)]
+        assert summary["summary_text"] not in str(captured[0]), "stale summary sent"
