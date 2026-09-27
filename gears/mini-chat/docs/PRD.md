@@ -219,7 +219,7 @@ The system MUST deliver AI responses as a real-time SSE stream. Every stream sta
 
 The request body MAY include a client-generated `request_id` used as an idempotency key (any UUID version is accepted; if omitted, the server MUST generate a UUID v4); MAY include `attachment_ids` for attachments (documents or images) explicitly associated with the current message; and MAY include `web_search` to explicitly enable web search for the turn (see `cpt-cf-mini-chat-fr-web-search`). In every Message response DTO, `request_id` is always present and non-null (a required UUID). Within a normal turn, the user message and assistant response share the same `request_id` (the turn correlation key). System/background messages carry an independently server-generated UUID v4. P1 enforces **at most one running turn per chat**: if any turn in the chat is currently `running`, the system MUST reject the new request with `409 Conflict` (`aborted`, reason `turn_already_running`), regardless of the `request_id` value. Additionally, if a `chat_turns` record exists for the same `(chat_id, request_id)` in a non-completed state, or the turn was soft-deleted by retry, edit or delete, the system MUST reject with `409 Conflict` (reason `request_id_conflict`). If a completed, non-deleted generation exists for the same `(chat_id, request_id)`, the system MUST replay the completed assistant response rather than starting a new provider request. Replay MUST be side-effect-free: no new quota reserve, no quota settlement, no billing/outbox event emission. Replay sends `stream_started`, `delta` and `done`; citations and `downgrade_reason` are not persisted and are not replayed ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)).
 
-Clients must not auto-retry with the same `request_id` after disconnect; recovery is via the Turn Status API (`GET /v1/chats/{chat_id}/turns/{request_id}`). Retry and edit operations both create a new turn and therefore require a new `request_id`. A completed `(chat_id, request_id)` pair is replay-only — reusing it will return the previously generated result instead of starting a new generation.
+Clients must not auto-retry with the same `request_id` after disconnect; recovery is via the Turn Status API (`GET /v1/chats/{id}/turns/{request_id}`). Retry and edit operations both create a new turn and therefore require a new `request_id`. A completed `(chat_id, request_id)` pair is replay-only — reusing it will return the previously generated result instead of starting a new generation.
 
 **Rationale**: Streaming provides perceived low latency and matches user expectations from consumer AI chat products.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -254,9 +254,9 @@ When a stream is cancelled or disconnects before a terminal completion, the syst
 
 The system MUST allow users to upload document files to a chat. Uploaded documents are extracted, chunked, and indexed into the chat's dedicated vector store with `attachment_id` metadata. Exception: files routed exclusively to `code_interpreter` (currently XLSX) are NOT extracted, chunked, or indexed. The system does NOT include full extracted file text in prompts; only relevant retrieved excerpts (top-k chunks) are included during file search. Attachment access MUST be limited to the owning user within their tenant.
 
-**P1 upload is synchronous** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)): `POST /v1/chats/{id}/attachments` uploads the file to the provider and indexes it within the request, and returns `201 Created` with the attachment identifier and `status: ready`. For a document added to the vector store, the request waits until the provider reports indexing `completed` (at most 25 s from the start of the upload, inside the api-gateway 30 s request timeout); if indexing fails or does not finish in time, the attachment becomes `failed` with `error_code = indexing_failed` and the upload returns 503 `service_unavailable`. On failure it returns an HTTP error; the attachment row stays visible via `GET /v1/chats/{id}/attachments/{attachment_id}` with `status: failed` and an `error_code` field (stable internal code, no provider identifiers). `uploaded` is an internal intermediate status and can be observed. When the request is dropped (client disconnect, api-gateway timeout), a background job later marks the row `failed` with `error_code = upload_abandoned` and deletes the provider file recorded on the row, if any (DESIGN.md B.9.5). Polling the GET endpoint is supported but not required. `doc_summary` is never provided by the client and is always `null` in P1 (see `cpt-cf-mini-chat-fr-doc-summary`).
+**P1 upload is synchronous** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)): `POST /v1/chats/{id}/attachments` uploads the file to the provider and indexes it within the request, and returns `201 Created` with the attachment identifier and `status: ready`. For a document added to the vector store, the request waits until the provider reports indexing `completed` (at most 25 s from the start of the upload, inside the api-gateway 30 s request timeout); if indexing fails or does not finish in time, the attachment becomes `failed` with `error_code = indexing_failed` and the upload returns 503 `service_unavailable`. On failure it returns an HTTP error; the attachment row stays visible via `GET /v1/chats/{id}/attachments/{attachment_id}` with `status: failed` and an `error_code` field (stable internal code, no provider identifiers). `uploaded` is an internal intermediate status and can be observed. When the request is dropped (in practice a client disconnect, since the 25 s indexing deadline ends a document upload before the gateway timeout) or the process dies mid-upload, a background job later marks the row `failed` with `error_code = upload_abandoned` and deletes the provider file recorded on the row, if any; rows of a deleted chat, whose provider cleanup chat deletion already owns, are skipped (DESIGN.md B.9.5). Polling the GET endpoint is supported but not required. `doc_summary` is never provided by the client and is always `null` in P1 (see `cpt-cf-mini-chat-fr-doc-summary`).
 
-Maximum document size: configurable (`rag.uploaded_file_max_size_kb`, default 25 MiB). A larger upload is rejected with 400 (`out_of_range`, `FILE_TOO_LARGE`). Mini-chat sets no request body limit of its own: the api-gateway `defaults.body_limit_bytes` (default 16 MiB) applies first and must be at least 25 MiB + 64 KiB (26,279,936 bytes) for 25 MiB documents, otherwise the gateway returns 413; an unsupported MIME type is rejected with 400 (`invalid_argument`, `UNSUPPORTED_CONTENT_TYPE`). Concurrent in-flight uploads per process are bounded (`rag.max_concurrent_uploads`, default 10); excess uploads get 503 with `Retry-After`.
+Maximum document size: configurable (`rag.uploaded_file_max_size_kb`, default 25 MiB). A larger upload is rejected with 400 (`out_of_range`, `FILE_TOO_LARGE`). Mini-chat sets no request body limit of its own: the api-gateway `defaults.body_limit_bytes` (default 16 MiB) applies first and must be at least 25 MiB + 64 KiB (26,279,936 bytes) for 25 MiB documents, otherwise the gateway returns 413; an unsupported MIME type is rejected with 400 (`invalid_argument`, `UNSUPPORTED_CONTENT_TYPE`). Concurrent in-flight uploads per process are bounded (`rag.max_concurrent_uploads`, default 10); excess uploads get 503 with `Retry-After: 5`.
 
 **Rationale**: Users need to ground AI conversations in their own documents (contracts, policies, reports).
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
@@ -363,7 +363,7 @@ Background/system tasks MUST NOT create `chat_turns` records. `chat_turns` idemp
 
 The system MUST enforce per-chat limits on document uploads to prevent RAG quality degradation and uncontrolled cost growth:
 
-- Maximum number of document attachments per chat: configurable (`rag.max_documents_per_chat`, default: 50). Counts non-deleted document attachments; checked on document uploads.
+- Maximum number of document attachments per chat: configurable (`rag.max_documents_per_chat`, default: 50). Counts non-deleted, non-failed document attachments; checked on document uploads.
 - Maximum total uploaded file size per chat: configurable (`rag.max_total_upload_mb_per_chat`, default: 100 MiB). Counts all non-deleted, non-failed attachments of the chat, **including images**; checked on every upload.
 - Maximum indexed chunks per chat: configurable (default: 10,000). The system MUST prevent indexing beyond this limit. **Not implemented** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)).
 
@@ -627,7 +627,7 @@ The UI experience MUST be resilient to SSE disconnects and idempotency conflicts
 ##### Disconnect before terminal event
 
 - If the SSE stream disconnects before `done`/`error`, the UI MUST treat the send as indeterminate and MUST NOT auto-retry `POST /messages:stream` with the same `request_id`.
-- After disconnect, the UI MUST call `GET /v1/chats/{chat_id}/turns/{request_id}` to determine whether the turn completed.
+- After disconnect, the UI MUST call `GET /v1/chats/{id}/turns/{request_id}` to determine whether the turn completed.
 - The UI MUST show a user-visible banner with the exact text: `Connection lost. Message delivery is uncertain. You can resend.`
 - If the user chooses to resend, the UI MUST generate a new `request_id`.
 
@@ -1009,7 +1009,7 @@ If the chat service pod crashes or restarts while an SSE stream is active, the c
 
 #### Turn recovery contract
 
-After a disconnect, the client MUST call `GET /v1/chats/{chat_id}/turns/{request_id}` to determine the turn outcome:
+After a disconnect, the client MUST call `GET /v1/chats/{id}/turns/{request_id}` to determine the turn outcome:
 
 | Turn state | Client action |
 |------------|---------------|
@@ -1080,7 +1080,7 @@ Turns stuck in `running` state beyond a configurable timeout (e.g. pod crash wit
 
 Support and UX recovery flows MUST be able to query authoritative turn state backed by `chat_turns`.
 
-**Endpoint**: `GET /v1/chats/{chat_id}/turns/{request_id}`
+**Endpoint**: `GET /v1/chats/{id}/turns/{request_id}`
 
 **Response** (`chat_id` is not included — it is already present in the URL path):
 
@@ -1160,17 +1160,17 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Unknown or disabled model on `POST /chats` | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
 | The chat's model is no longer in the catalog (`messages:stream`, retry, edit, attachment upload) | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL`. The upload checks it before reading the body |
 | Empty or whitespace-only `content` on `messages:stream` or turn edit | `invalid_argument` | 400 | `field_violations[content].reason = EMPTY_CONTENT` |
-| Invalid chat title on `POST /chats` or `PATCH /chats/{id}` (empty or whitespace-only after trim, or longer than 255 characters) | `invalid_argument` | 400 | `detail` |
-| Invalid reaction value (not `like` or `dislike`); checked before authorization. A body that does not match the schema (e.g. no `reaction` field) is 422, see below | `invalid_argument` | 400 | `detail` |
+| Invalid chat title on `POST /chats` or `PATCH /chats/{id}` (empty or whitespace-only after trim, or longer than 255 characters) | `invalid_argument` | 400 | `detail`; the same message is also in `context.format` |
+| Invalid reaction value (not `like` or `dislike`); checked before authorization. A body that does not match the schema (e.g. no `reaction` field) is 422, see below | `invalid_argument` | 400 | `detail`; the same message is also in `context.format` |
 | Bad OData query on a list endpoint (`GET /chats`, `GET /chats/{id}/messages`: `$filter`, `$orderby`, `$select`, page size, cursor, unsupported query option) | `invalid_argument` | 400 | `context.resource_type = gts.cf.core.odata.query.v1~` (not the chat type, not a `format` violation), for errors raised by the query extractor and by the repository while paginating. `field_violations[].reason` from `toolkit-odata`: `INVALID_FILTER` (`$filter`), `INVALID_ORDERBY_FIELD` (`$orderby`), `INVALID_LIMIT` (field `$top`, `limit=0`), `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR` (`cursor` combined with `$orderby`); from the platform OData extractor (`toolkit::api::odata`): `FILTER_TOO_LONG`, `FILTER_TOO_COMPLEX` (`$filter`), `INVALID_SELECT` (`$select`), `UNSUPPORTED_QUERY_PARAM` (a `$` option the extractor does not bind, e.g. `$skip`, `$count`), `INVALID_QUERY_PARAMS` (unparsable query string). A `limit` above 100 is clamped to 100, not rejected |
 | Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | `field_violations[body].reason = invalid_json_body` (platform JSON extractor `toolkit::api::rest::extract::Json`) |
 | Malformed JSON body | `invalid_argument` | 400 | `field_violations[body].reason = json_syntax_error` (platform JSON extractor) |
 | JSON body without a JSON `Content-Type` (`POST /chats`, `PATCH /chats/{id}`, `messages:stream`, turn edit, reaction `PUT`) | `invalid_argument` | 415 | `field_violations[body].reason = missing_json_content_type` (platform JSON extractor). Not declared in the OpenAPI document |
 | Path parameter that is not a UUID (chat, message, turn `request_id`, attachment id) | `invalid_argument` | 400 | `field_violations[].reason = invalid_path_params` (platform path extractor) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` (was 415) |
-| Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `detail` |
+| Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `detail`; the same message is also in `context.format` |
 | Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
-| `DELETE /chats/{id}`: the chat-cleanup outbox payload exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail`. The same failure on attachment `DELETE` and on turn retry, edit and delete is returned as 500 `internal` |
+| `DELETE /chats/{id}`: the chat-cleanup outbox payload exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail`; the same message is also in `context.format`. The same failure on attachment `DELETE` and on turn retry, edit and delete is returned as 500 `internal` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` (was 415) |
 | Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
 | Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` (was 413). A body above api-gateway `defaults.body_limit_bytes` (default 16 MiB) gets 413 from the gateway before it reaches mini-chat |
@@ -1193,9 +1193,9 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Any other unique-constraint violation that the caller does not handle (`DomainError::Conflict` from the DB layer) | `already_exists` | 409 | `resource_name = unique_violation`; `detail = "resource already exists"` (also for any other conflict code). The `detail` of every 409 `already_exists` is a fixed string per code; the driver or backend message is only logged |
 | Quota exhausted (tokens, daily web search, daily code interpreter) | `resource_exhausted` | 429 | `violations[{subject: <quota_scope>, description: "quota_exceeded"}]`; `quota_scope` is `tokens`, `web_search` or `code_interpreter` |
 | Per-chat document count or storage limit | `resource_exhausted` | 429 | `document_limit` / `storage_limit` (was 400) |
-| Storage backend (provider Files / vector store API) failure on attachment upload | `service_unavailable` | 503 + `Retry-After` | (was 502/504) |
+| Storage backend (provider Files / vector store API) failure on attachment upload | `service_unavailable` | 503 + `Retry-After` | `Retry-After: 10` (`context.retry_after_seconds = 10`) (was 502/504) |
 | Provider or policy resolution failure before streaming (`messages:stream`, retry, edit) or before an upload reads the body | `internal` | 500 | provider failures after the stream opens are SSE `error` events |
-| Upload concurrency limit | `service_unavailable` | 503 + `Retry-After` | |
+| Upload concurrency limit | `service_unavailable` | 503 + `Retry-After` | `Retry-After: 5` (`context.retry_after_seconds = 5`) |
 | Internal / database error | `internal` | 500 | |
 
 `StreamError::Replay` maps to 409 `aborted` with reason `REPLAY` in `api/rest/error.rs`. The arm is defensive: the `messages:stream` handler intercepts `Replay` and serves the buffered SSE replay of the completed turn (`api/rest/handlers/messages.rs`), so clients do not receive this error.
@@ -1250,7 +1250,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 
 **Alternative Flows**:
 - **Quota exceeded**: System rejects the request with HTTP 429 (`resource_exhausted` `Problem`); no LLM call made and no SSE stream is opened
-- **Client disconnects**: System cancels in-flight LLM request; partial response may be persisted. Delivery is indeterminate; the UI SHOULD first query `GET /v1/chats/{chat_id}/turns/{request_id}` to determine whether the turn completed. If the user resends, resend MUST use a new `request_id`.
+- **Client disconnects**: System cancels in-flight LLM request; partial response may be persisted. Delivery is indeterminate; the UI SHOULD first query `GET /v1/chats/{id}/turns/{request_id}` to determine whether the turn completed. If the user resends, resend MUST use a new `request_id`.
 
 #### UC-006: Reconnect After Network Loss (Turn Status Check)
 
@@ -1265,7 +1265,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 
 **Main Flow**:
 
-1. The UI calls `GET /v1/chats/{chat_id}/turns/{request_id}`.
+1. The UI calls `GET /v1/chats/{id}/turns/{request_id}`.
 2. If `state=done`, the UI renders the previously completed response and shows `Recovered a previously completed response.`
 3. If `state=running`, the UI informs the user that a response is still in progress and does not resend.
 4. If `state=error|cancelled`, the UI allows the user to resend using a new `request_id`.
@@ -1723,7 +1723,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 
 These defaults are used for P1 and are set by the operator for the whole deployment (gear configuration or the static policy plugin configuration); there are no per-tenant overrides except the provider `tenant_overrides` (host, alias, auth). Values are the code defaults (`mini-chat/src/config.rs`, `mini-chat/src/config/background.rs`, the static model policy plugin and `mini-chat-sdk` model catalog types).
 
-- Model catalog: no built-in default. The catalog is supplied by the policy plugin configuration (`model_catalog`, required). The default model for new chats is the first enabled model marked `is_default`, otherwise the first enabled model (see `cpt-cf-mini-chat-fr-model-selection`).
+- Model catalog: no built-in default. The catalog is supplied by the policy plugin configuration (`model_catalog`, required when the plugin's config section is present; when the section is absent, the plugin runs with an empty catalog). The default model for new chats is the first enabled model marked `is_default`, otherwise the first enabled model (see `cpt-cf-mini-chat-fr-model-selection`).
 - Downgrade cascade: premium → standard; when all tiers exhausted → reject with HTTP 429 (`resource_exhausted`)
 - Default premium-tier credit limits (static policy plugin `default_premium_limits`): daily `50_000_000` micro-credits, monthly `500_000_000` micro-credits
 - Default standard / `total` bucket credit limits (static policy plugin `default_standard_limits`): daily `100_000_000` micro-credits, monthly `1_000_000_000` micro-credits
