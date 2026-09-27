@@ -75,7 +75,6 @@ pub mod kind {
 /// Attachment upload result labels (`result` label).
 pub mod upload_result {
     pub const OK: &str = "ok";
-    #[allow(dead_code)] // declared ahead of call site (deferred metrics)
     pub const FILE_TOO_LARGE: &str = "file_too_large";
     #[allow(dead_code)] // declared ahead of call site (deferred metrics)
     pub const UNSUPPORTED_TYPE: &str = "unsupported_type";
@@ -109,7 +108,6 @@ pub mod cleanup_state {
 
 /// Orphan watchdog reason labels (`reason` label).
 pub mod reason {
-    #[allow(dead_code)] // declared ahead of call site (watchdog uses string literals)
     pub const STALE_PROGRESS: &str = "stale_progress";
 }
 

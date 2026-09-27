@@ -107,8 +107,9 @@ pub struct ProviderEntry {
     pub kind: ProviderKind,
     /// OAGW upstream alias (used in proxy URI: `/{alias}/...`).
     ///
-    /// In config: only required for IP-based hosts. For hostname-based
-    /// hosts OAGW auto-derives the alias — leave this unset.
+    /// In config: optional. When unset, `init()` sets it to `host` and the
+    /// OAGW upstream is registered under that alias. Set it only when the
+    /// alias must differ from the host.
     ///
     /// At runtime: overwritten with the OAGW-assigned alias after
     /// `create_upstream` succeeds.
@@ -188,8 +189,9 @@ pub struct ProviderTenantOverride {
     pub host: Option<String>,
     /// OAGW upstream alias for this tenant.
     ///
-    /// In config: only required for IP-based hosts. For hostname-based
-    /// hosts OAGW auto-derives the alias — leave this unset.
+    /// In config: optional when the override sets `host` — `init()` then
+    /// sets it to that host. An override needs `host` or `upstream_alias`
+    /// (see [`Self::has_distinct_upstream`]).
     ///
     /// At runtime: overwritten with the OAGW-assigned alias after
     /// `create_upstream` succeeds.
@@ -959,7 +961,7 @@ fn default_thumbnail_max_decode_bytes() -> usize {
     33_554_432 // 32 MiB
 }
 
-/// Configuration for server-generated image thumbnails (DESIGN.md §B.6).
+/// Configuration for server-generated image thumbnails (DESIGN.md §B.8).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThumbnailConfig {

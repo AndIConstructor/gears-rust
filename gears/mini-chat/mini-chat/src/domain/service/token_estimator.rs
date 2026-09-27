@@ -1,13 +1,10 @@
-// Called from QuotaService which is not yet wired into the turn handler.
-// Remove `dead_code` allows once QuotaService is live.
-
 use toolkit_macros::domain_model;
 
 use crate::config::EstimationBudgets;
 
 /// Input to the token estimation function.
 #[domain_model]
-#[allow(dead_code, clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct EstimationInput {
     pub utf8_bytes: u64,
     pub num_images: u32,
@@ -18,7 +15,6 @@ pub struct EstimationInput {
 
 /// Result of token estimation.
 #[domain_model]
-#[allow(dead_code)]
 pub struct EstimationResult {
     pub estimated_input_tokens: u64,
 }
@@ -26,7 +22,6 @@ pub struct EstimationResult {
 /// Estimate input tokens and reserve from request metadata.
 ///
 /// Pure function — no I/O. Uses the estimation budgets from `ConfigMap`.
-#[allow(dead_code)]
 pub fn estimate_tokens(input: &EstimationInput, budgets: &EstimationBudgets) -> EstimationResult {
     // Step 1: text tokens from byte count
     // Catalog values are not validated at startup; guard against a zero ratio.

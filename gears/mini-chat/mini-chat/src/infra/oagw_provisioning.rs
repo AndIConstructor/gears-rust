@@ -460,9 +460,8 @@ async fn create_upstream(
 /// Create an OAGW upstream for a tenant-specific override.
 ///
 /// Uses [`ProviderEntry::effective_host_for_tenant`] and the tenant's auth
-/// config. Passes the override's `upstream_alias`, which `init()` fills with
-/// the override host when the override sets a host; an override without a
-/// host passes no alias and OAGW derives it.
+/// config. Passes the override's `upstream_alias`: the configured one, or the
+/// override host that `init()` fills in when no alias is configured.
 ///
 /// Returns the OAGW-assigned alias on success.
 async fn create_tenant_upstream(
