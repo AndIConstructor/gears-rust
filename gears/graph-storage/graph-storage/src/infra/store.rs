@@ -202,7 +202,7 @@ pub fn map_db_err(error: &sea_orm::DbErr) -> GraphStoreError {
 /// bounded nor free of control characters.
 #[must_use]
 pub fn map_db_error(error: &toolkit_db::DbError) -> GraphStoreError {
-    tracing::warn!(%error, "the database did not answer");
+    tracing::warn!(error = %super::logged(&error), "the database did not answer");
     GraphStoreError::Unavailable {
         reason: "the database did not answer; the reason is in the gear's log".to_owned(),
     }
@@ -289,7 +289,7 @@ impl GraphStoreV1 for PgGraphStore {
         // anyone who can reach it. The row says what is wrong in words that
         // are the same for every deployment.
         if let Err(error) = self.db().conn() {
-            tracing::warn!(%error, "readiness: the database is unreachable");
+            tracing::warn!(error = %super::logged(&error), "readiness: the database is unreachable");
             out.push(ComponentReadiness::new(
                 graph_storage_sdk::models::DATABASE,
                 ReadinessState::Unhealthy,
@@ -330,7 +330,7 @@ impl GraphStoreV1 for PgGraphStore {
                     ));
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "readiness: the migration history cannot be read");
+                    tracing::warn!(error = %super::logged(&error), "readiness: the migration history cannot be read");
                     out.push(ComponentReadiness::new(
                         graph_storage_sdk::models::DATABASE,
                         ReadinessState::Unhealthy,

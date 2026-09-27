@@ -28,6 +28,7 @@ use toolkit_security::AccessScope;
 use tracing::warn;
 
 use crate::config::HopStrategy;
+use crate::infra::logged;
 use crate::infra::projections::{
     EdgeHop, EndpointPair, NodeIdent, TypeId, TypeName, edge_hop_columns, endpoint_pair_columns,
     node_ident_columns, type_id_columns, type_name_columns,
@@ -330,7 +331,7 @@ async fn expand_pgq(
     req: &ExpandRequest,
 ) -> Result<PatternOutcome, GraphEngineError> {
     let conn = store.db().conn().map_err(|error| {
-        warn!(%error, "the database gave the hop no connection");
+        warn!(error = %logged(&error), "the database gave the hop no connection");
         GraphEngineError::Unavailable {
             reason: NO_CONNECTION.to_owned(),
         }
@@ -409,7 +410,7 @@ async fn expand_pgq(
             // travel: it is a dependency's words, and they used to reach the
             // refusal's reason and be logged again unescaped at the REST edge.
             Err(error) => {
-                warn!(%error, "the pattern statement did not execute");
+                warn!(error = %logged(&error), "the pattern statement did not execute");
                 return Ok(PatternOutcome::Unavailable(
                     PATTERN_DID_NOT_EXECUTE.to_owned(),
                 ));
@@ -686,7 +687,7 @@ async fn expand_two_query(
     req: &ExpandRequest,
 ) -> Result<ExpandResponse, GraphEngineError> {
     let conn = store.db().conn().map_err(|error| {
-        warn!(%error, "the database gave the hop no connection");
+        warn!(error = %logged(&error), "the database gave the hop no connection");
         GraphEngineError::Unavailable {
             reason: NO_CONNECTION.to_owned(),
         }
