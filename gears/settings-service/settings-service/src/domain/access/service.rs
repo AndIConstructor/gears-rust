@@ -82,6 +82,18 @@ fn absent() -> DomainError {
 /// and masks for a caller not authorized for unmasked PII. The setter is not
 /// repeated here, where it would sit beside that mask in the clear; the one
 /// who set a replaced row is the actor of the record that set it.
+/// A restriction is a change to a live setting, as a value write is: a
+/// retired declaration refuses it as retired. The rows it keeps across the
+/// retire stay readable — they are what a revive brings back.
+fn refuse_retired(declaration: &Declaration) -> Result<(), DomainError> {
+    if declaration.status == "retired" {
+        return Err(DomainError::Retired {
+            key: declaration.key.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn snapshot(row: &Restriction) -> serde_json::Value {
     json!({
         "tenant_id": row.tenant_id,
@@ -230,6 +242,7 @@ where
     /// [`DomainError::Unauthorized`] unless the target is a reachable strict
     /// descendant; [`DomainError::Validation`] for `overridable`;
     /// [`DomainError::NotFound`] for a declaration absent or hidden;
+    /// [`DomainError::Retired`] for a retired one;
     /// [`DomainError::PreconditionRequired`] and
     /// [`DomainError::PreconditionFailed`] on the tag.
     pub async fn set<C: DBRunner>(
@@ -258,6 +271,9 @@ where
         // @cpt-end:cpt-cf-settings-service-flow-tenant-access-set:p1:inst-ta-set-5
         // @cpt-begin:cpt-cf-settings-service-flow-tenant-access-set:p1:inst-ta-set-6
         let declaration = self.visible_declaration(conn, actor, key).await?;
+        // @cpt-begin:cpt-cf-settings-service-flow-tenant-access-set:p1:inst-ta-set-14
+        refuse_retired(&declaration)?;
+        // @cpt-end:cpt-cf-settings-service-flow-tenant-access-set:p1:inst-ta-set-14
         // The row is taken for update for the rest of this transaction. A
         // value write in flight holds it for share until its commit and
         // derives the writer's access again once the lock clears, so this
@@ -342,6 +358,9 @@ where
         // @cpt-end:cpt-cf-settings-service-flow-tenant-access-clear:p1:inst-ta-clear-3
         // @cpt-begin:cpt-cf-settings-service-flow-tenant-access-clear:p1:inst-ta-clear-4
         let declaration = self.visible_declaration(conn, actor, key).await?;
+        // @cpt-begin:cpt-cf-settings-service-flow-tenant-access-clear:p1:inst-ta-clear-10
+        refuse_retired(&declaration)?;
+        // @cpt-end:cpt-cf-settings-service-flow-tenant-access-clear:p1:inst-ta-clear-10
         // Lifting a restriction serializes against writes in flight the same
         // way setting one does; see `set`.
         self.declarations

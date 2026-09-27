@@ -547,3 +547,30 @@ async fn a_restrictions_setter_is_masked_for_a_reader_without_the_pii_entitlemen
         );
     }
 }
+
+#[tokio::test]
+async fn a_retired_setting_refuses_a_restriction_change_with_410_and_keeps_its_rows_readable() {
+    let h = RestHarness::new().await;
+    let id = h.inner.declare("proxy", "cascading", json!(true)).await;
+    let (root, a) = (h.inner.tree.root, h.inner.tree.a);
+    assert_eq!(
+        restrict(&h, "proxy", a, "read_only", "absent", root).await,
+        200
+    );
+    let (_, tag) = read(&h, "proxy", a, root).await;
+    h.inner.retire(id).await;
+
+    assert_eq!(
+        restrict(&h, "proxy", a, "hidden", &tag, root).await,
+        410,
+        "a set on a retired setting"
+    );
+    let uri = format!("{}?tenant={a}", permissions(&h, "proxy"));
+    assert_eq!(
+        h.send("DELETE", &uri, None, Some(&tag), root).await.status,
+        410,
+        "a clear on a retired setting"
+    );
+    let (body, _) = read(&h, "proxy", a, root).await;
+    assert_eq!(body["stored"]["access"], json!("read_only"), "{body}");
+}

@@ -55899,7 +55899,7 @@
     },
     "/settings-service/v1/settings/{key}/permissions": {
       "delete": {
-        "description": "Delete the pair's row, making this level `overridable` while an ancestor row may still narrow the effective result. Clearing an absent row is a no-op that still requires the absent-state tag. Requires `delegate` and `If-Match`.",
+        "description": "Delete the pair's row, making this level `overridable` while an ancestor row may still narrow the effective result. Clearing an absent row is a no-op that still requires the absent-state tag. Requires `delegate` and `If-Match`. A retired setting refuses the change with 410.",
         "operationId": "settings_service.clear_tenant_access",
         "parameters": [
           {
@@ -55988,6 +55988,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "410": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gone: the declaration is retired"
           },
           "412": {
             "content": {
@@ -56154,7 +56164,7 @@
         ]
       },
       "put": {
-        "description": "Store `read_only` or `hidden` for a strict descendant that is not standalone; a caller cannot restrict itself, an ancestor or a sibling. `overridable` is the absence of a row and is expressed by DELETE. Requires `delegate` on the setting and `If-Match` against the tag the read returned. The row is stored even when a stricter ancestor already dominates it and takes effect when that is lifted. The target and its descendants are evicted from the cache.",
+        "description": "Store `read_only` or `hidden` for a strict descendant that is not standalone; a caller cannot restrict itself, an ancestor or a sibling. `overridable` is the absence of a row and is expressed by DELETE. Requires `delegate` on the setting and `If-Match` against the tag the read returned. The row is stored even when a stricter ancestor already dominates it and takes effect when that is lifted. The target and its descendants are evicted from the cache. A retired setting refuses the change with 410; the rows it keeps stay readable.",
         "operationId": "settings_service.set_tenant_access",
         "parameters": [
           {
@@ -56254,6 +56264,16 @@
               }
             },
             "description": "Not Found"
+          },
+          "410": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gone: the declaration is retired"
           },
           "412": {
             "content": {

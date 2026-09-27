@@ -127,7 +127,8 @@ pub async fn read_access(
 /// 400 for a malformed key, a missing `tenant` or an `access` other than
 /// `read_only` or `hidden`; 403 when the caller lacks `delegate` or the target
 /// is not a reachable strict descendant; 404 when the declaration is absent or
-/// hidden; 428 without `If-Match`, 412 when it is stale.
+/// hidden; 410 when it is retired; 428 without `If-Match`, 412 when it is
+/// stale.
 pub async fn set_access(
     Extension(ctx): Extension<SecurityContext>,
     Extension(service): Extension<Arc<ConcreteAccessService>>,

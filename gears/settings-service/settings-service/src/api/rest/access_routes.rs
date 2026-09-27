@@ -82,7 +82,8 @@ pub fn register_routes(
              absence of a row and is expressed by DELETE. Requires `delegate` on the setting and \
              `If-Match` against the tag the read returned. The row is stored even when a \
              stricter ancestor already dominates it and takes effect when that is lifted. The \
-             target and its descendants are evicted from the cache.",
+             target and its descendants are evicted from the cache. A retired setting refuses \
+             the change with 410; the rows it keeps stay readable.",
         )
         .tag(TAG)
         .authenticated()
@@ -104,6 +105,11 @@ pub fn register_routes(
         .error_404(openapi)
         .problem_response(
             openapi,
+            http::StatusCode::GONE,
+            "Gone: the declaration is retired",
+        )
+        .problem_response(
+            openapi,
             http::StatusCode::PRECONDITION_FAILED,
             "Precondition Failed: the row changed since it was read",
         )
@@ -122,7 +128,8 @@ pub fn register_routes(
         .description(
             "Delete the pair's row, making this level `overridable` while an ancestor row may \
              still narrow the effective result. Clearing an absent row is a no-op that still \
-             requires the absent-state tag. Requires `delegate` and `If-Match`.",
+             requires the absent-state tag. Requires `delegate` and `If-Match`. A retired \
+             setting refuses the change with 410.",
         )
         .tag(TAG)
         .authenticated()
@@ -141,6 +148,11 @@ pub fn register_routes(
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        .problem_response(
+            openapi,
+            http::StatusCode::GONE,
+            "Gone: the declaration is retired",
+        )
         .problem_response(
             openapi,
             http::StatusCode::PRECONDITION_FAILED,

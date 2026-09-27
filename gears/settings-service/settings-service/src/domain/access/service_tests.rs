@@ -309,6 +309,81 @@ async fn a_declaration_outside_the_callers_domain_is_absent_to_every_permission_
 }
 
 #[tokio::test]
+async fn a_retired_declaration_keeps_its_restrictions_readable_but_takes_no_new_change() {
+    // A restriction is a change to a live setting, as a value write is: a
+    // retired declaration refuses both as retired. The rows it keeps across a
+    // retire stay readable, which is what a revive brings back.
+    let h = Harness::new().await;
+    let id = h
+        .base
+        .declare("strict", scope_class::CASCADING, json!(false))
+        .await;
+    let t = &h.base.tree;
+    let conn = h.base.db.conn().expect("connection");
+    let root = actor(t.root);
+    let key = h.key("strict");
+    let set = h
+        .service
+        .set(
+            &conn,
+            &root,
+            &key,
+            t.a,
+            TenantAccess::Hidden,
+            Some(ABSENT_RESTRICTION_TAG),
+        )
+        .await
+        .expect("sets");
+    h.base.retire(id).await;
+
+    let read = h
+        .service
+        .read(&conn, &root, &key, t.a)
+        .await
+        .expect("reads a retired declaration's row");
+    assert_eq!(read.stored.map(|r| r.access), Some(TenantAccess::Hidden));
+    assert_eq!(
+        h.service
+            .list(&conn, &root, &key)
+            .await
+            .expect("lists")
+            .len(),
+        1
+    );
+    let retired = |result: Result<crate::domain::access::AccessReadout, DomainError>,
+                   what: &str| {
+        assert!(
+            matches!(result, Err(DomainError::Retired { .. })),
+            "{what}: {result:?}"
+        );
+    };
+    retired(
+        h.service
+            .set(
+                &conn,
+                &root,
+                &key,
+                t.a,
+                TenantAccess::ReadOnly,
+                Some(set.etag.as_str()),
+            )
+            .await,
+        "set",
+    );
+    retired(
+        h.service
+            .clear(&conn, &root, &key, t.a, Some(set.etag.as_str()))
+            .await,
+        "clear",
+    );
+    assert_eq!(
+        h.audit.operations(),
+        vec!["create"],
+        "nothing further written"
+    );
+}
+
+#[tokio::test]
 async fn only_a_reachable_strict_descendant_can_be_restricted_and_overridable_is_not_a_value() {
     let h = Harness::new().await;
     h.base
