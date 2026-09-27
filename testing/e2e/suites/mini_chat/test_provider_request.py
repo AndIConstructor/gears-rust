@@ -17,8 +17,11 @@ from .conftest import (
     USER_A_ID,
     expect_done,
     poll_until,
+    query_db,
     stream_message,
 )
+from .test_attachments import _upload_ready
+from .test_code_interpreter import XLSX_CONTENT_TYPE, _make_minimal_xlsx
 
 
 @pytest.fixture(autouse=True)
@@ -165,6 +168,73 @@ class TestProviderIdentity:
         assert search["metadata"] == {**expected_metadata, "feature": "web_search"}, (
             search["metadata"]
         )
+
+    def test_metadata_feature_of_attachment_tools(self, provider_chat, chat_with_model,
+                                                  mock_provider):
+        """`metadata.feature` names the attachment tools of the request
+        (flags in the order file_search, web_search, code_interpreter, joined
+        with "+"; infra/llm/request.rs): a document gives `file_search`, an
+        XLSX `code_interpreter`, both in one chat `file_search+code_interpreter`."""
+        model = provider_chat["model"]
+        doc = ("notes.txt", b"Notes.", "text/plain")
+        xlsx = ("data.xlsx", _make_minimal_xlsx(), XLSX_CONTENT_TYPE)
+        features = {}
+        for name, files in (("doc", [doc]), ("xlsx", [xlsx]), ("both", [doc, xlsx])):
+            chat_id = chat_with_model(model)["id"]
+            att_ids = [_upload_ready(chat_id, *f) for f in files]
+            mock_provider.clear_captured_requests()
+            status, events, raw = stream_message(chat_id, "Use the files.", attachment_ids=att_ids)
+            assert status == 200, raw
+            expect_done(events)
+            (req,) = mock_provider.get_captured_requests()
+            features[name] = (
+                req["metadata"]["feature"], sorted(t["type"] for t in req["tools"]),
+            )
+        assert features == {
+            "doc": ("file_search", ["file_search"]),
+            "xlsx": ("code_interpreter", ["code_interpreter"]),
+            "both": ("file_search+code_interpreter", ["code_interpreter", "file_search"]),
+        }, features
+
+
+@pytest.mark.multi_provider
+class TestProviderRequestPaths:
+    """The provider endpoints the gear calls (config/base.yaml providers,
+    after OAGW strips the upstream alias). The mock answers 404 to any other
+    path (mock_provider/server.py, `path_error`), and every test fails on
+    such a request (conftest `reset_mock_provider_state`)."""
+
+    def test_requests_hit_the_configured_paths(self, provider, provider_chat, mock_provider):
+        """A document upload and a message: OpenAI calls /v1/files,
+        /v1/vector_stores, /v1/vector_stores/{id}/files and /v1/responses
+        without a query; Azure calls /openai/files, /openai/vector_stores and
+        /openai/vector_stores/{id}/files with `api-version=2025-03-01-preview`
+        (`api_version`), and its Responses `api_path` /openai/v1/responses
+        (the v1 API) without one."""
+        chat_id = provider_chat["id"]
+        mock_provider.clear_captured_requests()
+        att_id = _upload_ready(chat_id, "paths.txt", b"Path check.", "text/plain")
+        status, events, raw = stream_message(chat_id, "Say OK.", attachment_ids=[att_id])
+        assert status == 200, raw
+        expect_done(events)
+
+        (row,) = query_db(
+            "SELECT vector_store_id FROM chat_vector_stores WHERE chat_id = ?", (chat_id,),
+        )
+        vs_id = row["vector_store_id"]
+        q = "?api-version=2025-03-01-preview"
+        expected = {
+            "openai": [
+                "/v1/files", "/v1/vector_stores", f"/v1/vector_stores/{vs_id}/files",
+                "/v1/responses",
+            ],
+            "azure": [
+                f"/openai/files{q}", f"/openai/vector_stores{q}",
+                f"/openai/vector_stores/{vs_id}/files{q}", "/openai/v1/responses",
+            ],
+        }[provider]
+        assert mock_provider.get_post_paths() == expected
+        assert mock_provider.get_path_errors() == []
 
 
 @pytest.mark.multi_provider

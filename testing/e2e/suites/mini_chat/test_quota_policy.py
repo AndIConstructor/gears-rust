@@ -28,6 +28,7 @@ import pytest
 
 from .conftest import (
     API_PREFIX,
+    CATALOG_SYSTEM_PROMPT,
     DEFAULT_MODEL,
     DISABLED_MODEL,
     QUOTA_USER_1_ID,
@@ -50,6 +51,7 @@ from .conftest import (
     query_db,
     stream_message,
     turn_count,
+    usage_events,
 )
 from .test_code_interpreter import XLSX_CONTENT_TYPE, _make_minimal_xlsx
 
@@ -322,6 +324,43 @@ class TestWebSearchDailyQuota:
         assert_problem(resp, 429, "resource_exhausted", violation_subject="web_search")
         assert mock_provider.get_captured_requests() == []
         assert_no_reserves(user3.user_id)
+
+    @pytest.mark.usefixtures("offline_only")
+    def test_model_without_web_search_skips_tool_and_quota(self, user3, mock_provider):
+        """Web search requested in a chat whose model has
+        `tool_support.web_search: false` (gpt-5-nano): the turn runs without
+        web search (DESIGN, "only when the effective model ... has
+        tool_support.web_search = true"). With the daily web_search quota
+        used up it is still allowed, the request has no tools, no guard and
+        feature `none`, the turn stores the requested flag, and no web
+        search is counted."""
+        chat_id = user3.create_chat("gpt-5-nano")
+        user3.seed(
+            bucket="total", period_type="daily", web_search_calls=WEB_SEARCH_DAILY_QUOTA,
+        )
+
+        mock_provider.clear_captured_requests()
+        rid = str(uuid.uuid4())
+        resp = user3.post_stream(chat_id, {
+            "content": "SEARCH: weather", "web_search": {"enabled": True}, "request_id": rid,
+        })
+        assert resp.status_code == 200, resp.text
+        expect_done(parse_sse(resp.text))
+        poll_turn(chat_id, rid, ("done",), token=user3.token)
+
+        (req,) = mock_provider.get_captured_requests()
+        assert "tools" not in req, req["tools"]
+        assert req["instructions"] == CATALOG_SYSTEM_PROMPT, req["instructions"]
+        assert req["metadata"]["feature"] == "none", req["metadata"]
+        assert query_db(
+            "SELECT web_search_enabled FROM chat_turns WHERE request_id = ?", (rid,),
+        ) == [{"web_search_enabled": 1}]
+        assert query_db(
+            "SELECT web_search_calls FROM quota_usage "
+            "WHERE user_id = ? AND bucket = 'total' AND period_type = 'daily'",
+            (user3.user_id,),
+        ) == [{"web_search_calls": WEB_SEARCH_DAILY_QUOTA}]
+        assert [e["web_search_calls"] for e in usage_events(rid)] == [0]
 
     def test_web_search_below_quota_allowed(self, user3):
         chat_id = user3.create_chat(DEFAULT_MODEL)
