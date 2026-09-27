@@ -192,6 +192,28 @@ impl crate::domain::repos::AttachmentRepository for AttachmentRepository {
         Ok(result.rows_affected)
     }
 
+    async fn touch_uploaded<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<u64, DomainError> {
+        let result = Entity::update_many()
+            .col_expr(Column::UpdatedAt, Expr::value(OffsetDateTime::now_utc()))
+            .filter(
+                Condition::all()
+                    .add(Column::Id.eq(id))
+                    .add(Column::Status.eq(AttachmentStatus::Uploaded))
+                    .add(Column::DeletedAt.is_null()),
+            )
+            .secure()
+            .scope_with(scope)
+            .exec(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(result.rows_affected)
+    }
+
     async fn cas_set_ready<C: DBRunner>(
         &self,
         runner: &C,

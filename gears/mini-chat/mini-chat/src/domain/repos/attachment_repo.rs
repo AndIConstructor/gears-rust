@@ -91,6 +91,16 @@ pub trait AttachmentRepository: Send + Sync {
         scope: &AccessScope,
         params: SetUploadedParams,
     ) -> Result<u64, DomainError>;
+    /// Refresh `updated_at` of an `uploaded`, non-deleted row. The background
+    /// indexing wait calls it on each poll so the upload reaper does not take
+    /// a row that is still being indexed. Returns rows affected (0: the row
+    /// is gone or no longer `uploaded`).
+    async fn touch_uploaded<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<u64, DomainError>;
     async fn cas_set_ready<C: DBRunner>(
         &self,
         runner: &C,

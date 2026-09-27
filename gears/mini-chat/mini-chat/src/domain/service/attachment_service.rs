@@ -163,15 +163,236 @@ fn unwrap_mutation_err(e: toolkit_db::DbError) -> DomainError {
 /// as abandoned. Provider vector-store creation takes seconds.
 const STALE_VECTOR_STORE_PLACEHOLDER: time::Duration = time::Duration::seconds(120);
 
-/// Time from the start of an upload until the vector store must have indexed
-/// the document; after it the attachment is marked `failed` with
-/// `indexing_failed`. The upload runs inside the request and api-gateway ends
-/// every request after 30 s, so the deadline leaves room to write the failed
-/// state and answer before that.
+/// Time from the start of an upload during which the request waits for the
+/// vector store to index the document. The upload runs inside the request and
+/// api-gateway ends every request after 30 s, so the request stops waiting
+/// here; a document still `in_progress` is returned as `uploaded` and a
+/// background task finishes the wait ([`BACKGROUND_INDEXING_TIMEOUT`]).
 const UPLOAD_INDEXING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
 /// First and maximum interval between indexing status polls (doubling).
 const INDEXING_POLL_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
 const INDEXING_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+/// Total time the background task keeps waiting for indexing after the
+/// upload returned `uploaded`.
+const BACKGROUND_INDEXING_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
+/// The background task refreshes `updated_at` at least this often; well below
+/// the upload reaper's minimum `stale_after_secs` (60 s).
+const BACKGROUND_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+/// Maximum interval between background status polls.
+const BACKGROUND_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Outcome of waiting for vector store indexing until a deadline.
+#[domain_model]
+#[derive(Debug, PartialEq, Eq)]
+enum IndexingWait {
+    Completed,
+    /// `failed` / `cancelled`, or a status read error that is not transient.
+    Failed(String),
+    /// Still `in_progress` at the deadline.
+    Pending,
+}
+
+/// Poll the vector store file status until it leaves `in_progress` or the
+/// deadline passes. Waits 250 ms doubling to `poll_max` between reads; each
+/// read is bounded by the deadline; a transient read error (5xx, gateway
+/// failure) keeps polling.
+async fn wait_for_indexing(
+    vector_store: &dyn VectorStoreProvider,
+    ctx: &SecurityContext,
+    deadline: tokio::time::Instant,
+    poll_max: std::time::Duration,
+    ids: (&str, &str, &str),
+    mut status: VectorStoreFileStatus,
+) -> IndexingWait {
+    let (provider_id, vector_store_id, provider_file_id) = ids;
+    let mut delay = INDEXING_POLL_INITIAL;
+    loop {
+        match status {
+            VectorStoreFileStatus::Completed => return IndexingWait::Completed,
+            VectorStoreFileStatus::Failed { message } => return IndexingWait::Failed(message),
+            VectorStoreFileStatus::InProgress => {}
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return IndexingWait::Pending;
+        }
+        tokio::time::sleep(delay.min(deadline - now)).await;
+        delay = (delay * 2).min(poll_max);
+        let read = tokio::time::timeout_at(
+            deadline,
+            vector_store.get_vector_store_file_status(
+                ctx.clone(),
+                provider_id,
+                vector_store_id,
+                provider_file_id,
+            ),
+        )
+        .await;
+        status = match read {
+            Err(_elapsed) => return IndexingWait::Pending,
+            Ok(Ok(status)) => status,
+            Ok(Err(FileStorageError::Unavailable { message })) => {
+                tracing::debug!(error = %message, "indexing status read failed; polling again");
+                VectorStoreFileStatus::InProgress
+            }
+            Ok(Err(e)) => return IndexingWait::Failed(e.to_string()),
+        };
+    }
+}
+
+/// Everything the background indexing wait needs; owned so it can outlive
+/// the upload request.
+struct BackgroundIndexing<AR: AttachmentRepository + 'static> {
+    db: Arc<DbProvider>,
+    attachment_repo: Arc<AR>,
+    vector_store: Arc<dyn VectorStoreProvider>,
+    file_storage: Arc<dyn FileStorageProvider>,
+    ctx: SecurityContext,
+    scope: AccessScope,
+    attachment_id: Uuid,
+    provider_id: String,
+    vector_store_id: String,
+    provider_file_id: String,
+}
+
+impl<AR: AttachmentRepository + 'static> BackgroundIndexing<AR> {
+    /// Keep polling after the upload request returned `uploaded`.
+    /// `completed` → `ready`; `failed` or [`BACKGROUND_INDEXING_TIMEOUT`] →
+    /// `failed` / `indexing_failed` and the provider file is deleted.
+    async fn run(self) {
+        match self.wait().await {
+            None => {}
+            Some(IndexingWait::Completed) => self.mark_ready().await,
+            Some(IndexingWait::Failed(reason)) => self.mark_failed(&reason).await,
+            Some(IndexingWait::Pending) => self.mark_failed("indexing not finished in time").await,
+        }
+    }
+
+    /// Poll in rounds of [`BACKGROUND_HEARTBEAT_INTERVAL`]; each round first
+    /// refreshes `updated_at` so the upload reaper leaves the row alone.
+    /// `None` when the row is gone or no longer `uploaded`.
+    async fn wait(&self) -> Option<IndexingWait> {
+        let overall = tokio::time::Instant::now() + BACKGROUND_INDEXING_TIMEOUT;
+        loop {
+            if !self.heartbeat().await {
+                return None;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= overall {
+                return Some(IndexingWait::Pending);
+            }
+            let outcome = wait_for_indexing(
+                self.vector_store.as_ref(),
+                &self.ctx,
+                (now + BACKGROUND_HEARTBEAT_INTERVAL).min(overall),
+                BACKGROUND_POLL_MAX,
+                (
+                    &self.provider_id,
+                    &self.vector_store_id,
+                    &self.provider_file_id,
+                ),
+                VectorStoreFileStatus::InProgress,
+            )
+            .await;
+            if outcome != IndexingWait::Pending {
+                return Some(outcome);
+            }
+        }
+    }
+
+    /// `false` only when the row is gone or no longer `uploaded`; a DB error
+    /// keeps waiting.
+    async fn heartbeat(&self) -> bool {
+        let touched = match self.db.conn() {
+            Ok(conn) => {
+                self.attachment_repo
+                    .touch_uploaded(&conn, &self.scope, self.attachment_id)
+                    .await
+            }
+            Err(e) => Err(DomainError::from(e)),
+        };
+        match touched {
+            Ok(0) => {
+                tracing::info!(attachment_id = %self.attachment_id, "background indexing: row no longer uploaded, stopping");
+                false
+            }
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(attachment_id = %self.attachment_id, error = %e, "background indexing: heartbeat failed");
+                true
+            }
+        }
+    }
+
+    async fn mark_ready(&self) {
+        use crate::domain::repos::SetReadyParams;
+        let result = match self.db.conn() {
+            Ok(conn) => {
+                self.attachment_repo
+                    .cas_set_ready(
+                        &conn,
+                        &self.scope,
+                        SetReadyParams {
+                            id: self.attachment_id,
+                            img_thumbnail: None,
+                            img_thumbnail_width: None,
+                            img_thumbnail_height: None,
+                        },
+                    )
+                    .await
+            }
+            Err(e) => Err(DomainError::from(e)),
+        };
+        match result {
+            Ok(affected) => {
+                tracing::info!(attachment_id = %self.attachment_id, affected, "background indexing: ready");
+            }
+            Err(e) => {
+                tracing::error!(attachment_id = %self.attachment_id, error = %e, "background indexing: set ready failed");
+            }
+        }
+    }
+
+    async fn delete_provider_file(&self) {
+        if let Err(e) = self
+            .file_storage
+            .delete_file(self.ctx.clone(), &self.provider_id, &self.provider_file_id)
+            .await
+        {
+            tracing::warn!(provider_file_id = %self.provider_file_id, error = %e, "background indexing: file delete failed");
+        }
+    }
+
+    async fn mark_failed(&self, reason: &str) {
+        use crate::domain::repos::SetFailedParams;
+        tracing::warn!(attachment_id = %self.attachment_id, reason = %reason, "background indexing: failed");
+        let result = match self.db.conn() {
+            Ok(conn) => {
+                self.attachment_repo
+                    .cas_set_failed(
+                        &conn,
+                        &self.scope,
+                        SetFailedParams {
+                            id: self.attachment_id,
+                            error_code: "indexing_failed".to_owned(),
+                            from_status: "uploaded".to_owned(),
+                        },
+                    )
+                    .await
+            }
+            Err(e) => Err(DomainError::from(e)),
+        };
+        match result {
+            // Only the winner of the CAS deletes the file; a row deleted
+            // meanwhile is cleaned up by the attachment cleanup.
+            Ok(1) => self.delete_provider_file().await,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(attachment_id = %self.attachment_id, error = %e, "background indexing: set failed failed");
+            }
+        }
+    }
+}
 
 /// Service handling file attachment operations.
 #[domain_model]
@@ -251,58 +472,6 @@ impl<
     pub(crate) fn with_indexing_deadline(mut self, deadline: std::time::Duration) -> Self {
         self.indexing_deadline = deadline;
         self
-    }
-
-    /// Wait until the vector store finishes indexing the file. `Ok(())` on
-    /// `completed`; `Err` with the reason on `failed` / `cancelled`, a
-    /// status read failure, or `deadline`.
-    async fn wait_for_indexing(
-        &self,
-        ctx: &SecurityContext,
-        deadline: tokio::time::Instant,
-        provider_id: &str,
-        vector_store_id: &str,
-        provider_file_id: &str,
-        mut status: VectorStoreFileStatus,
-    ) -> Result<(), String> {
-        let mut delay = INDEXING_POLL_INITIAL;
-        loop {
-            match status {
-                VectorStoreFileStatus::Completed => return Ok(()),
-                VectorStoreFileStatus::Failed { message } => return Err(message),
-                VectorStoreFileStatus::InProgress => {}
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Err("indexing not finished before the upload deadline".to_owned());
-            }
-            tokio::time::sleep(delay.min(deadline - now)).await;
-            delay = (delay * 2).min(INDEXING_POLL_MAX);
-            // The status read is bounded by the deadline. A transient failure
-            // (5xx, gateway error) keeps polling; any other error ends
-            // the wait.
-            let read = tokio::time::timeout_at(
-                deadline,
-                self.vector_store.get_vector_store_file_status(
-                    ctx.clone(),
-                    provider_id,
-                    vector_store_id,
-                    provider_file_id,
-                ),
-            )
-            .await;
-            status = match read {
-                Err(_elapsed) => {
-                    return Err("indexing not finished before the upload deadline".to_owned());
-                }
-                Ok(Ok(status)) => status,
-                Ok(Err(FileStorageError::Unavailable { message })) => {
-                    tracing::debug!(error = %message, "indexing status read failed; polling again");
-                    VectorStoreFileStatus::InProgress
-                }
-                Ok(Err(e)) => return Err(e.to_string()),
-            };
-        }
     }
 
     /// Resolve the effective upload size limits for a chat.
@@ -1490,38 +1659,76 @@ impl<
             // P1-13: indexing failure → CAS set_failed from uploaded,
             // best-effort delete provider file. `ready` only after the vector
             // store reports the file `completed`, so file_search can find it.
-            let indexing_err = match added {
-                Err(e) => Some(DomainError::from(e)),
-                Ok(status) => self
-                    .wait_for_indexing(
-                        ctx,
-                        indexing_deadline,
-                        &provider_id,
-                        &vs_id,
-                        &provider_file_id,
-                        status,
-                    )
-                    .await
-                    .err()
-                    .map(|reason| {
-                        tracing::warn!(
-                            attachment_id = %attachment_id,
-                            reason = %reason,
-                            "vector store indexing did not complete"
-                        );
-                        DomainError::from(FileStorageError::Rejected {
-                            code: "indexing_failed".to_owned(),
-                            message: "vector store indexing failed".to_owned(),
-                        })
-                    }),
+            let outcome = match added {
+                Err(e) => Err(DomainError::from(e)),
+                Ok(status) => Ok(wait_for_indexing(
+                    self.vector_store.as_ref(),
+                    ctx,
+                    indexing_deadline,
+                    INDEXING_POLL_MAX,
+                    (&provider_id, &vs_id, &provider_file_id),
+                    status,
+                )
+                .await),
             };
-            if let Some(e) = indexing_err {
-                self.try_set_failed(&scope, attachment_id, "uploaded", "indexing_failed")
-                    .await;
-                self.spawn_delete_file(ctx.clone(), &provider_id, &provider_file_id);
-                self.metrics
-                    .record_attachment_upload(kind_metric, upload_result::PROVIDER_ERROR);
-                return Err(e);
+            match outcome {
+                Ok(IndexingWait::Completed) => {}
+                Ok(IndexingWait::Pending) => {
+                    // Not indexed yet: answer `uploaded` and finish in the
+                    // background. The row becomes `ready` or `failed`.
+                    tokio::spawn(
+                        BackgroundIndexing {
+                            db: Arc::clone(&self.db),
+                            attachment_repo: Arc::clone(&self.attachment_repo),
+                            vector_store: Arc::clone(&self.vector_store),
+                            file_storage: Arc::clone(&self.file_storage),
+                            ctx: ctx.clone(),
+                            scope: scope.clone(),
+                            attachment_id,
+                            provider_id: provider_id.clone(),
+                            vector_store_id: vs_id.clone(),
+                            provider_file_id: provider_file_id.clone(),
+                        }
+                        .run(),
+                    );
+                    self.metrics
+                        .record_attachment_upload(kind_metric, upload_result::OK);
+                    #[allow(clippy::cast_precision_loss)]
+                    self.metrics
+                        .record_attachment_upload_bytes(kind_metric, bytes_uploaded as f64);
+                    pending_guard.defuse();
+                    let conn = self.db.conn().map_err(DomainError::from)?;
+                    return self
+                        .attachment_repo
+                        .get(&conn, &scope, attachment_id)
+                        .await?
+                        .ok_or_else(|| DomainError::attachment_not_found(attachment_id));
+                }
+                failed => {
+                    // P1-13: indexing failure → CAS set_failed from uploaded,
+                    // best-effort delete provider file.
+                    let e = match failed {
+                        Err(e) => e,
+                        Ok(IndexingWait::Failed(reason)) => {
+                            tracing::warn!(
+                                attachment_id = %attachment_id,
+                                reason = %reason,
+                                "vector store indexing failed"
+                            );
+                            DomainError::from(FileStorageError::Rejected {
+                                code: "indexing_failed".to_owned(),
+                                message: "vector store indexing failed".to_owned(),
+                            })
+                        }
+                        Ok(_) => unreachable!("handled above"),
+                    };
+                    self.try_set_failed(&scope, attachment_id, "uploaded", "indexing_failed")
+                        .await;
+                    self.spawn_delete_file(ctx.clone(), &provider_id, &provider_file_id);
+                    self.metrics
+                        .record_attachment_upload(kind_metric, upload_result::PROVIDER_ERROR);
+                    return Err(e);
+                }
             }
         }
 

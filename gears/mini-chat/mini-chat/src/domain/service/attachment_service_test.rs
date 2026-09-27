@@ -3365,9 +3365,25 @@ async fn test_upload_indexing_failed_marks_attachment_failed() {
     assert_eq!(row.error_code.as_deref(), Some("indexing_failed"));
 }
 
-/// Indexing that does not finish before the upload deadline fails the upload.
+/// Poll the only attachment row until `pred` holds (background indexing).
+async fn wait_for_row(
+    db_prov: &crate::domain::service::DbProvider,
+    pred: impl Fn(&crate::infra::db::entity::attachment::Model) -> bool,
+) -> crate::infra::db::entity::attachment::Model {
+    for _ in 0..60 {
+        let row = only_attachment_row(db_prov).await;
+        if pred(&row) {
+            return row;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    only_attachment_row(db_prov).await
+}
+
+/// Indexing still `in_progress` at the request deadline: the upload returns
+/// `uploaded`, and the background wait makes it `ready` once indexed.
 #[tokio::test]
-async fn test_upload_indexing_timeout_marks_attachment_failed() {
+async fn test_upload_returns_uploaded_and_background_marks_ready() {
     let db = inmem_db().await;
     let tenant_id = Uuid::new_v4();
     let chat_id = Uuid::new_v4();
@@ -3376,21 +3392,21 @@ async fn test_upload_indexing_timeout_marks_attachment_failed() {
     insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
     let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
 
-    let mut responses = vec![
+    let oagw = MockOagwGateway::with_responses(vec![
         Ok(file_upload_response("file-idx-003")),
         Ok(vector_store_create_response("vs-idx-003")),
-    ];
-    responses.extend((0..20).map(|_| Ok(vector_store_file_response("in_progress"))));
-    let oagw = MockOagwGateway::with_responses(responses);
+        Ok(vector_store_file_response("in_progress")),
+        Ok(vector_store_file_response("completed")),
+    ]);
     let svc = build_service(
         db,
         Arc::clone(&oagw) as _,
         Arc::new(NoopOutboxEnqueuer),
         RagConfig::default(),
     )
-    .with_indexing_deadline(std::time::Duration::from_millis(300));
+    .with_indexing_deadline(std::time::Duration::ZERO);
 
-    let err = test_upload_file(
+    let attachment = test_upload_file(
         &svc,
         &ctx,
         chat_id,
@@ -3399,13 +3415,88 @@ async fn test_upload_indexing_timeout_marks_attachment_failed() {
         Bytes::from(vec![0u8; 1024]),
     )
     .await
-    .expect_err("indexing timed out");
-    assert!(
-        matches!(&err, crate::domain::error::DomainError::ProviderError { code, .. } if code == "indexing_failed"),
-        "expected indexing_failed, got {err:?}"
+    .expect("upload returns while indexing continues");
+    assert_eq!(
+        attachment.status,
+        crate::infra::db::entity::attachment::AttachmentStatus::Uploaded
     );
-    let row = only_attachment_row(&db_prov).await;
+
+    let row = wait_for_row(&db_prov, |r| {
+        r.status == crate::infra::db::entity::attachment::AttachmentStatus::Ready
+    })
+    .await;
+    assert_eq!(
+        row.status,
+        crate::infra::db::entity::attachment::AttachmentStatus::Ready
+    );
+}
+
+/// The background wait marks the attachment `failed` / `indexing_failed`
+/// when the vector store reports a failure after the request returned.
+#[tokio::test]
+async fn test_background_indexing_failure_marks_attachment_failed() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    let oagw = MockOagwGateway::with_responses(vec![
+        Ok(file_upload_response("file-idx-005")),
+        Ok(vector_store_create_response("vs-idx-005")),
+        Ok(vector_store_file_response("in_progress")),
+        Ok(serde_json::json!({
+            "id": "vsf-abc123",
+            "status": "failed",
+            "last_error": { "code": "server_error", "message": "indexing error" }
+        })),
+        // Delete of the provider file.
+        Ok(serde_json::json!({ "id": "file-idx-005", "deleted": true })),
+    ]);
+    let svc = build_service(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+    )
+    .with_indexing_deadline(std::time::Duration::ZERO);
+
+    let attachment = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await
+    .expect("upload returns while indexing continues");
+    assert_eq!(
+        attachment.status,
+        crate::infra::db::entity::attachment::AttachmentStatus::Uploaded
+    );
+
+    let row = wait_for_row(&db_prov, |r| {
+        r.status == crate::infra::db::entity::attachment::AttachmentStatus::Failed
+    })
+    .await;
     assert_eq!(row.error_code.as_deref(), Some("indexing_failed"));
+    // The provider file is deleted after the row is marked failed.
+    for _ in 0..30 {
+        if oagw
+            .captured_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.uri.contains("/v1/files/file-idx-005"))
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("provider file was not deleted");
 }
 
 /// A transient failure of one status read does not fail the upload; the
