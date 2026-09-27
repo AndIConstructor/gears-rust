@@ -156,8 +156,12 @@ class TestCodeInterpreterUsageAccounting:
         assert _query_ci_calls() == ci_before + 1
 
     @pytest.mark.timeout(20)
-    def test_non_ci_turn_has_zero_ci_calls(self, provider, server):
-        """A normal turn (no XLSX) should not increment code_interpreter_calls."""
+    def test_non_ci_turn_has_zero_ci_calls(self, provider, server, mock_provider):
+        """In a chat without an XLSX the same `CODEINTERP:` prompt does not
+        offer the code_interpreter tool, so the mock (like the real API)
+        runs no code: no code_interpreter tool events, no call counted in
+        the turn's usage event or in quota_usage. The control with an XLSX
+        is test_code_interpreter_calls_tracked_in_db."""
         model = PROVIDER_DEFAULT_MODEL[provider]
 
         resp = httpx.post(f"{API_PREFIX}/chats", json={"model": model})
@@ -166,23 +170,15 @@ class TestCodeInterpreterUsageAccounting:
 
         ci_before = _query_ci_calls()
 
-        status, events, _ = stream_message(chat_id, "What is 2+2? Answer in one word.")
+        rid = str(uuid.uuid4())
+        mock_provider.clear_captured_requests()
+        status, events, _ = stream_message(chat_id, "CODEINTERP: what is the sum?", request_id=rid)
         assert status == 200
         expect_done(events)
         assert_no_reserves(USER_A_ID)
 
-        ci_after = _query_ci_calls()
-
-        assert ci_after == ci_before, (
-            f"code_interpreter_calls changed without CI: before={ci_before}, after={ci_after}"
-        )
-
-        # Verify no code_interpreter tool events
-        tool_events = [e for e in events if e.event == "tool"]
-        ci_events = [
-            e for e in tool_events
-            if isinstance(e.data, dict) and e.data.get("name") == "code_interpreter"
-        ]
-        assert len(ci_events) == 0, (
-            f"Unexpected code_interpreter events: {[t.data for t in ci_events]}"
-        )
+        (req,) = mock_provider.get_captured_requests()
+        assert "code_interpreter" not in [t.get("type") for t in req.get("tools") or []], req
+        assert [e.data["name"] for e in events if e.event == "tool"] == [], events
+        assert [u["code_interpreter_calls"] for u in usage_events(rid)] == [0]
+        assert _query_ci_calls() == ci_before
