@@ -37,6 +37,16 @@ pub(super) struct InvalidAttachmentError {
     pub(super) message: String,
 }
 
+/// A concurrent request reserved between the preflight check and the reserve
+/// write, and this reserve no longer fits: the same 429 as a preflight reject.
+pub(super) fn reserve_limit_exceeded() -> StreamError {
+    StreamError::QuotaExhausted {
+        error_code: "quota_exceeded".to_owned(),
+        http_status: 429,
+        quota_scope: "tokens".to_owned(),
+    }
+}
+
 pub(super) fn attachment_err(message: impl Into<String>) -> toolkit_db::DbError {
     toolkit_db::DbError::Other(anyhow::Error::new(InvalidAttachmentError {
         message: message.into(),

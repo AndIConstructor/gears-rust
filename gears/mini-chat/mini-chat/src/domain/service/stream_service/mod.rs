@@ -33,8 +33,44 @@ use crate::infra::llm::provider_resolver::ProviderResolver;
 use super::{DbProvider, actions, resources};
 use types::{
     FinalizationCtx, InvalidAttachmentError, PreflightResult, attachment_err,
-    check_input_token_limit, flatten_preflight, requester_type_from_str,
+    check_input_token_limit, flatten_preflight, requester_type_from_str, reserve_limit_exceeded,
 };
+
+/// Map a failure of the reserve + message + turn transaction.
+fn turn_tx_error(e: toolkit_db::DbError) -> StreamError {
+    match e {
+        toolkit_db::DbError::Other(anyhow_err)
+            if anyhow_err.is::<super::quota_service::ReserveLimitExceeded>() =>
+        {
+            reserve_limit_exceeded()
+        }
+        toolkit_db::DbError::Other(anyhow_err) => {
+            match anyhow_err.downcast::<InvalidAttachmentError>() {
+                Ok(err) => StreamError::InvalidAttachment {
+                    code: "invalid_attachment".to_owned(),
+                    message: err.message,
+                },
+                Err(anyhow_err) => match anyhow_err.downcast::<DomainError>() {
+                    // Lost the race on the one-running-turn-per-chat
+                    // index (or on UNIQUE(chat_id, request_id)).
+                    Ok(DomainError::Conflict { code, message }) if code == "unique_violation" => {
+                        StreamError::Conflict {
+                            code: "turn_already_running".to_owned(),
+                            message,
+                        }
+                    }
+                    Ok(domain_err) => StreamError::TurnCreationFailed { source: domain_err },
+                    Err(err) => StreamError::TurnCreationFailed {
+                        source: DomainError::from(toolkit_db::DbError::Other(err)),
+                    },
+                },
+            }
+        }
+        other => StreamError::TurnCreationFailed {
+            source: DomainError::from(other),
+        },
+    }
+}
 
 /// Quota preflight computed for a retry/edit before its mutation commits.
 pub struct MutationPreflight {
@@ -745,6 +781,12 @@ impl<
                                     })?;
                             }
                         }
+                        super::quota_service::verify_reserve_within_limits(
+                            &*quota_repo,
+                            tx,
+                            &computed,
+                        )
+                        .await?;
                     }
 
                     // 2. Insert user message; the chat moves to the top of
@@ -884,37 +926,7 @@ impl<
                 })
             })
             .await
-            .map_err(|e: toolkit_db::DbError| match e {
-                toolkit_db::DbError::Other(anyhow_err) => {
-                    match anyhow_err.downcast::<InvalidAttachmentError>() {
-                        Ok(err) => StreamError::InvalidAttachment {
-                            code: "invalid_attachment".to_owned(),
-                            message: err.message,
-                        },
-                        Err(anyhow_err) => match anyhow_err.downcast::<DomainError>() {
-                            // Lost the race on the one-running-turn-per-chat
-                            // index (or on UNIQUE(chat_id, request_id)).
-                            Ok(DomainError::Conflict { code, message })
-                                if code == "unique_violation" =>
-                            {
-                                StreamError::Conflict {
-                                    code: "turn_already_running".to_owned(),
-                                    message,
-                                }
-                            }
-                            Ok(domain_err) => {
-                                StreamError::TurnCreationFailed { source: domain_err }
-                            }
-                            Err(err) => StreamError::TurnCreationFailed {
-                                source: DomainError::from(toolkit_db::DbError::Other(err)),
-                            },
-                        },
-                    }
-                }
-                other => StreamError::TurnCreationFailed {
-                    source: DomainError::from(other),
-                },
-            });
+            .map_err(turn_tx_error);
 
         match result {
             Ok(()) => Ok(turn_id),
@@ -1508,16 +1520,29 @@ impl<
                                 .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
                         }
                     }
+                    super::quota_service::verify_reserve_within_limits(
+                        &*quota_repo,
+                        txn,
+                        &computed,
+                    )
+                    .await?;
                     Ok(())
                 })
             })
             .await
-            .map_err(|e| StreamError::TurnCreationFailed {
-                source: match e {
-                    toolkit_db::DbError::Other(err) => err
+            .map_err(|e| match e {
+                toolkit_db::DbError::Other(err)
+                    if err.is::<super::quota_service::ReserveLimitExceeded>() =>
+                {
+                    reserve_limit_exceeded()
+                }
+                toolkit_db::DbError::Other(err) => StreamError::TurnCreationFailed {
+                    source: err
                         .downcast::<DomainError>()
                         .unwrap_or_else(|err| DomainError::from(toolkit_db::DbError::Other(err))),
-                    other => DomainError::from(other),
+                },
+                other => StreamError::TurnCreationFailed {
+                    source: DomainError::from(other),
                 },
             })?;
 
@@ -6883,6 +6908,99 @@ mod tests {
         );
     }
 
+    /// Retry/edit: a concurrent reserve booked after the mutation preflight
+    /// makes the reserve write fail with `quota_exceeded`; the turn is marked
+    /// failed and no reserve stays behind.
+    #[tokio::test]
+    async fn run_stream_for_mutation_rechecks_limits_after_concurrent_reserve() {
+        use crate::domain::repos::{IncrementReserveParams, QuotaUsageRepository};
+
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+        insert_running_turn(&db, tenant_id, user_id, chat_id, request_id, turn_id).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service(db.clone(), provider);
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, _rx) = mpsc::channel(32);
+
+        let model = test_resolved_model();
+        let content = "retry question".to_owned();
+        let preflight = svc
+            .preflight_mutation(&ctx, chat_id, Uuid::new_v4(), &content, &model, false)
+            .await
+            .expect("preflight should allow the mutation");
+
+        let (period_type, period_start) = preflight.computed.periods[0].clone();
+        let competing = preflight
+            .computed
+            .user_limits
+            .standard
+            .limit_daily_credits_micro;
+        let conn = db.conn().unwrap();
+        OrmQuotaUsageRepo
+            .increment_reserve(
+                &conn,
+                &AccessScope::for_tenant(tenant_id),
+                IncrementReserveParams {
+                    tenant_id,
+                    user_id,
+                    period_type: period_type.clone(),
+                    period_start,
+                    bucket: "total".to_owned(),
+                    amount_micro: competing,
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = svc
+            .run_stream_for_mutation(
+                ctx,
+                chat_id,
+                request_id,
+                turn_id,
+                content,
+                model,
+                false,
+                None,
+                preflight,
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect_err("the reserve no longer fits the daily limit");
+        assert!(
+            matches!(&err, StreamError::QuotaExhausted { error_code, .. } if error_code == "quota_exceeded"),
+            "expected quota_exceeded, got: {err:?}"
+        );
+
+        let turn = TurnRepo
+            .find_by_chat_and_request_id(&conn, &AccessScope::allow_all(), chat_id, request_id)
+            .await
+            .unwrap()
+            .expect("turn must exist");
+        assert_eq!(turn.state, TurnState::Failed);
+        let rows = OrmQuotaUsageRepo
+            .find_bucket_rows_for_update(
+                &conn,
+                &AccessScope::for_tenant(tenant_id),
+                tenant_id,
+                user_id,
+                &[period_type],
+                &[period_start],
+            )
+            .await
+            .unwrap();
+        let reserved: i64 = rows.iter().map(|r| r.reserved_credits_micro).sum();
+        assert_eq!(reserved, competing, "the mutation's reserve rolled back");
+    }
+
     // ── Atomic reserve + user message + turn (E2E 09-03) ──
 
     /// Runs the real preflight and then `reserve_and_create_turn` directly,
@@ -7032,6 +7150,110 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "no turn for the failed request_id"
+        );
+    }
+
+    /// A reserve booked by a concurrent request between the preflight check
+    /// and the reserve write is seen by the write transaction: the request
+    /// gets `quota_exceeded` and leaves nothing behind.
+    #[tokio::test]
+    async fn reserve_and_create_turn_rechecks_limits_after_concurrent_reserve() {
+        use crate::domain::repos::{IncrementReserveParams, QuotaUsageRepository};
+
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
+        let svc = build_stream_service(db.clone(), provider);
+
+        let content = "hello".to_owned();
+        let computed = svc
+            .quota
+            .preflight_evaluate(crate::domain::model::quota::PreflightInput {
+                tenant_id,
+                user_id,
+                selected_model: "gpt-5.2".to_owned(),
+                utf8_bytes: content.len() as u64,
+                num_images: 0,
+                tools_enabled: false,
+                web_search_enabled: false,
+                code_interpreter_enabled: false,
+                max_output_tokens_cap: svc.streaming_config.max_output_tokens,
+                prior_context_tokens: 0,
+            })
+            .await
+            .expect("preflight evaluate");
+        let pf = super::types::flatten_preflight(computed.decision.clone()).expect("allow");
+
+        // The concurrent request books the whole daily limit.
+        let (period_type, period_start) = computed.periods[0].clone();
+        let competing = computed.user_limits.standard.limit_daily_credits_micro;
+        let conn = db.conn().unwrap();
+        OrmQuotaUsageRepo
+            .increment_reserve(
+                &conn,
+                &AccessScope::for_tenant(tenant_id),
+                IncrementReserveParams {
+                    tenant_id,
+                    user_id,
+                    period_type: period_type.clone(),
+                    period_start,
+                    bucket: "total".to_owned(),
+                    amount_micro: competing,
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = svc
+            .reserve_and_create_turn(
+                &AccessScope::for_tenant(tenant_id),
+                &pf,
+                computed,
+                tenant_id,
+                user_id,
+                chat_id,
+                request_id,
+                "user".to_owned(),
+                content,
+                Vec::new(),
+                false,
+            )
+            .await
+            .expect_err("the reserve no longer fits the daily limit");
+        assert!(
+            matches!(&err, StreamError::QuotaExhausted { error_code, quota_scope, .. }
+                if error_code == "quota_exceeded" && quota_scope == "tokens"),
+            "expected quota_exceeded, got: {err:?}"
+        );
+
+        let rows = OrmQuotaUsageRepo
+            .find_bucket_rows_for_update(
+                &conn,
+                &AccessScope::for_tenant(tenant_id),
+                tenant_id,
+                user_id,
+                &[period_type],
+                &[period_start],
+            )
+            .await
+            .unwrap();
+        let reserved: i64 = rows.iter().map(|r| r.reserved_credits_micro).sum();
+        assert_eq!(
+            reserved, competing,
+            "the failed request's reserve rolled back"
+        );
+        assert!(
+            TurnRepo
+                .find_by_chat_and_request_id(&conn, &AccessScope::allow_all(), chat_id, request_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "no turn for the rejected request"
         );
     }
 

@@ -415,6 +415,9 @@ pub struct PreflightComputed {
     pub(crate) periods: Vec<(PeriodType, time::Date)>,
     pub(crate) tenant_id: uuid::Uuid,
     pub(crate) user_id: uuid::Uuid,
+    /// Limits the decision was checked against; the reserve transaction
+    /// checks them again (see [`verify_reserve_within_limits`]).
+    pub(crate) user_limits: UserLimits,
     /// Policy kill switches captured at preflight time.
     /// Avoids a redundant `PolicySnapshotProvider::get()` call in `run_stream()`.
     pub kill_switches: KillSwitches,
@@ -424,6 +427,59 @@ impl PreflightComputed {
     /// Tier label for metrics recording.
     pub(crate) fn effective_tier(&self) -> &'static str {
         self.metrics_tier
+    }
+}
+
+// ── reserve limit re-check ──
+
+/// The reserve pushed a bucket over its limit: another request reserved
+/// between the preflight check and the reserve write.
+#[allow(de0309_must_have_domain_model)]
+#[derive(Debug, thiserror::Error)]
+#[error("quota reserve exceeds the limit")]
+pub struct ReserveLimitExceeded;
+
+/// Check the limits again after the reserve increments, in the same
+/// transaction. The preflight check runs in an earlier transaction, so two
+/// concurrent requests can both pass it; the increments take the row locks
+/// (Postgres) or the write lock (`SQLite`), so this check sees every reserve
+/// committed before it. Returns [`ReserveLimitExceeded`] inside
+/// `DbError::Other`; the caller rolls back and reports `quota_exceeded`.
+pub async fn verify_reserve_within_limits<QR: QuotaUsageRepository, C: DBRunner>(
+    repo: &QR,
+    runner: &C,
+    computed: &PreflightComputed,
+) -> Result<(), toolkit_db::DbError> {
+    if computed.buckets.is_empty() {
+        return Ok(());
+    }
+    let scope = AccessScope::for_tenant(computed.tenant_id);
+    let period_types: Vec<PeriodType> = computed.periods.iter().map(|(pt, _)| pt.clone()).collect();
+    let period_starts: Vec<time::Date> = computed.periods.iter().map(|(_, ps)| *ps).collect();
+    let rows = repo
+        .find_bucket_rows_for_update(
+            runner,
+            &scope,
+            computed.tenant_id,
+            computed.user_id,
+            &period_types,
+            &period_starts,
+        )
+        .await
+        .map_err(to_db)?;
+    let within = computed.buckets.iter().all(|bucket| {
+        computed.periods.iter().all(|(period_type, period_start)| {
+            let limit = limit_credits_micro(bucket, period_type, &computed.user_limits);
+            let (spent, reserved) = sum_from_usage_rows(bucket, period_type, *period_start, &rows);
+            spent.saturating_add(reserved) <= limit
+        })
+    });
+    if within {
+        Ok(())
+    } else {
+        Err(toolkit_db::DbError::Other(anyhow::Error::new(
+            ReserveLimitExceeded,
+        )))
     }
 }
 
@@ -585,6 +641,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                             periods: periods.clone(),
                             tenant_id,
                             user_id,
+                            user_limits: user_limits.clone(),
                             kill_switches: snapshot.kill_switches.clone(),
                         }),
                         CascadeDecision::Allow {
@@ -632,6 +689,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                         periods: periods.clone(),
                                         tenant_id,
                                         user_id,
+                                        user_limits: user_limits.clone(),
                                         kill_switches: snapshot.kill_switches.clone(),
                                     });
                                 }
@@ -663,6 +721,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                         periods: periods.clone(),
                                         tenant_id,
                                         user_id,
+                                        user_limits: user_limits.clone(),
                                         kill_switches: snapshot.kill_switches.clone(),
                                     });
                                 }
@@ -776,6 +835,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                 periods: periods.clone(),
                                 tenant_id,
                                 user_id,
+                                user_limits: user_limits.clone(),
                                 kill_switches: snapshot.kill_switches.clone(),
                             })
                         }
