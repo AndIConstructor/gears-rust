@@ -194,7 +194,9 @@ class TestThreadSummary:
         assert summary_requests[0]["model"] == SUMMARY_MODEL_PROVIDER_ID
         # A system task: the tenant with the default subject (not the chat
         # owner, user B), request_type summary.
-        assert summary_requests[0]["user"] == f"{TENANT_A_ID}:{DEFAULT_SUBJECT_ID}"
+        assert summary_requests[0]["user"] == (
+            TENANT_A_ID.replace("-", "") + DEFAULT_SUBJECT_ID.replace("-", "")
+        )
         assert summary_requests[0]["metadata"] == {
             "tenant_id": TENANT_A_ID,
             "user_id": DEFAULT_SUBJECT_ID,

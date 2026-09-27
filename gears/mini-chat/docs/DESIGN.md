@@ -3657,8 +3657,10 @@ Every request sent to the LLM provider via `llm_provider` carries the caller ide
 **`user` field** - composite tenant+user identifier for provider usage monitoring and abuse detection:
 
 ```json
-"user": "{tenant_id}:{user_id}"
+"user": "{tenant_id_hex}{user_id_hex}"
 ```
+
+- The two UUIDs in simple (hyphen-less, 32 hex) form, tenant first: exactly 64 characters. OpenAI and Azure OpenAI reject a `user` longer than 64 characters, so the earlier `{tenant_id}:{user_id}` form (73 characters) failed every request (`UserIdentity::provider_user` in `infra/llm/request.rs`).
 
 - Chat requests (`messages:stream`, retry, edit) use the tenant and user of the request's security context.
 - The thread summary request uses the system identity: the chat's tenant and the platform default subject (`DEFAULT_SUBJECT_ID`).

@@ -64,6 +64,9 @@ def parse_sse(text: str) -> list[dict]:
 
 
 def create_chat(model: str = DEFAULT_MODEL) -> dict:
+    # Online only: a model whose provider has no key is skipped, not failed.
+    from .config.generator import model_provider, skip_unless_provider_key
+    skip_unless_provider_key(model_provider(model))
     resp = httpx.post(f"{API}/chats", json={"model": model}, timeout=TIMEOUT)
     assert resp.status_code == 201, f"create chat: {resp.status_code} {resp.text}"
     return resp.json()

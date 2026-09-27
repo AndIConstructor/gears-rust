@@ -162,8 +162,11 @@ class TestProviderIdentity:
         expect_done(events)
         (search,) = mock_provider.get_captured_requests()
 
-        assert plain["user"] == f"{TENANT_A_ID}:{USER_A_ID}", plain.get("user")
-        assert search["user"] == f"{TENANT_A_ID}:{USER_A_ID}", search.get("user")
+        # OpenAI and Azure cap `user` at 64 characters: two hyphen-less UUIDs.
+        expected_user = TENANT_A_ID.replace("-", "") + USER_A_ID.replace("-", "")
+        assert len(expected_user) == 64
+        assert plain["user"] == expected_user, plain.get("user")
+        assert search["user"] == expected_user, search.get("user")
         assert plain["metadata"] == {**expected_metadata, "feature": "none"}, plain["metadata"]
         assert search["metadata"] == {**expected_metadata, "feature": "web_search"}, (
             search["metadata"]

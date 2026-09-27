@@ -653,7 +653,7 @@ fn build_request_body<M>(request: &LlmRequest<M>, stream: bool) -> serde_json::V
 
     if let Some(ref identity) = request.user_identity {
         body["metadata"] = serde_json::json!({
-            "user_id": format!("{}:{}", identity.tenant_id, identity.user_id)
+            "user_id": identity.provider_user()
         });
     }
 

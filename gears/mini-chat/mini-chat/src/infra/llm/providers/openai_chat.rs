@@ -508,7 +508,7 @@ fn build_request_body<M>(request: &LlmRequest<M>, stream: bool) -> serde_json::V
 
     // User field: "{tenant_id}:{user_id}"
     if let Some(ref identity) = request.user_identity {
-        body["user"] = serde_json::json!(format!("{}:{}", identity.tenant_id, identity.user_id));
+        body["user"] = serde_json::json!(identity.provider_user());
     }
 
     // Map tools: Function → Chat Completions function format, others dropped

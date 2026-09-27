@@ -976,6 +976,13 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "online_only" in item.keywords:
                 item.add_marker(skip)
+    else:
+        # A provider-parameterized test runs only when that provider has a key.
+        from .config.generator import provider_key_missing
+        for item in items:
+            for provider in ("openai", "azure"):
+                if provider in item.keywords and provider_key_missing(provider):
+                    item.add_marker(pytest.mark.skip(reason=f"no {provider} key in online mode"))
     default_timeout = float(config.getini("timeout") or 0)
     for item in items:
         if MODULE_DIR not in Path(str(item.path)).parents:
@@ -1292,9 +1299,12 @@ def chat(server) -> dict:
 
 
 @pytest.fixture
-def chat_with_model(server):
+def chat_with_model(server, request):
     """Factory fixture: create a chat with a specific model."""
     def _create(model: str) -> dict:
+        if request.config.getoption("mode") == "online":
+            from .config.generator import model_provider, skip_unless_provider_key
+            skip_unless_provider_key(model_provider(model))
         resp = httpx.post(f"{API_PREFIX}/chats", json={"model": model})
         assert resp.status_code == 201, f"Failed to create chat: {resp.status_code} {resp.text}"
         return resp.json()
