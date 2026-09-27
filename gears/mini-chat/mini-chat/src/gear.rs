@@ -569,6 +569,11 @@ impl RunnableCapability for MiniChatGear {
         // Start the outbox pipeline now that OAGW upstreams are registered.
         // Cleanup handlers can immediately call provider DELETE via OAGW.
         if let Some(od) = self.outbox_deferred.get() {
+            crate::infra::workers::thread_summary_worker::check_summary_model(
+                od.model_policy_gw.as_ref(),
+                &od.thread_summary_config,
+            )
+            .await;
             let outbox_db = od.db.db();
             let num_partitions = od.outbox_config.num_partitions;
             let max_cleanup_attempts = od.cleanup_config.max_attempts;

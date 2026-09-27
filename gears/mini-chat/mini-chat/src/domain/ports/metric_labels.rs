@@ -122,3 +122,21 @@ pub mod trigger {
     pub const ORPHAN_TIMEOUT: &str = "orphan_timeout";
     pub const INTERNAL_ABORT: &str = "internal_abort";
 }
+
+/// Thread summary execution result labels (`result` label of
+/// `thread_summary_execution`).
+pub mod summary_result {
+    pub const SUCCESS: &str = "success";
+    pub const RETRY: &str = "retry";
+    pub const PROVIDER_ERROR: &str = "provider_error";
+    pub const EMPTY_SUMMARY: &str = "empty_summary";
+    /// The summary model is missing or disabled in the catalog; the task is
+    /// rejected.
+    pub const MODEL_UNAVAILABLE: &str = "model_unavailable";
+    /// The target frontier message was deleted while the summary was
+    /// generated; nothing is committed.
+    pub const FRONTIER_DELETED: &str = "frontier_deleted";
+    /// The task expected a stored summary that no longer exists (dropped by
+    /// a retry, edit or delete); nothing is committed.
+    pub const BASE_MISSING: &str = "base_missing";
+}

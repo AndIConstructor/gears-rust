@@ -195,7 +195,9 @@ pub trait MiniChatMetricsPort: Send + Sync {
     fn record_thread_summary_trigger(&self, result: &str);
 
     /// `{prefix}_thread_summary_execution` — counter
-    /// `result`: `success`, `provider_error`, `timeout`, `retry`
+    /// `result`: see [`metric_labels::summary_result`](super::metric_labels::summary_result)
+    /// (`success`, `retry`, `provider_error`, `empty_summary`,
+    /// `model_unavailable`, `frontier_deleted`, `base_missing`)
     fn record_thread_summary_execution(&self, result: &str);
 
     /// `{prefix}_thread_summary_cas_conflicts` — counter

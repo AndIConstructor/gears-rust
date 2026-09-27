@@ -12,6 +12,7 @@ use toolkit_security::AccessScope;
 use tracing::{debug, error, info, warn};
 
 use crate::domain::ports::MiniChatMetricsPort;
+use crate::domain::ports::metric_labels::summary_result;
 use crate::domain::repos::{SummaryFrontier, ThreadSummaryRepository, ThreadSummaryTaskPayload};
 use crate::infra::db::entity::message::MessageRole;
 
@@ -155,6 +156,9 @@ impl ThreadSummaryHandler {
                         chat_id = %payload.chat_id,
                         "thread summary: expected frontier but none found, skipping"
                     );
+                    self.deps
+                        .metrics
+                        .record_thread_summary_execution(summary_result::BASE_MISSING);
                     return MessageResult::Ok;
                 }
             }
@@ -210,11 +214,7 @@ impl ThreadSummaryHandler {
             .map(|s| s.content.as_str());
 
         // 4a. Resolve model
-        let model_id = if self.deps.config.summary_model_id.is_empty() {
-            "gpt-4.1-mini".to_owned()
-        } else {
-            self.deps.config.summary_model_id.clone()
-        };
+        let model_id = summary_model_id(&self.deps.config);
 
         let resolved_model = match self
             .deps
@@ -226,9 +226,24 @@ impl ThreadSummaryHandler {
             .await
         {
             Ok(m) => m,
+            // Missing or disabled in the catalog: retrying does not help.
+            Err(e @ crate::domain::error::DomainError::InvalidModel { .. }) => {
+                error!(
+                    chat_id = %payload.chat_id,
+                    model = %model_id,
+                    error = %e,
+                    "thread summary: summary model is not in the catalog or disabled - dropping task"
+                );
+                self.deps
+                    .metrics
+                    .record_thread_summary_execution(summary_result::MODEL_UNAVAILABLE);
+                return MessageResult::Reject(format!("summary model unavailable: {model_id}"));
+            }
             Err(e) => {
                 warn!(chat_id = %payload.chat_id, error = %e, "thread summary: model resolution failed");
-                self.deps.metrics.record_thread_summary_execution("retry");
+                self.deps
+                    .metrics
+                    .record_thread_summary_execution(summary_result::RETRY);
                 return MessageResult::Retry;
             }
         };
@@ -243,7 +258,9 @@ impl ThreadSummaryHandler {
             Ok(p) => p,
             Err(e) => {
                 warn!(chat_id = %payload.chat_id, error = %e, "thread summary: provider resolution failed");
-                self.deps.metrics.record_thread_summary_execution("retry");
+                self.deps
+                    .metrics
+                    .record_thread_summary_execution(summary_result::RETRY);
                 return MessageResult::Retry;
             }
         };
@@ -312,7 +329,7 @@ impl ThreadSummaryHandler {
                               "thread summary: prompt too long, cannot drop more messages");
                         self.deps
                             .metrics
-                            .record_thread_summary_execution("provider_error");
+                            .record_thread_summary_execution(summary_result::PROVIDER_ERROR);
                         self.deps.metrics.record_summary_fallback();
                         return MessageResult::Retry;
                     }
@@ -330,7 +347,7 @@ impl ThreadSummaryHandler {
                     warn!(chat_id = %payload.chat_id, error = %e, "thread summary: LLM call failed");
                     self.deps
                         .metrics
-                        .record_thread_summary_execution("provider_error");
+                        .record_thread_summary_execution(summary_result::PROVIDER_ERROR);
                     self.deps.metrics.record_summary_fallback();
                     return MessageResult::Retry;
                 }
@@ -342,7 +359,7 @@ impl ThreadSummaryHandler {
             warn!(chat_id = %payload.chat_id, "thread summary: LLM returned empty summary, retrying");
             self.deps
                 .metrics
-                .record_thread_summary_execution("empty_summary");
+                .record_thread_summary_execution(summary_result::EMPTY_SUMMARY);
             return MessageResult::Retry;
         }
         let llm_usage = response.usage;
@@ -382,7 +399,7 @@ impl ThreadSummaryHandler {
                             chat_id = %payload_clone.chat_id,
                             "thread summary: target frontier message deleted, skipping"
                         );
-                        return Ok((false, crate::domain::repos::Wake::empty()));
+                        return Ok(CommitOutcome::FrontierDeleted);
                     }
 
                     // 5b. Upsert summary with CAS
@@ -401,7 +418,7 @@ impl ThreadSummaryHandler {
                         .map_err(|e| toolkit_db::DbError::Other(anyhow::anyhow!("{e}")))?;
 
                     if rows == 0 {
-                        return Ok((false, crate::domain::repos::Wake::empty()));
+                        return Ok(CommitOutcome::CasLost);
                     }
 
                     // 5c. Mark messages as compressed
@@ -464,15 +481,17 @@ impl ThreadSummaryHandler {
                         .await
                         .map_err(|e| toolkit_db::DbError::Other(anyhow::anyhow!("{e}")))?;
 
-                    Ok((true, wake))
+                    Ok(CommitOutcome::Committed(wake))
                 })
             })
             .await;
 
         match cas_result {
-            Ok((true, wake)) => {
+            Ok(CommitOutcome::Committed(wake)) => {
                 wake.fire();
-                self.deps.metrics.record_thread_summary_execution("success");
+                self.deps
+                    .metrics
+                    .record_thread_summary_execution(summary_result::SUCCESS);
                 info!(
                     chat_id = %payload.chat_id,
                     messages_compressed = msg_count,
@@ -480,7 +499,13 @@ impl ThreadSummaryHandler {
                 );
                 MessageResult::Ok
             }
-            Ok((false, _)) => {
+            Ok(CommitOutcome::FrontierDeleted) => {
+                self.deps
+                    .metrics
+                    .record_thread_summary_execution(summary_result::FRONTIER_DELETED);
+                MessageResult::Ok
+            }
+            Ok(CommitOutcome::CasLost) => {
                 self.deps.metrics.record_thread_summary_cas_conflict();
                 info!(
                     chat_id = %payload.chat_id,
@@ -494,7 +519,9 @@ impl ThreadSummaryHandler {
                     error = %e,
                     "thread summary: commit failed"
                 );
-                self.deps.metrics.record_thread_summary_execution("retry");
+                self.deps
+                    .metrics
+                    .record_thread_summary_execution(summary_result::RETRY);
                 MessageResult::Retry
             }
         }
@@ -523,6 +550,63 @@ Your summary MUST include these sections:
 5. Current Topic: What was being discussed most recently, with enough detail to continue naturally
 
 Respond with an <analysis> block followed by a <summary> block.";
+
+/// Summary model used when `thread_summary_worker.summary_model_id` is empty.
+pub const DEFAULT_SUMMARY_MODEL_ID: &str = "gpt-4.1-mini";
+
+/// The configured summary model, or [`DEFAULT_SUMMARY_MODEL_ID`].
+pub fn summary_model_id(config: &crate::config::background::ThreadSummaryWorkerConfig) -> String {
+    if config.summary_model_id.is_empty() {
+        DEFAULT_SUMMARY_MODEL_ID.to_owned()
+    } else {
+        config.summary_model_id.clone()
+    }
+}
+
+/// Startup check: log an error when summaries are enabled but the summary
+/// model is not in the catalog or is disabled. Startup continues, because a
+/// dynamic policy plugin can add the model later; each task that finds the
+/// model missing is rejected (`model_unavailable`). Returns whether the
+/// model resolved.
+pub async fn check_summary_model(
+    resolver: &dyn crate::domain::repos::ModelResolver,
+    config: &crate::config::background::ThreadSummaryWorkerConfig,
+) -> bool {
+    if !config.enabled {
+        return true;
+    }
+    let model_id = summary_model_id(config);
+    match resolver
+        .resolve_model(
+            toolkit_security::constants::DEFAULT_SUBJECT_ID,
+            Some(model_id.clone()),
+        )
+        .await
+    {
+        Ok(_) => true,
+        Err(e @ crate::domain::error::DomainError::InvalidModel { .. }) => {
+            error!(
+                model = %model_id,
+                error = %e,
+                "thread summary model is not in the catalog or disabled; summary tasks will be rejected"
+            );
+            false
+        }
+        Err(e) => {
+            warn!(model = %model_id, error = %e, "thread summary model check failed at startup");
+            false
+        }
+    }
+}
+
+/// Result of the summary commit transaction.
+enum CommitOutcome {
+    Committed(crate::domain::repos::Wake),
+    /// The stored frontier moved: another handler committed first.
+    CasLost,
+    /// The target frontier message was soft-deleted meanwhile.
+    FrontierDeleted,
+}
 
 /// Whether the frontier message still exists (not soft-deleted). Locks the
 /// row on Postgres for the rest of the transaction.
@@ -883,6 +967,66 @@ mod tests {
         let result = handler.handle(&make_outbox_msg(&payload)).await;
         // No messages → should succeed (skip)
         assert!(matches!(result, MessageResult::Ok));
+    }
+
+    /// A summary model that is not in the catalog (or disabled) rejects the
+    /// task at once instead of retrying it until it is dead-lettered.
+    #[tokio::test]
+    async fn e2e_handler_rejects_when_summary_model_unavailable() {
+        let (deps, db) = make_e2e_deps().await;
+        let mut deps = Arc::try_unwrap(deps).ok().expect("single owner");
+        deps.config.summary_model_id = "no-such-model".to_owned();
+        let deps = Arc::new(deps);
+        let tenant_id = uuid::Uuid::new_v4();
+        let chat_id = uuid::Uuid::new_v4();
+        insert_chat(&db, tenant_id, chat_id).await;
+        let base = time::OffsetDateTime::now_utc();
+        insert_message(&db, tenant_id, chat_id, MessageRole::User, "q", base).await;
+        let last = insert_message(
+            &db,
+            tenant_id,
+            chat_id,
+            MessageRole::Assistant,
+            "a",
+            base + time::Duration::seconds(1),
+        )
+        .await;
+
+        let payload = ThreadSummaryTaskPayload {
+            tenant_id,
+            chat_id,
+            system_request_id: uuid::Uuid::new_v4(),
+            system_task_type: "thread_summary_update".to_owned(),
+            base_frontier_created_at: None,
+            base_frontier_message_id: None,
+            frozen_target_created_at: base + time::Duration::seconds(1),
+            frozen_target_message_id: last,
+        };
+        let handler = ThreadSummaryHandler::new(deps);
+        let result = handler.handle(&make_outbox_msg(&payload)).await;
+        assert!(
+            matches!(&result, MessageResult::Reject(reason) if reason.contains("no-such-model")),
+            "expected Reject, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_summary_model_reports_missing_model() {
+        let resolver = crate::domain::service::test_helpers::MockModelResolver::default();
+        let mut config = crate::config::background::ThreadSummaryWorkerConfig {
+            summary_model_id: "gpt-5.2".to_owned(),
+            ..Default::default()
+        };
+        assert!(check_summary_model(&resolver, &config).await);
+
+        config.summary_model_id = "no-such-model".to_owned();
+        assert!(!check_summary_model(&resolver, &config).await);
+
+        config.enabled = false;
+        assert!(
+            check_summary_model(&resolver, &config).await,
+            "disabled: nothing to check"
+        );
     }
 
     #[tokio::test]
