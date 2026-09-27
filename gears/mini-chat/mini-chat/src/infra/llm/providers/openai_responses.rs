@@ -374,9 +374,27 @@ fn code_interpreter_logs(outputs: Vec<CodeInterpreterOutputItem>) -> String {
 // FromServerEvent
 // ════════════════════════════════════════════════════════════════════════════
 
+/// The `type` field shared by every Responses streaming event.
+#[derive(Deserialize)]
+struct EventTypeData {
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+}
+
 impl FromServerEvent for ProviderEvent {
     fn from_server_event(event: ServerEvent) -> Result<Self, StreamingError> {
-        let event_name = event.event.as_deref().unwrap_or("message");
+        // Every Responses event carries its name in `data.type` as well. Fall
+        // back to it when the `event:` line is missing, e.g. dropped by a proxy.
+        let type_from_data: Option<String>;
+        let event_name = match event.event.as_deref() {
+            Some(name) if name != "message" => name,
+            _ => {
+                type_from_data = serde_json::from_str::<EventTypeData>(&event.data)
+                    .ok()
+                    .and_then(|d| d.event_type);
+                type_from_data.as_deref().unwrap_or("message")
+            }
+        };
 
         match event_name {
             "response.output_text.delta" => {

@@ -585,6 +585,46 @@ fn parse_text_delta_event() {
 }
 
 #[test]
+fn parse_event_without_event_line_uses_data_type() {
+    for name in [None, Some("message".to_string())] {
+        let event = ServerEvent {
+            event: name,
+            data: r#"{"type":"response.output_text.delta","delta":"Hi"}"#.to_string(),
+            id: None,
+            retry: None,
+        };
+        let result = ProviderEvent::from_server_event(event).unwrap();
+        assert!(
+            matches!(result, ProviderEvent::ResponseOutputTextDelta { delta } if delta == "Hi")
+        );
+    }
+}
+
+#[test]
+fn parse_event_line_takes_precedence_over_data_type() {
+    let event = ServerEvent {
+        event: Some("response.output_text.done".to_string()),
+        data: r#"{"type":"response.output_text.delta","text":"Done"}"#.to_string(),
+        id: None,
+        retry: None,
+    };
+    let result = ProviderEvent::from_server_event(event).unwrap();
+    assert!(matches!(result, ProviderEvent::ResponseOutputTextDone { text } if text == "Done"));
+}
+
+#[test]
+fn parse_event_without_event_line_or_type_is_unknown() {
+    let event = ServerEvent {
+        event: None,
+        data: "not json".to_string(),
+        id: None,
+        retry: None,
+    };
+    let result = ProviderEvent::from_server_event(event).unwrap();
+    assert!(matches!(result, ProviderEvent::Unknown { event_name } if event_name == "message"));
+}
+
+#[test]
 fn parse_text_done_event() {
     let event = ServerEvent {
         event: Some("response.output_text.done".to_string()),
