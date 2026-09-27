@@ -70,6 +70,34 @@ impl Validator {
     }
 }
 
+/// A read's condition: `*`, or the opaque validators the caller holds.
+#[domain_model]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IfNoneMatch {
+    Any,
+    Validators(Vec<String>),
+}
+
+impl IfNoneMatch {
+    #[must_use]
+    pub fn matches(&self, current: Validator) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Validators(tokens) => tokens
+                .iter()
+                .any(|token| Validator::decode(token) == Some(current)),
+        }
+    }
+
+    /// The longest token, for the caller's size bound.
+    pub(crate) fn longest(&self) -> usize {
+        match self {
+            Self::Any => 0,
+            Self::Validators(tokens) => tokens.iter().map(String::len).max().unwrap_or(0),
+        }
+    }
+}
+
 /// Length-prefixed, so no two field splits digest alike.
 fn update_prefixed(ctx: &mut Context, bytes: &[u8]) {
     ctx.update(&(bytes.len() as u64).to_be_bytes());

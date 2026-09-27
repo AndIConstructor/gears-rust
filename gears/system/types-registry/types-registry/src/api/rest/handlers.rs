@@ -25,11 +25,12 @@ use crate::domain::admission::{Accepted, Candidate, SubmitRequest};
 use crate::domain::enums::OperationKind;
 use crate::domain::error::DomainError;
 use crate::domain::registry_service::{
-    DeleteRequest, DeleteTarget, DiscoveryQuery, EntityKey, EntityLookup, MAX_BATCH_GET_KEYS,
-    MAX_KEY_LEN, RegistryService, ServiceError,
+    BatchGetItem, DeleteRequest, DeleteTarget, DiscoveryQuery, EntityKey, EntityLookup,
+    MAX_BATCH_GET_KEYS, MAX_KEY_LEN, RegistryService, ServiceError,
 };
 use crate::domain::selection::FieldSelection;
 use crate::domain::service::TypesRegistryService;
+use crate::domain::validator::Validator;
 
 /// POST /api/v1/types-registry/entities
 ///
@@ -125,8 +126,7 @@ pub async fn get_entity(
 // method, and maps the result — no policy, no existence check and no vocabulary
 // decision lives here, which is what lets a future `api/grpc` adapter reuse the
 // same domain surface (SPEC §8.4). Size bounds checked here only fail early; the
-// domain enforces the same ones for every adapter. The one exception is a batch
-// item's `if_none_match`, which no domain method receives until T22d compares it.
+// domain enforces the same ones for every adapter.
 //
 // The handlers above this line are the pre-database path T27 deletes.
 
@@ -347,16 +347,34 @@ fn no_store() -> HeaderMap {
 pub async fn get_entity_by_key(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
     extract::Path(key): extract::Path<String>,
+    headers: HeaderMap,
     ExactReadSelection(selection): ExactReadSelection,
 ) -> ApiResult<Response> {
     let service = require_registry(service)?;
     let parsed = EntityKey::parse(&key);
-    let record = service
-        .entity(&parsed, selection)
+    let lookup = service
+        .lookup(&parsed, selection, super::etag::header_condition(&headers))
         .await
-        .map_err(CanonicalError::from)?
-        .ok_or_else(|| CanonicalError::from(DomainError::not_found_by_id(key)))?;
-    json_body(EntityDto::from(record), selection).await
+        .map_err(CanonicalError::from)?;
+    let (mut response, etag) = match lookup {
+        EntityLookup::Found { record, etag } => {
+            (json_body(EntityDto::from(record), selection).await?, etag)
+        }
+        // RFC 9110 §15.4.5: a `304` still carries the `ETag` a `200` would have.
+        EntityLookup::Unchanged { etag } => (StatusCode::NOT_MODIFIED.into_response(), etag),
+        EntityLookup::NotFound => {
+            return Err(CanonicalError::from(DomainError::not_found_by_id(key)));
+        }
+    };
+    response
+        .headers_mut()
+        .insert(header::ETAG, etag_header(etag)?);
+    Ok(response)
+}
+
+fn etag_header(etag: Validator) -> Result<HeaderValue, CanonicalError> {
+    HeaderValue::try_from(super::etag::entity_tag(etag))
+        .map_err(|_| CanonicalError::internal("the registry could not encode a validator").create())
 }
 
 /// Serialized off the executor when the body carries documents.
@@ -405,10 +423,8 @@ pub async fn batch_get_entities(
         return Err(ServiceError::BatchReadOutOfRange { count }.into());
     }
     let items = req.items.into_items();
-    // `if_none_match` is length-checked but not compared: no read emits a
-    // validator until T22d.
     let mut spelling_map: HashMap<EntityKey, String> = HashMap::with_capacity(items.len());
-    let mut keys: Vec<EntityKey> = Vec::with_capacity(items.len());
+    let mut reads: Vec<BatchGetItem> = Vec::with_capacity(items.len());
     for item in items {
         // Before `EntityKey::parse` copies the key; the domain repeats the check.
         if item.key.len() > MAX_KEY_LEN {
@@ -424,11 +440,17 @@ pub async fn batch_get_entities(
         if let Entry::Vacant(e) = spelling_map.entry(key.clone()) {
             e.insert(item.key);
         }
-        keys.push(key);
+        reads.push(BatchGetItem {
+            key,
+            if_none_match: item
+                .if_none_match
+                .as_deref()
+                .map(super::etag::item_condition),
+        });
     }
 
     let results = service
-        .batch_get(&keys, selection)
+        .batch_get(&reads, selection)
         .await
         .map_err(CanonicalError::from)?;
 
@@ -439,20 +461,13 @@ pub async fn batch_get_entities(
                 let key = spelling_map.remove(&key).ok_or_else(|| {
                     tracing::error!(
                         unexpected_key = ?key,
-                        batch_size = keys.len(),
+                        batch_size = reads.len(),
                         "types_registry batch read answered a key it was not asked"
                     );
                     CanonicalError::internal("the registry could not match a batch read result")
                         .create()
                 })?;
-                Ok(EntityLookupDto {
-                    key,
-                    status: (&lookup).into(),
-                    entity: match lookup {
-                        EntityLookup::Found(record) => Some(EntityDto::from(record)),
-                        EntityLookup::NotFound => None,
-                    },
-                })
+                Ok(EntityLookupDto::new(key, lookup))
             })
             .collect::<Result<_, CanonicalError>>()?,
     };

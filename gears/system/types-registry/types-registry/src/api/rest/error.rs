@@ -175,6 +175,7 @@ impl From<ServiceError> for CanonicalError {
                 field::INVALID_QUERY,
             ),
             ServiceError::KeyTooLong { len } => key_too_long(len),
+            ServiceError::ValidatorTooLong { len } => validator_too_long(len),
         }
     }
 }

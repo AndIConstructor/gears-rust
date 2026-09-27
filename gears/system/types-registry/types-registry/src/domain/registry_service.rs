@@ -30,6 +30,7 @@ use crate::domain::ports::{
     CurrentReadRow, EntityRow, ListFilter, PageRequest, Stores, snapshot_read,
 };
 use crate::domain::selection::{EntityField, FieldSelection};
+use crate::domain::validator::{IfNoneMatch, Validator};
 
 /// GTS identifier or deterministic Registry Reference for the same row.
 #[domain_model]
@@ -129,12 +130,8 @@ pub struct Provenance {
     pub compat_forced: Option<bool>,
 }
 
-/// One key's answer in a batch read.
-///
-/// Absence is a result, not a failure: a caller reconciling a set needs to know
-/// which of its keys is missing, and one absent key must not fail the others.
-/// P0 has the two states DESIGN's four reduce to — `unchanged` needs T22d's
-/// validators and `failed` needs federation, which is out of scope (SPEC §10.1).
+/// One key's read result; absence is an answer, not a failure. Every answer but
+/// `NotFound` carries the current validator (RFC 9110 §15.4.5).
 #[domain_model]
 #[derive(Clone, Debug)]
 // `Found` already owns heap JSON up to the 1 MB document bound, so the 240 bytes
@@ -146,7 +143,38 @@ pub struct Provenance {
     reason = "boxing Found penalises every successful read with an allocation and an indirection; NotFound's discriminant overhead is acceptable"
 )]
 pub enum EntityLookup {
-    Found(EntityRecord),
+    Found {
+        record: EntityRecord,
+        etag: Validator,
+    },
+    /// The caller's condition matched, so no representation is returned.
+    Unchanged {
+        etag: Validator,
+    },
+    NotFound,
+}
+
+/// One key of a batch read; a condition makes just this key conditional.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub struct BatchGetItem {
+    pub key: EntityKey,
+    pub if_none_match: Option<IfNoneMatch>,
+}
+
+impl From<EntityKey> for BatchGetItem {
+    fn from(key: EntityKey) -> Self {
+        Self {
+            key,
+            if_none_match: None,
+        }
+    }
+}
+
+/// A key's answer decided inside the snapshot, before any document is read.
+enum Answer {
+    Found(i64, Validator),
+    Unchanged(Validator),
     NotFound,
 }
 
@@ -235,6 +263,8 @@ pub enum ServiceError {
     BatchReadOutOfRange { count: usize },
     #[error("a key must be at most {MAX_KEY_LEN} bytes; this one is {len}")]
     KeyTooLong { len: usize },
+    #[error("a validator must be at most {MAX_KEY_LEN} bytes; this one is {len}")]
+    ValidatorTooLong { len: usize },
     /// `limit` outside `1..=limits.page_size_max` (D12).
     #[error("a page size must be between 1 and {max}; this request asked for {limit}")]
     PageSizeOutOfRange { limit: u64, max: u32 },
@@ -257,6 +287,7 @@ impl ServiceError {
             Self::UnresolvedReference { .. } => "unresolved_reference",
             Self::BatchReadOutOfRange { .. } => "batch_read_out_of_range",
             Self::KeyTooLong { .. } => "key_too_long",
+            Self::ValidatorTooLong { .. } => "validator_too_long",
             Self::PageSizeOutOfRange { .. } => "page_size_out_of_range",
             Self::InvalidPattern { .. } => "invalid_pattern",
         }
@@ -579,11 +610,32 @@ impl RegistryService {
         key: &EntityKey,
         selection: FieldSelection,
     ) -> Result<Option<EntityRecord>, ServiceError> {
-        let results = self.batch_get(std::slice::from_ref(key), selection).await?;
-        Ok(results.into_iter().find_map(|(_, lookup)| match lookup {
-            EntityLookup::Found(record) => Some(record),
-            EntityLookup::NotFound => None,
-        }))
+        Ok(match self.lookup(key, selection, None).await? {
+            EntityLookup::Found { record, .. } => Some(record),
+            EntityLookup::Unchanged { .. } | EntityLookup::NotFound => None,
+        })
+    }
+
+    /// [`Self::entity`], conditional on the caller's validators (SPEC §8.5).
+    ///
+    /// # Errors
+    /// As [`Self::batch_get`].
+    pub async fn lookup(
+        &self,
+        key: &EntityKey,
+        selection: FieldSelection,
+        if_none_match: Option<IfNoneMatch>,
+    ) -> Result<EntityLookup, ServiceError> {
+        let item = BatchGetItem {
+            key: key.clone(),
+            if_none_match,
+        };
+        let mut results = self
+            .batch_get(std::slice::from_ref(&item), selection)
+            .await?;
+        Ok(results
+            .pop()
+            .map_or(EntityLookup::NotFound, |(_, lookup)| lookup))
     }
 
     /// Read a bounded set of keys, answering every one of them (DESIGN §3.3).
@@ -595,58 +647,68 @@ impl RegistryService {
     /// one row are **not** duplicates of each other — each is a key a caller asked
     /// about and each is echoed.
     ///
-    /// Constant in round trips rather than linear in keys: two identity reads and
-    /// two current-state reads per kind, all under one snapshot, whatever the batch
-    /// size. Only the documents `selection` names are fetched and parsed.
+    /// Constant in round trips rather than linear in keys: two identity reads, one
+    /// fingerprint read and two current-state reads per kind, all under one
+    /// snapshot, whatever the batch size. Only the documents `selection` names are
+    /// fetched, and none for a key answered `Unchanged`.
     ///
     /// # Errors
     /// [`ServiceError::BatchReadOutOfRange`] for an empty or over-long batch,
     /// [`ServiceError::KeyTooLong`] for a key over [`MAX_KEY_LEN`] bytes,
+    /// [`ServiceError::ValidatorTooLong`] for a validator over [`MAX_KEY_LEN`] bytes,
     /// [`ServiceError::Storage`] for a read failure, or
     /// [`ServiceError::CorruptDocument`] if a stored document is not JSON.
     pub async fn batch_get(
         &self,
-        keys: &[EntityKey],
+        items: &[BatchGetItem],
         selection: FieldSelection,
     ) -> Result<Vec<(EntityKey, EntityLookup)>, ServiceError> {
         // Bounded before any read, as deletion bounds its batch: the ceiling exists
         // to keep one request's work finite, so it cannot be checked after the work.
-        if keys.is_empty() || keys.len() > MAX_BATCH_GET_KEYS {
-            return Err(ServiceError::BatchReadOutOfRange { count: keys.len() });
+        if items.is_empty() || items.len() > MAX_BATCH_GET_KEYS {
+            return Err(ServiceError::BatchReadOutOfRange { count: items.len() });
         }
-        let mut requested: Vec<EntityKey> = Vec::with_capacity(keys.len());
+        let mut requested: Vec<BatchGetItem> = Vec::with_capacity(items.len());
         let mut seen: std::collections::HashSet<&EntityKey> =
-            std::collections::HashSet::with_capacity(keys.len());
-        for key in keys {
-            if let EntityKey::GtsId(gts_id) = key
+            std::collections::HashSet::with_capacity(items.len());
+        for item in items {
+            if let EntityKey::GtsId(gts_id) = &item.key
                 && gts_id.len() > MAX_KEY_LEN
             {
                 return Err(ServiceError::KeyTooLong { len: gts_id.len() });
             }
-            if seen.insert(key) {
-                requested.push(key.clone());
+            if let Some(len) = item
+                .if_none_match
+                .as_ref()
+                .map(IfNoneMatch::longest)
+                .filter(|len| *len > MAX_KEY_LEN)
+            {
+                return Err(ServiceError::ValidatorTooLong { len });
+            }
+            if seen.insert(&item.key) {
+                requested.push(item.clone());
             }
         }
 
         // A non-canonical identifier cannot be stored, so it never reaches SQL.
         let gts_ids: Vec<String> = requested
             .iter()
-            .filter_map(|key| match key {
+            .filter_map(|item| match &item.key {
                 EntityKey::GtsId(gts_id) if is_canonical(gts_id) => Some(gts_id.clone()),
                 EntityKey::GtsId(_) | EntityKey::Uuid(_) => None,
             })
             .collect();
         let gts_uuids: Vec<Uuid> = requested
             .iter()
-            .filter_map(|key| match key {
-                EntityKey::Uuid(gts_uuid) => Some(*gts_uuid),
+            .filter_map(|item| match item.key {
+                EntityKey::Uuid(gts_uuid) => Some(gts_uuid),
                 EntityKey::GtsId(_) => None,
             })
             .collect();
         if gts_ids.is_empty() && gts_uuids.is_empty() {
             return Ok(requested
                 .into_iter()
-                .map(|key| (key, EntityLookup::NotFound))
+                .map(|item| (item.key, EntityLookup::NotFound))
                 .collect());
         }
 
@@ -654,10 +716,9 @@ impl RegistryService {
         let scope = Self::scope();
         let stores = Arc::clone(&self.stores);
         // One snapshot keeps each row's atomically written `resource_version`,
-        // artifacts and authored document together. T11 revisions could otherwise
-        // pair N with N + 1 artifacts, breaking T22d's version/body promise for
-        // conditional reads.
-        let state = provider
+        // fingerprint and documents together, so a validator describes the body
+        // it is returned with.
+        let (answers, rows, current) = provider
             .transaction_with_config(snapshot_read(&self.db), move |tx| {
                 Box::pin(async move {
                     let mut rows = stores.find_by_gts_ids(tx, &scope, &gts_ids).await?;
@@ -668,53 +729,54 @@ impl RegistryService {
                     rows.sort_by_key(|row| row.id);
                     rows.dedup_by_key(|row| row.id);
 
+                    let etags = validators(&*stores, tx, &scope, &rows, selection).await?;
+                    let answers = answer(requested, &rows, &etags);
+                    let found: std::collections::BTreeSet<i64> = answers
+                        .iter()
+                        .filter_map(|(_, answer)| match answer {
+                            Answer::Found(id, _) => Some(*id),
+                            Answer::Unchanged(_) | Answer::NotFound => None,
+                        })
+                        .collect();
+                    rows.retain(|row| found.contains(&row.id));
                     // Branch on row kind, not on key: Type Schemas have a document
                     // and D3's three artifacts, Instances only an authored value.
                     let current = read_current(&*stores, tx, &scope, &rows, selection).await?;
-                    Ok((rows, current))
+                    Ok((answers, rows, current))
                 })
             })
             .await?;
 
-        let mut records = build_records(state.0, state.1, selection).await?;
-        let by_gts_id: BTreeMap<&str, i64> = records
-            .iter()
-            .map(|(id, record)| (record.gts_id.as_str(), *id))
-            .collect();
-        let by_gts_uuid: BTreeMap<Uuid, i64> = records
-            .iter()
-            .map(|(id, record)| (record.gts_uuid, *id))
-            .collect();
-        let ids: Vec<Option<i64>> = requested
-            .iter()
-            .map(|key| match key {
-                EntityKey::GtsId(gts_id) => by_gts_id.get(gts_id.as_str()).copied(),
-                EntityKey::Uuid(gts_uuid) => by_gts_uuid.get(gts_uuid).copied(),
-            })
-            .collect();
-        drop((by_gts_id, by_gts_uuid));
+        let mut records = build_records(rows, current, selection).await?;
         // Moved out on a row's last mention; cloned only for a row asked by both spellings.
         let mut uses: BTreeMap<i64, usize> = BTreeMap::new();
-        for id in ids.iter().flatten() {
-            *uses.entry(*id).or_default() += 1;
+        for (_, answer) in &answers {
+            if let Answer::Found(id, _) = answer {
+                *uses.entry(*id).or_default() += 1;
+            }
         }
-        Ok(requested
+        Ok(answers
             .into_iter()
-            .zip(ids)
-            .map(|(key, id)| {
-                let record = id.and_then(|id| {
-                    let left = uses.get_mut(&id)?;
-                    *left -= 1;
-                    if *left == 0 {
-                        records.remove(&id)
-                    } else {
-                        records.get(&id).cloned()
+            .map(|(key, answer)| {
+                let lookup = match answer {
+                    Answer::NotFound => EntityLookup::NotFound,
+                    Answer::Unchanged(etag) => EntityLookup::Unchanged { etag },
+                    Answer::Found(id, etag) => {
+                        let record = uses.get_mut(&id).and_then(|left| {
+                            *left -= 1;
+                            if *left == 0 {
+                                records.remove(&id)
+                            } else {
+                                records.get(&id).cloned()
+                            }
+                        });
+                        record.map_or(EntityLookup::NotFound, |record| EntityLookup::Found {
+                            record,
+                            etag,
+                        })
                     }
-                });
-                (
-                    key,
-                    record.map_or(EntityLookup::NotFound, EntityLookup::Found),
-                )
+                };
+                (key, lookup)
             })
             .collect())
     }
@@ -797,6 +859,65 @@ fn ids_of(rows: &[EntityRow], kind: EntityKind) -> Vec<i64> {
     rows.iter()
         .filter(|row| row.entity_kind == kind)
         .map(|row| row.id)
+        .collect()
+}
+
+/// Each row's validator. Type Schema fingerprints come from one keyed read.
+async fn validators(
+    stores: &dyn Stores,
+    tx: &toolkit_db::DbTx<'_>,
+    scope: &AccessScope,
+    rows: &[EntityRow],
+    selection: FieldSelection,
+) -> Result<BTreeMap<i64, Validator>, ServiceError> {
+    let type_ids = ids_of(rows, EntityKind::TypeSchema);
+    let fingerprints: BTreeMap<i64, Vec<u8>> = stores
+        .current_schema_projections(tx, scope, &type_ids)
+        .await?
+        .into_iter()
+        .map(|projection| (projection.entity_id, projection.cas.resolution_fingerprint))
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let fingerprint = match row.entity_kind {
+                EntityKind::Instance => None,
+                EntityKind::TypeSchema => Some(
+                    fingerprints
+                        .get(&row.id)
+                        .ok_or_else(|| missing_state(&row.gts_id, "current Type Schema state"))?
+                        .as_slice(),
+                ),
+            };
+            let etag = Validator::compute(row.resource_version, fingerprint, selection);
+            Ok((row.id, etag))
+        })
+        .collect()
+}
+
+/// Match each requested key to its row and the caller's condition to its validator.
+fn answer(
+    requested: Vec<BatchGetItem>,
+    rows: &[EntityRow],
+    etags: &BTreeMap<i64, Validator>,
+) -> Vec<(EntityKey, Answer)> {
+    let by_gts_id: BTreeMap<&str, i64> = rows.iter().map(|r| (r.gts_id.as_str(), r.id)).collect();
+    let by_gts_uuid: BTreeMap<Uuid, i64> = rows.iter().map(|r| (r.gts_uuid, r.id)).collect();
+    requested
+        .into_iter()
+        .map(|item| {
+            let id = match &item.key {
+                EntityKey::GtsId(gts_id) => by_gts_id.get(gts_id.as_str()).copied(),
+                EntityKey::Uuid(gts_uuid) => by_gts_uuid.get(gts_uuid).copied(),
+            };
+            let answer = match id.and_then(|id| Some((id, *etags.get(&id)?))) {
+                None => Answer::NotFound,
+                Some((_, etag)) if item.if_none_match.as_ref().is_some_and(|c| c.matches(etag)) => {
+                    Answer::Unchanged(etag)
+                }
+                Some((id, etag)) => Answer::Found(id, etag),
+            };
+            (item.key, answer)
+        })
         .collect()
 }
 

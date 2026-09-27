@@ -87,6 +87,15 @@ fn idempotency_key_param() -> ParamSpec {
         )
 }
 
+/// The exact read's validator (SPEC §8.5), on its `200` and its `304`.
+fn etag_header() -> ResponseHeaderSpec {
+    ResponseHeaderSpec::new(
+        "ETag",
+        "The validator of this key under this `$select`",
+        ResponseHeaderType::String,
+    )
+}
+
 /// The pre-database v1 contract, verbatim from `main` (T9a).
 fn register_v1(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     // -----------------------------------------------------------------------
@@ -290,7 +299,8 @@ fn register_reads(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
              case-insensitive; an empty, duplicate, unknown or nested name is a 400. \
              `gts_id`, `gts_uuid`, `kind` and `lifecycle_status` are always returned, \
              whether or not `$select` names them, so a deleted entity is still readable and \
-             reports it. No other query parameter is accepted.",
+             reports it. No other query parameter is accepted. The `ETag` is scoped to the \
+             `$select`; `If-None-Match` with a current one returns a bodyless 304.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -300,9 +310,20 @@ fn register_reads(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
             "A GTS identifier (e.g. gts.acme.core.events.user_created.v1~) or a Registry \
              Reference UUID",
         )
+        .param(
+            ParamSpec::header("If-None-Match")
+                .required(false)
+                .description("An earlier `ETag` of this key under the same `$select`, or `*`"),
+        )
         .with_odata_select()
         .handler(handlers::get_entity_by_key)
         .json_response_with_schema::<EntityDto>(openapi, StatusCode::OK, "The requested entity")
+        .response_header(etag_header())
+        .no_content_response(
+            StatusCode::NOT_MODIFIED,
+            "The If-None-Match validator is current",
+        )
+        .response_header(etag_header())
         .problem_response(openapi, StatusCode::NOT_FOUND, "Entity not found")
         .standard_errors(openapi)
         .error_503(openapi)
@@ -327,7 +348,10 @@ fn register_batch_get(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rout
              `$select` rules; absent, the document-free default. Tombstones are `found`. Returns 200 with one result \
              per requested key, in request order and echoing the key it was asked by: `found` \
              with the selected fields, exactly as the exact read returns them and always \
-             including `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`, or `not_found`. Query parameters are refused, `$select` included. A key \
+             including `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`, or `not_found`. \
+             Every result but `not_found` carries the key's `etag`; an item whose \
+             `if_none_match` is still current answers `unchanged` without the entity. \
+             Query parameters are refused, `$select` included. A key \
              named twice collapses onto its first mention; the two spellings of one entity are \
              two keys and get two results. An absent key is not a 404: one missing key must \
              not lose the answers for the others. The If-None-Match header is refused rather \

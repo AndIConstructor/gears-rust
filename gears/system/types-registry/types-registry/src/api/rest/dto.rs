@@ -1155,16 +1155,8 @@ pub struct BatchGetItemDto {
     /// as `GET /entities/{entity_key}` classifies its path segment.
     #[schema(max_length = 1024)]
     pub key: String,
-    /// This key's validator from an earlier read, which makes just this key
-    /// conditional. The field the two header names lowercase to — `if_none_match`
-    /// going out, `etag` coming back — because one `If-None-Match` header cannot
-    /// represent a batch of them (DESIGN §3.3).
-    ///
-    /// **No read emits a validator yet:** T22d adds `etag` to a result and the
-    /// comparison behind it. Until then no value a caller could hold can match, so
-    /// every present key is read unconditionally and answers `found` — which is
-    /// what a stale validator does after T22d too. The field is declared now so the
-    /// wire shape does not change under the callers T23 migrates.
+    /// A prior `etag` for this key and `$select`; a match returns `unchanged`.
+    /// Batch validators are per item.
     #[serde(default)]
     #[schema(max_length = 1024)]
     pub if_none_match: Option<String>,
@@ -1245,26 +1237,16 @@ impl<'de> serde::Deserialize<'de> for BatchGetItems {
     }
 }
 
-/// `found` or `not_found`.
+/// `found`, `unchanged` or `not_found`.
 ///
-/// DESIGN's `unchanged` arrives with T22d's validators and its `failed` needs
-/// federation, which is out of P0 (SPEC §2). Declaring either now would publish a
-/// vocabulary value this gear never emits, which a generated client would
-/// type-check against.
+/// DESIGN's `failed` needs federation, which is out of P0 (SPEC §2); declaring it
+/// would publish a value this gear never emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[toolkit_macros::api_dto(response)]
 pub enum EntityLookupStatusDto {
     Found,
+    Unchanged,
     NotFound,
-}
-
-impl From<&EntityLookup> for EntityLookupStatusDto {
-    fn from(lookup: &EntityLookup) -> Self {
-        match lookup {
-            EntityLookup::Found(_) => Self::Found,
-            EntityLookup::NotFound => Self::NotFound,
-        }
-    }
 }
 
 /// One key's answer, echoing the key it was asked by.
@@ -1277,10 +1259,37 @@ impl From<&EntityLookup> for EntityLookupStatusDto {
 pub struct EntityLookupDto {
     pub key: String,
     pub status: EntityLookupStatusDto,
+    /// The validator for this key under this `$select`, byte-identical to the exact
+    /// read's `ETag`. Present unless `not_found`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
     /// The selected fields, exactly as the exact read returns them for the same
-    /// `$select`. Absent on `not_found`.
+    /// `$select`. Present only on `found`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entity: Option<EntityDto>,
+}
+
+impl EntityLookupDto {
+    #[must_use]
+    pub fn new(key: String, lookup: EntityLookup) -> Self {
+        let (status, etag, entity) = match lookup {
+            EntityLookup::Found { record, etag } => (
+                EntityLookupStatusDto::Found,
+                Some(etag),
+                Some(EntityDto::from(record)),
+            ),
+            EntityLookup::Unchanged { etag } => {
+                (EntityLookupStatusDto::Unchanged, Some(etag), None)
+            }
+            EntityLookup::NotFound => (EntityLookupStatusDto::NotFound, None, None),
+        };
+        Self {
+            key,
+            status,
+            etag: etag.map(super::etag::entity_tag),
+            entity,
+        }
+    }
 }
 
 /// The results of one batch read, in request order.

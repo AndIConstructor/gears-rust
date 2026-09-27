@@ -268,6 +268,7 @@ struct Response {
     retry_after: Option<String>,
     idempotency_replayed: Option<String>,
     cache_control: Option<String>,
+    etag: Option<String>,
     body: Value,
 }
 
@@ -309,6 +310,11 @@ async fn call_raw(router: &Router, req: Request<Body>) -> Response {
         .get(axum::http::header::CACHE_CONTROL)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let etag = resp
+        .headers()
+        .get(axum::http::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("read body");
@@ -325,6 +331,7 @@ async fn call_raw(router: &Router, req: Request<Body>) -> Response {
         retry_after,
         idempotency_replayed,
         cache_control,
+        etag,
         body,
     }
 }
@@ -4668,4 +4675,169 @@ fn discovery_declares_the_page_size_as_positive_on_request_and_page() {
     let applied = &doc["components"]["schemas"]["PageInfoDto"]["properties"]["limit"];
     assert_eq!(applied["minimum"], 1, "{applied}");
     assert!(applied.get("maximum").is_none(), "{applied}");
+}
+
+// ---------------------------------------------------------------------------
+// Conditional reads (T22d)
+// ---------------------------------------------------------------------------
+
+fn get_if_none_match(uri: &str, value: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("if-none-match", value)
+        .body(Body::empty())
+        .expect("request")
+}
+
+/// The exact read hands out a quoted `ETag`, and sending it back answers a bodyless
+/// `304` carrying the same bytes (RFC 9110 §15.4.5).
+#[tokio::test]
+async fn a_current_etag_answers_304_with_the_same_etag() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let uri = format!("{V2}/entities/{CF_TYPE}");
+
+    let first = call(&router, get(&uri)).await;
+    assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+    let etag = first.etag.expect("an exact read carries an ETag");
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+
+    for condition in [
+        etag.clone(),
+        format!("W/{etag}"),
+        format!("\"stale\", {etag}"),
+        "*".to_owned(),
+    ] {
+        let conditional = call(&router, get_if_none_match(&uri, &condition)).await;
+        assert_eq!(conditional.status, StatusCode::NOT_MODIFIED, "{condition}");
+        assert_eq!(conditional.body, Value::Null, "{condition}: bodyless");
+        assert_eq!(
+            conditional.etag.as_deref(),
+            Some(etag.as_str()),
+            "{condition}"
+        );
+    }
+}
+
+/// A validator from before a revision, or for another `$select`, is not current.
+#[tokio::test]
+async fn a_stale_or_narrower_etag_answers_200_with_the_representation() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let uri = format!("{V2}/entities/{CF_TYPE}");
+    let stale = call(&router, get(&uri)).await.etag.expect("ETag");
+
+    let wide = call(
+        &router,
+        get_if_none_match(&format!("{uri}?$select=content"), &stale),
+    )
+    .await;
+    assert_eq!(
+        wide.status,
+        StatusCode::OK,
+        "a narrow token never answers a wider read"
+    );
+    assert!(wide.body["content"].is_object(), "{:?}", wide.body);
+    assert_ne!(wide.etag.as_deref(), Some(stale.as_str()));
+
+    let mut revised = schema(CF_TYPE);
+    revised["title"] = json!("revised");
+    let body = json!({
+        "items": [{ "gts_id": CF_TYPE, "content": revised, "expected_resource_version": 1 }]
+    });
+    let accepted = call(&router, submit(Some("revise"), &body)).await;
+    assert_eq!(
+        poll(&router, &accepted).await["items"][0]["status"],
+        json!("succeeded")
+    );
+
+    let after = call(&router, get_if_none_match(&uri, &stale)).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(after.body["origin"]["resource_version"], json!(2));
+    assert_ne!(after.etag.as_deref(), Some(stale.as_str()));
+}
+
+/// `batchGet` hands out one `etag` per key, the exact read's `ETag` byte for byte,
+/// and a current one comes back as `unchanged` with the same bytes and no entity.
+#[tokio::test]
+async fn a_batch_answers_unchanged_per_key_with_the_same_etag() {
+    let router = router_with_db().await;
+    register_type_and_instance(&router).await;
+
+    let first = call(&router, batch_get(&keys(&[CF_TYPE, CF_INSTANCE]))).await;
+    assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+    let etag = |i: usize| {
+        first.body["items"][i]["etag"]
+            .as_str()
+            .expect("a found result carries etag")
+            .to_owned()
+    };
+    let exact = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(
+        exact.etag,
+        Some(etag(0)),
+        "byte-identical to the exact read's ETag"
+    );
+
+    let body = json!({ "items": [
+        { "key": CF_TYPE, "if_none_match": etag(0) },
+        { "key": CF_INSTANCE, "if_none_match": "\"stale\"" },
+        { "key": CF_ABSENT_TYPE, "if_none_match": etag(0) },
+    ] });
+    let response = call(&router, batch_get(&body)).await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+    let items = &response.body["items"];
+    assert_eq!(items[0]["status"], json!("unchanged"));
+    assert_eq!(items[0]["etag"], json!(etag(0)));
+    assert!(items[0].get("entity").is_none(), "{items}");
+    assert_eq!(items[1]["status"], json!("found"));
+    assert_eq!(items[1]["etag"], json!(etag(1)));
+    assert!(items[1]["entity"].is_object(), "{items}");
+    assert_eq!(items[2]["status"], json!("not_found"));
+    assert!(items[2].get("etag").is_none(), "{items}");
+}
+
+/// A page is a changing set, not an exact-key answer (DESIGN §3.3).
+#[tokio::test]
+async fn discovery_carries_no_validator() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+
+    let page = call(&router, discover("")).await;
+    assert_eq!(page.status, StatusCode::OK, "{:?}", page.body);
+    assert_eq!(page.etag, None);
+    assert!(
+        page.body["items"][0].get("etag").is_none(),
+        "{:?}",
+        page.body
+    );
+}
+
+#[test]
+fn the_exact_read_declares_if_none_match_and_a_304_carrying_the_etag() {
+    let doc = generated_openapi();
+    let read = &doc["paths"][format!("{V2}/entities/{{entity_key}}")]["get"];
+    let params = read["parameters"].as_array().expect("parameters");
+    assert!(
+        params.iter().any(|p| p["name"] == "If-None-Match"
+            && p["in"] == "header"
+            && p["required"] != json!(true)),
+        "{params:?}",
+    );
+    assert!(
+        read["responses"]["200"]["headers"]["ETag"].is_object(),
+        "{read}"
+    );
+    let not_modified = &read["responses"]["304"];
+    assert!(not_modified["headers"]["ETag"].is_object(), "{read}");
+    assert!(
+        not_modified.get("content").is_none(),
+        "a 304 has no body: {not_modified}"
+    );
+
+    let schemas = &doc["components"]["schemas"];
+    let statuses = schemas["EntityLookupStatusDto"].to_string();
+    assert!(statuses.contains("\"unchanged\""), "{statuses}");
+    assert!(schemas["EntityLookupDto"]["properties"]["etag"].is_object());
 }
