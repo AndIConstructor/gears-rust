@@ -1,10 +1,13 @@
 """E2E tests for the attachment API (upload, get, delete, send-message with attachments)."""
 
+import http.client
 import io
+import json
 import pathlib
 import struct
 import threading
 import time
+import urllib.parse
 import uuid
 import zlib
 
@@ -18,6 +21,7 @@ from .conftest import (
     RESOURCE_ATTACHMENT,
     RESOURCE_CHAT,
     STANDARD_MODEL,
+    TOKEN_USER_A,
     assert_problem,
     exec_db,
     expect_done,
@@ -35,6 +39,10 @@ from .mock_provider.responses import SCENARIOS, Scenario
 from .mock_provider.server import FILES_PATH
 
 FIXTURES_DIR = pathlib.Path(__file__).parent / "fixtures"
+
+# `detail` of a canonical service_unavailable Problem (a provider error,
+# src/api/rest/error.rs `DomainError::ProviderError`).
+DETAIL_SERVICE_UNAVAILABLE = "Service temporarily unavailable"
 
 # api-gateway `defaults.body_limit_bytes` (config/base.yaml).
 GATEWAY_BODY_LIMIT_BYTES = 64_000_000
@@ -637,20 +645,33 @@ class TestUploadSizeEnforcement:
         assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
 
     @pytest.mark.usefixtures("offline_only")
-    @pytest.mark.timeout(60)
+    @pytest.mark.timeout(30)
     def test_body_over_gateway_limit_413(self, provider_chat, mock_provider):
         """A request whose Content-Length is over the api-gateway
         `body_limit_bytes` (64_000_000, config/base.yaml) is 413 from the
         gateway before the handler runs: no attachment row, nothing sent to
-        the provider."""
+        the provider. Only the headers and the start of the body are sent:
+        the gateway answers from the Content-Length."""
         chat_id = provider_chat["id"]
-        payload = b"\x00" * (GATEWAY_BODY_LIMIT_BYTES + 1)
-        resp = httpx.post(
-            f"{API_PREFIX}/chats/{chat_id}/attachments",
-            files={"file": ("huge.pdf", io.BytesIO(payload), "application/pdf")},
-            timeout=60,
-        )
-        assert resp.status_code == 413, resp.text
+        url = urllib.parse.urlsplit(f"{API_PREFIX}/chats/{chat_id}/attachments")
+        conn = http.client.HTTPConnection(url.hostname, url.port, timeout=30)
+        try:
+            conn.putrequest("POST", url.path)
+            conn.putheader("Authorization", f"Bearer {TOKEN_USER_A}")
+            conn.putheader("Content-Type", "multipart/form-data; boundary=x")
+            conn.putheader("Content-Length", str(GATEWAY_BODY_LIMIT_BYTES + 1))
+            conn.endheaders()
+            conn.send(b"--x\r\n")
+            resp = conn.getresponse()
+            status, content_type, body = (
+                resp.status, resp.getheader("Content-Type", ""), resp.read(),
+            )
+        finally:
+            conn.close()
+        assert status == 413, (status, body)
+        if "json" in content_type:
+            problem = json.loads(body)
+            assert problem.get("status") == 413, problem
         assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
         assert _file_upload_calls(mock_provider) == []
 
@@ -1399,8 +1420,10 @@ class TestUploadVectorStoreIndexing:
         )
 
         resp = _upload(chat_id, "broken.txt", b"cannot be indexed", "text/plain")
-        assert_problem(resp, 503, "service_unavailable")
+        assert_problem(resp, 503, "service_unavailable", detail=DETAIL_SERVICE_UNAVAILABLE)
         assert resp.headers.get("Retry-After") == "10", resp.headers
+        # The provider error code stays internal.
+        assert "indexing_failed" not in resp.text, resp.text
 
         row = _failed_upload_row(chat_id)
         detail = httpx.get(
@@ -1423,7 +1446,9 @@ class TestUploadVectorStoreIndexing:
         mock_provider.set_fault("POST", "/v1/vector_stores", 500)
 
         resp = _upload(chat_id, "no-store.txt", b"no vector store", "text/plain")
-        assert_problem(resp, 503, "service_unavailable")
+        assert_problem(resp, 503, "service_unavailable", detail=DETAIL_SERVICE_UNAVAILABLE)
+        assert resp.headers.get("Retry-After") == "10", resp.headers
+        assert "vector_store_failed" not in resp.text, resp.text
 
         row = _failed_upload_row(chat_id)
         assert (row["status"], row["error_code"]) == ("failed", "vector_store_failed"), row
