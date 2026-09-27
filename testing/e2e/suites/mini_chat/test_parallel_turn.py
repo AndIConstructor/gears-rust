@@ -8,6 +8,7 @@ import pytest
 from .conftest import (
     API_PREFIX,
     DETAIL_TURN_ALREADY_RUNNING,
+    OpenStream,
     assert_problem,
     expect_done,
     list_messages,
@@ -49,6 +50,44 @@ class TestParallelTurn:
         messages = list_messages(chat_id)
         assert [m["role"] for m in messages] == ["user", "assistant"]
         assert messages[0]["content"] == "First turn."
+
+    @pytest.mark.timeout(30)
+    @pytest.mark.parametrize("mutation", ["retry", "edit"])
+    def test_send_while_mutation_streams_409(self, request, chat, mock_provider, mutation):
+        """A send into a chat whose retry or edit is streaming gets 409
+        turn_already_running; the mutation completes and is the only turn."""
+        if request.config.getoption("mode") == "online":
+            pytest.skip("requires mock provider (slow scenario)")
+        chat_id = chat["id"]
+        rid = str(uuid.uuid4())
+        status, events, _ = stream_message(chat_id, "Original.", request_id=rid)
+        assert status == 200
+        expect_done(events)
+
+        mock_provider.set_next_scenario(slow_scenario(10, slow=0.3))
+        url = f"{API_PREFIX}/chats/{chat_id}/turns/{rid}"
+        if mutation == "retry":
+            stream = OpenStream(f"{url}/retry", None)
+        else:
+            stream = OpenStream(url, {"content": "Edited."}, method="PATCH")
+        with stream as s:
+            new_rid = s.read_until_started().data["request_id"]
+            second = httpx.post(
+                f"{API_PREFIX}/chats/{chat_id}/messages:stream",
+                json={"content": "Meanwhile.", "request_id": str(uuid.uuid4())},
+                headers={"Accept": "text/event-stream"},
+                timeout=30,
+            )
+            assert_problem(
+                second, 409, "aborted",
+                reason="turn_already_running", detail=DETAIL_TURN_ALREADY_RUNNING,
+            )
+            expect_done(s.drain())
+
+        messages = list_messages(chat_id)
+        assert [(m["role"], m["request_id"]) for m in messages] == [
+            ("user", new_rid), ("assistant", new_rid),
+        ]
 
     def test_new_stream_succeeds_after_terminal(self, chat):
         """A new stream request succeeds after the previous turn completed."""
