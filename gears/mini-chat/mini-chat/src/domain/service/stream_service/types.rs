@@ -394,6 +394,9 @@ pub(super) fn normalize_error(err: &LlmProviderError) -> (String, String) {
 pub(super) struct PreflightResult {
     pub(super) effective_model: String,
     pub(super) effective_provider_model_id: String,
+    /// Provider routing key of the effective model; after a downgrade it can
+    /// differ from the selected model's provider.
+    pub(super) effective_provider_id: String,
     pub(super) reserve_tokens: i64,
     pub(super) max_output_tokens_applied: i32,
     pub(super) reserved_credits_micro: i64,
@@ -424,6 +427,7 @@ pub(super) fn flatten_preflight(
         PreflightDecision::Allow {
             effective_model,
             effective_provider_model_id,
+            effective_provider_id,
             reserve_tokens,
             max_output_tokens_applied,
             reserved_credits_micro,
@@ -443,6 +447,7 @@ pub(super) fn flatten_preflight(
         } => Ok(PreflightResult {
             effective_model,
             effective_provider_model_id,
+            effective_provider_id,
             reserve_tokens,
             max_output_tokens_applied,
             reserved_credits_micro,
@@ -465,6 +470,7 @@ pub(super) fn flatten_preflight(
         PreflightDecision::Downgrade {
             effective_model,
             effective_provider_model_id,
+            effective_provider_id,
             reserve_tokens,
             max_output_tokens_applied,
             reserved_credits_micro,
@@ -486,6 +492,7 @@ pub(super) fn flatten_preflight(
         } => Ok(PreflightResult {
             effective_model,
             effective_provider_model_id,
+            effective_provider_id,
             reserve_tokens,
             max_output_tokens_applied,
             reserved_credits_micro,

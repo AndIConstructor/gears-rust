@@ -719,6 +719,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                     effective_provider_model_id: eff_entry
                                         .provider_model_id
                                         .clone(),
+                                    effective_provider_id: eff_entry.provider_id.clone(),
                                     reserve_tokens,
                                     max_output_tokens_applied,
                                     reserved_credits_micro: final_reserved,
@@ -747,6 +748,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                     effective_provider_model_id: eff_entry
                                         .provider_model_id
                                         .clone(),
+                                    effective_provider_id: eff_entry.provider_id.clone(),
                                     reserve_tokens,
                                     max_output_tokens_applied,
                                     reserved_credits_micro: final_reserved,

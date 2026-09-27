@@ -216,6 +216,17 @@ impl ProviderResolver {
         );
         Self { adapters, registry }
     }
+
+    /// Register another `provider_id` that shares the `"openai"` entry of
+    /// [`Self::single_provider`] but has its own upstream alias.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_alias_provider(mut self, provider_id: &str, upstream_alias: &str) -> Self {
+        let mut entry = self.registry["openai"].clone();
+        entry.upstream_alias = Some(upstream_alias.to_owned());
+        self.registry.insert(provider_id.to_owned(), entry);
+        self
+    }
 }
 
 #[cfg(test)]

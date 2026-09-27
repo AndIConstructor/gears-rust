@@ -294,9 +294,7 @@ impl<
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<tokio::task::JoinHandle<StreamOutcome>, StreamError> {
         let ResolvedModel {
-            model_id: model,
-            provider_id,
-            ..
+            model_id: model, ..
         } = resolved_model;
         let tenant_id = ctx.subject_tenant_id();
         let user_id = ctx.subject_id();
@@ -428,6 +426,9 @@ impl<
         self.record_preflight_metrics(&computed, &selected_model);
 
         let pf = flatten_preflight(computed.decision.clone())?;
+        // Adapter, OAGW alias and file-id maps follow the effective model: a
+        // downgrade may land on a model of another provider.
+        let provider_id = pf.effective_provider_id.clone();
 
         // ── Input token limit check ──
         check_input_token_limit(&content, &pf)?;
@@ -1309,7 +1310,6 @@ impl<
         preflight: MutationPreflight,
     ) -> Result<PreparedMutationStream<TR, MR>, StreamError> {
         let selected_model = resolved_model.model_id;
-        let provider_id = resolved_model.provider_id;
         let tenant_id = ctx.subject_tenant_id();
         let user_id = ctx.subject_id();
         let scope = AccessScope::for_tenant(tenant_id);
@@ -1320,6 +1320,8 @@ impl<
             ci_file_ids: pre_ci_file_ids,
             image_file_ids,
         } = preflight;
+        // Same as `run_stream`: route to the effective model's provider.
+        let provider_id = pf.effective_provider_id.clone();
         let web_search_tool = web_search_enabled && pf.tool_support.web_search;
 
         let conn = self
@@ -3075,6 +3077,7 @@ mod tests {
         let decision = PreflightDecision::Allow {
             effective_model: "m".to_owned(),
             effective_provider_model_id: "m-provider".to_owned(),
+            effective_provider_id: "openai".to_owned(),
             reserve_tokens: 100,
             max_output_tokens_applied: 1024,
             reserved_credits_micro: 0,
@@ -3151,6 +3154,7 @@ mod tests {
         let decision = PreflightDecision::Downgrade {
             effective_model: "m-mini".to_owned(),
             effective_provider_model_id: "m-mini-provider".to_owned(),
+            effective_provider_id: "openai".to_owned(),
             reserve_tokens: 50,
             max_output_tokens_applied: 512,
             reserved_credits_micro: 0,
@@ -4183,6 +4187,29 @@ mod tests {
         OrmVectorStoreRepo,
         OrmMessageAttachmentRepo,
     > {
+        build_stream_service_with_resolver(
+            db,
+            ProviderResolver::single_provider(provider),
+            catalog,
+            limits,
+        )
+    }
+
+    fn build_stream_service_with_resolver(
+        db: Arc<DbProvider>,
+        provider_resolver: ProviderResolver,
+        catalog: Vec<mini_chat_sdk::ModelCatalogEntry>,
+        limits: mini_chat_sdk::UserLimits,
+    ) -> StreamService<
+        TurnRepo,
+        MsgRepo,
+        OrmQuotaUsageRepo,
+        OrmChatRepo,
+        MockThreadSummaryRepo,
+        OrmAttachmentRepo,
+        OrmVectorStoreRepo,
+        OrmMessageAttachmentRepo,
+    > {
         use crate::domain::service::finalization_service::FinalizationService;
         use crate::domain::service::quota_settler::QuotaSettler;
 
@@ -4208,7 +4235,7 @@ mod tests {
             }
         }
 
-        let provider_resolver = Arc::new(ProviderResolver::single_provider(provider));
+        let provider_resolver = Arc::new(provider_resolver);
         let turn_repo = Arc::new(TurnRepo);
         let message_repo = Arc::new(MsgRepo::new(toolkit_db::odata::LimitCfg {
             default: 20,
@@ -4675,6 +4702,133 @@ mod tests {
             "provider-gpt-5-mini",
             "provider should receive the downgraded model's provider_model_id, \
              not the originally-requested premium model's"
+        );
+    }
+
+    /// A downgrade to a model of another `providers.<id>` entry must use that
+    /// provider's OAGW alias, not the selected model's.
+    #[tokio::test]
+    async fn downgrade_routes_to_effective_models_provider() {
+        #[domain_model]
+        struct AliasCapturingProvider {
+            captured: std::sync::Mutex<Option<(String, String)>>,
+            inner: MockProvider,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmProvider for AliasCapturingProvider {
+            async fn stream(
+                &self,
+                ctx: SecurityContext,
+                request: LlmRequest<Streaming>,
+                upstream_alias: &str,
+                cancel: CancellationToken,
+            ) -> Result<ProviderStream, LlmProviderError> {
+                *self.captured.lock().unwrap() =
+                    Some((request.model().to_owned(), upstream_alias.to_owned()));
+                self.inner
+                    .stream(ctx, request, upstream_alias, cancel)
+                    .await
+            }
+
+            async fn complete(
+                &self,
+                _ctx: SecurityContext,
+                _request: LlmRequest<NonStreaming>,
+                _upstream_alias: &str,
+            ) -> Result<ResponseResult, LlmProviderError> {
+                unimplemented!("not needed for streaming tests")
+            }
+        }
+
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let capturing = Arc::new(AliasCapturingProvider {
+            captured: std::sync::Mutex::new(None),
+            inner: MockProvider::completed(&["Hi"]),
+        });
+        let resolver = ProviderResolver::single_provider(Arc::clone(&capturing) as _)
+            .with_alias_provider("premium-provider", "premium-host")
+            .with_alias_provider("standard-provider", "standard-host");
+
+        let mut premium = make_catalog_entry("gpt-5", mini_chat_sdk::ModelTier::Premium);
+        premium.provider_id = "premium-provider".to_owned();
+        let mut standard = make_catalog_entry("gpt-5-mini", mini_chat_sdk::ModelTier::Standard);
+        standard.provider_id = "standard-provider".to_owned();
+
+        // Premium limits = 0 → forces downgrade to standard
+        let limits = mini_chat_sdk::UserLimits {
+            user_id: Uuid::nil(),
+            policy_version: 1,
+            standard: mini_chat_sdk::TierLimits {
+                limit_daily_credits_micro: 100_000_000,
+                limit_monthly_credits_micro: 1_000_000_000,
+            },
+            premium: mini_chat_sdk::TierLimits {
+                limit_daily_credits_micro: 0,
+                limit_monthly_credits_micro: 0,
+            },
+        };
+        let svc = build_stream_service_with_resolver(db, resolver, vec![premium, standard], limits);
+
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, mut rx) = mpsc::channel(32);
+        let handle = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                Uuid::new_v4(),
+                "hello".into(),
+                ResolvedModel {
+                    model_id: "gpt-5".into(),
+                    provider_model_id: "provider-gpt-5".into(),
+                    provider_id: "premium-provider".into(),
+                    display_name: "GPT 5".into(),
+                    tier: "premium".into(),
+                    multiplier_display: "1x".into(),
+                    description: None,
+                    multimodal_capabilities: vec![],
+                    context_window: 128_000,
+                    max_file_size_mb: 25,
+                    system_prompt: String::new(),
+                    tool_support: mini_chat_sdk::ModelToolSupport {
+                        web_search: false,
+                        file_search: false,
+                        image_generation: false,
+                        code_interpreter: false,
+                        mcp: false,
+                    },
+                    thread_summary_prompt: String::new(),
+                    max_output_tokens: 16_384,
+                },
+                false,
+                Vec::new(),
+                CancellationToken::new(),
+                tx,
+            )
+            .await
+            .expect("should succeed (downgrade, not reject)");
+        while let Some(ev) = rx.recv().await {
+            if ev.is_terminal() {
+                break;
+            }
+        }
+        let _outcome = handle.await.expect("task should complete");
+
+        let (model, alias) = capturing
+            .captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("provider was never called");
+        assert_eq!(model, "provider-gpt-5-mini");
+        assert!(
+            alias.starts_with("standard-host"),
+            "request must go through the effective provider's alias, got {alias}"
         );
     }
 
@@ -6682,15 +6836,13 @@ mod tests {
         insert_running_turn(&db, tenant_id, user_id, chat_id, request_id, turn_id).await;
 
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
-        let svc = build_stream_service(db.clone(), provider);
+        let mut svc = build_stream_service(db.clone(), provider);
+        // A resolver without providers makes provider resolution fail.
+        svc.provider_resolver = Arc::new(ProviderResolver::empty());
         let ctx = test_security_ctx_with_id(tenant_id, user_id);
         let (tx, _rx) = mpsc::channel(32);
 
-        // A provider the resolver does not know makes provider resolution fail.
-        let model = ResolvedModel {
-            provider_id: "unknown-provider".to_owned(),
-            ..test_resolved_model()
-        };
+        let model = test_resolved_model();
         let content = "retry question".to_owned();
         let preflight = svc
             .preflight_mutation(&ctx, chat_id, Uuid::new_v4(), &content, &model, false)
@@ -7021,14 +7173,13 @@ mod tests {
         insert_test_chat(&db, tenant_id, user_id, chat_id).await;
 
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["unused"]));
-        let svc = build_stream_service(db.clone(), provider);
+        let mut svc = build_stream_service(db.clone(), provider);
+        // A resolver without providers makes provider resolution fail.
+        svc.provider_resolver = Arc::new(ProviderResolver::empty());
         let ctx = test_security_ctx_with_id(tenant_id, user_id);
         let (tx, _rx) = mpsc::channel(32);
 
-        let model = ResolvedModel {
-            provider_id: "unknown-provider".to_owned(),
-            ..test_resolved_model()
-        };
+        let model = test_resolved_model();
         let err = svc
             .run_stream(
                 ctx,
