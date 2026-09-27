@@ -395,16 +395,18 @@ Sub-grants are not admitted: they derive from an admitted root grant per `cpt-cf
 - [ ] `p1` - **ID**: `cpt-cf-license-enforcement-fr-grant-lifecycle`
 
 A grant's lifecycle **MUST** distinguish at least: usable (in force, or expired within its grace window); awaiting the
-holder's acceptance; suspended; revoked, which no verb reverses; and expired beyond grace. Only a usable grant
-satisfies a check. Transitions **MUST** be explicit verbs: `issue` (usable at once or awaiting acceptance, per the
-grant's acceptance requirement), `accept` and `reject` by the holder (a rejected grant is revoked), `suspend`,
-`reinstate`, `revoke`, and `renew`, and for sub-grants `recall` by the grantor and `return` by a holder whose chain
-ends unbound; both revoke the sub-grant and everything below it, unbind any subject at the end of the chain, and
-return the parent's binding to none. Expiry **MUST** be derived from time, not from a stored transition: past
-`expires_at` a grant with a `terminates_at` still satisfies a check, with a grace diagnostic, until that date and then
-denies as terminated; without one it denies as expired. Suspension, revocation, expiry, and termination of a grant
-**MUST** apply to every grant below it in the parent grant chain without changing their stored state. Revoked grants
-**MUST** be retained for audit.
+holder's acceptance; suspended; revoked, which no verb reverses; and expired beyond grace. Only a usable grant satisfies
+a check. Transitions **MUST** be explicit verbs: `issue` (usable at once or awaiting acceptance, per the grant's
+acceptance requirement), `accept` and `reject` by the holder (a rejected grant is revoked), `suspend`, `reinstate`,
+`revoke`, and `renew`, and for sub-grants `recall` by the grantor and `return` by a holder whose chain ends unbound;
+both revoke the sub-grant and everything below it, unbind any subject at the end of the chain, and return the parent's
+binding to none. `renew` extends a grant's validity window, the grant keeping its identity; any grant not revoked can be
+renewed, and sub-grants that inherit its validity follow. In an untrusted build a root grant is renewed only by a
+renewed artifact from the vendor. Expiry **MUST** be derived from time, not from a stored transition: past `expires_at`
+a grant with a `terminates_at` still satisfies a check, with a grace diagnostic, until that date and then denies as
+terminated; without one it denies as expired. Suspension, revocation, expiry, and termination of a grant **MUST** apply
+to every grant below it in the parent grant chain without changing their stored state. Revoked grants **MUST** be
+retained for audit.
 
 - **Rationale**: Distinct situations and explicit verbs let consumers and operators tell *why* a grant does not apply;
   a state the check derives cannot be flipped by editing a row.
@@ -466,10 +468,11 @@ rejected with a typed error.
 - [ ] `p1` - **ID**: `cpt-cf-license-enforcement-fr-precedence`
 
 The vendor **MUST** be able to replace a grant or Pack by a new issuance in one operation: the replaced grants are
-revoked, and each binding they carried moves to an unbound grant of the replacement on the same resource that admits
-the subject, so a plan change never opens a denial window. A replacement that cannot carry over every binding
-**MUST** be rejected as a whole, naming the bindings without a successor; the holder unbinds first or the vendor
-replaces with grants that can carry them.
+revoked, and each binding they carried moves to an unbound grant of the replacement on the same resource that admits the
+subject or the delegation; a delegated binding moves with every sub-grant below it, which then descend from the
+replacement's evidence and stay usable throughout, so a plan change never opens a denial window. A replacement that
+cannot carry over every binding **MUST** be rejected as a whole, naming the bindings without a successor; the holder
+unbinds first or the vendor replaces with grants that can carry them.
 
 - **Rationale**: Bindings belong to the holder, so only a single vendor operation can move them together with the
   grants they sit on.
@@ -604,12 +607,12 @@ anywhere on a verification path.
 - [ ] `p2` - **ID**: `cpt-cf-license-enforcement-fr-freshness-revocation`
 
 In an untrusted build the vendor **MUST** be able to give an artifact a freshness TTL: past it the grants it carries
-deny as stale until a renewed artifact arrives. Revocation and suspension **MUST** be effected by ceasing renewal and
-by signed, versioned revocation material the verifier applies; the newest material applied is the vendor's current
-statement: a grant it lists as suspended or revoked is so, one it no longer lists, whatever an earlier entry said, is
-not; a version lower than the highest already applied **MUST** be rejected. An artifact issued without a TTL to a
-deployment that never receives revocation material cannot be revoked before its expiry; that is the vendor's choice at
-issuance.
+deny as stale until a renewed artifact arrives. Revocation and suspension **MUST** be effected by ceasing renewal and by
+signed, versioned revocation material the verifier applies; the newest material applied is the vendor's current
+statement for suspension: a grant it lists as suspended is so, one it no longer lists is not. A revocation, once
+applied, is final: later material that no longer lists it does not make the grant usable again. A version lower than the
+highest already applied **MUST** be rejected. An artifact issued without a TTL to a deployment that never receives
+revocation material cannot be revoked before its expiry; that is the vendor's choice at issuance.
 
 - **Rationale**: Short TTL plus renewal is the only revocation that works without connectivity to the vendor; whether
   to pay its operational price is the vendor's call per artifact, and the air-gap limit must be explicit, not implied
