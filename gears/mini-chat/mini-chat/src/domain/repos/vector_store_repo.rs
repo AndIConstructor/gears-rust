@@ -60,16 +60,4 @@ pub trait VectorStoreRepository: Send + Sync {
         id: Uuid,
         cutoff: time::OffsetDateTime,
     ) -> Result<u64, DomainError>;
-
-    // ── System-scoped methods (no AccessScope — background workers) ─────
-
-    /// Find vector store row for a chat (system context, no access scope).
-    async fn find_by_chat_system<C: DBRunner>(
-        &self,
-        runner: &C,
-        chat_id: Uuid,
-    ) -> Result<Option<VectorStoreModel>, DomainError>;
-
-    /// Hard-delete vector store row (system context, no access scope).
-    async fn delete_system<C: DBRunner>(&self, runner: &C, id: Uuid) -> Result<u64, DomainError>;
 }

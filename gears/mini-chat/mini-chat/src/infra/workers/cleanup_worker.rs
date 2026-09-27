@@ -561,10 +561,12 @@ impl LeasedMessageHandler for ChatCleanupHandler {
             return MessageResult::Retry;
         }
 
-        // 6. Vector store cleanup — only after all attachments are terminal
+        // 6. Vector store cleanup — only after all attachments are terminal.
+        //    Every `chat_vector_stores` query carries the event's tenant.
+        let vs_scope = toolkit_security::AccessScope::for_tenant(tenant_id);
         let vs_row = match self
             .vector_store_repo
-            .find_by_chat_system(&conn, chat_id)
+            .find_by_chat(&conn, &vs_scope, chat_id)
             .await
         {
             Ok(vs) => vs,
@@ -637,7 +639,11 @@ impl LeasedMessageHandler for ChatCleanupHandler {
             }
 
             // Hard-delete the chat_vector_stores row (durable completion marker)
-            if let Err(e) = self.vector_store_repo.delete_system(&conn, vs_row.id).await {
+            if let Err(e) = self
+                .vector_store_repo
+                .delete(&conn, &vs_scope, vs_row.id)
+                .await
+            {
                 warn!(chat_id = %chat_id, error = %e, "chat cleanup: failed to delete VS row");
                 return MessageResult::Retry;
             }
@@ -789,10 +795,10 @@ mod tests {
 
     // ── Chat cleanup handler tests ──────────────────────────────────
 
-    fn make_chat_cleanup_payload(chat_id: uuid::Uuid) -> OutboxMessage {
+    fn make_chat_cleanup_payload(chat_id: uuid::Uuid, tenant_id: uuid::Uuid) -> OutboxMessage {
         let event = serde_json::json!({
             "reason": "chat_soft_delete",
-            "tenant_id": uuid::Uuid::new_v4().to_string(),
+            "tenant_id": tenant_id.to_string(),
             "chat_id": chat_id.to_string(),
             "system_request_id": uuid::Uuid::new_v4().to_string(),
             "chat_deleted_at": "2026-01-01T00:00:00+00:00",
@@ -847,7 +853,7 @@ mod tests {
         let handler = build_chat_handler(mock_db_provider(db));
 
         // Non-existent chat → is_deleted_system returns false
-        let msg = make_chat_cleanup_payload(uuid::Uuid::new_v4());
+        let msg = make_chat_cleanup_payload(uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         let result = handler.handle(&msg).await;
         assert!(
             matches!(result, MessageResult::Reject(_)),
@@ -889,7 +895,7 @@ mod tests {
         chat_repo.soft_delete(&conn, &scope, chat_id).await.unwrap();
 
         let handler = build_chat_handler(db_provider);
-        let msg = make_chat_cleanup_payload(chat_id);
+        let msg = make_chat_cleanup_payload(chat_id, uuid::Uuid::new_v4());
         let result = handler.handle(&msg).await;
         assert!(
             matches!(result, MessageResult::Ok),
@@ -900,7 +906,7 @@ mod tests {
     #[tokio::test]
     async fn deserialize_chat_cleanup_payload() {
         let chat_id = uuid::Uuid::new_v4();
-        let msg = make_chat_cleanup_payload(chat_id);
+        let msg = make_chat_cleanup_payload(chat_id, uuid::Uuid::new_v4());
         let payload: ChatCleanupPayload =
             serde_json::from_slice(&msg.payload).expect("deserialization should succeed");
         assert_eq!(payload.chat_id, chat_id);
@@ -1010,7 +1016,7 @@ mod tests {
         seed_pending_attachment(&db_provider, chat_id, tenant_id, Some("file-123")).await;
 
         let handler = build_chat_handler(Arc::clone(&db_provider));
-        let msg = make_chat_cleanup_payload(chat_id);
+        let msg = make_chat_cleanup_payload(chat_id, tenant_id);
         let result = handler.handle(&msg).await;
 
         assert!(
@@ -1055,7 +1061,7 @@ mod tests {
             None, // anthropic_files_client
         );
 
-        let msg = make_chat_cleanup_payload(chat_id);
+        let msg = make_chat_cleanup_payload(chat_id, tenant_id);
         let result = handler.handle(&msg).await;
 
         assert!(
@@ -1108,7 +1114,7 @@ mod tests {
             None, // anthropic_files_client
         );
 
-        let msg = make_chat_cleanup_payload(chat_id);
+        let msg = make_chat_cleanup_payload(chat_id, tenant_id);
         let result = handler.handle(&msg).await;
 
         // All attachments terminal (failed) → handler proceeds to VS check → Success
@@ -1256,7 +1262,7 @@ mod tests {
             None,
         );
 
-        let mut msg = make_chat_cleanup_payload(chat_id);
+        let mut msg = make_chat_cleanup_payload(chat_id, tenant_id);
         for attempts in 0..2 {
             msg.attempts = attempts;
             let result = handler.handle(&msg).await;
@@ -1274,7 +1280,7 @@ mod tests {
 
         // The row stays so a replayed dead letter retries the delete.
         let remaining = vs_repo
-            .find_by_chat_system(&conn, chat_id)
+            .find_by_chat(&conn, &toolkit_security::AccessScope::allow_all(), chat_id)
             .await
             .expect("load vector store row");
         assert!(remaining.is_some(), "chat_vector_stores row must stay");
