@@ -13,7 +13,8 @@ use crate::domain::mime_validation::{AttachmentKind, AttachmentPurpose};
 use crate::domain::ports::MiniChatMetricsPort;
 use crate::domain::ports::metric_labels::{kind as kind_label, upload_result};
 use crate::domain::ports::{
-    AddFileToVectorStoreParams, FileStorageProvider, UploadFileParams, VectorStoreProvider,
+    AddFileToVectorStoreParams, FileStorageError, FileStorageProvider, UploadFileParams,
+    VectorStoreFileStatus, VectorStoreProvider,
 };
 use crate::domain::repos::{
     AttachmentRepository, ChatRepository, InsertVectorStoreParams, ModelResolver, OutboxEnqueuer,
@@ -162,6 +163,13 @@ fn unwrap_mutation_err(e: toolkit_db::DbError) -> DomainError {
 /// as abandoned. Provider vector-store creation takes seconds.
 const STALE_VECTOR_STORE_PLACEHOLDER: time::Duration = time::Duration::seconds(120);
 
+/// How long an upload waits for the vector store to index a document before
+/// the attachment is marked `failed` with `indexing_failed`.
+const INDEXING_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
+/// First and maximum interval between indexing status polls (doubling).
+const INDEXING_POLL_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
+const INDEXING_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Service handling file attachment operations.
 #[domain_model]
 pub struct AttachmentService<
@@ -187,6 +195,8 @@ pub struct AttachmentService<
     /// configured — the parallel upload is skipped silently in that case.
     anthropic_files_client:
         Option<Arc<crate::infra::llm::providers::anthropic_files_client::AnthropicFilesClient>>,
+    /// Upper bound on waiting for vector store indexing ([`INDEXING_TIMEOUT`]).
+    indexing_timeout: std::time::Duration,
 }
 
 impl<
@@ -229,6 +239,54 @@ impl<
             thumbnail_config,
             metrics,
             anthropic_files_client,
+            indexing_timeout: INDEXING_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_indexing_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.indexing_timeout = timeout;
+        self
+    }
+
+    /// Wait until the vector store finishes indexing the file. `Ok(())` on
+    /// `completed`; `Err` with the reason on `failed` / `cancelled`, a
+    /// status read failure, or [`Self::indexing_timeout`].
+    async fn wait_for_indexing(
+        &self,
+        ctx: &SecurityContext,
+        provider_id: &str,
+        vector_store_id: &str,
+        provider_file_id: &str,
+        mut status: VectorStoreFileStatus,
+    ) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + self.indexing_timeout;
+        let mut delay = INDEXING_POLL_INITIAL;
+        loop {
+            match status {
+                VectorStoreFileStatus::Completed => return Ok(()),
+                VectorStoreFileStatus::Failed { message } => return Err(message),
+                VectorStoreFileStatus::InProgress => {}
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(format!(
+                    "indexing not finished after {}s",
+                    self.indexing_timeout.as_secs()
+                ));
+            }
+            tokio::time::sleep(delay.min(deadline - now)).await;
+            delay = (delay * 2).min(INDEXING_POLL_MAX);
+            status = self
+                .vector_store
+                .get_vector_store_file_status(
+                    ctx.clone(),
+                    provider_id,
+                    vector_store_id,
+                    provider_file_id,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
         }
     }
 
@@ -1397,13 +1455,13 @@ impl<
             };
 
             // Add file to vector store with attachment_id attribute
-            if let Err(e) = self
+            let added = self
                 .vector_store
                 .add_file_to_vector_store(
                     ctx.clone(),
                     &provider_id,
                     AddFileToVectorStoreParams {
-                        vector_store_id: vs_id,
+                        vector_store_id: vs_id.clone(),
                         provider_file_id: provider_file_id.clone(),
                         attributes: HashMap::from([(
                             "attachment_id".to_owned(),
@@ -1411,16 +1469,35 @@ impl<
                         )]),
                     },
                 )
-                .await
-            {
-                // P1-13: indexing failure → CAS set_failed from uploaded,
-                // best-effort delete provider file
+                .await;
+            // P1-13: indexing failure → CAS set_failed from uploaded,
+            // best-effort delete provider file. `ready` only after the vector
+            // store reports the file `completed`, so file_search can find it.
+            let indexing_err = match added {
+                Err(e) => Some(DomainError::from(e)),
+                Ok(status) => self
+                    .wait_for_indexing(ctx, &provider_id, &vs_id, &provider_file_id, status)
+                    .await
+                    .err()
+                    .map(|reason| {
+                        tracing::warn!(
+                            attachment_id = %attachment_id,
+                            reason = %reason,
+                            "vector store indexing did not complete"
+                        );
+                        DomainError::from(FileStorageError::Rejected {
+                            code: "indexing_failed".to_owned(),
+                            message: "vector store indexing failed".to_owned(),
+                        })
+                    }),
+            };
+            if let Some(e) = indexing_err {
                 self.try_set_failed(&scope, attachment_id, "uploaded", "indexing_failed")
                     .await;
                 self.spawn_delete_file(ctx.clone(), &provider_id, &provider_file_id);
                 self.metrics
                     .record_attachment_upload(kind_metric, upload_result::PROVIDER_ERROR);
-                return Err(DomainError::from(e));
+                return Err(e);
             }
         }
 

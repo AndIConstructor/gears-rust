@@ -138,6 +138,28 @@ impl RagHttpClient {
         })
     }
 
+    /// Send a GET and parse the typed JSON response.
+    pub async fn json_get<T: DeserializeOwned>(
+        &self,
+        ctx: SecurityContext,
+        uri: &str,
+    ) -> Result<T, FileStorageError> {
+        let req = http::Request::builder()
+            .method(http::Method::GET)
+            .uri(uri)
+            .header(http::header::ACCEPT, "application/json")
+            .body(Body::Empty)
+            .map_err(|e| FileStorageError::Configuration {
+                message: format!("failed to build GET request: {e}"),
+            })?;
+
+        let bytes = self.send(ctx, req, "GET").await?;
+
+        serde_json::from_slice(&bytes).map_err(|e| FileStorageError::InvalidResponse {
+            message: format!("failed to parse JSON response: {e}"),
+        })
+    }
+
     /// Send a JSON POST without parsing the response body.
     pub async fn json_post_no_response(
         &self,
@@ -244,6 +266,42 @@ fn check_status(
         });
     }
     Ok(())
+}
+
+/// `vector_store.file` object returned by the `OpenAI` and Azure `OpenAI`
+/// vector store file endpoints.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct VectorStoreFileObject {
+    /// `in_progress`, `completed`, `failed` or `cancelled`. Treated as
+    /// `completed` when absent.
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    last_error: Option<VectorStoreFileError>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct VectorStoreFileError {
+    #[serde(default)]
+    message: String,
+}
+
+impl VectorStoreFileObject {
+    #[must_use]
+    pub fn into_status(self) -> crate::domain::ports::VectorStoreFileStatus {
+        use crate::domain::ports::VectorStoreFileStatus;
+        match self.status.as_deref() {
+            None | Some("completed") => VectorStoreFileStatus::Completed,
+            Some("in_progress") => VectorStoreFileStatus::InProgress,
+            Some(other) => VectorStoreFileStatus::Failed {
+                message: self
+                    .last_error
+                    .map(|e| e.message)
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| format!("vector store file status '{other}'")),
+            },
+        }
+    }
 }
 
 #[cfg(test)]

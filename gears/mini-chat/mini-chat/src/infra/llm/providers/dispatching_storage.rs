@@ -18,7 +18,7 @@ use toolkit_security::SecurityContext;
 
 use crate::domain::ports::{
     AddFileToVectorStoreParams, FileStorageError, FileStorageProvider, UploadFileParams,
-    VectorStoreProvider,
+    VectorStoreFileStatus, VectorStoreProvider,
 };
 
 /// An implementation and the provider id to hand to it.
@@ -145,9 +145,21 @@ impl VectorStoreProvider for DispatchingVectorStore {
         ctx: SecurityContext,
         provider_id: &str,
         params: AddFileToVectorStoreParams,
-    ) -> Result<(), FileStorageError> {
+    ) -> Result<VectorStoreFileStatus, FileStorageError> {
         let (imp, provider_id) = self.get(provider_id)?;
         imp.add_file_to_vector_store(ctx, provider_id, params).await
+    }
+
+    async fn get_vector_store_file_status(
+        &self,
+        ctx: SecurityContext,
+        provider_id: &str,
+        vector_store_id: &str,
+        provider_file_id: &str,
+    ) -> Result<VectorStoreFileStatus, FileStorageError> {
+        let (imp, provider_id) = self.get(provider_id)?;
+        imp.get_vector_store_file_status(ctx, provider_id, vector_store_id, provider_file_id)
+            .await
     }
 
     async fn delete_vector_store(
@@ -259,7 +271,17 @@ mod tests {
             _ctx: SecurityContext,
             _provider_id: &str,
             _params: AddFileToVectorStoreParams,
-        ) -> Result<(), FileStorageError> {
+        ) -> Result<VectorStoreFileStatus, FileStorageError> {
+            unreachable!("not used")
+        }
+
+        async fn get_vector_store_file_status(
+            &self,
+            _ctx: SecurityContext,
+            _provider_id: &str,
+            _vector_store_id: &str,
+            _provider_file_id: &str,
+        ) -> Result<VectorStoreFileStatus, FileStorageError> {
             unreachable!("not used")
         }
 

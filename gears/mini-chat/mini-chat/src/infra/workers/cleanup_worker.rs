@@ -1181,8 +1181,24 @@ mod tests {
             _ctx: SecurityContext,
             _provider_id: &str,
             _params: crate::domain::ports::AddFileToVectorStoreParams,
-        ) -> Result<(), crate::domain::ports::FileStorageError> {
-            Ok(())
+        ) -> Result<
+            crate::domain::ports::VectorStoreFileStatus,
+            crate::domain::ports::FileStorageError,
+        > {
+            Ok(crate::domain::ports::VectorStoreFileStatus::Completed)
+        }
+
+        async fn get_vector_store_file_status(
+            &self,
+            _ctx: toolkit_security::SecurityContext,
+            _provider_id: &str,
+            _vector_store_id: &str,
+            _provider_file_id: &str,
+        ) -> Result<
+            crate::domain::ports::VectorStoreFileStatus,
+            crate::domain::ports::FileStorageError,
+        > {
+            Ok(crate::domain::ports::VectorStoreFileStatus::Completed)
         }
 
         async fn delete_vector_store(
