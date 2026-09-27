@@ -1,6 +1,8 @@
 """Tests for the streaming message endpoint (POST /v1/chats/{id}/messages:stream):
 SSE contract, pre-stream errors and message persistence."""
 
+import dataclasses
+import threading
 import uuid
 
 import pytest
@@ -24,8 +26,10 @@ from .conftest import (
     slow_scenario,
     turn_count,
     uuid_from_db,
+    wait_for,
 )
-from .test_attachments import _upload, _upload_ready
+from .mock_provider.responses import SCENARIOS
+from .test_attachments import _chunked_multipart, _upload, _upload_ready
 
 
 @pytest.mark.multi_provider
@@ -233,6 +237,42 @@ def _post_stream(chat_id: str, body: dict) -> httpx.Response:
 
 
 @pytest.mark.usefixtures("offline_only")
+class TestProviderEventsWithoutEventLine:
+    """A provider stream whose SSE events have no `event:` line: each event
+    is named only by its `data.type`, as every Responses event carries it."""
+
+    def test_plain_answer(self, chat, mock_provider):
+        mock_provider.set_next_scenario(
+            dataclasses.replace(SCENARIOS["*"], omit_event_lines=True),
+        )
+        rid = str(uuid.uuid4())
+        resp = _post_stream(chat["id"], {"content": "Hello.", "request_id": rid})
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        expect_done(events)
+        assert delta_text(events) == "Hello! How can I help?"
+        rows = query_db("SELECT state FROM chat_turns WHERE request_id = ?", (rid,))
+        assert rows == [{"state": "completed"}], rows
+
+    def test_web_search_answer(self, chat, mock_provider):
+        """Tool and citation events are dispatched by `data.type` too."""
+        mock_provider.set_next_scenario(
+            dataclasses.replace(SCENARIOS["SEARCH:*"], omit_event_lines=True),
+        )
+        resp = _post_stream(chat["id"], {
+            "content": "SEARCH: weather", "web_search": {"enabled": True},
+        })
+        assert resp.status_code == 200, resp.text
+        events = parse_sse(resp.text)
+        expect_done(events)
+        assert [(e.data["name"], e.data["phase"]) for e in events if e.event == "tool"] == [
+            ("web_search", "start"), ("web_search", "done"),
+        ]
+        (citations,) = [e.data for e in events if e.event == "citations"]
+        assert [c["url"] for c in citations["items"]] == ["https://example.com"], citations
+
+
+@pytest.mark.usefixtures("offline_only")
 class TestStreamInvalidAttachments:
     """`attachment_ids` that exist but cannot be used: 400 invalid_attachment,
     no turn row, the provider is not called (ADR-0004: invalid, foreign or
@@ -263,6 +303,51 @@ class TestStreamInvalidAttachments:
         chat_id = chat["id"]
         att_id = _upload_ready(chat_id, "dup.txt", b"one document", "text/plain")
         self._assert_rejected(chat_id, [att_id, att_id], mock_provider)
+
+    def test_deleted_attachment_rejected(self, chat, mock_provider):
+        """An attachment removed by DELETE /attachments/{id}."""
+        chat_id = chat["id"]
+        att_id = _upload_ready(chat_id, "gone.txt", b"deleted document", "text/plain")
+        resp = httpx.delete(f"{API_PREFIX}/chats/{chat_id}/attachments/{att_id}", timeout=10)
+        assert resp.status_code == 204, resp.text
+        self._assert_rejected(chat_id, [att_id], mock_provider)
+
+    @pytest.mark.timeout(30)
+    def test_pending_attachment_rejected(self, chat, mock_provider):
+        """An attachment whose upload is still in progress (status `pending`:
+        the upload has sent its multipart headers and holds the rest of the
+        body). The upload then completes `ready`."""
+        chat_id = chat["id"]
+        release = threading.Event()
+        result: dict[str, httpx.Response] = {}
+        content_type, body = _chunked_multipart("held.txt", "text/plain", b"held upload")
+        head = next(body)
+
+        def gated():
+            yield head
+            release.wait(20)
+            yield from body
+
+        def held_upload():
+            result["resp"] = httpx.post(
+                f"{API_PREFIX}/chats/{chat_id}/attachments",
+                content=gated(), headers={"Content-Type": content_type}, timeout=30,
+            )
+
+        thread = threading.Thread(target=held_upload)
+        thread.start()
+        try:
+            rows = wait_for(
+                lambda: query_db("SELECT id, status FROM attachments WHERE chat_id = ?", (chat_id,)),
+                "the attachment row of the held upload",
+            )
+            assert [r["status"] for r in rows] == ["pending"], rows
+            self._assert_rejected(chat_id, [uuid_from_db(rows[0]["id"])], mock_provider)
+        finally:
+            release.set()
+            thread.join(timeout=30)
+        assert result["resp"].status_code == 201, result["resp"].text
+        assert result["resp"].json()["status"] == "ready"
 
 
 @pytest.mark.usefixtures("offline_only")
