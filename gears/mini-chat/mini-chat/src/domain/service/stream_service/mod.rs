@@ -445,7 +445,10 @@ impl<
 
         // Period boundaries from the computed preflight (used by finalization for settlement)
         let period_starts = computed.periods.clone();
-        let file_search_disabled = computed.kill_switches.disable_file_search;
+        // The kill switch, or an effective model without file_search support,
+        // leaves the tool out.
+        let file_search_disabled =
+            computed.kill_switches.disable_file_search || !pf.tool_support.file_search;
         let has_reserve_buckets = !computed.buckets.is_empty();
 
         // ── Retrieval mode determination ──
@@ -462,7 +465,7 @@ impl<
             tracing::info!(
                 chat_id = %chat_id,
                 ready_doc_count,
-                "file_search disabled by kill switch -- {ready_doc_count} ready documents skipped"
+                "file_search disabled (kill switch or model without file_search support) -- {ready_doc_count} ready documents skipped"
             );
         }
 
@@ -1332,7 +1335,10 @@ impl<
             .record_quota_estimated_tokens(pf.reserve_tokens as f64);
 
         let period_starts = computed.periods.clone();
-        let file_search_disabled = computed.kill_switches.disable_file_search;
+        // The kill switch, or an effective model without file_search support,
+        // leaves the tool out.
+        let file_search_disabled =
+            computed.kill_switches.disable_file_search || !pf.tool_support.file_search;
         let disable_code_interpreter = computed.kill_switches.disable_code_interpreter;
 
         // ── Retrieval mode determination ──

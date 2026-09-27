@@ -543,7 +543,7 @@ pub fn test_catalog_entry(params: TestCatalogEntryParams) -> ModelCatalogEntry {
             },
             tool_support: ModelToolSupport {
                 web_search: false,
-                file_search: false,
+                file_search: true,
                 image_generation: false,
                 code_interpreter: false,
                 mcp: false,

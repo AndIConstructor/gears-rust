@@ -1413,3 +1413,22 @@ class TestAttachmentsInProviderRequest:
             ("file_search", [vs_id]),
         ], req["tools"]
 
+
+
+class TestFileSearchModelSupport:
+    """10-48: a chat on a model with `tool_support.file_search: false`
+    (gpt-5-nano) never sends the file_search tool, even with a ready document."""
+
+    @pytest.mark.usefixtures("offline_only")
+    def test_no_file_search_tool_on_model_without_support(self, chat_with_model, mock_provider):
+        chat_id = chat_with_model("gpt-5-nano")["id"]
+        _upload_ready(chat_id, "notes.txt", b"Quarterly revenue grew.", "text/plain")
+
+        mock_provider.clear_captured_requests()
+        status, events, raw = stream_message(chat_id, "What grew?")
+        assert status == 200, raw
+        expect_done(events)
+        streamed = [r for r in mock_provider.get_captured_requests() if r.get("stream") is not False]
+        assert len(streamed) == 1, streamed
+        tools = [t.get("type") for t in streamed[0].get("tools", [])]
+        assert "file_search" not in tools, streamed[0].get("tools")
