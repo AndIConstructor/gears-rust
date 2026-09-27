@@ -125,6 +125,29 @@ class QuotaUser:
             (self.user_id,),
         )
 
+    def mutate(self, mutation: str, chat_id: str, rid: str) -> httpx.Response:
+        """Retry or edit the turn `rid`."""
+        url = f"{API_PREFIX}/chats/{chat_id}/turns/{rid}"
+        headers = {"Accept": "text/event-stream", **self.headers}
+        if mutation == "retry":
+            return httpx.post(f"{url}/retry", headers=headers, timeout=30)
+        return httpx.patch(url, json={"content": "Edited."}, headers=headers, timeout=30)
+
+    def assert_mutation_rejected(
+        self, mutation: str, chat_id: str, rid: str, subject: str, mock_provider,
+    ) -> None:
+        """The retry or edit is 429 on `subject`; nothing changes and the
+        provider is not called."""
+        messages_before = list_messages(chat_id, token=self.token)
+        mock_provider.clear_captured_requests()
+        resp = self.mutate(mutation, chat_id, rid)
+        assert_problem(resp, 429, "resource_exhausted", violation_subject=subject)
+        assert mock_provider.get_captured_requests() == []
+        assert list_messages(chat_id, token=self.token) == messages_before
+        assert poll_turn(chat_id, rid, token=self.token)["state"] == "done"
+        assert turn_count(chat_id) == 1
+        assert_no_reserves(self.user_id)
+
     def usage_rows(self) -> int:
         return query_db(
             "SELECT COUNT(*) AS n FROM quota_usage WHERE user_id = ?", (self.user_id,),
@@ -289,6 +312,30 @@ class TestDowngrade:
         premium_after = find_period(get_quota_status(token=user2.token), "premium", "daily")
         assert premium_after["used_credits_micro"] == premium_before["used_credits_micro"]
 
+    def test_standard_reserve_fits_where_premium_does_not(self, user2, mock_provider):
+        """Each cascade candidate is checked with its own reserve. With
+        60_000 credits_micro left in `total`, the premium model's reserve
+        (about 124_500: output cap 8192 x 15) does not fit and the standard
+        model's (about 25_000: 8192 x 3) does: the turn is downgraded, not
+        rejected."""
+        chat_id = user2.create_chat(DEFAULT_MODEL)
+        headroom = 60_000
+        user2.seed_spent(total=TOTAL_DAILY_LIMIT - headroom)
+
+        mock_provider.clear_captured_requests()
+        rid, done = user2.complete_turn(chat_id, "Downgrade me.")
+
+        assert (done["quota_decision"], done["effective_model"], done["downgrade_reason"]) == (
+            "downgrade", STANDARD_MODEL, "premium_quota_exhausted",
+        ), done
+        assert mock_provider.get_last_request()["model"] == "gpt-5.2"
+        (turn,) = query_db(
+            "SELECT reserved_credits_micro FROM chat_turns WHERE request_id = ?", (rid,),
+        )
+        # The booked (standard) reserve fits in the headroom; the premium
+        # one, 8192 output tokens at 15 credits_micro alone, does not.
+        assert turn["reserved_credits_micro"] <= headroom < 8192 * 15, turn
+
     def test_disabled_chat_model_downgrades(self, user3):
         """A chat locked to a model that was disabled later is downgraded with model_disabled."""
         chat_id = user3.create_chat(STANDARD_MODEL)
@@ -362,6 +409,23 @@ class TestWebSearchDailyQuota:
         ) == [{"web_search_calls": WEB_SEARCH_DAILY_QUOTA}]
         assert [e["web_search_calls"] for e in usage_events(rid)] == [0]
 
+    @pytest.mark.parametrize("mutation", ["retry", "edit"])
+    def test_web_search_quota_blocks_mutation(self, user3, mock_provider, mutation):
+        """A retry or edit keeps the turn's web search flag, so at the daily
+        web_search quota it is 429 `web_search`; the turn is kept."""
+        chat_id = user3.create_chat(DEFAULT_MODEL)
+        rid = str(uuid.uuid4())
+        resp = user3.post_stream(chat_id, {
+            "content": "SEARCH: weather", "web_search": {"enabled": True}, "request_id": rid,
+        })
+        assert resp.status_code == 200, resp.text
+        expect_done(parse_sse(resp.text))
+        poll_turn(chat_id, rid, ("done",), token=user3.token)
+        user3.seed(
+            bucket="total", period_type="daily", web_search_calls=WEB_SEARCH_DAILY_QUOTA,
+        )
+        user3.assert_mutation_rejected(mutation, chat_id, rid, "web_search", mock_provider)
+
     def test_web_search_below_quota_allowed(self, user3):
         chat_id = user3.create_chat(DEFAULT_MODEL)
         user3.seed(
@@ -404,6 +468,24 @@ class TestCodeInterpreterDailyQuota:
 
         plain_chat = user3.create_chat(STANDARD_MODEL)
         user3.complete_turn(plain_chat, "No files here.")
+
+    @pytest.mark.parametrize("mutation", ["retry", "edit"])
+    def test_code_interpreter_quota_blocks_mutation(self, user3, mock_provider, mutation):
+        """A retry or edit in a chat with a ready XLSX at the daily
+        code_interpreter quota is 429 `code_interpreter`; the turn is kept."""
+        chat_id = user3.create_chat(STANDARD_MODEL)
+        resp = httpx.post(
+            f"{API_PREFIX}/chats/{chat_id}/attachments",
+            files={"file": ("data.xlsx", io.BytesIO(_make_minimal_xlsx()), XLSX_CONTENT_TYPE)},
+            headers=user3.headers, timeout=60,
+        )
+        assert resp.status_code == 201, resp.text
+        rid, _ = user3.complete_turn(chat_id, "CODEINTERP: analyze")
+        user3.seed(
+            bucket="total", period_type="daily",
+            code_interpreter_calls=CODE_INTERPRETER_DAILY_QUOTA,
+        )
+        user3.assert_mutation_rejected(mutation, chat_id, rid, "code_interpreter", mock_provider)
 
 
 class TestQuotaStatusFlags:
