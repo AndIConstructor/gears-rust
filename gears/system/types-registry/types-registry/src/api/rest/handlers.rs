@@ -126,7 +126,7 @@ pub async fn get_entity(
 // decision lives here, which is what lets a future `api/grpc` adapter reuse the
 // same domain surface (SPEC §8.4). Size bounds checked here only fail early; the
 // domain enforces the same ones for every adapter. The one exception is a batch
-// item's `if_none_match`, which no domain method receives until T29 compares it.
+// item's `if_none_match`, which no domain method receives until T22d compares it.
 //
 // The handlers above this line are the pre-database path T27 deletes.
 
@@ -406,7 +406,7 @@ pub async fn batch_get_entities(
     }
     let items = req.items.into_items();
     // `if_none_match` is length-checked but not compared: no read emits a
-    // validator until T29.
+    // validator until T22d.
     let mut spelling_map: HashMap<EntityKey, String> = HashMap::with_capacity(items.len());
     let mut keys: Vec<EntityKey> = Vec::with_capacity(items.len());
     for item in items {

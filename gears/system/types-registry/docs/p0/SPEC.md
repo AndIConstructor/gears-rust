@@ -102,7 +102,7 @@ correctness core, not scope.
 | D10 | **`POST /entities` breaks**: `200` + results becomes `202` + operation | No compatibility path on that route. The gear's REST stability is `unstable`; the break is called out in the changelog |
 | D11 | **P0 retains registry-side inventory pull; per-gear push moves to P1** | Supersedes the original P0 push decision (plan P4/P18). types-registry seeds all linked inventory plus `cfg.entities` through the outbox, requiring every seed item to be `succeeded` or `unchanged` before publishing its client. T23 reconciles explicitly supplied documents for existing registration callers; no per-gear inventory filter or new inventory startup calls in P0. C3 remains open until P1 integrates inventory attribution and push with the platform-plane client |
 | D12 | **`GET /entities` becomes a bounded page with a cursor, document-free by default** | The old shape returns every match with full `content` in one response. A `limit` without a cursor would make the endpoint incomplete, so both land together. P19 adds `$select` on this page and the two exact-key routes; selected documents are explicit and the discovery cursor binds the normalized selection (§10.2) |
-| D13 | **P0 field projection on all three reads** (plan P19) | An absent `$select` means the same document-free managed metadata set on exact read, `batchGet` and discovery. P0 selects only fields it can answer; documents are flat and individually selectable. One normalized set drives SQL retrieval, cursor identity, T29 validators and T30 cache keys (§10.2) |
+| D13 | **P0 field projection on all three reads** (plan P19) | An absent `$select` means the same document-free managed metadata set on exact read, `batchGet` and discovery. P0 selects only fields it can answer; documents are flat and individually selectable. One normalized set drives SQL retrieval, cursor identity, T22d validators and T30 cache keys (§10.2) |
 | D14 | **Discovery filters by `pattern`, `depth`, `kind` and `lifecycle_status`, all exact SQL before `LIMIT`** (plan P20) | `depth` is an inclusive maximum GTS chain length; `kind` is `type_schema` or `instance`; `lifecycle_status` defaults to `active`. Admission materializes `entity.chain_depth` and one `entity_gts_segment` row per parsed segment; the repository compiles the `gts-rust`-parsed pattern into one join per constrained segment and fetches `limit + 1`, so only the last page is short. The cursor binds the filters so continuation cannot splice different result sets (§8.2, §10.2) |
 
 ---
@@ -851,7 +851,7 @@ What P0 builds is DESIGN's cache minus what needs inputs P0 does not have:
 |---|---|
 | Bounded store, LRU eviction | ✅ — bound is **bytes**, not entries: §3.2 caps one resolved document at 1 MB, so today's `capacity: 1024` bounds memory to nothing useful. DESIGN's argument, adopted |
 | Freshness window, `0` meaningful and supported | ✅ — DESIGN's 30 s default replaces today's 1 min |
-| `fresh` per-call bypass | ✅ — T29's validator makes the call revalidate unconditionally against the source, even within the freshness window |
+| `fresh` per-call bypass | ✅ — T22d's validator makes the call revalidate unconditionally against the source, even within the freshness window |
 | Invalidation on an observed terminal mutation, across identifier and UUID keys | ✅ — a client observes a mutation when a poll or the reconciliation helper returns a terminal successful outcome, **not** when the `POST` is accepted |
 | Entries indexed by both identifier and UUID | ✅ — already true of the current cache |
 | `NotFound`, `Failed`, discovery pages and operation resources never cached | ✅ — all four are expressible in P0 |
@@ -1172,7 +1172,7 @@ once every consumer has moved (D6). During the migration both exist briefly, but
 is not a supported surface — it is a step in the cutover, not a deprecation window.
 
 Shape follows DESIGN §3.3, minus tenancy, availability and federation. T22b supplies
-projection, and T29 supplies validators before the P0 cutover:
+projection, and T22d supplies validators before the P0 cutover:
 
 ```rust
 #[async_trait]

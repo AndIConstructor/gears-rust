@@ -1615,7 +1615,7 @@
         "description": "One key in a batch read.",
         "properties": {
           "if_none_match": {
-            "description": "This key's validator from an earlier read, which makes just this key\nconditional. The field the two header names lowercase to — `if_none_match`\ngoing out, `etag` coming back — because one `If-None-Match` header cannot\nrepresent a batch of them (DESIGN §3.3).\n\n**No read emits a validator yet:** T29 adds `etag` to a result and the\ncomparison behind it. Until then no value a caller could hold can match, so\nevery present key is read unconditionally and answers `found` — which is\nwhat a stale validator does after T29 too. The field is declared now so the\nwire shape does not change under the callers T23 migrates.",
+            "description": "This key's validator from an earlier read, which makes just this key\nconditional. The field the two header names lowercase to — `if_none_match`\ngoing out, `etag` coming back — because one `If-None-Match` header cannot\nrepresent a batch of them (DESIGN §3.3).\n\n**No read emits a validator yet:** T22d adds `etag` to a result and the\ncomparison behind it. Until then no value a caller could hold can match, so\nevery present key is read unconditionally and answers `found` — which is\nwhat a stale validator does after T22d too. The field is declared now so the\nwire shape does not change under the callers T23 migrates.",
             "maxLength": 1024,
             "type": [
               "string",
@@ -6228,7 +6228,7 @@
         "type": "object"
       },
       "EntityLookupStatusDto": {
-        "description": "`found` or `not_found`.\n\nDESIGN's `unchanged` arrives with T29's validators and its `failed` needs\nfederation, which is out of P0 (SPEC §2). Declaring either now would publish a\nvocabulary value this gear never emits, which a generated client would\ntype-check against.",
+        "description": "`found` or `not_found`.\n\nDESIGN's `unchanged` arrives with T22d's validators and its `failed` needs\nfederation, which is out of P0 (SPEC §2). Declaring either now would publish a\nvocabulary value this gear never emits, which a generated client would\ntype-check against.",
         "enum": [
           "found",
           "not_found"

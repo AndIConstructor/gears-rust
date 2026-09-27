@@ -133,7 +133,7 @@ pub struct Provenance {
 ///
 /// Absence is a result, not a failure: a caller reconciling a set needs to know
 /// which of its keys is missing, and one absent key must not fail the others.
-/// P0 has the two states DESIGN's four reduce to — `unchanged` needs T29's
+/// P0 has the two states DESIGN's four reduce to — `unchanged` needs T22d's
 /// validators and `failed` needs federation, which is out of scope (SPEC §10.1).
 #[domain_model]
 #[derive(Clone, Debug)]
@@ -655,7 +655,7 @@ impl RegistryService {
         let stores = Arc::clone(&self.stores);
         // One snapshot keeps each row's atomically written `resource_version`,
         // artifacts and authored document together. T11 revisions could otherwise
-        // pair N with N + 1 artifacts, breaking T29's version/body promise for
+        // pair N with N + 1 artifacts, breaking T22d's version/body promise for
         // conditional reads.
         let state = provider
             .transaction_with_config(snapshot_read(&self.db), move |tx| {

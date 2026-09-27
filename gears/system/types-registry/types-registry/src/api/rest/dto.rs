@@ -1160,10 +1160,10 @@ pub struct BatchGetItemDto {
     /// going out, `etag` coming back — because one `If-None-Match` header cannot
     /// represent a batch of them (DESIGN §3.3).
     ///
-    /// **No read emits a validator yet:** T29 adds `etag` to a result and the
+    /// **No read emits a validator yet:** T22d adds `etag` to a result and the
     /// comparison behind it. Until then no value a caller could hold can match, so
     /// every present key is read unconditionally and answers `found` — which is
-    /// what a stale validator does after T29 too. The field is declared now so the
+    /// what a stale validator does after T22d too. The field is declared now so the
     /// wire shape does not change under the callers T23 migrates.
     #[serde(default)]
     #[schema(max_length = 1024)]
@@ -1247,7 +1247,7 @@ impl<'de> serde::Deserialize<'de> for BatchGetItems {
 
 /// `found` or `not_found`.
 ///
-/// DESIGN's `unchanged` arrives with T29's validators and its `failed` needs
+/// DESIGN's `unchanged` arrives with T22d's validators and its `failed` needs
 /// federation, which is out of P0 (SPEC §2). Declaring either now would publish a
 /// vocabulary value this gear never emits, which a generated client would
 /// type-check against.
