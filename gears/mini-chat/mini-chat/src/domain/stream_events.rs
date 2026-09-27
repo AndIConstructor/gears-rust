@@ -88,6 +88,7 @@ impl QuotaDecisionKind {
 pub struct ToolData {
     pub phase: ToolPhase,
     pub name: String,
+    #[schema(value_type = Object)]
     pub details: serde_json::Value,
 }
 

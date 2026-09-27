@@ -1198,7 +1198,8 @@ impl<
         {
             Ok(result) => result,
             Err(e) => {
-                // Size-limit error from the streaming adapter → FileTooLarge (413).
+                // Size-limit error from the streaming adapter → FileTooLarge
+                // (400 `FILE_TOO_LARGE`).
                 if let crate::domain::ports::FileStorageError::Rejected {
                     ref code,
                     ref message,

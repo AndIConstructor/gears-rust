@@ -56,7 +56,7 @@ impl RagHttpClient {
         // Collect stream into bytes.
         // The stream may yield `multer::Error::FieldSizeExceeded` from the
         // handler's size constraints — propagate as Rejected so the domain
-        // layer maps it to FileTooLarge (413), not ProviderError (502).
+        // layer maps it to FileTooLarge (400), not ProviderError (503).
         let mut file_buf = Vec::new();
         let mut stream = params.file_stream;
         while let Some(chunk) = stream.next().await {

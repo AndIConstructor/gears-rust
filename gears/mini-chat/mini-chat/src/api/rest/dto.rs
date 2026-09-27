@@ -81,12 +81,12 @@ impl From<ChatDetail> for ChatDetailDto {
 pub struct MessageDto {
     pub id: Uuid,
     pub request_id: Uuid,
-    pub role: String,
+    pub role: MessageRoleDto,
     pub content: String,
     pub attachments: Vec<AttachmentSummaryDto>,
     /// The caller's reaction to this message; `null` when there is none.
     #[schema(required)]
-    pub my_reaction: Option<String>,
+    pub my_reaction: Option<ReactionKindDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,18 +102,57 @@ impl From<crate::domain::models::Message> for MessageDto {
         Self {
             id: m.id,
             request_id: m.request_id,
-            role: m.role,
+            role: MessageRoleDto::from_db(&m.role),
             content: m.content,
             attachments: m
                 .attachments
                 .into_iter()
                 .map(AttachmentSummaryDto::from)
                 .collect(),
-            my_reaction: m.my_reaction.map(|r| r.as_str().to_owned()),
+            my_reaction: m.my_reaction.map(ReactionKindDto::from),
             model: m.model,
             input_tokens: m.input_tokens,
             output_tokens: m.output_tokens,
             created_at: m.created_at,
+        }
+    }
+}
+
+/// Message author role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum MessageRoleDto {
+    User,
+    Assistant,
+    System,
+}
+
+impl MessageRoleDto {
+    /// Map the stored role (`user` / `assistant` / `system`, enforced by a
+    /// DB check constraint).
+    fn from_db(role: &str) -> Self {
+        match role {
+            "assistant" => Self::Assistant,
+            "system" => Self::System,
+            _ => Self::User,
+        }
+    }
+}
+
+/// Reaction value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum ReactionKindDto {
+    Like,
+    Dislike,
+}
+
+impl From<crate::domain::models::ReactionKind> for ReactionKindDto {
+    fn from(k: crate::domain::models::ReactionKind) -> Self {
+        use crate::domain::models::ReactionKind;
+        match k {
+            ReactionKind::Like => Self::Like,
+            ReactionKind::Dislike => Self::Dislike,
         }
     }
 }
@@ -123,9 +162,9 @@ impl From<crate::domain::models::Message> for MessageDto {
 #[toolkit_macros::api_dto(response)]
 pub struct AttachmentSummaryDto {
     pub attachment_id: Uuid,
-    pub kind: String,
+    pub kind: AttachmentKindDto,
     pub filename: String,
-    pub status: String,
+    pub status: AttachmentStatusDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub img_thumbnail: Option<ImgThumbnailDto>,
 }
@@ -134,9 +173,9 @@ impl From<AttachmentSummary> for AttachmentSummaryDto {
     fn from(a: AttachmentSummary) -> Self {
         Self {
             attachment_id: a.attachment_id,
-            kind: a.kind,
+            kind: AttachmentKindDto::from_db(&a.kind),
             filename: a.filename,
-            status: a.status,
+            status: AttachmentStatusDto::from_db(&a.status),
             img_thumbnail: a.img_thumbnail.map(ImgThumbnailDto::from),
         }
     }
@@ -173,6 +212,18 @@ pub enum AttachmentStatusDto {
     Failed,
 }
 
+impl AttachmentStatusDto {
+    /// Map the stored status string (DB check constraint).
+    fn from_db(status: &str) -> Self {
+        match status {
+            "pending" => Self::Pending,
+            "uploaded" => Self::Uploaded,
+            "ready" => Self::Ready,
+            _ => Self::Failed,
+        }
+    }
+}
+
 impl From<crate::infra::db::entity::attachment::AttachmentStatus> for AttachmentStatusDto {
     fn from(s: crate::infra::db::entity::attachment::AttachmentStatus) -> Self {
         use crate::infra::db::entity::attachment::AttachmentStatus;
@@ -191,6 +242,17 @@ impl From<crate::infra::db::entity::attachment::AttachmentStatus> for Attachment
 pub enum AttachmentKindDto {
     Document,
     Image,
+}
+
+impl AttachmentKindDto {
+    /// Map the stored kind string (DB check constraint).
+    fn from_db(kind: &str) -> Self {
+        if kind == "image" {
+            Self::Image
+        } else {
+            Self::Document
+        }
+    }
 }
 
 impl From<crate::infra::db::entity::attachment::AttachmentKind> for AttachmentKindDto {
@@ -274,7 +336,7 @@ pub struct SetReactionReq {
 #[schema(as = MiniChatReactionDto)]
 pub struct ReactionDto {
     pub message_id: Uuid,
-    pub reaction: String,
+    pub reaction: ReactionKindDto,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -283,7 +345,7 @@ impl From<crate::domain::models::Reaction> for ReactionDto {
     fn from(r: crate::domain::models::Reaction) -> Self {
         Self {
             message_id: r.message_id,
-            reaction: r.kind.as_str().to_owned(),
+            reaction: r.kind.into(),
             created_at: r.created_at,
         }
     }

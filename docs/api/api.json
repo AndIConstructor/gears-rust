@@ -1108,10 +1108,10 @@
             ]
           },
           "kind": {
-            "type": "string"
+            "$ref": "#/components/schemas/AttachmentKindDto"
           },
           "status": {
-            "type": "string"
+            "$ref": "#/components/schemas/AttachmentStatusDto"
           }
         },
         "required": [
@@ -8460,6 +8460,15 @@
         ],
         "type": "object"
       },
+      "MessageRoleDto": {
+        "description": "Message author role.",
+        "enum": [
+          "user",
+          "assistant",
+          "system"
+        ],
+        "type": "string"
+      },
       "MetadataEntryDto": {
         "description": "One custom-metadata key/value pair.",
         "properties": {
@@ -8796,10 +8805,14 @@
             ]
           },
           "my_reaction": {
-            "description": "The caller's reaction to this message; `null` when there is none.",
-            "type": [
-              "string",
-              "null"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReactionKindDto",
+                "description": "The caller's reaction to this message; `null` when there is none."
+              }
             ]
           },
           "output_tokens": {
@@ -8814,7 +8827,7 @@
             "type": "string"
           },
           "role": {
-            "type": "string"
+            "$ref": "#/components/schemas/MessageRoleDto"
           }
         },
         "required": [
@@ -8840,7 +8853,7 @@
             "type": "string"
           },
           "reaction": {
-            "type": "string"
+            "$ref": "#/components/schemas/ReactionKindDto"
           }
         },
         "required": [
@@ -14187,6 +14200,14 @@
         ],
         "type": "string"
       },
+      "ReactionKindDto": {
+        "description": "Reaction value.",
+        "enum": [
+          "like",
+          "dislike"
+        ],
+        "type": "string"
+      },
       "ReasonRequest": {
         "description": "A mandatory-reason decision body (`reject` / `request-changes`).",
         "properties": {
@@ -18645,7 +18666,9 @@
       "ToolData": {
         "description": "Tool lifecycle event.",
         "properties": {
-          "details": {},
+          "details": {
+            "type": "object"
+          },
           "name": {
             "type": "string"
           },
