@@ -3848,7 +3848,10 @@ mod tests {
             done.selected_model, "gpt-4o",
             "selected_model should be the user's original choice"
         );
-        assert_eq!(done.quota_decision, "downgrade");
+        assert_eq!(
+            done.quota_decision,
+            crate::domain::stream_events::QuotaDecisionKind::Downgrade
+        );
         assert_eq!(done.downgrade_from.as_deref(), Some("gpt-4o"));
         assert_eq!(done.downgrade_reason.as_deref(), Some("premium_exhausted"));
     }
@@ -4399,7 +4402,10 @@ mod tests {
             })
             .expect("should have a Done event");
 
-        assert_eq!(done.quota_decision, "allow");
+        assert_eq!(
+            done.quota_decision,
+            crate::domain::stream_events::QuotaDecisionKind::Allow
+        );
         assert_eq!(done.effective_model, "gpt-5.2");
         assert_eq!(done.selected_model, "gpt-5.2");
         assert!(done.downgrade_from.is_none());
@@ -4576,7 +4582,10 @@ mod tests {
             })
             .expect("should have a Done event");
 
-        assert_eq!(done.quota_decision, "downgrade");
+        assert_eq!(
+            done.quota_decision,
+            crate::domain::stream_events::QuotaDecisionKind::Downgrade
+        );
         assert_eq!(
             done.effective_model, "gpt-5-mini",
             "should be downgraded model"

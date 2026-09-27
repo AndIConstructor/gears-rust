@@ -163,6 +163,46 @@ impl From<ImgThumbnail> for ImgThumbnailDto {
     }
 }
 
+/// Attachment lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum AttachmentStatusDto {
+    Pending,
+    Uploaded,
+    Ready,
+    Failed,
+}
+
+impl From<crate::infra::db::entity::attachment::AttachmentStatus> for AttachmentStatusDto {
+    fn from(s: crate::infra::db::entity::attachment::AttachmentStatus) -> Self {
+        use crate::infra::db::entity::attachment::AttachmentStatus;
+        match s {
+            AttachmentStatus::Pending => Self::Pending,
+            AttachmentStatus::Uploaded => Self::Uploaded,
+            AttachmentStatus::Ready => Self::Ready,
+            AttachmentStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+/// Attachment kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum AttachmentKindDto {
+    Document,
+    Image,
+}
+
+impl From<crate::infra::db::entity::attachment::AttachmentKind> for AttachmentKindDto {
+    fn from(k: crate::infra::db::entity::attachment::AttachmentKind) -> Self {
+        use crate::infra::db::entity::attachment::AttachmentKind;
+        match k {
+            AttachmentKind::Document => Self::Document,
+            AttachmentKind::Image => Self::Image,
+        }
+    }
+}
+
 /// Full attachment details returned by the GET attachment endpoint.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
@@ -171,8 +211,8 @@ pub struct AttachmentDetailDto {
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
-    pub status: String,
-    pub kind: String,
+    pub status: AttachmentStatusDto,
+    pub kind: AttachmentKindDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,8 +246,8 @@ impl From<AttachmentModel> for AttachmentDetailDto {
             filename: m.filename,
             content_type: m.content_type,
             size_bytes: m.size_bytes,
-            status: m.status.to_string(),
-            kind: m.attachment_kind.to_string(),
+            status: m.status.into(),
+            kind: m.attachment_kind.into(),
             error_code: m.error_code,
             doc_summary: m.doc_summary,
             img_thumbnail,
@@ -253,13 +293,21 @@ impl From<crate::domain::models::Reaction> for ReactionDto {
 // Model DTOs
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Model tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum ModelTierDto {
+    Standard,
+    Premium,
+}
+
 /// Response DTO for a single model.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct ModelDto {
     pub model_id: String,
     pub display_name: String,
-    pub tier: String,
+    pub tier: ModelTierDto,
     pub multiplier_display: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -272,7 +320,11 @@ impl From<crate::domain::models::ResolvedModel> for ModelDto {
         Self {
             model_id: m.model_id,
             display_name: m.display_name,
-            tier: m.tier,
+            tier: if m.tier == "premium" {
+                ModelTierDto::Premium
+            } else {
+                ModelTierDto::Standard
+            },
             multiplier_display: m.multiplier_display,
             description: m.description,
             multimodal_capabilities: m.multimodal_capabilities,
@@ -320,12 +372,21 @@ pub struct WebSearchConfig {
 // Turn DTOs
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Turn state as reported by the turn status endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStatusState {
+    Running,
+    Done,
+    Error,
+    Cancelled,
+}
+
 /// Response DTO for `GET /chats/{id}/turns/{request_id}`.
 #[derive(Debug, serde::Serialize, ToSchema)]
 pub struct TurnStatusResponse {
     pub request_id: Uuid,
-    /// `running`, `done`, `error` or `cancelled`.
-    pub state: String,
+    pub state: TurnStatusState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

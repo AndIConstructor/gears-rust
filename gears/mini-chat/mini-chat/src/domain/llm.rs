@@ -156,7 +156,7 @@ pub enum LlmTool {
 
 /// Token usage counters.
 #[domain_model]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, ToSchema)]
 #[allow(clippy::struct_field_names)]
 pub struct Usage {
     pub input_tokens: i64,
@@ -185,7 +185,9 @@ pub struct Citation {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The attachment UUID (the provider file id before mapping).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = Uuid)]
     pub attachment_id: Option<String>,
     pub snippet: String,
     #[serde(skip_serializing_if = "Option::is_none")]

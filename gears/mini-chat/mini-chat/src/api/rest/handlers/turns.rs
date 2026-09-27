@@ -12,7 +12,7 @@ use toolkit_security::SecurityContext;
 use tracing::{Instrument, info, warn};
 
 use super::messages::SseRelay;
-use crate::api::rest::dto::{EditTurnRequest, TurnStatusResponse};
+use crate::api::rest::dto::{EditTurnRequest, TurnStatusResponse, TurnStatusState};
 use crate::api::rest::error::MiniChatChatError;
 use crate::domain::stream_events::StreamEvent;
 use crate::gear::AppServices;
@@ -22,12 +22,12 @@ use crate::infra::db::entity::chat_turn::TurnState;
 // GET turn status
 // ════════════════════════════════════════════════════════════════════════════
 
-fn map_turn_state(state: &TurnState) -> &'static str {
+fn map_turn_state(state: &TurnState) -> TurnStatusState {
     match state {
-        TurnState::Running => "running",
-        TurnState::Completed => "done",
-        TurnState::Failed => "error",
-        TurnState::Cancelled => "cancelled",
+        TurnState::Running => TurnStatusState::Running,
+        TurnState::Completed => TurnStatusState::Done,
+        TurnState::Failed => TurnStatusState::Error,
+        TurnState::Cancelled => TurnStatusState::Cancelled,
     }
 }
 
@@ -46,7 +46,7 @@ pub(crate) async fn get_turn(
 
     Ok(Json(TurnStatusResponse {
         request_id: turn.request_id,
-        state: map_turn_state(&turn.state).to_owned(),
+        state: map_turn_state(&turn.state),
         error_code: turn.error_code.clone(),
         assistant_message_id: turn.assistant_message_id,
         updated_at: turn.updated_at,

@@ -64,9 +64,10 @@ impl toolkit::api::api_dto::ResponseApiDto for MiniChatSseEvent {}
 impl From<ClientSseEvent> for StreamEvent {
     fn from(event: ClientSseEvent) -> Self {
         match event {
-            ClientSseEvent::Delta { r#type, content } => {
-                StreamEvent::Delta(DeltaData { r#type, content })
-            }
+            ClientSseEvent::Delta { r#type, content } => StreamEvent::Delta(DeltaData {
+                r#type: crate::domain::stream_events::DeltaKind::from_wire(r#type),
+                content,
+            }),
             ClientSseEvent::Tool {
                 phase,
                 name,
@@ -228,7 +229,7 @@ mod tests {
     fn delta_converts_to_sse_event() {
         assert!(
             StreamEvent::Delta(DeltaData {
-                r#type: "text",
+                r#type: crate::domain::stream_events::DeltaKind::Text,
                 content: "hello".into(),
             })
             .into_sse_event()
@@ -239,7 +240,7 @@ mod tests {
     #[test]
     fn delta_data_serializes_correctly() {
         let data = DeltaData {
-            r#type: "text",
+            r#type: crate::domain::stream_events::DeltaKind::Text,
             content: "hello".into(),
         };
         let json = serde_json::to_string(&data).unwrap();
@@ -250,10 +251,10 @@ mod tests {
     #[test]
     fn done_serializes_without_optional_fields() {
         let data = DoneData {
-            usage: None,
+            usage: Usage::default(),
             effective_model: "gpt-4o".into(),
             selected_model: "gpt-4o".into(),
-            quota_decision: "allow".into(),
+            quota_decision: crate::domain::stream_events::QuotaDecisionKind::Allow,
             downgrade_from: None,
             downgrade_reason: None,
             quota_warnings: None,
@@ -267,7 +268,7 @@ mod tests {
     #[test]
     fn done_serializes_with_downgrade() {
         let data = DoneData {
-            usage: Some(Usage {
+            usage: (Usage {
                 input_tokens: 100,
                 output_tokens: 50,
                 cache_read_input_tokens: 0,
@@ -276,7 +277,7 @@ mod tests {
             }),
             effective_model: "gpt-4o-mini".into(),
             selected_model: "gpt-4o".into(),
-            quota_decision: "downgrade".into(),
+            quota_decision: crate::domain::stream_events::QuotaDecisionKind::Downgrade,
             downgrade_from: Some("gpt-4o".into()),
             downgrade_reason: Some("premium_quota_exhausted".into()),
             quota_warnings: None,
@@ -290,10 +291,10 @@ mod tests {
     fn done_converts_to_sse_event() {
         assert!(
             StreamEvent::Done(Box::new(DoneData {
-                usage: None,
+                usage: Usage::default(),
                 effective_model: "gpt-4o".into(),
                 selected_model: "gpt-4o".into(),
-                quota_decision: "allow".into(),
+                quota_decision: crate::domain::stream_events::QuotaDecisionKind::Allow,
                 downgrade_from: None,
                 downgrade_reason: None,
                 quota_warnings: None,
@@ -307,7 +308,7 @@ mod tests {
     fn done_serializes_with_quota_warnings() {
         use crate::domain::stream_events::QuotaWarning;
         let data = DoneData {
-            usage: Some(Usage {
+            usage: (Usage {
                 input_tokens: 50,
                 output_tokens: 20,
                 cache_read_input_tokens: 0,
@@ -316,7 +317,7 @@ mod tests {
             }),
             effective_model: "gpt-5.2".into(),
             selected_model: "gpt-5.2".into(),
-            quota_decision: "allow".into(),
+            quota_decision: crate::domain::stream_events::QuotaDecisionKind::Allow,
             downgrade_from: None,
             downgrade_reason: None,
             quota_warnings: Some(vec![QuotaWarning {
@@ -340,16 +341,45 @@ mod tests {
     #[test]
     fn done_omits_quota_warnings_when_none() {
         let data = DoneData {
-            usage: None,
+            usage: Usage::default(),
             effective_model: "gpt-4o".into(),
             selected_model: "gpt-4o".into(),
-            quota_decision: "allow".into(),
+            quota_decision: crate::domain::stream_events::QuotaDecisionKind::Allow,
             downgrade_from: None,
             downgrade_reason: None,
             quota_warnings: None,
         };
         let json = serde_json::to_string(&data).unwrap();
         assert!(!json.contains("quota_warnings"));
+    }
+
+    /// The typed fields keep the `snake_case` strings on the wire.
+    #[test]
+    fn typed_fields_keep_wire_values() {
+        use crate::domain::stream_events::{DeltaKind, QuotaDecisionKind};
+        assert_eq!(serde_json::to_value(DeltaKind::Text).unwrap(), "text");
+        assert_eq!(
+            serde_json::to_value(DeltaKind::Reasoning).unwrap(),
+            "reasoning"
+        );
+        assert_eq!(DeltaKind::from_wire("reasoning"), DeltaKind::Reasoning);
+        assert_eq!(DeltaKind::from_wire("text"), DeltaKind::Text);
+        assert_eq!(
+            serde_json::to_value(QuotaDecisionKind::Allow).unwrap(),
+            "allow"
+        );
+        assert_eq!(
+            serde_json::to_value(QuotaDecisionKind::Downgrade).unwrap(),
+            "downgrade"
+        );
+        assert_eq!(
+            QuotaDecisionKind::from_decision("downgrade"),
+            QuotaDecisionKind::Downgrade
+        );
+        assert_eq!(
+            QuotaDecisionKind::from_decision("allow"),
+            QuotaDecisionKind::Allow
+        );
     }
 
     #[test]

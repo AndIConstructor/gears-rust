@@ -909,10 +909,12 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                             };
                             let _ = tx
                                 .send(StreamEvent::Done(Box::new(DoneData {
-                                    usage: Some(usage),
+                                    usage,
                                     effective_model: fctx.effective_model.clone(),
                                     selected_model: fctx.selected_model.clone(),
-                                    quota_decision: fctx.quota_decision.clone(),
+                                    quota_decision: crate::domain::stream_events::QuotaDecisionKind::from_decision(
+                                        &fctx.quota_decision,
+                                    ),
                                     downgrade_from: fctx.downgrade_from.clone(),
                                     downgrade_reason: fctx.downgrade_reason.clone(),
                                     quota_warnings,
@@ -943,10 +945,10 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                     }
                     let _ = tx
                         .send(StreamEvent::Done(Box::new(DoneData {
-                            usage: Some(usage),
+                            usage,
                             effective_model: model.clone(),
                             selected_model: model.clone(),
-                            quota_decision: "allow".into(),
+                            quota_decision: crate::domain::stream_events::QuotaDecisionKind::Allow,
                             downgrade_from: None,
                             downgrade_reason: None,
                             quota_warnings: None,
@@ -1015,10 +1017,12 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                             };
                             let _ = tx
                                 .send(StreamEvent::Done(Box::new(DoneData {
-                                    usage: Some(usage),
+                                    usage,
                                     effective_model: fctx.effective_model.clone(),
                                     selected_model: fctx.selected_model.clone(),
-                                    quota_decision: fctx.quota_decision.clone(),
+                                    quota_decision: crate::domain::stream_events::QuotaDecisionKind::from_decision(
+                                        &fctx.quota_decision,
+                                    ),
                                     downgrade_from: fctx.downgrade_from.clone(),
                                     downgrade_reason: fctx.downgrade_reason.clone(),
                                     quota_warnings,
@@ -1037,10 +1041,10 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                 } else {
                     let _ = tx
                         .send(StreamEvent::Done(Box::new(DoneData {
-                            usage: Some(usage),
+                            usage,
                             effective_model: model.clone(),
                             selected_model: model.clone(),
-                            quota_decision: "allow".into(),
+                            quota_decision: crate::domain::stream_events::QuotaDecisionKind::Allow,
                             downgrade_from: None,
                             downgrade_reason: None,
                             quota_warnings: None,

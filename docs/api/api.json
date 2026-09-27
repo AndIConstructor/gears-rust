@@ -1041,14 +1041,14 @@
             ]
           },
           "kind": {
-            "type": "string"
+            "$ref": "#/components/schemas/AttachmentKindDto"
           },
           "size_bytes": {
             "format": "int64",
             "type": "integer"
           },
           "status": {
-            "type": "string"
+            "$ref": "#/components/schemas/AttachmentStatusDto"
           },
           "summary_updated_at": {
             "format": "date-time",
@@ -1068,6 +1068,24 @@
           "created_at"
         ],
         "type": "object"
+      },
+      "AttachmentKindDto": {
+        "description": "Attachment kind.",
+        "enum": [
+          "document",
+          "image"
+        ],
+        "type": "string"
+      },
+      "AttachmentStatusDto": {
+        "description": "Attachment lifecycle status.",
+        "enum": [
+          "pending",
+          "uploaded",
+          "ready",
+          "failed"
+        ],
+        "type": "string"
       },
       "AttachmentSummaryDto": {
         "description": "Lightweight attachment metadata embedded in Message responses.",
@@ -2385,6 +2403,8 @@
         "description": "A citation extracted from provider annotations.",
         "properties": {
           "attachment_id": {
+            "description": "The attachment UUID (the provider file id before mapping).",
+            "format": "uuid",
             "type": [
               "string",
               "null"
@@ -4761,7 +4781,7 @@
             "type": "string"
           },
           "type": {
-            "type": "string"
+            "$ref": "#/components/schemas/DeltaKind"
           }
         },
         "required": [
@@ -4769,6 +4789,14 @@
           "content"
         ],
         "type": "object"
+      },
+      "DeltaKind": {
+        "description": "Kind of a `delta` chunk.",
+        "enum": [
+          "text",
+          "reasoning"
+        ],
+        "type": "string"
       },
       "DenyReason": {
         "description": "Reason for an explicit deny from the PDP.",
@@ -5001,7 +5029,7 @@
             "type": "string"
           },
           "quota_decision": {
-            "type": "string"
+            "$ref": "#/components/schemas/QuotaDecisionKind"
           },
           "quota_warnings": {
             "items": {
@@ -5016,17 +5044,11 @@
             "type": "string"
           },
           "usage": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Usage"
-              }
-            ]
+            "$ref": "#/components/schemas/Usage"
           }
         },
         "required": [
+          "usage",
           "effective_model",
           "selected_model",
           "quota_decision"
@@ -9021,7 +9043,7 @@
             "type": "string"
           },
           "tier": {
-            "type": "string"
+            "$ref": "#/components/schemas/ModelTierDto"
           }
         },
         "required": [
@@ -9048,6 +9070,14 @@
           "items"
         ],
         "type": "object"
+      },
+      "ModelTierDto": {
+        "description": "Model tier.",
+        "enum": [
+          "standard",
+          "premium"
+        ],
+        "type": "string"
       },
       "MoveMembershipRequest": {
         "description": "The body of `POST /customer-groups/{group}/members/{payerId}/move`.",
@@ -13936,6 +13966,14 @@
         ],
         "type": "object"
       },
+      "QuotaDecisionKind": {
+        "description": "Quota decision reported in `done`.",
+        "enum": [
+          "allow",
+          "downgrade"
+        ],
+        "type": "string"
+      },
       "QuotaPeriod": {
         "description": "Quota period classification.",
         "enum": [
@@ -18765,8 +18803,7 @@
             "type": "string"
           },
           "state": {
-            "description": "`running`, `done`, `error` or `cancelled`.",
-            "type": "string"
+            "$ref": "#/components/schemas/TurnStatusState"
           },
           "updated_at": {
             "format": "date-time",
@@ -18779,6 +18816,16 @@
           "updated_at"
         ],
         "type": "object"
+      },
+      "TurnStatusState": {
+        "description": "Turn state as reported by the turn status endpoint.",
+        "enum": [
+          "running",
+          "done",
+          "error",
+          "cancelled"
+        ],
+        "type": "string"
       },
       "TypeDto": {
         "description": "REST DTO for GTS type representation.",
