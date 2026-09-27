@@ -311,8 +311,8 @@ class TestThreadSummaryFailures:
         """A provider 500 on the summary request: the task is retried and the
         second request stores the summary."""
         _require_offline(request)
-        mock_provider.set_summary_fault(500, count=1)
         chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        mock_provider.set_summary_fault(chat_id, 500, count=1)
         _complete_turn(chat_id, "First question.")
         _complete_turn(chat_id, "Second question.")
 
@@ -328,8 +328,8 @@ class TestThreadSummaryFailures:
         deliveries: the task is dropped, no summary is stored, no message is
         marked compressed, and the next turn is sent without a summary."""
         _require_offline(request)
-        mock_provider.set_summary_fault(500, count=SUMMARY_MAX_ATTEMPTS)
         chat_id = chat_with_model(TINY_CTX_MODEL)["id"]
+        mock_provider.set_summary_fault(chat_id, 500, count=SUMMARY_MAX_ATTEMPTS)
         _complete_turn(chat_id, "First question.")
         _complete_turn(chat_id, "Second question.")
 

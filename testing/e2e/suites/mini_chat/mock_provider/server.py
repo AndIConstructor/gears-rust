@@ -171,7 +171,7 @@ class _Handler(BaseHTTPRequestHandler):
             server.capture_summary_request(body)
             # Non-streaming requests come from background work (thread
             # summary), so they never consume a test's queued scenario.
-            fault = server.take_summary_fault()
+            fault = server.take_summary_fault((body.get("metadata") or {}).get("chat_id"))
             if fault is not None:
                 self._json_response(*fault)
                 return
@@ -427,7 +427,7 @@ class MockProviderServer(ThreadingHTTPServer):
         # One-shot HTTP faults: [method, path_contains, status, body, remaining].
         self._faults: list[list] = []
         # Faults of the non-streaming (thread summary) Responses requests:
-        # [status, body, remaining].
+        # [chat_id, status, body, remaining].
         self._summary_faults: list[list] = []
         self._fault_lock = threading.Lock()
         # Guards _files and _vector_stores: handler threads outlive per-test
@@ -528,23 +528,27 @@ class MockProviderServer(ThreadingHTTPServer):
         with self._fault_lock:
             self._faults.append([method.upper(), path_contains, status, body, count])
 
-    def set_summary_fault(self, status: int, body: dict | None = None, count: int = 1) -> None:
+    def set_summary_fault(
+        self, chat_id: str, status: int, body: dict | None = None, count: int = 1,
+    ) -> None:
         """Answer the next `count` thread summary (non-streaming Responses)
-        requests with `status` and a JSON `body`; turn requests are not affected."""
+        requests of chat `chat_id` (`metadata.chat_id`) with `status` and a
+        JSON `body`. Turn requests and other chats' summaries (a background
+        summary of an earlier test) are not affected."""
         if body is None:
             body = {"error": {"message": f"Mock fault {status}", "type": "mock_fault"}}
         with self._fault_lock:
-            self._summary_faults.append([status, body, count])
+            self._summary_faults.append([chat_id, status, body, count])
 
-    def take_summary_fault(self) -> tuple[int, dict] | None:
+    def take_summary_fault(self, chat_id: str | None) -> tuple[int, dict] | None:
         with self._fault_lock:
-            if not self._summary_faults:
-                return None
-            fault = self._summary_faults[0]
-            fault[2] -= 1
-            if fault[2] <= 0:
-                self._summary_faults.pop(0)
-            return fault[0], fault[1]
+            for fault in self._summary_faults:
+                if fault[0] == chat_id:
+                    fault[3] -= 1
+                    if fault[3] <= 0:
+                        self._summary_faults.remove(fault)
+                    return fault[1], fault[2]
+        return None
 
     def take_fault(self, method: str, path: str) -> tuple[int, dict] | None:
         """Consume one matching fault; return (status, body) or None."""
@@ -651,7 +655,9 @@ class _DummyMockProvider:
     def get_summary_requests(self) -> list[dict]:
         return []
 
-    def set_summary_fault(self, status: int, body: dict | None = None, count: int = 1) -> None:
+    def set_summary_fault(
+        self, chat_id: str, status: int, body: dict | None = None, count: int = 1,
+    ) -> None:
         pass
 
     def get_uploaded_files(self) -> list[dict]:
