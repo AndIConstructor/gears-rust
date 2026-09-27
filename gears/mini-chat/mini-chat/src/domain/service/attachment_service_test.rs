@@ -3075,3 +3075,155 @@ async fn upload_image_emits_metrics_and_gauge_balanced() {
         "pending gauge should be back to zero (guard balanced)"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Upload when the chat's model cannot be resolved
+// ════════════════════════════════════════════════════════════════════════════
+
+async fn count_attachment_rows(db_prov: &crate::domain::service::DbProvider) -> usize {
+    use crate::infra::db::entity::attachment::Entity;
+    use sea_orm::EntityTrait;
+    use toolkit_db::secure::SecureEntityExt;
+
+    let conn = db_prov.conn().unwrap();
+    Entity::find()
+        .secure()
+        .scope_with(&toolkit_security::AccessScope::allow_all())
+        .all(&conn)
+        .await
+        .unwrap()
+        .len()
+}
+
+/// The chat's model left the catalog: the upload fails with `InvalidModel`
+/// (400 `INVALID_MODEL`, same as the stream path) before any row is written
+/// or the provider is called.
+#[tokio::test]
+async fn test_upload_rejected_when_chat_model_left_catalog() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_with_model(&db_prov, tenant_id, chat_id, user_id, "model-removed").await;
+
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+    let oagw = MockOagwGateway::with_responses(vec![Ok(file_upload_response("file-x"))]);
+    let svc = build_service(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+    );
+
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "notes.txt",
+        "text/plain",
+        Bytes::from_static(b"hello"),
+    )
+    .await;
+    match result {
+        Err(crate::domain::error::DomainError::InvalidModel { model }) => {
+            assert_eq!(model, "model-removed");
+        }
+        other => panic!("expected InvalidModel, got {other:?}"),
+    }
+    assert!(
+        oagw.captured_requests.lock().unwrap().is_empty(),
+        "provider must not be called"
+    );
+    assert_eq!(count_attachment_rows(&db_prov).await, 0, "nothing stored");
+}
+
+/// Resolver that fails every lookup with a transient error.
+struct UnavailableModelResolver;
+
+#[async_trait::async_trait]
+impl crate::domain::repos::ModelResolver for UnavailableModelResolver {
+    async fn resolve_model(
+        &self,
+        _user_id: Uuid,
+        _model: Option<String>,
+    ) -> Result<crate::domain::models::ResolvedModel, crate::domain::error::DomainError> {
+        Err(crate::domain::error::DomainError::service_unavailable(
+            "policy snapshot unavailable",
+        ))
+    }
+
+    async fn resolve_chat_model(
+        &self,
+        _user_id: Uuid,
+        _model_id: &str,
+    ) -> Result<crate::domain::models::ResolvedModel, crate::domain::error::DomainError> {
+        Err(crate::domain::error::DomainError::service_unavailable(
+            "policy snapshot unavailable",
+        ))
+    }
+
+    async fn list_visible_models(
+        &self,
+        _user_id: Uuid,
+    ) -> Result<Vec<crate::domain::models::ResolvedModel>, crate::domain::error::DomainError> {
+        Ok(vec![])
+    }
+
+    async fn get_visible_model(
+        &self,
+        _user_id: Uuid,
+        model_id: &str,
+    ) -> Result<crate::domain::models::ResolvedModel, crate::domain::error::DomainError> {
+        Err(crate::domain::error::DomainError::model_not_found(model_id))
+    }
+
+    async fn get_kill_switches(
+        &self,
+        _user_id: Uuid,
+    ) -> Result<mini_chat_sdk::KillSwitches, crate::domain::error::DomainError> {
+        Ok(mini_chat_sdk::KillSwitches::default())
+    }
+}
+
+/// Any other resolution failure is propagated as is; there is no fallback
+/// storage provider.
+#[tokio::test]
+async fn test_upload_propagates_model_resolution_error() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+    let oagw = MockOagwGateway::with_responses(vec![Ok(file_upload_response("file-x"))]);
+    let svc = build_service_with_metrics(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+        Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        Arc::new(UnavailableModelResolver),
+    );
+
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "notes.txt",
+        "text/plain",
+        Bytes::from_static(b"hello"),
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(crate::domain::error::DomainError::ServiceUnavailable { .. })
+        ),
+        "expected ServiceUnavailable, got {result:?}"
+    );
+    assert!(oagw.captured_requests.lock().unwrap().is_empty());
+    assert_eq!(count_attachment_rows(&db_prov).await, 0);
+}

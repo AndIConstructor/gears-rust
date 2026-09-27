@@ -1125,6 +1125,28 @@ class TestUploadUnknownChat:
         assert_problem(resp, 404, "not_found", resource_type=RESOURCE_CHAT)
 
 
+@pytest.mark.usefixtures("offline_only")
+class TestUploadChatModelLeftCatalog:
+    """The chat's model is no longer in the catalog: the upload has no provider
+    to store the file with and is rejected like a send
+    (test_streaming.py TestChatModelLeftCatalog)."""
+
+    def test_upload_to_chat_with_model_missing_from_catalog_400(self, chat, mock_provider):
+        chat_id = chat["id"]
+        assert exec_db(
+            "UPDATE chats SET model = ? WHERE id = ?", ("gpt-removed-from-catalog", chat_id),
+        ) == 1
+        mock_provider.clear_captured_requests()
+        resp = _upload(chat_id, "a.txt", b"no model", "text/plain")
+        body = assert_problem(
+            resp, 400, "invalid_argument",
+            field_reason="INVALID_MODEL", resource_type=RESOURCE_CHAT,
+        )
+        assert body["context"]["field_violations"][0]["field"] == "model", body
+        assert query_db("SELECT id FROM attachments WHERE chat_id = ?", (chat_id,)) == []
+        assert mock_provider.get_request_paths() == []
+
+
 class TestDeleteMissingAttachment:
     """DELETE /attachments/{id} for an attachment that does not exist."""
 

@@ -85,8 +85,6 @@ pub enum CodeInterpreterStatus {
     Allowed,
     /// Model does not support CI or kill switch is on.
     Denied,
-    /// Model resolution failed transiently — cannot determine CI support.
-    Unknown,
 }
 
 /// Information needed to perform the parallel "secondary" upload to
@@ -113,7 +111,6 @@ pub struct UploadContext {
     pub allow_csv_upload: bool,
     /// Whether the resolved model supports `code_interpreter` and the kill
     /// switch is not active. Pre-resolved to avoid duplicate model lookups.
-    /// `Unknown` when model resolution failed transiently.
     pub code_interpreter_status: CodeInterpreterStatus,
     /// `Some` when the chat's LLM provider is Anthropic — the upload code
     /// will perform a secondary parallel upload to Anthropic's Files API
@@ -241,8 +238,10 @@ impl<
     /// `min(ConfigMap, CCM per-model)` for each kind. Returns an
     /// `UploadContext` that `upload_file` can reuse (no double-authz).
     ///
-    /// Falls back to ConfigMap-only limits if model resolution fails
-    /// (e.g., CCM snapshot unavailable).
+    /// Fails when the chat's model cannot be resolved: `InvalidModel` if it
+    /// left the catalog (same as the stream path), the resolver's error
+    /// otherwise. Without the model there is no provider to store the file
+    /// with.
     pub(crate) async fn get_upload_context(
         &self,
         ctx: &SecurityContext,
@@ -270,18 +269,16 @@ impl<
         let config_file_bytes = u64::from(self.rag_config.uploaded_file_max_size_kb) * 1024;
         let config_image_bytes = u64::from(self.rag_config.uploaded_image_max_size_kb) * 1024;
 
-        // CCM per-model limit (best-effort — fall back to ConfigMap on failure).
         let (provider_id, storage_backend, ccm_bytes, model_supports_ci, anthropic_upload) =
-            self.resolve_model_limits(ctx, chat_id, chat.model).await;
+            self.resolve_model_limits(ctx, chat_id, chat.model).await?;
 
         let code_interpreter_status = self
             .resolve_ci_status(ctx, chat_id, model_supports_ci)
             .await;
 
         let limits = UploadLimits {
-            max_file_bytes: ccm_bytes.map_or(config_file_bytes, |ccm| config_file_bytes.min(ccm)),
-            max_image_bytes: ccm_bytes
-                .map_or(config_image_bytes, |ccm| config_image_bytes.min(ccm)),
+            max_file_bytes: config_file_bytes.min(ccm_bytes),
+            max_image_bytes: config_image_bytes.min(ccm_bytes),
         };
 
         Ok(UploadContext {
@@ -296,19 +293,13 @@ impl<
     }
 
     /// Resolve provider, storage backend, per-model byte limit, and CI support
-    /// from the model catalog. Falls back to ConfigMap-only on transient failure.
+    /// from the model catalog.
     async fn resolve_model_limits(
         &self,
         ctx: &SecurityContext,
         chat_id: Uuid,
         model: String,
-    ) -> (
-        String,
-        String,
-        Option<u64>,
-        Option<bool>,
-        Option<AnthropicUploadInfo>,
-    ) {
+    ) -> Result<(String, String, u64, bool, Option<AnthropicUploadInfo>), DomainError> {
         match self
             .model_resolver
             .resolve_chat_model(ctx.subject_id(), &model)
@@ -330,7 +321,7 @@ impl<
                     .provider_resolver
                     .resolve_storage_backend(&storage_provider_id);
                 let ccm = u64::from(resolved.max_file_size_mb) * 1_048_576;
-                let ci = Some(resolved.tool_support.code_interpreter);
+                let ci = resolved.tool_support.code_interpreter;
 
                 // §8.0: when the chat's LLM provider is Anthropic, the upload
                 // path performs a second parallel upload to Anthropic's Files
@@ -350,25 +341,16 @@ impl<
                     None
                 };
 
-                (
-                    storage_provider_id,
-                    backend,
-                    Some(ccm),
-                    ci,
-                    anthropic_upload,
-                )
+                Ok((storage_provider_id, backend, ccm, ci, anthropic_upload))
             }
             Err(e) => {
                 tracing::warn!(
                     chat_id = %chat_id,
+                    model = %model,
                     error = %e,
-                    "model resolution failed for upload limits; using ConfigMap only"
+                    "model resolution failed for upload; rejecting"
                 );
-                let fallback_provider = "openai".to_owned();
-                let backend = self
-                    .provider_resolver
-                    .resolve_storage_backend(&fallback_provider);
-                (fallback_provider, backend, None, None, None)
+                Err(e)
             }
         }
     }
@@ -379,7 +361,7 @@ impl<
         &self,
         ctx: &SecurityContext,
         chat_id: Uuid,
-        model_supports_ci: Option<bool>,
+        model_supports_ci: bool,
     ) -> CodeInterpreterStatus {
         let disable = match self
             .model_resolver
@@ -397,10 +379,10 @@ impl<
             }
         };
 
-        match model_supports_ci {
-            None => CodeInterpreterStatus::Unknown,
-            Some(true) if !disable => CodeInterpreterStatus::Allowed,
-            _ => CodeInterpreterStatus::Denied,
+        if model_supports_ci && !disable {
+            CodeInterpreterStatus::Allowed
+        } else {
+            CodeInterpreterStatus::Denied
         }
     }
 
@@ -968,16 +950,9 @@ impl<
         // When CI is blocked, remove it from purposes rather than rejecting
         // outright — the attachment may still serve other purposes (e.g.
         // FileSearch). Only reject if no purposes remain after filtering.
-        // When CI status is Unknown (transient resolution failure), return 503
-        // so the client can retry rather than hard-rejecting the upload.
         let purposes = if purposes.contains(&AttachmentPurpose::CodeInterpreter)
             && upload_ctx.code_interpreter_status != CodeInterpreterStatus::Allowed
         {
-            if upload_ctx.code_interpreter_status == CodeInterpreterStatus::Unknown {
-                return Err(DomainError::service_unavailable(
-                    "Unable to determine code interpreter support; please retry",
-                ));
-            }
             let filtered: Vec<_> = purposes
                 .into_iter()
                 .filter(|p| *p != AttachmentPurpose::CodeInterpreter)
