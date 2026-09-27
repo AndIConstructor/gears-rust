@@ -428,11 +428,15 @@ impl toolkit_db::outbox::LeasedMessageHandler for UsageEventHandler {
 /// - `Ok(())` → `Ok`
 /// - `Transient` → `Retry`
 /// - `Permanent` → `Reject` (dead-letter)
-/// - Deserialization failure → `Reject` (corrupt payload)
+/// - Deserialization failure → `Reject` (corrupt payload), checked before
+///   the plugin is resolved, so it is dead-lettered with or without a plugin
 /// - Plugin not configured → `Ok` (audit is optional; the gateway logs a
 ///   warning once and the event is dropped; the next delivery looks again)
 /// - Plugin resolution error, or an instance registered in types-registry
 ///   whose client is not in `ClientHub` → `Retry` (plugin may not be ready yet)
+///
+/// Every outcome except "plugin not configured" is counted in
+/// `mini_chat_audit_emit_total{result}`.
 pub struct AuditEventHandler {
     pub(crate) audit_gateway: Arc<AuditGateway>,
     pub(crate) metrics: Arc<dyn MiniChatMetricsPort>,
@@ -445,18 +449,6 @@ impl toolkit_db::outbox::LeasedMessageHandler for AuditEventHandler {
         &self,
         msg: &toolkit_db::outbox::OutboxMessage,
     ) -> toolkit_db::outbox::MessageResult {
-        let plugin = match self.audit_gateway.get_plugin().await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                // No audit plugin registered - audit is optional; ack and advance.
-                return toolkit_db::outbox::MessageResult::Ok;
-            }
-            Err(e) => {
-                warn!(error = %e, "audit plugin resolution failed - will retry");
-                return toolkit_db::outbox::MessageResult::Retry;
-            }
-        };
-
         let envelope = match serde_json::from_slice::<AuditEnvelope>(&msg.payload) {
             Ok(e) => e,
             Err(e) => {
@@ -466,9 +458,24 @@ impl toolkit_db::outbox::LeasedMessageHandler for AuditEventHandler {
                     payload_len = msg.payload.len(),
                     "audit event deserialization failed: {e}"
                 );
+                self.metrics
+                    .record_audit_emit(metric_labels::result::REJECT);
                 return toolkit_db::outbox::MessageResult::Reject(format!(
                     "deserialization failed: {e}"
                 ));
+            }
+        };
+
+        let plugin = match self.audit_gateway.get_plugin().await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                // No audit plugin registered - audit is optional; ack and advance.
+                return toolkit_db::outbox::MessageResult::Ok;
+            }
+            Err(e) => {
+                warn!(error = %e, "audit plugin resolution failed - will retry");
+                self.metrics.record_audit_emit(metric_labels::result::RETRY);
+                return toolkit_db::outbox::MessageResult::Retry;
             }
         };
 
@@ -942,22 +949,41 @@ mod tests {
     }
 
     // ── AuditEventHandler: invalid payload → Reject ──
-    //
-    // Note: the handler only deserializes payloads when a plugin is present.
-    // Use an `ok` plugin so the handler reaches the deserialization step.
 
     #[tokio::test]
     async fn audit_handler_reject_for_invalid_payload() {
         let plugin = MockAuditPlugin::ok();
+        let metrics = Arc::new(crate::domain::service::test_helpers::TestMetrics::new());
         let handler = AuditEventHandler {
-            audit_gateway: AuditGateway::from_plugin(plugin),
-            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+            audit_gateway: AuditGateway::from_plugin(Arc::clone(&plugin) as _),
+            metrics: Arc::clone(&metrics) as _,
         };
         let msg = make_outbox_message(b"not json".to_vec());
         let result = LeasedMessageHandler::handle(&handler, &msg).await;
         assert!(
             matches!(result, MessageResult::Reject(_)),
             "expected Reject for corrupt payload"
+        );
+        assert_eq!(plugin.calls(), 0);
+        assert_eq!(metrics.audit_emit.load(Ordering::Relaxed), 1);
+    }
+
+    // A corrupt payload is rejected before the plugin is resolved: a missing
+    // client must not turn it into an endless retry.
+    #[tokio::test]
+    async fn audit_handler_rejects_invalid_payload_when_plugin_unresolvable() {
+        let handler = AuditEventHandler {
+            audit_gateway: AuditGateway::with_lookup(
+                Arc::new(toolkit::client_hub::ClientHub::new()),
+                || Some("test.audit.plugin.v1~test._.missing.v1".to_owned()),
+            ),
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        };
+        let msg = make_outbox_message(b"not json".to_vec());
+        let result = LeasedMessageHandler::handle(&handler, &msg).await;
+        assert!(
+            matches!(result, MessageResult::Reject(_)),
+            "expected Reject for corrupt payload, got {result:?}"
         );
     }
 
@@ -982,12 +1008,13 @@ mod tests {
 
     #[tokio::test]
     async fn audit_handler_retry_when_plugin_client_missing() {
+        let metrics = Arc::new(crate::domain::service::test_helpers::TestMetrics::new());
         let handler = AuditEventHandler {
             audit_gateway: AuditGateway::with_lookup(
                 Arc::new(toolkit::client_hub::ClientHub::new()),
                 || Some("test.audit.plugin.v1~test._.missing.v1".to_owned()),
             ),
-            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+            metrics: Arc::clone(&metrics) as _,
         };
         let msg = make_outbox_message(make_audit_envelope_payload());
         let result = LeasedMessageHandler::handle(&handler, &msg).await;
@@ -995,6 +1022,7 @@ mod tests {
             matches!(result, MessageResult::Retry),
             "expected Retry when the plugin client is not in ClientHub"
         );
+        assert_eq!(metrics.audit_emit.load(Ordering::Relaxed), 1);
     }
 
     // ── AuditEventHandler: plugin registered after a no-plugin delivery ──
