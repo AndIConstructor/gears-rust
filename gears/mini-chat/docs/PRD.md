@@ -254,7 +254,7 @@ When a stream is cancelled or disconnects before a terminal completion, the syst
 
 The system MUST allow users to upload document files to a chat. Uploaded documents are extracted, chunked, and indexed into the chat's dedicated vector store with `attachment_id` metadata. Exception: files routed exclusively to `code_interpreter` (currently XLSX) are NOT extracted, chunked, or indexed. The system does NOT include full extracted file text in prompts; only relevant retrieved excerpts (top-k chunks) are included during file search. Attachment access MUST be limited to the owning user within their tenant.
 
-**P1 upload is synchronous** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)): `POST /v1/chats/{id}/attachments` uploads the file to the provider and indexes it within the request, and returns `201 Created` with the attachment identifier and `status: ready`. For a document added to the vector store, the request waits until the provider reports indexing `completed` (at most 25 s from the start of the upload, inside the api-gateway 30 s request timeout); if indexing fails or does not finish in time, the attachment becomes `failed` with `error_code = indexing_failed` and the upload returns 503 `service_unavailable`. On failure it returns an HTTP error; the attachment row stays visible via `GET /v1/chats/{id}/attachments/{attachment_id}` with `status: failed` and an `error_code` field (stable internal code, no provider identifiers). `uploaded` is an internal intermediate status and can be observed. Polling the GET endpoint is supported but not required. `doc_summary` is never provided by the client and is always `null` in P1 (see `cpt-cf-mini-chat-fr-doc-summary`).
+**P1 upload is synchronous** ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)): `POST /v1/chats/{id}/attachments` uploads the file to the provider and indexes it within the request, and returns `201 Created` with the attachment identifier and `status: ready`. For a document added to the vector store, the request waits until the provider reports indexing `completed` (at most 25 s from the start of the upload, inside the api-gateway 30 s request timeout); if indexing fails or does not finish in time, the attachment becomes `failed` with `error_code = indexing_failed` and the upload returns 503 `service_unavailable`. On failure it returns an HTTP error; the attachment row stays visible via `GET /v1/chats/{id}/attachments/{attachment_id}` with `status: failed` and an `error_code` field (stable internal code, no provider identifiers). `uploaded` is an internal intermediate status and can be observed. When the request is dropped (client disconnect, api-gateway timeout), a background job later marks the row `failed` with `error_code = upload_abandoned` and deletes the provider file recorded on the row, if any (DESIGN.md B.9.5). Polling the GET endpoint is supported but not required. `doc_summary` is never provided by the client and is always `null` in P1 (see `cpt-cf-mini-chat-fr-doc-summary`).
 
 Maximum document size: configurable (`rag.uploaded_file_max_size_kb`, default 25 MiB). A larger upload is rejected with 400 (`out_of_range`, `FILE_TOO_LARGE`). Mini-chat sets no request body limit of its own: the api-gateway `defaults.body_limit_bytes` (default 16 MiB) applies first and must be at least 25 MiB + 64 KiB (26,279,936 bytes) for 25 MiB documents, otherwise the gateway returns 413; an unsupported MIME type is rejected with 400 (`invalid_argument`, `UNSUPPORTED_CONTENT_TYPE`). Concurrent in-flight uploads per process are bounded (`rag.max_concurrent_uploads`, default 10); excess uploads get 503 with `Retry-After`.
 
@@ -918,7 +918,7 @@ The contract has two parts:
 ##### Emitted: thread summary health
 
 - `mini_chat_thread_summary_trigger_total{result}` (`scheduled|not_needed`; recorded after the finalization commit for each turn whose trigger is evaluated, `not_needed` when nothing is scheduled)
-- `mini_chat_thread_summary_execution_total{result}`
+- `mini_chat_thread_summary_execution_total{result}` (`success|provider_error|empty_summary|retry|model_unavailable|frontier_deleted|base_missing`; `model_unavailable`: the summary model is missing from the catalog or disabled and the task is rejected without retries)
 - `mini_chat_thread_summary_cas_conflicts_total`
 - `mini_chat_summary_fallback_total`
 
@@ -947,6 +947,11 @@ The contract has two parts:
 - `mini_chat_orphan_detected_total{reason}`
 - `mini_chat_orphan_finalized_total{reason}`
 - `mini_chat_orphan_scan_duration_seconds`
+
+##### Emitted: upload reaper
+
+- `mini_chat_attachment_upload_abandoned_total{from_status}` (`pending|uploaded`; attachments left by a dropped upload request and marked `failed` with `error_code = upload_abandoned`)
+- `mini_chat_upload_reaper_scan_duration_seconds`
 
 ##### Emitted: audit and finalization
 
@@ -1140,7 +1145,7 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | `delta` | `type`, `content` |
 | `tool` | `phase` (`start`/`done`), `name`, `details` |
 | `citations` | `items` |
-| `done` | `usage` (token counts only; optional), `effective_model`, `selected_model`, `quota_decision`, optional `downgrade_from`, `downgrade_reason`, `quota_warnings` (entries carry `next_reset` only when `warning` or `exhausted` is `true`). The message ID and `request_id` are not repeated; they are in `stream_started`. |
+| `done` | `usage` (token counts only; always present), `effective_model`, `selected_model`, `quota_decision`, optional `downgrade_from`, `downgrade_reason`, `quota_warnings` (entries carry `next_reset` only when `warning` or `exhausted` is `true`). The message ID and `request_id` are not repeated; they are in `stream_started`. |
 | `error` | `code`, `message` |
 
 **Stream close**: the server MUST close the SSE connection immediately after emitting the terminal event. No further events are permitted after the terminal `done` or `error`. After a client disconnect nothing is sent.
@@ -1741,6 +1746,7 @@ These defaults are used for P1 and are set by the operator for the whole deploym
 - Recent messages in context: 10 (`context.recent_messages_limit: 10`)
 - Thread summary trigger: 80% of the input budget (`thread_summary_worker.compression_threshold_pct: 80`); lease 300 s (`claim_timeout_secs`); 3 attempts (`max_attempts`)
 - Orphan watchdog: timeout 300 s (minimum 90 s), scan interval 60 s (`orphan_watchdog.timeout_secs`, `orphan_watchdog.scan_interval_secs`)
+- Upload reaper: an attachment left in `pending` or `uploaded` for 300 s (range 60–86400 s) is marked `failed`, scan interval 60 s (`upload_reaper.stale_after_secs`, `upload_reaper.scan_interval_secs`; `upload_reaper.enabled: true`)
 - SSE ping interval: 15 s (`streaming.sse_ping_interval_seconds`), before the first content event only
 - Knowledge search (`search_knowledge`): disabled (`knowledge_search.enabled: false`)
 - Temporary chat retention window: P2, not implemented. There is no `temporary_chat_retention_hours` configuration key; the planned value is 24 hours

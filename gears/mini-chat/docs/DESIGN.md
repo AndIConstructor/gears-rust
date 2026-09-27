@@ -108,7 +108,8 @@ Long conversations are managed via thread summaries - a Level 1 compression stra
 │  │ ┌──────────────────┐  ┌──────────────────────┐  │  │
 │  │ │ workers/ (outbox │  │ leader/ (K8s Lease   │  │  │
 │  │ │ handlers, orphan │  │ or no-op), metrics   │  │  │
-│  │ │ watchdog)        │  │                      │  │  │
+│  │ │ watchdog, upload │  │                      │  │  │
+│  │ │ reaper)          │  │                      │  │  │
 │  │ └──────────────────┘  └──────────────────────┘  │  │
 │  └─────────────────────────────────────────────────┘  │
 └───────────────────────────────────────────────────────┘
@@ -591,12 +592,14 @@ For automatic thread summary work, the serialized thread-summary outbox payload 
 
 - **orphan_watchdog** — P1 mandatory. Periodic background job that detects and cleans up turns abandoned by crashed pods. Transitions stale `running` turns to `failed` after a configurable timeout (default: 5 min) measured from durable `last_progress_at`, commits bounded quota debit, and enqueues the corresponding Mini-Chat usage message through `toolkit_db::outbox`. Runs under leader election: a gear-local Kubernetes Lease when built with the `k8s` feature, a no-op elector otherwise; double finalization is prevented by the CAS guard in either case ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)). See section "Turn Lifecycle, Crash Recovery and Orphan Handling" for full specification.
 
+- **upload_reaper** (`infra/workers/upload_reaper.rs`) — Periodic background job that fails attachments left in `pending` or `uploaded` by an upload whose request was dropped (client disconnect, api-gateway timeout) before the service recorded the outcome. Such a row gets `status = failed`, `error_code = upload_abandoned`; when it has a `provider_file_id`, the same transaction enqueues an attachment cleanup event that deletes the provider file. Runs under the same leader elector as the orphan watchdog; the CAS on status and `updated_at` prevents double processing. See B.9.5.
+
 #### Gear lifecycle
 
 The gear implements `init`, `start` and `stop`, plus `RestApiCapability::register_rest` for the REST routes (`src/gear.rs`):
 
-1. **`init`** — Loads `MiniChatConfig` (`deny_unknown_fields`) and validates every section (streaming, estimation budgets, quota, outbox, context, client credentials, providers and `rag_provider` references, orphan watchdog, thread-summary worker, cleanup worker, thumbnail, rag, knowledge search). Creates the model-policy and audit gateways (plugins are resolved lazily through types-registry), resolves the `authz_resolver`, `oagw` and `authn_resolver` clients from the ClientHub, and builds the per-provider file and vector-store implementations, metrics, the outbox enqueuer (the pipeline is not started yet), the knowledge retriever (only when enabled), the Anthropic Files client (only when an `anthropic_messages` entry exists) and the domain services. The REST routes are registered separately, in `RestApiCapability::register_rest`, from the services built in `init`. Gear migrations include the `toolkit_db::outbox` migrations.
-2. **`start`** — Prepares the leader elector when a leader-only worker (orphan watchdog) is enabled. Exchanges `client_credentials` for an S2S security context and registers OAGW upstreams and routes (see "OAGW provisioning"); misconfigured providers fail startup, deferred ones are retried in the background. Then starts the outbox pipeline with five queues: usage (`UsageEventHandler`), attachment cleanup, chat cleanup, thread summary (lease = `thread_summary_worker.claim_timeout_secs`) and audit (lease 60 s); the other queues use the `toolkit_db` default lease (30 s). Finally spawns the orphan watchdog.
+1. **`init`** — Loads `MiniChatConfig` (`deny_unknown_fields`) and validates every section (streaming, estimation budgets, quota, outbox, context, client credentials, providers and `rag_provider` references, orphan watchdog, upload reaper, thread-summary worker, cleanup worker, thumbnail, rag, knowledge search). Creates the model-policy and audit gateways (plugins are resolved lazily through types-registry), resolves the `authz_resolver`, `oagw` and `authn_resolver` clients from the ClientHub, and builds the per-provider file and vector-store implementations, metrics, the outbox enqueuer (the pipeline is not started yet), the knowledge retriever (only when enabled), the Anthropic Files client (only when an `anthropic_messages` entry exists) and the domain services. The REST routes are registered separately, in `RestApiCapability::register_rest`, from the services built in `init`. Gear migrations include the `toolkit_db::outbox` migrations.
+2. **`start`** — Prepares the leader elector when a leader-only worker (orphan watchdog, upload reaper) is enabled. Exchanges `client_credentials` for an S2S security context and registers OAGW upstreams and routes (see "OAGW provisioning"); misconfigured providers fail startup, deferred ones are retried in the background. Then starts the outbox pipeline with five queues: usage (`UsageEventHandler`), attachment cleanup, chat cleanup, thread summary (lease = `thread_summary_worker.claim_timeout_secs`) and audit (lease 60 s); the other queues use the `toolkit_db` default lease (30 s). Finally spawns the orphan watchdog and the upload reaper (the reaper enqueues attachment cleanup events, so it starts after the outbox pipeline).
 3. **`stop`** — Cancels the background workers and joins them with a bounded timeout, then stops the outbox pipeline (or gives up when the framework deadline fires).
 
 ### 3.3 API Contracts
@@ -801,6 +804,8 @@ Upload is synchronous: within the request the file is uploaded to the RAG provid
 Errors shared with other endpoints (for example a non-UUID path parameter) are listed in the REST error table under **Error Codes** in [Provider Event Translation](#provider-event-translation).
 
 When the failure happens after the row was inserted, the row stays visible via `GET` with `status: failed` and `error_code`.
+
+When the request is dropped (client disconnect, api-gateway timeout) the service records no outcome and the row stays `pending` or `uploaded`. The upload reaper sets such a row to `status: failed`, `error_code = upload_abandoned` once its `updated_at` is older than `upload_reaper.stale_after_secs` (default 300 s), and schedules the delete of the provider file recorded on the row, if any (B.9.5). The row is not soft-deleted and stays visible via `GET`.
 
 **Streaming Contract** (`POST /v1/chats/{id}/messages:stream`) — **ID**: `cpt-cf-mini-chat-contract-sse-streaming`:
 
@@ -1103,6 +1108,7 @@ Finalizes the stream. Provides usage and model selection metadata.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `usage` | object (required) | Always present. On replay the counts come from the persisted assistant message. |
 | `usage.input_tokens` | number | Actual input tokens consumed. |
 | `usage.output_tokens` | number | Actual output tokens consumed. `usage` carries token counts only; there is no `usage.model` (the model is in `effective_model`, [ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)). Cache and reasoning token counts are internal and not serialized. |
 | `effective_model` | string | Model actually used for this turn after quota and policy evaluation. Always present. |
@@ -1642,7 +1648,7 @@ sequenceDiagram
 
 Attachment kind is derived from `content_type`: MIME types matching `image/png`, `image/jpeg`, `image/webp`, or `image/gif` are classified as `image`; all other supported types are classified as `document`. Attachment purpose is derived from the validated MIME type: XLSX → `for_code_interpreter=true`; other document types → `for_file_search=true`; images have both flags `false` (handled as multimodal input). A single attachment may serve multiple purposes (both boolean columns can be `true`).
 
-**Attachment status**: Upload returns 201 with `status: ready`; no polling is needed. `GET /v1/chats/{id}/attachments/{attachment_id}` still reports rows that failed during upload. `doc_summary` is never populated ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). `img_thumbnail` is server-generated during image upload processing; it appears only when `status=ready` and `kind=image` (null otherwise). If status is `failed`, the response includes an `error_code` field with a stable internal error code (no provider identifiers).
+**Attachment status**: Upload returns 201 with `status: ready`; no polling is needed. `GET /v1/chats/{id}/attachments/{attachment_id}` still reports rows that failed during upload. `doc_summary` is never populated ([ADR-0007](./ADR/0007-cpt-cf-mini-chat-adr-document-retrieval-scope.md)). `img_thumbnail` is server-generated during image upload processing; it appears only when `status=ready` and `kind=image` (null otherwise). If status is `failed`, the response includes an `error_code` field with a stable internal error code (no provider identifiers). A row left in `pending` or `uploaded` by a dropped request moves to `failed` (`error_code = upload_abandoned`) through the upload reaper (B.9.5).
 
 **UI rendering flow for chat history**:
 1. `GET /v1/chats/{id}` returns chat metadata + `message_count` (no embedded messages).
@@ -1998,7 +2004,7 @@ Normative rules:
 
 3. **Failure tolerance**: if a process crashes or restarts after some attachment rows reach terminal state but before vector-store deletion completes, the remaining `chat_vector_stores` row preserves the outstanding cleanup work and the same durable outbox message remains retryable within the shared outbox framework. A chat is not fully purged from provider storage until both conditions hold: (a) every relevant attachment cleanup row is in a terminal state (`done` or `failed`), and (b) the corresponding `chat_vector_stores` row has been removed after provider delete success or `404 Not Found`. If any attachment row is `failed`, individual provider-file cleanup debt remains unresolved, but vector-store deletion is not blocked — the handler proceeds with vector-store deletion and emits `mini_chat_cleanup_vector_store_with_failed_attachments_total`. Because `failed` rows are terminal in P1 and excluded from automatic re-enqueue, clearing per-file debt requires operator intervention or a future recovery policy outside P1 scope.
 
-4. **Provider-side orphan files (P2)**: if a process crashes after a successful provider Files API upload but before `cas_set_uploaded` persists the `provider_file_id` in the local database, the uploaded file becomes an orphan on the provider side. Mini Chat has no record of its `provider_file_id` and therefore the P1 cleanup handler cannot delete it. This orphan window is narrow (microseconds between provider HTTP response and local DB commit) and the cost is limited to provider storage. P2 SHOULD implement a **provider file reconciliation job** that periodically lists files via the provider Files API (`GET /files?purpose=assistants`), compares with locally-known `provider_file_id` values, and deletes unmatched orphans. Provider-side filenames follow the structured convention `{chat_id}_{attachment_id}.{ext}` (see `structured_filename()`), so the reconciliation job can parse the filename to extract `chat_id` and `attachment_id`, then verify against the local database whether the file is tracked. The reconciliation job MUST be leader-elected (single instance) and MUST NOT delete files younger than a configurable grace period (e.g. 1 hour) to avoid racing with in-progress uploads. Deleting a provider vector store does NOT delete its referenced files — it only removes the index references — so orphan file cleanup cannot rely on vector store deletion alone.
+4. **Provider-side orphan files (P2)**: if a process crashes after a successful provider Files API upload but before `cas_set_uploaded` persists the `provider_file_id` in the local database, the uploaded file becomes an orphan on the provider side. Mini Chat has no record of its `provider_file_id` and therefore the P1 cleanup handler cannot delete it. This orphan window is narrow (microseconds between provider HTTP response and local DB commit) and the cost is limited to provider storage. A dropped upload request opens the same gap for the whole provider upload call: the provider can finish storing the file after the request future is gone. The upload reaper later fails the `pending` row, but it has no `provider_file_id` and cannot delete that file. P2 SHOULD implement a **provider file reconciliation job** that periodically lists files via the provider Files API (`GET /files?purpose=assistants`), compares with locally-known `provider_file_id` values, and deletes unmatched orphans. Provider-side filenames follow the structured convention `{chat_id}_{attachment_id}.{ext}` (see `structured_filename()`), so the reconciliation job can parse the filename to extract `chat_id` and `attachment_id`, then verify against the local database whether the file is tracked. The reconciliation job MUST be leader-elected (single instance) and MUST NOT delete files younger than a configurable grace period (e.g. 1 hour) to avoid racing with in-progress uploads. Deleting a provider vector store does NOT delete its referenced files — it only removes the index references — so orphan file cleanup cannot rely on vector store deletion alone.
 
 **Cleanup configuration knobs** (deployment config):
 
@@ -2177,7 +2183,7 @@ Soft-delete rules:
 | storage_backend | VARCHAR(32) | Internal storage routing label (`providers.<id>.storage_backend`, or the provider ID; column default `azure`). Used by cleanup to pick the provider API: the storage dispatchers map the label back to the provider ID. Not exposed in public API. Does NOT store URLs. |
 | provider_file_id | VARCHAR(128) | LLM provider file ID - OpenAI `file-*` or Azure OpenAI `assistant-*` (nullable until upload completes). Internal-only; MUST NOT be exposed via any API response. |
 | status | VARCHAR(16) | `pending`, `uploaded`, `ready`, `failed` (`uploaded` = provider upload done, indexing not finished) |
-| error_code | VARCHAR(64) | Machine-readable failure reason set when `status` becomes `failed` (nullable); returned as `error_code` in `AttachmentDetail` |
+| error_code | VARCHAR(64) | Machine-readable failure reason set when `status` becomes `failed` (nullable); returned as `error_code` in `AttachmentDetail`. Values: `file_too_large`, `upload_failed`, `storage_limit_exceeded`, `vector_store_failed`, `indexing_failed` (set by the upload request), `upload_abandoned` (set by the upload reaper) |
 | attachment_kind | VARCHAR(16) | `document` or `image`. Derived from `content_type` on INSERT: MIME types `image/png`, `image/jpeg`, `image/webp`, `image/gif` -> `image`; all others -> `document`. Stored explicitly for efficient query filtering. |
 | for_file_search | BOOLEAN | `true` when the attachment is routed for `file_search` processing. Derived from MIME type on INSERT. Actual indexing state is tracked by `status` and the vector-store linkage. Default `false`. |
 | for_code_interpreter | BOOLEAN | `true` when the attachment is routed for `code_interpreter` usage. Derived from MIME type on INSERT. Default `false`. |
@@ -2187,7 +2193,7 @@ Soft-delete rules:
 | img_thumbnail_height | INTEGER | Thumbnail height in pixels (nullable) |
 | summary_model | VARCHAR(1024) | Reserved; never populated |
 | summary_updated_at | TIMESTAMPTZ | Reserved; never populated |
-| cleanup_status | VARCHAR(16) | `pending`, `done`, `failed` (nullable). Set to `pending` when the attachment is deleted directly or its chat is deleted; `pending` means provider cleanup is still outstanding. For chat-level provider purge semantics, only `done` counts as cleanup complete; `failed` remains unresolved cleanup debt. |
+| cleanup_status | VARCHAR(16) | `pending`, `done`, `failed` (nullable). Set to `pending` when the attachment is deleted directly or its chat is deleted, or when the upload reaper fails an abandoned upload that has a `provider_file_id`; `pending` means provider cleanup is still outstanding. For chat-level provider purge semantics, only `done` counts as cleanup complete; `failed` remains unresolved cleanup debt. |
 | cleanup_attempts | INTEGER | Cleanup retry attempts (default 0) |
 | last_cleanup_error | TEXT | Last cleanup error (nullable) |
 | cleanup_updated_at | TIMESTAMPTZ | When cleanup state was last updated (nullable) |
@@ -2202,7 +2208,7 @@ Soft-delete rules:
 
 **Constraints**: NOT NULL on `tenant_id`, `chat_id`, `uploaded_by_user_id`, `filename`, `status`, `attachment_kind`, `storage_backend`, `created_at`. FK `chat_id` -> `chats.id` ON DELETE CASCADE. CHECK `attachment_kind IN ('document', 'image')`. CHECK `status IN ('pending', 'uploaded', 'ready', 'failed')`. CHECKs on `secondary_status` and `secondary_provider_kind`. The `cleanup_status` value set (`pending`, `done`, `failed`) is not enforced by a CHECK ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)).
 
-**Indexes**: `(tenant_id, chat_id) WHERE deleted_at IS NULL`; `(cleanup_status) WHERE cleanup_status IS NOT NULL AND deleted_at IS NULL`; UNIQUE `(id, chat_id)`.
+**Indexes**: `(tenant_id, chat_id) WHERE deleted_at IS NULL`; `(cleanup_status) WHERE cleanup_status IS NOT NULL AND deleted_at IS NULL`; `idx_attachments_stale_upload` on `(updated_at) WHERE status IN ('pending', 'uploaded') AND deleted_at IS NULL` (upload reaper scan, migration `m20260927_000006_add_stale_upload_index`); UNIQUE `(id, chat_id)`.
 
 **Secure ORM**: `#[secure(tenant_col = "tenant_id", resource_col = "id", no_owner, no_type)]`. Owner isolation inherited from chat-level scoping (`chat_id` obtained from an owner-scoped chat query).
 
@@ -3345,6 +3351,8 @@ The shared outbox pipeline delivers the `attachment_cleanup` message to `Attachm
 
 The handler makes no Vector Stores API call; there is no per-document removal from the vector store. The vector store itself is deleted by the chat-deletion cleanup.
 
+The upload reaper enqueues the same message (`event_type = attachment_upload_abandoned`) for an abandoned upload that has a `provider_file_id`. That attachment is `failed`, not soft-deleted. The message carries no `secondary_ref`, so an Anthropic secondary copy is not deleted.
+
 If the primary delete fails, the handler records the attempt and returns `Retry` so the shared outbox applies lease-aware retry/backoff; after `cleanup_worker.max_attempts` it marks the attachment cleanup `failed` and returns `Reject`. A malformed payload is rejected immediately. `Reject` moves the message to the shared outbox dead-letter store for operator recovery. Partial failure is safe: the attachment is already soft-deleted and excluded from chat metadata and citations. Provider-side orphans are eventually cleaned up by retries, dead-letter replay, or by the outbox-driven chat-deletion cleanup path.
 
 **Invariants**:
@@ -3748,6 +3756,8 @@ Instruments are defined in `infra/metrics.rs` (OpenTelemetry meter). The toolkit
 | Cancellation | `mini_chat_streams_aborted` | counter | `trigger`: `client_disconnect` \| `orphan_timeout` (`internal_abort` is defined but not reachable: no code path aborts a turn internally) |
 | Orphan watchdog | `mini_chat_orphan_detected`, `mini_chat_orphan_finalized` | counter | `reason`: `stale_progress` |
 | Orphan watchdog | `mini_chat_orphan_scan_duration_seconds` | histogram | — |
+| Upload reaper | `mini_chat_attachment_upload_abandoned` | counter | `from_status`: `pending` \| `uploaded`. Recorded after the transaction that marks the row `failed` commits |
+| Upload reaper | `mini_chat_upload_reaper_scan_duration_seconds` | histogram | — |
 | Quota | `mini_chat_quota_preflight` | counter | `decision`, `model`, `tier` |
 | Quota | `mini_chat_quota_reserve`, `mini_chat_quota_commit`, `mini_chat_quota_overshoot` | counter | `period`. `quota_commit` is recorded only for actual settlements; `quota_overshoot` for actual settlements whose actual tokens exceed the reserve |
 | Quota | `mini_chat_quota_estimated_tokens`, `mini_chat_quota_actual_tokens` | histogram | — (`quota_estimated_tokens` records the turn's `reserve_tokens` = estimated input + `max_output_tokens_applied` after an allow/downgrade preflight, before the reserve is written, so a request rejected later still records it; `quota_actual_tokens` only for actual settlements) |
@@ -4040,7 +4050,7 @@ Each watchdog scan SHOULD record `mini_chat_orphan_scan_duration_seconds`.
 
 **Mechanism: gear-local leader election** ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md))
 
-When built with the cargo feature `k8s` (the Docker image and Helm chart use it), the watchdog runs under a gear-local Kubernetes Lease elector (`infra/leader/k8s_lease.rs`; requires `POD_NAMESPACE` and `POD_NAME`), and only the leader pod executes scans. The Lease is `mini-chat-orphan-watchdog` in the pod's namespace, with a 15 s lease duration and a 2 s renew period (hardcoded). Without the feature a no-op elector is used (single-process mode) and every instance scans. In both cases double finalization is prevented by the CAS guard below.
+When built with the cargo feature `k8s` (the Docker image and Helm chart use it), the watchdog runs under a gear-local Kubernetes Lease elector (`infra/leader/k8s_lease.rs`; requires `POD_NAMESPACE` and `POD_NAME`), and only the leader pod executes scans. The Lease is `mini-chat-orphan-watchdog` in the pod's namespace (the upload reaper uses its own Lease, `mini-chat-upload-reaper`, created at runtime if missing), with a 15 s lease duration and a 2 s renew period (hardcoded). Without the feature a no-op elector is used (single-process mode) and every instance scans. In both cases double finalization is prevented by the CAS guard below.
 
 **Configuration Example**:
 
@@ -6785,7 +6795,7 @@ Legend:
 
 ## B.1 Gear config (ToolKit config)
 
-The gear configuration is `MiniChatConfig` (`src/config.rs`, worker sections in `src/config/background.rs`). It is declared with `#[serde(deny_unknown_fields)]`, as are all nested sections in `config.rs` (`streaming`, `estimation_budgets`, `quota`, `outbox`, `context`, `rag`, `client_credentials`, `metrics`, `providers.<id>` and its `tenant_overrides`, `thumbnail`, `knowledge_search`), so an unknown or misspelled key there fails startup. The worker sections in `config/background.rs` (`orphan_watchdog`, `thread_summary_worker`, `cleanup_worker`) do not use `deny_unknown_fields`: unknown keys in them are accepted and ignored. Every section is validated in `init()`. Values support `${VAR}` expansion where marked `expand_vars` (provider `host` and `auth_config`, the same two fields in `tenant_overrides.<tenant_id>`, `client_credentials`).
+The gear configuration is `MiniChatConfig` (`src/config.rs`, worker sections in `src/config/background.rs`). It is declared with `#[serde(deny_unknown_fields)]`, as are all nested sections in `config.rs` (`streaming`, `estimation_budgets`, `quota`, `outbox`, `context`, `rag`, `client_credentials`, `metrics`, `providers.<id>` and its `tenant_overrides`, `thumbnail`, `knowledge_search`), so an unknown or misspelled key there fails startup. The worker sections in `config/background.rs` (`orphan_watchdog`, `upload_reaper`, `thread_summary_worker`, `cleanup_worker`) do not use `deny_unknown_fields`: unknown keys in them are accepted and ignored. Every section is validated in `init()`. Values support `${VAR}` expansion where marked `expand_vars` (provider `host` and `auth_config`, the same two fields in `tenant_overrides.<tenant_id>`, `client_credentials`).
 
 | Parameter | Type | Default | Validation / notes |
 |-----------|------|---------|--------------------|
@@ -7225,6 +7235,31 @@ Lease durations: thread summary = `thread_summary_worker.claim_timeout_secs` (de
 | `thread_summary_worker.message_content_limit` | `usize` | `4000` | — | Max characters per message in the prompt; 0 = no truncation |
 | `thread_summary_worker.reconcile_interval_secs` | `u64` | `60` | — | Deprecated, no effect; warning at startup if set ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)) |
 | User turn interval trigger, `summary_quality.*` | — | — | — | Not implemented; no config keys |
+
+### B.9.5 Upload reaper
+
+| Parameter | Type | Default | Valid range | Source |
+|-----------|------|---------|-------------|--------|
+| `upload_reaper.enabled` | `bool` | `true` | — | gear config |
+| `upload_reaper.scan_interval_secs` | `u64` | `60` | > 0 | gear config |
+| `upload_reaper.stale_after_secs` | `u64` | `300` | `60..=86400` | gear config |
+
+The upload runs inside the HTTP request. When the request future is dropped (client disconnect, api-gateway timeout) the service never records the outcome, so the row stays `pending` or `uploaded` and its provider file is not deleted. The minimum `stale_after_secs` (60) is above the api-gateway request timeout (30 s), so a live upload is not reaped.
+
+Each scan (leader only, `infra/workers/upload_reaper.rs`):
+
+1. `find_stale_uploads` selects at most 100 rows (`BATCH_LIMIT`, not configurable) with `status IN ('pending', 'uploaded') AND deleted_at IS NULL AND updated_at < cutoff`, oldest `updated_at` first; `cutoff = now - stale_after_secs` (application clock). The rest are picked up by later scans.
+2. Per row, one transaction: `cas_abandon_upload` sets `status = 'failed'`, `error_code = 'upload_abandoned'`, `updated_at = now`, guarded by the same status, `deleted_at IS NULL` and `updated_at < cutoff`. `rows_affected = 0` (the upload finished or the row was deleted meanwhile) skips the row.
+3. When the row has a `provider_file_id`, the same transaction sets `cleanup_status = 'pending'` and enqueues an `AttachmentCleanupEvent` (`event_type = attachment_upload_abandoned`) to `outbox.cleanup_queue_name`; `AttachmentCleanupHandler` deletes the provider file and marks cleanup done.
+
+The row is not soft-deleted: it stays visible via `GET` with `status: failed`. A `failed` row no longer counts toward the per-chat total size (`rag.max_total_upload_mb_per_chat`); a failed document still counts toward `rag.max_documents_per_chat` until it is deleted, like any other failed document.
+
+Limitations:
+
+- A `pending` row has no `provider_file_id`. If the provider stored the file before the request was dropped, that file is not deleted (see "Provider-side orphan files (P2)").
+- The cleanup event carries no `secondary_ref`, so an Anthropic secondary copy of an image is not deleted.
+
+Observability: `mini_chat_attachment_upload_abandoned_total{from_status}` (`pending` \| `uploaded`, after commit) and `mini_chat_upload_reaper_scan_duration_seconds`.
 
 ## B.10 API & OpenAPI defaults
 
