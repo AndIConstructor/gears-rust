@@ -118,14 +118,18 @@ Each is the shipped behaviour, with the contract that fixes it.
 - **A tombstoned node key is not reusable before purge**, and purge is not
   built; a tombstoned edge is revived by the next upsert that names it
   (DESIGN § Soft Delete Contract, rules 4 and 6).
-- **Adjacency on a node read is bounded** by `node_read_max_adjacency` (100
-  by default, at most 1 000) with a truncation flag and no cursor. To list
-  every edge of a hub, walk it: `POST /graph/traverse` with the node as the
-  seed and depth 1 returns its edges, up to `traversal_max_nodes` (1 000 by
-  default, at most 10 000) neighbours.
+- **Adjacency on a node read is bounded per direction** by
+  `node_read_max_adjacency` (100 by default, at most 1 000): outgoing and
+  incoming are cut separately, so one read carries up to twice that many
+  entries, with a truncation flag and no cursor. To list every edge of a hub,
+  walk it: `POST /graph/traverse` with the node as the seed and depth 1 returns
+  its edges, up to `traversal_max_nodes` (1 000 by default, at most 10 000)
+  neighbours.
 - **`$filter` and `$orderby` reach payload attributes the type declares** in
-  its `index` trait (`payload/severity`), equality served by one GIN over the
-  payload; range and ordering over a payload path are admitted and unindexed.
+  its `index` trait (`payload/severity`). Equality on a string, boolean or
+  date-time value is served by one GIN over the payload; equality on a number,
+  every range comparison and ordering over a payload path are admitted and
+  unindexed, which is a scan of the type's rows.
   A type that declares no `index` paths can be filtered by `node_key`, `name`,
   `created_at` and `updated_at` only, which is a scan of the tenant. The audit
   envelope's `updated_at` is when the gear last wrote the row, not when the

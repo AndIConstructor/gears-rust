@@ -104,8 +104,9 @@ pub fn admit_ingest(cfg: &GraphStorageConfig, request: &IngestRequest) -> Result
     }
     // The idempotency key is the one caller-controlled string the batch
     // carries on its own, and it is the most durable of all of them: it is the
-    // TEXT primary key of `ingest_idempotency`, kept for the retention window
-    // and read on every retry.
+    // TEXT primary key of `ingest_idempotency`, kept until the expiry protocol
+    // lands (#4874; nothing reads `idempotency_retention_days` yet) and read
+    // on every retry.
     if let Some(key) = idempotency_key {
         admit_identifier(cfg, "idempotency_key", key)?;
     }
