@@ -89,6 +89,31 @@ mod tests {
         }
     }
 
+    /// A zero `bytes_per_token_conservative` (accepted as a deprecated config
+    /// value) is treated as 1 instead of dividing by zero.
+    #[test]
+    fn zero_bytes_per_token_is_treated_as_one() {
+        let input = EstimationInput {
+            utf8_bytes: 40,
+            num_images: 0,
+            tools_enabled: false,
+            web_search_enabled: false,
+            code_interpreter_enabled: false,
+        };
+        let zero = EstimationBudgets {
+            bytes_per_token_conservative: 0,
+            ..default_budgets()
+        };
+        let one = EstimationBudgets {
+            bytes_per_token_conservative: 1,
+            ..default_budgets()
+        };
+        assert_eq!(
+            estimate_tokens(&input, &zero).estimated_input_tokens,
+            estimate_tokens(&input, &one).estimated_input_tokens
+        );
+    }
+
     #[test]
     fn text_only_estimation() {
         let input = EstimationInput {

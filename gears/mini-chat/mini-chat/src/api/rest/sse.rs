@@ -365,6 +365,8 @@ mod tests {
         );
         assert_eq!(DeltaKind::from_wire("reasoning"), DeltaKind::Reasoning);
         assert_eq!(DeltaKind::from_wire("text"), DeltaKind::Text);
+        // Unknown values fall back to plain text.
+        assert_eq!(DeltaKind::from_wire("bogus"), DeltaKind::Text);
         assert_eq!(
             serde_json::to_value(QuotaDecisionKind::Allow).unwrap(),
             "allow"
@@ -379,6 +381,10 @@ mod tests {
         );
         assert_eq!(
             QuotaDecisionKind::from_decision("allow"),
+            QuotaDecisionKind::Allow
+        );
+        assert_eq!(
+            QuotaDecisionKind::from_decision("bogus"),
             QuotaDecisionKind::Allow
         );
     }

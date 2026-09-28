@@ -1055,9 +1055,28 @@ mod tests {
         })
         .unwrap();
 
-        // u-2, a-2 and the current message.
-        assert_eq!(result.messages.len(), 3);
+        // The newest whole turn (u-2, a-2) and the current message, in order;
+        // the older turn is dropped.
         assert!(result.messages_truncated);
+        let got: Vec<(Role, String)> = result
+            .messages
+            .iter()
+            .map(|m| {
+                let text = match &m.content[0] {
+                    crate::domain::llm::ContentPart::Text { text } => text.clone(),
+                    crate::domain::llm::ContentPart::Image { .. } => panic!("expected text"),
+                };
+                (m.role, text)
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (Role::User, "u-2".to_owned()),
+                (Role::Assistant, "a-2".to_owned()),
+                (Role::User, "hello".to_owned()),
+            ]
+        );
     }
 
     #[test]

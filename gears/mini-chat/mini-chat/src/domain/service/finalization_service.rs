@@ -1746,10 +1746,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_message_persist_failure_retries_as_failed() {
-        // Existing behavior unchanged — verify the guard doesn't break it.
-        // We test by finalizing as Completed, then finalizing again (CAS loser
-        // path), confirming the first finalization worked correctly.
+    async fn completed_finalization_persists_assistant_message() {
+        // A clean Completed finalization wins the CAS, stays Completed and
+        // stores the assistant message. The failed-insert downgrade to
+        // `message_persistence_failed` is covered by
+        // `completed_stream_with_unsaved_message_sends_persistence_error`
+        // (stream_service).
         let db = mock_db_provider(inmem_db().await);
         let (svc, _outbox) = build_finalization_service(Arc::clone(&db));
 

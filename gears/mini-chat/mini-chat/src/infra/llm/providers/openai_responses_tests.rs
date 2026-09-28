@@ -643,14 +643,21 @@ fn parse_event_line_takes_precedence_over_data_type() {
 
 #[test]
 fn parse_event_without_event_line_or_type_is_unknown() {
-    let event = ServerEvent {
-        event: None,
-        data: "not json".to_string(),
-        id: None,
-        retry: None,
-    };
-    let result = ProviderEvent::from_server_event(event).unwrap();
-    assert!(matches!(result, ProviderEvent::Unknown { event_name } if event_name == "message"));
+    // Unparseable data, valid JSON without `type`, and JSON with other keys:
+    // none names the event, so it stays the SSE default `message`.
+    for data in ["not json", "{}", r#"{"foo":1}"#] {
+        let event = ServerEvent {
+            event: None,
+            data: data.to_string(),
+            id: None,
+            retry: None,
+        };
+        let result = ProviderEvent::from_server_event(event).unwrap();
+        assert!(
+            matches!(&result, ProviderEvent::Unknown { event_name } if event_name == "message"),
+            "{data}: {result:?}"
+        );
+    }
 }
 
 #[test]
@@ -2136,4 +2143,33 @@ fn file_search_wire_format_with_filters() {
     assert_eq!(tool["filters"]["key"], "attachment_id");
     assert_eq!(tool["filters"]["values"][0], "uuid-a");
     assert_eq!(tool["filters"]["values"][1], "uuid-b");
+}
+
+/// `extra_body` cannot lift the quota-derived caps or change the model; other
+/// keys are merged.
+#[test]
+fn extra_body_does_not_override_reserved_keys() {
+    let request = llm_request("gpt-4o")
+        .message(LlmMessage::user("Hello"))
+        .max_output_tokens(256)
+        .max_tool_calls(2)
+        .api_params(mini_chat_sdk::ModelApiParams {
+            extra_body: Some(serde_json::json!({
+                "max_output_tokens": 100_000,
+                "max_tool_calls": 50,
+                "model": "other-model",
+                "user": "someone-else",
+                "seed": 7
+            })),
+            ..test_api_params()
+        })
+        .build_streaming();
+
+    let body = build_request_body(&request, true);
+
+    assert_eq!(body["max_output_tokens"], 256);
+    assert_eq!(body["max_tool_calls"], 2);
+    assert_eq!(body["model"], "gpt-4o");
+    assert!(body.get("user").is_none(), "{body}");
+    assert_eq!(body["seed"], 7);
 }

@@ -1332,6 +1332,15 @@ fn odata_client_errors_keep_the_odata_error() {
         toolkit_odata::Error::InvalidOrderByField("nope".to_owned()),
         toolkit_odata::Error::InvalidCursor,
         toolkit_odata::Error::FilterMismatch,
+        toolkit_odata::Error::OrderMismatch,
+        toolkit_odata::Error::InvalidLimit,
+        toolkit_odata::Error::OrderWithCursor,
+        toolkit_odata::Error::CursorInvalidBase64,
+        toolkit_odata::Error::CursorInvalidJson,
+        toolkit_odata::Error::CursorInvalidVersion,
+        toolkit_odata::Error::CursorInvalidKeys,
+        toolkit_odata::Error::CursorInvalidFields,
+        toolkit_odata::Error::CursorInvalidDirection,
     ] {
         assert!(
             matches!(odata_err(e.clone()), DomainError::OData(_)),
