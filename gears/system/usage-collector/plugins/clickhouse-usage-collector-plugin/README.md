@@ -14,7 +14,7 @@ Config maps to `ClickHousePluginConfig` (`src/config.rs`). Durations are whole s
 | `async_insert` | `true` | Send single-row `usage_records` `INSERT`s with the ClickHouse settings `async_insert = 1` and `wait_for_async_insert = 1`, applied **per statement** so no `SELECT` is affected. The server buffers and coalesces concurrent inserts into shared parts instead of writing one small part per request, which is what keeps `ReplacingMergeTree` part count and merge pressure down under a request-shaped ingest stream — the write path is one `INSERT` per `create_usage_record`. `wait_for_async_insert = 1` is pinned, not separately configurable: without it an acknowledged record can be lost on a server restart, and `create_usage_record`'s dedup pre-read would stop seeing its own prior insert, so a retry would insert a second row under an idempotency key already in use. The flush wait is bounded by the server-side `async_insert_busy_timeout_ms` (adaptive 50-200ms on ClickHouse 24.x+) and is charged against `request_timeout_secs`, which must therefore be ≥ 2s while this is enabled (startup validation). The busy timeout itself is deliberately **not** exposed — it is a cluster-wide property the server adapts on its own; pin it in a ClickHouse settings profile for the plugin's DB user if you must. **Scope:** multi-row `INSERT`s (`create_usage_records` and the deactivation cascade) and all `usage_type_catalog` writes stay synchronous regardless of this setting — see [Asynchronous inserts](#asynchronous-inserts). **Dedup interaction:** every `usage_records` `INSERT` carries an `insert_deduplication_token`; ClickHouse enforces it on synchronous inserts, and on asynchronous inserts only for `Replicated*` tables, so with this on a racing duplicate single-record create is collapsed by `optimize_on_insert` when both land in one flush and by merge otherwise (visible twice to `list`/`aggregate` until then). Set to `false` for deterministic engine-side dedup of single creates at the cost of one part per request. |
 | `retention_period_secs` | `31536000` (365d) | `usage_records` retention window; rows older than this are dropped via ClickHouse TTL. Must be in `(0, 100 years]`. Migration DDL defaults to 1 year; on every startup `ensure_retention_ttl` issues `ALTER TABLE … MODIFY TTL` when the live interval differs from this value — see [Retention window management](#retention-window-management). |
 | `vendor` | `constructorfabric` | Vendor name for GTS instance registration. Must not be empty or blank; an empty value fails startup validation. |
-| `priority` | `10` | Plugin priority (lower = higher precedence when multiple plugins are registered). |
+| `priority` | `11` | Plugin priority (lower = higher precedence when multiple plugins are registered). Defaults one below the TimescaleDB plugin's `10`, so with both registered under default config the TimescaleDB backend is selected deterministically; the host's selector breaks equal priorities by registration order, so give each instance a distinct value when overriding. |
 
 ```yaml
 gears:
@@ -25,7 +25,7 @@ gears:
       async_insert: true
       retention_period_secs: 31536000
       vendor: "constructorfabric"
-      priority: 10
+      priority: 11
 ```
 
 The plugin's only gear dependency is `types-registry` (for the registration handshake).

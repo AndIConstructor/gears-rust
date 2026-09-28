@@ -70,7 +70,7 @@ Foundation owns the cross-cutting plumbing every other feature builds on: the Pl
 
 - Record insert, dedup, compensation, and deactivation semantics — Feature 2 (`cpt-cf-uc-ch-plugin-feature-record-persistence`).
 - Aggregation and keyset raw-list execution and injection-safe translation — Feature 3 (`cpt-cf-uc-ch-plugin-feature-query-aggregation`).
-- Usage-type create / get / list, and why delete is withheld — Feature 4 (`cpt-cf-uc-ch-plugin-feature-usage-type-catalog`).
+- Usage-type create / get / list, and the probe-delete-sweep delete protocol — Feature 4 (`cpt-cf-uc-ch-plugin-feature-usage-type-catalog`).
 - `TTL` clause ownership, config, and retention semantics — Feature 5 (`cpt-cf-uc-ch-plugin-feature-retention`); Foundation provides the `apply_migrations` / `ensure_retention_ttl` call sites.
 - The `uc_clickhouse_*` metric inventory — Feature 6 (`cpt-cf-uc-ch-plugin-feature-observability`).
 - ClickHouse cluster topology, sizing, HA — operator deployment guide.

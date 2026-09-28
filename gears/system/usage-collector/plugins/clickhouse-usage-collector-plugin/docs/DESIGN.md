@@ -323,7 +323,7 @@ The operation is offered with the race documented rather than withheld: an appen
 
 **Sorting key (`ORDER BY`)**: `(gts_id)`. **Engine**: `ReplacingMergeTree(version)`. There is no native `PRIMARY KEY`/`UNIQUE` constraint; uniqueness-on-`gts_id` is an application-level invariant enforced best-effort by the create sequence's pre-existence check ([§3.6](#36-interactions--sequences)) and made eventual by version resolution, not a schema-level guarantee. `delete_usage_type` removes rows from this table with `ALTER TABLE … DELETE` ([§3.6](#36-interactions--sequences)) — a real mutation, so no tombstone-flag column or higher-version marker row exists and a re-create after a delete has no surviving copy to outrank.
 
-**Constraints**: none native (no FK target support); referenced only conceptually by `usage_records.gts_id` — the reference is checked in application code at insert time only ([§3.6](#36-interactions--sequences)), which is sufficient because rows are never removed.
+**Constraints**: none native (no FK target support); referenced only conceptually by `usage_records.gts_id` — the reference is checked in application code on both sides ([§3.6](#36-interactions--sequences)): at insert time, and by `delete_usage_type`'s reference probe and post-delete orphan sweep. Neither side is atomic, so a narrow orphaning window remains and is instrumented by `uc_clickhouse_orphaned_reference_detected_total`.
 
 #### Table: usage_records
 

@@ -165,7 +165,10 @@ impl Default for ClickHousePluginConfig {
             // needs no `MODIFY TTL` reconciliation at startup.
             retention_period_secs: crate::infra::storage::pool::DEFAULT_RETENTION_SECS,
             vendor: "constructorfabric".to_owned(),
-            priority: 10,
+            // One below the TimescaleDB plugin's default of 10, so with both
+            // registered under default config the choice is deterministic
+            // rather than decided by types-registry iteration order.
+            priority: 11,
         }
     }
 }
