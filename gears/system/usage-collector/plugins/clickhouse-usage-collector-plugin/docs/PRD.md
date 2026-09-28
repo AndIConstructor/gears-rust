@@ -361,22 +361,23 @@ The plugin **MUST** emit push-based OpenTelemetry metrics for its backend-intern
 
 **Actor**: `cpt-cf-uc-ch-plugin-actor-plugin-host`
 
-**Preconditions**: A usage type exists in the catalog and the call is authorized (whether or not any record references it — the outcome is the same).
+**Preconditions**: A usage type exists in the catalog, at least one usage record references it (of any `status`, deactivation markers included), and the call is authorized.
 
 **Main Flow**:
 
 1. The core calls the SPI to delete a usage type by identifier.
-2. The plugin issues no SQL and performs no reference probe.
-3. The plugin returns `UsageCollectorPluginError::Internal`, which the gear lifts to an HTTP 500 problem response.
-4. Nothing in the catalog or in `usage_records` is touched.
+2. The plugin reads the catalog and finds the type present.
+3. The plugin runs a capped reference probe over `usage_records` for the `gts_id` — a primary-key range read that counts rows of every `status` and stops at `REF_COUNT_CAP`.
+4. The probe finds at least one row: the plugin increments `uc_clickhouse_usage_type_referenced_total` and returns `UsageTypeReferenced { gts_id, sample_ref_count }`, which the gear lifts to an HTTP 409 problem response.
 
-**Postconditions**: The type remains in the catalog and available, and no record can be orphaned — the operation that could orphan one does not exist.
+**Postconditions**: Nothing in the catalog or in `usage_records` is touched; the type remains registered and available. `sample_ref_count` is a bounded diagnostic, not a full reference count.
 
 **Alternative Flows**:
 
-- **Unreferenced type**: identical outcome — the refusal does not depend on whether records reference the type. Removing a mis-registered type is an operator procedure (DESIGN.md §3.6).
-- **Missing type**: identical outcome. The refusal precedes any existence read, so a caller cannot distinguish a missing type from a present one through this operation.
-- **Coordination-lock backend unavailable**: the exclusive-lock acquisition in step 2 cannot complete within its configured timeout; the plugin fails closed and returns `Transient` rather than proceeding without the lock.
+- **Missing type**: the existence read in step 2 finds no row; the plugin returns `UsageTypeNotFound` (HTTP 404) without probing.
+- **Unreferenced type**: the probe in step 3 returns zero. The plugin removes the catalog row with `ALTER TABLE usage_type_catalog DELETE` under `mutations_sync = 1`, so the removal is visible before the call returns; from that moment the create-path check ([§5](#5-functional-requirements) obligation (a)) refuses new records for the `gts_id`. The plugin then re-runs the probe: if records landed inside the probe→delete span, it increments `uc_clickhouse_orphaned_reference_detected_total`, logs at `warn`, and sweeps them with `ALTER TABLE usage_records DELETE`. The call returns `Ok(())`. A failed sweep is logged at `error` and not propagated — the type is already deleted.
+- **Concurrent insert during delete**: an insert whose catalog check passed before the removal can commit after the sweep and orphan a record; `async_insert` widens that window to the server-side flush interval. This is the accepted residual recorded in the [§12](#12-risks) deviations table and DESIGN.md §3.6, not a guarantee.
+- **Transient backend error**: a failure in the existence read, the probe, or the catalog removal is returned as `Transient`. A timeout during the removal abandons the client await while the server may still apply the mutation (DESIGN.md §3.6).
 
 ### Bind the Backend at Host Startup
 
