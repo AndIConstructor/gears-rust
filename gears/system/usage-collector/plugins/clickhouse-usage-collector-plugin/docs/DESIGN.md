@@ -156,7 +156,7 @@ Record Store (`infra/storage/record_store.rs`): `usage_records` CRUD, dedup, bat
 
 - [ ] `p2` - **ID**: `cpt-cf-uc-ch-plugin-component-catalog-store`
 
-Catalog Store (`infra/storage/catalog_store.rs`): `usage_type_catalog` create / get / list, the unimplemented delete refusal, catalog-size background refresh.
+Catalog Store (`infra/storage/catalog_store.rs`): `usage_type_catalog` create / get / list / delete, catalog-size background refresh. `delete` is implemented as an existence read (`UsageTypeNotFound` if absent), a capped reference probe (`UsageTypeReferenced` if any record references the type), an `ALTER TABLE … DELETE` of the catalog row under `mutations_sync = 1`, and a re-probe-gated orphan sweep of records that landed in the probe→delete window. It narrows the delete-side referential-integrity race but does not close it ([§3.6](#delete-usage-type--probe-delete-sweep-cpt-cf-uc-ch-plugin-seq-delete-type-fk)).
 
 - [ ] `p2` - **ID**: `cpt-cf-uc-ch-plugin-component-query-translator`
 
