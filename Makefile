@@ -1136,9 +1136,14 @@ e2e-usage-collector-clickhouse: py-env
 	E2E_BINARY=target/debug/cf-gears-example-server UC_E2E_BACKEND=clickhouse \
 		$(PYTHON) -m pytest testing/e2e/suites/usage_collector/ -vv $(E2E_TARGET)
 
-## Run usage-collector E2E tests against both storage backends
-e2e-usage-collector: e2e-usage-collector-timescaledb e2e-usage-collector-clickhouse
+## Run usage-collector E2E tests against both storage backends.
+## Sequential even under `make -j`: both lanes build the same
+## target/debug/cf-gears-example-server path, bind 127.0.0.1:8088, and share
+## ~/.cf-gears, so they must never run concurrently.
+e2e-usage-collector:
 	$(call print_target_banner)
+	$(MAKE) e2e-usage-collector-timescaledb
+	$(MAKE) e2e-usage-collector-clickhouse
 
 ## Run event-broker E2E tests (its own standalone binary, not a cf-gears-example-server feature)
 e2e-event-broker: py-env
