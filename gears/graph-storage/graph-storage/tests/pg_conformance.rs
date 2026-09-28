@@ -934,6 +934,41 @@ async fn colliding_node_keys_stay_inside_their_tenants() {
 
 // --- what only a real PostgreSQL 19 can show --------------------------------
 
+/// Admission refuses a NUL before any statement; this is the net under it. A
+/// NUL that reaches the server anyway -- here through the store directly,
+/// which is where a path admission does not cover would put it -- is refused
+/// as `22021` for `text`, and that is the caller's input, not a store fault:
+/// it used to classify as `Internal` and answer `500 unknown`.
+#[tokio::test]
+async fn a_nul_that_reaches_the_server_is_invalid_input_not_an_internal_error() {
+    let Some(stand) = stand(HopStrategy::Pgq).await else {
+        return;
+    };
+    let tenant = tenant_on(&stand).await;
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = conformance::ctx(tenant, &scope, None);
+    stand
+        .store
+        .register_types(&ctx, conformance::ontology_batch())
+        .await
+        .expect("ontology registers");
+
+    let error = conformance::ingest_batch(
+        stand.store.as_ref(),
+        &ctx,
+        conformance::batch(vec![conformance::node("nul", "na\u{0}me")], Vec::new()),
+    )
+    .await
+    .expect_err("the server cannot store a NUL");
+    assert!(
+        matches!(
+            error,
+            graph_storage_sdk::plugin_api::GraphStoreError::InvalidQuery { .. }
+        ),
+        "a NUL the server refused is invalid input, got {error:?}"
+    );
+}
+
 /// The property-graph DDL the migration executed is the DDL the declaration
 /// generates: if `MATCH` and `CREATE PROPERTY GRAPH` could disagree, this hop
 /// would not parse.

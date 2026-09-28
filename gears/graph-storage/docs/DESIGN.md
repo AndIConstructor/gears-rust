@@ -2624,19 +2624,19 @@ One authoritative chain classifies every failure: `DomainError -> CanonicalError
 
 | Failure | Canonical category | Stable reason | Client disposition |
 |---|---|---|---|
-| Malformed payload, schema violation, a request the gear cannot interpret, inconsistent limits | `invalid_argument` | `SCHEMA_VIOLATION` (per-item and query-shape violations), `INVALID_ARGUMENT` (an unknown enumeration value, an unaccepted query option, a malformed migration step), `LIMIT_COMBINATION` (two bounds that cannot hold at once) | Fix the request |
+| Malformed payload, schema violation, a request the gear cannot interpret, inconsistent limits, a string carrying U+0000 (the store holds no NUL; admission names where it is) | `invalid_argument` | `SCHEMA_VIOLATION` (per-item and query-shape violations), `INVALID_ARGUMENT` (an unknown enumeration value, an unaccepted query option, a malformed migration step), `LIMIT_COMBINATION` (two bounds that cannot hold at once) | Fix the request |
 | Value outside a documented hard range (depth, batch size, seed count) | `out_of_range` | `LIMIT_EXCEEDED` | Reduce the value; never retry unchanged |
 | Same-key different-type ingest, expected-version mismatch | `aborted` | `CAS_CONFLICT` | Re-read and retry |
-| Serialization failure under concurrent ingest | `aborted` | `SERIALIZATION` | Retry unchanged |
+| Serialization failure, deadlock or a row lock not granted within the database's `lock_timeout` under concurrent ingest | `aborted` | `SERIALIZATION` | Retry unchanged |
 | Older source generation for a scope | `failed_precondition` | `STALE_GENERATION` | Drop the stale run; never retry |
 | Idempotency key reused with a different request | `aborted` | `IDEMPOTENCY_MISMATCH` | New logical request |
 | Idempotency receipt expired for an uncertain key | `failed_precondition` | `IDEMPOTENCY_KEY_EXPIRED` | Reconcile, then issue a new logical request |
 | Transient quota, concurrency, queue, or memory pressure | `resource_exhausted` | `QUEUE_FULL`, `MEMORY_POOL_BUSY`, `TENANT_CONCURRENCY` | Wait for the retry-after hint, then retry |
-| Operation exceeded its absolute deadline | `deadline_exceeded` | `DEADLINE` | Retry with a smaller request or later |
+| Operation exceeded its absolute deadline, or the database's `statement_timeout` ended the statement | `deadline_exceeded` | `DEADLINE` | Retry with a smaller request or later |
 | Caller or shutdown cancellation | `cancelled` | `CANCELLED` | Resubmit if still needed |
 | Capability not supported by the selected engine | `unimplemented` | `CAPABILITY_UNSUPPORTED` | Do not retry; use another capability |
 | No registered implementation can serve the caller's scope shape | `failed_precondition` | `SCOPE_UNSERVABLE` | Never retry unchanged; narrow the scope or query per alternative. Reached only when the fallback chain is exhausted — an ordinary decline is invisible to the caller |
-| Dependency unavailable (PDP, types-registry, provider, engine) | `unavailable` | `DEPENDENCY_UNAVAILABLE` | Wait and retry |
+| Dependency unavailable (PDP, types-registry, provider, engine, a database shutting down or out of connections) | `unavailable` | `DEPENDENCY_UNAVAILABLE` | Wait and retry |
 | Vector search blocked by embedding-identity mismatch | `failed_precondition` | `EMBEDDING_SPACE_MISMATCH` | Operator action; other operations unaffected |
 | Filter on an attribute whose index is not `active` | `failed_precondition` | `INDEX_NOT_ACTIVE` | Drop the filter or wait for the build; never retry unchanged in a loop |
 | Write under a source namespace owned by another producer | `permission_denied` | `SOURCE_NAMESPACE_FORBIDDEN` | Never retry; request ownership transfer |

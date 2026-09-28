@@ -2615,3 +2615,81 @@ async fn a_cursor_is_bound_to_the_filter_it_was_minted_under() {
         );
     }
 }
+
+/// `PostgreSQL` stores U+0000 in neither `text` nor `jsonb`. A payload string,
+/// key or query carrying one used to reach the statement and fail there as
+/// `unknown: internal error`, losing the batch with the cause only in the
+/// database server's log (Studio request #7). It is refused at admission now,
+/// on every path a caller string takes to the store, and the refusal says
+/// where the character is.
+#[tokio::test]
+async fn a_nul_is_refused_at_admission_and_named_where_it_is() {
+    let harness = Harness::allowed();
+    let ctx = harness.ctx();
+    harness.seed_ontology(&ctx).await;
+
+    let refused = |outcome: Result<_, DomainError>, case: &str, names: &str| match outcome {
+        Err(DomainError::InvalidArgument { message }) => assert!(
+            message.contains(names) && message.contains("U+0000"),
+            "{case}: the refusal names `{names}`: {message}"
+        ),
+        Err(other) => panic!("{case}: expected an invalid-argument refusal, got {other}"),
+        Ok(()) => panic!("{case}: a NUL must not be admitted"),
+    };
+
+    let mut nested = conformance::node("n1", "n1");
+    nested.payload = Some(serde_json::json!({ "meta": { "tags": ["ok", "bad\u{0}byte"] } }));
+    refused(
+        harness
+            .services
+            .ingest(&ctx, conformance::batch(vec![nested], Vec::new()))
+            .await
+            .map(|_| ()),
+        "a nested payload string",
+        "node[0] payload/meta/tags/1",
+    );
+
+    let mut keyed = conformance::node("n2", "n2");
+    keyed.payload = Some(serde_json::json!({ "we\u{0}ird": 1 }));
+    refused(
+        harness
+            .services
+            .ingest(&ctx, conformance::batch(vec![keyed], Vec::new()))
+            .await
+            .map(|_| ()),
+        "a payload object key",
+        "node[0] payload/we\\u0000ird",
+    );
+
+    refused(
+        harness
+            .services
+            .ingest(
+                &ctx,
+                conformance::batch(vec![conformance::node("n\u{0}3", "n3")], Vec::new()),
+            )
+            .await
+            .map(|_| ()),
+        "a node key",
+        "node[0] node_key",
+    );
+
+    refused(
+        harness
+            .services
+            .search(
+                &ctx,
+                SearchRequest {
+                    mode: SearchMode::Lexical,
+                    query: Some("pass\u{0}word".to_owned()),
+                    arm_limit: 10,
+                    limit: 10,
+                    type_patterns: Vec::new(),
+                },
+            )
+            .await
+            .map(|_| ()),
+        "a search query",
+        "query",
+    );
+}

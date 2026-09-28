@@ -155,7 +155,28 @@ fn classify_sqlstate(sqlstate: &str) -> Option<GraphStoreError> {
         // locking across concurrent writers is the shape that produces
         // deadlocks. Leaving it out meant the one failure this design invites
         // was the one the classifier could not name.
-        "40001" | "40P01" => Some(GraphStoreError::Serialization),
+        //
+        // `55P03` is a row lock not granted within `lock_timeout`: rolled
+        // back, nothing written, the same answer. It used to read as
+        // `Internal`, a `500` under concurrent writes to the same keys
+        // (Studio stand, 2026-09-27: 38 of them in one run), which a caller
+        // cannot tell from a defect.
+        "40001" | "40P01" | "55P03" => Some(GraphStoreError::Serialization),
+        // `statement_timeout` (and an operator's cancel) end the statement,
+        // not the store: the operation ran out of time.
+        "57014" => Some(GraphStoreError::Deadline),
+        // A character the server cannot store -- U+0000 in `text` or `jsonb`
+        // (`22P05`), or one outside the database encoding (`22021`).
+        // Admission refuses a NUL before any statement; this is the net for a
+        // path it does not cover, and it names the input, not the store.
+        "22P05" | "22021" => Some(GraphStoreError::InvalidQuery {
+            what: "the input carries a character the store cannot hold (a NUL, U+0000, or one outside the database encoding)".into(),
+        }),
+        // The server is shutting down, restarting or out of connections:
+        // nothing about this request is wrong.
+        "57P01" | "57P02" | "57P03" | "53300" => Some(GraphStoreError::Unavailable {
+            reason: "the database is not accepting work right now".into(),
+        }),
         _ => None,
     }
 }
@@ -186,7 +207,10 @@ pub fn map_db_err(error: &sea_orm::DbErr) -> GraphStoreError {
         return classify_sqlstate(&sqlstate).unwrap_or(GraphStoreError::Internal(text));
     }
 
-    for sqlstate in ["23505", "23503", "23001", "40001", "40P01"] {
+    for sqlstate in [
+        "23505", "23503", "23001", "40001", "40P01", "55P03", "57014", "22P05", "22021", "57P01",
+        "57P02", "57P03", "53300",
+    ] {
         if text.contains(sqlstate)
             && let Some(classified) = classify_sqlstate(sqlstate)
         {
@@ -577,6 +601,33 @@ mod tests {
                 message: message.to_owned(),
             })),
         )))
+    }
+
+    /// Every transient or input-shaped failure the server reports has a
+    /// canonical answer. Each of these read as `Internal` -- a `500 unknown` --
+    /// until the Studio stand hit them: `55P03` 38 times under concurrent
+    /// writes to shared keys, `22P05` on a payload string carrying U+0000.
+    #[test]
+    fn transient_and_input_failures_are_not_internal() {
+        for (code, expect) in [
+            ("55P03", "serialization"),
+            ("57014", "deadline"),
+            ("22P05", "invalid"),
+            ("22021", "invalid"),
+            ("57P01", "unavailable"),
+            ("57P03", "unavailable"),
+            ("53300", "unavailable"),
+        ] {
+            let classified = map_db_err(&driver_error(code, "the server refused"));
+            let got = match classified {
+                GraphStoreError::Serialization => "serialization",
+                GraphStoreError::Deadline => "deadline",
+                GraphStoreError::InvalidQuery { .. } => "invalid",
+                GraphStoreError::Unavailable { .. } => "unavailable",
+                other => panic!("SQLSTATE {code} classified as {other:?}"),
+            };
+            assert_eq!(got, expect, "SQLSTATE {code}");
+        }
     }
 
     /// The message is the caller's to influence; the SQLSTATE is not. A

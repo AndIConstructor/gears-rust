@@ -42,6 +42,51 @@ fn exceeded(what: impl Into<String>) -> DomainError {
     DomainError::LimitExceeded { what: what.into() }
 }
 
+/// `PostgreSQL` stores U+0000 in neither `text` nor `jsonb`: a string that
+/// carries one is valid UTF-8 and valid JSON, reaches the statement, and fails
+/// there (SQLSTATE `22P05`) -- which surfaced as `unknown: internal error` and
+/// lost the batch, with the cause only in the database server's log. Every
+/// caller-supplied string bound for the store is checked here instead, and
+/// the refusal names where the character is.
+fn refuse_nul(what: &str, value: &str) -> Result<(), DomainError> {
+    if value.contains('\0') {
+        return Err(DomainError::invalid(format!(
+            "{what} carries a NUL character (U+0000), which the store cannot hold"
+        )));
+    }
+    Ok(())
+}
+
+/// The JSON-pointer path of the first NUL in a document -- in a string value
+/// or in an object key -- or `None`.
+fn nul_in_json(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => text.contains('\0').then(String::new),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, item)| nul_in_json(item).map(|rest| format!("/{index}{rest}"))),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, item)| {
+            if key.contains('\0') {
+                return Some(format!("/{}", key.replace('\0', "\\u0000")));
+            }
+            nul_in_json(item).map(|rest| format!("/{key}{rest}"))
+        }),
+        _ => None,
+    }
+}
+
+/// [`refuse_nul`] for a JSON document: `what` names the document, the
+/// refusal adds the path inside it.
+fn refuse_nul_in_json(what: &str, value: &serde_json::Value) -> Result<(), DomainError> {
+    match nul_in_json(value) {
+        Some(path) => Err(DomainError::invalid(format!(
+            "{what}{path} carries a NUL character (U+0000), which the store cannot hold"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// One caller-supplied identifier on a read or a single-row write: a key,
 /// a type id or pattern, a namespace.
 ///
@@ -63,7 +108,7 @@ pub fn admit_identifier(
             cfg.identifier_max_bytes
         )));
     }
-    Ok(())
+    refuse_nul(what, value)
 }
 
 /// Bounds every ingest batch must clear before any validation work is spent.
@@ -136,6 +181,7 @@ pub fn admit_ingest(cfg: &GraphStorageConfig, request: &IngestRequest) -> Result
                     cfg.payload_max_bytes
                 )));
             }
+            refuse_nul_in_json(&format!("node[{index}] payload"), payload)?;
         }
     }
     for (index, edge) in edges.iter().enumerate() {
@@ -160,6 +206,7 @@ pub fn admit_ingest(cfg: &GraphStorageConfig, request: &IngestRequest) -> Result
                     cfg.payload_max_bytes
                 )));
             }
+            refuse_nul_in_json(&format!("edge[{index}] payload"), payload)?;
         }
     }
 
@@ -286,6 +333,9 @@ pub fn admit_search(cfg: &GraphStorageConfig, request: &SearchRequest) -> Result
             query.len(),
             cfg.search_query_max_bytes
         )));
+    }
+    if let Some(query) = query {
+        refuse_nul("query", query)?;
     }
     for (index, pattern) in type_patterns.iter().enumerate() {
         admit_identifier(cfg, &format!("type_patterns[{index}]"), pattern)?;
@@ -624,8 +674,9 @@ pub fn admit_registration(
     migrations: &[MigrationSpec],
 ) -> Result<(), DomainError> {
     for (index, registration) in batch.iter().enumerate() {
-        let TypeRegistration { type_id, schema: _ } = registration;
+        let TypeRegistration { type_id, schema } = registration;
         admit_identifier(cfg, &format!("types[{index}].type_id"), type_id)?;
+        refuse_nul_in_json(&format!("types[{index}].schema"), schema)?;
     }
     for (index, migration) in migrations.iter().enumerate() {
         let MigrationSpec { type_id, steps } = migration;
@@ -637,7 +688,11 @@ pub fn admit_registration(
                     admit_identifier(cfg, &what("from"), from)?;
                     admit_identifier(cfg, &what("to"), to)?;
                 }
-                MigrationStep::Default { path, value: _ } | MigrationStep::Drop { path } => {
+                MigrationStep::Default { path, value } => {
+                    admit_identifier(cfg, &what("path"), path)?;
+                    refuse_nul_in_json(&what("value"), value)?;
+                }
+                MigrationStep::Drop { path } => {
                     admit_identifier(cfg, &what("path"), path)?;
                 }
             }
