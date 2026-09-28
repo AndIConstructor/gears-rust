@@ -291,7 +291,7 @@ The plugin **MUST** emit push-based OpenTelemetry metrics for its backend-intern
 - [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-contract-clickhouse`
 
 - **Direction**: required from external system (the operator-provisioned ClickHouse server/cluster).
-- **Protocol/Format**: ClickHouse HTTP interface (via the `sea-clickhouse` Rust client, crate path `clickhouse`), TLS-preferred.
+- **Protocol/Format**: ClickHouse HTTP interface (via the official `clickhouse` Rust crate), TLS-preferred.
 - **Compatibility**: The plugin provisions its initial schema idempotently at startup (see [§5](#5-functional-requirements) and [§13](#13-open-questions) for the schema-evolution limitation); it requires a ClickHouse version supporting the storage engine, expiry, and map-typed-column features this plugin's schema depends on (DESIGN.md §3.7) — all long-stable ClickHouse capabilities.
 
 #### Coordination Lock Backend Contract (Retired)
@@ -427,8 +427,7 @@ The plugin **MUST** emit push-based OpenTelemetry metrics for its backend-intern
 | --- | --- | --- |
 | usage-collector-sdk | Storage SPI trait, domain models, error vocabulary, and GTS plugin spec — the contract the plugin implements | p1 |
 | ClickHouse server/cluster | Durable system of record; provides columnar storage and the engine/expiry features this plugin's schema depends on | p1 |
-| `sea-clickhouse` (crate path `clickhouse`) | Async Rust HTTP client (SeaQL soft fork of clickhouse-rs); typed Row inserts + DataRow reads | p1 |
-| `sea-query` + `sea-query-clickhouse` | Typed ClickHouse SQL builders for runtime SELECT/DELETE | p1 |
+| `clickhouse` crate | Official async Rust HTTP client (clickhouse-rs); typed Row inserts/reads, `JSONEachRow` reads for aggregates. Runtime SQL is hand-assembled and parameterised — no SQL-builder crate | p1 |
 | Cluster gear (`usage-collector` profile) | **Retired** — no longer a dependency of this plugin | — |
 | `cluster-sdk` | **Retired** — no longer linked by this plugin | — |
 | types-registry (+ ClientHub) | Publishes the plugin's GTS instance for host discovery and scoped binding | p1 |
