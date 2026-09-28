@@ -10,7 +10,7 @@ The suite covers two APIs:
 | `test_reading.py`, `test_discovery.py` | exact reads, `:batchGet` and discovery pages over that API, also numbered scenarios |
 | [`legacy/`](legacy/README.md) | the original synchronous `v1` API (`200` + a `results` array) |
 
-Async scenarios pair tests, `scenarios/` documentation and `fixtures/` data: [registration](scenarios/registration.md) (`TR-REG-*`), [deletion](scenarios/deletion.md) (`TR-DEL-*`), [exact/batch reads](scenarios/reading.md) (`TR-READ-*`) and [discovery](scenarios/discovery.md) (`TR-DISC-*`).
+Async scenarios pair tests, `scenarios/` documentation and `fixtures/` data: [registration](scenarios/registration.md) (`TR-REG-*`), [deletion](scenarios/deletion.md) (`TR-DEL-*`), [exact/batch reads](scenarios/reading.md) (`TR-READ-*`) and [discovery](scenarios/discovery.md) (`TR-DISC-*`). Registration also lists planned scenarios awaiting fixtures and tests.
 
 `conftest.py` provides HTTP/fixture setup, `given_registered` and scenario-ID binding; `helpers.py` provides submit-and-poll and read helpers, expected-body builders and comparators. Pytest collects both sets.
 
@@ -30,7 +30,8 @@ Leave exhaustive parameter combinations, malformed inputs, numeric boundaries, a
 
 - `registry_api` defaults to `v2` today. Set `TYPES_REGISTRY_API_VERSION` explicitly when running against another version; there is no fallback.
 - Each test gets a fresh `cf.e2e.r<uuid>.` namespace. Fixture loaders rewrite IDs and `$ref` targets, not schema constraints or values.
-- Every submission carries a fresh `Idempotency-Key`.
+- Submissions use a fresh `Idempotency-Key` by default. Replay and conflict
+  scenarios intentionally reuse the key they are testing.
 - Registration outcomes match by GTS ID. Deletion outcomes preserve request order and use `assert_operation(..., ordered=True)`.
 - Read responses are compared whole. `assert_exact` compares `{"status", "etag", "body"}` as one JSON value; a `304` has no `body`. An expected `"<etag>"` stands for a validated ETag that is none of the known ones, so a changed ETag is part of the expectation. `assert_batch` matches results by echoed key, because batch order is not contractual. `walk` follows every cursor and `assert_pages` compares the whole walk.
 - Only unpredictable values are masked, after validation: operation IDs, receipt status, timestamps, new ETags, cursors, implementation versions, trace IDs and non-contractual messages.

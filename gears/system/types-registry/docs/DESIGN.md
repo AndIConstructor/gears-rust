@@ -432,7 +432,9 @@ The endpoint has one successful acceptance shape: `202 Accepted` with an operati
 
 Separate operations, including requests accepted in sequence, have no execution or completion ordering guarantee. Dependency ordering applies within one batch. Callers needing a dependency across requests must await and inspect the prerequisite operation's results before submitting the dependent request.
 
-Acceptance reads no registry entity state. It decides only from the request, plane, and startup configuration, so the following failures are synchronous:
+Acceptance reads no registry entity state. It decides only from the request,
+plane, and startup configuration, so the following checks and refusals are
+synchronous:
 
 1. **Envelope and batch size** — refuses more than 100 candidates.
 2. **Candidate identifiers** — refuses a non-canonical GTS Identifier, or a duplicate within the batch.
@@ -441,14 +443,26 @@ Acceptance reads no registry entity state. It decides only from the request, pla
 5. **Managed identifier profile** — refuses an explicit UUID tail on any candidate (ADR-0001), and a minor or major 0 in the **last segment** of a registered Instance identifier (ADR-0004, ADR-0015). A minor on a Type Schema identifier is admissible under any prefix.
 6. **Declared identity and dialect, Type Schema candidates** — refuses a top-level `$id` that is not exactly the `gts://` URI of the candidate's GTS Identifier (absent, non-string, malformed, or naming another entity), then an absent top-level `$schema`, a value outside the closed Draft-07 spelling set, and a `$schema` below the document root that differs from it (ADR-0014). The set is canonical `http://json-schema.org/draft-07/schema#`, that URI without `#`, and either form under `https`; every accepted form normalizes to the canonical one.
 7. **`force`, per candidate** — refuses the flag where `allow_compatibility_force` is off, and where the candidate has no cross-minor check to waive: major-only, the first minor of its major, or major 0 (ADR-0004).
-8. **ADR-0015 quarantine** — refuses a stable candidate whose immediate derivation base or `$ref` targets include a major-0 identifier. `x-gts-ref` is an instance-value constraint and is outside the quarantine in every form.
-9. **Canonicalization and request identity** — canonicalizes each authored schema or Instance value through `gts-rust`, computes the request fingerprint, and resolves the mandatory `Idempotency-Key`.
+8. **Canonicalization and request identity** — canonicalizes each authored schema or Instance value through `gts-rust`, computes the request fingerprint, and resolves the mandatory `Idempotency-Key`.
+
+After acceptance creates the operation, the worker extracts the candidate's
+dependency edges and checks ADR-0015 quarantine before loading target
+documents. A stable candidate whose immediate derivation base or `$ref`
+targets include a major-0 identifier fails as an operation item with
+`stable_derives_from_major_zero` or `stable_refs_major_zero`. Independent
+batch candidates remain eligible to commit. `x-gts-ref` is an instance-value
+constraint and is outside quarantine in every form. Reusing the extracted
+edges keeps this check consistent with dependency ordering and
+malformed-reference failures (P0 SPEC §8.1).
 
 Three ordering invariants are load-bearing:
 
 - Steps 3 and 4 precede existence lookup, preventing namespace probing; policy precedes the PDP because a grant cannot open a closed region.
 - Steps 5 and 7 are request-static. Family shape and whether a waived comparison would fail remain worker decisions under the version-family lock.
-- Step 8 checks direct references. The closure property follows inductively, with the base case coming from the release boundary: the release that introduces the check is the release that first persists an entity, so no stored edge predates it (ADR-0015).
+- The worker's quarantine check covers direct references. The closure
+  property follows inductively, with the base case coming from the
+  release boundary: the release that introduces the check is the first
+  to persist an entity, so no stored edge predates it (ADR-0015).
 
 The request fingerprint covers the canonical body, operation kind, authorization scope, owner, optimistic preconditions, and each `force` flag. The key identifies that request and is scoped to authorization scope, owning tenant, and principal. A matching replay returns the stored operation without reading entity state (`202` while active, `200` when terminal); another fingerprint under the same key returns `409 Conflict`. A new reconciliation uses a new key.
 
@@ -552,7 +566,12 @@ The registration commit transaction then:
 
 The three guards cover distinct races:
 
-- The caller precondition detects target movement since the caller's read; mismatch is terminal per-item `precondition_failed`, with no silent rebase.
+- The caller's version precondition detects movement of an active target since
+  its read; mismatch is terminal per-item `precondition_failed`, with no silent
+  rebase. A deleted target instead fails `entity_deleted` before comparing
+  versions.
+  A creation whose identifier is already occupied instead fails per item
+  as `already_exists`, including when the existing entity is deleted.
 - The reverse-impact set and revision vector detect movement since validation; the worker reloads and revalidates within a bounded retry policy.
 - Updating `entity_write_order` serializes every entity-state commit, preventing a dependency edge from appearing between graph validation and commit. A database row binds exclusion to the transaction, unlike a session-scoped advisory lock.
 - Canonical family and entity lock ordering prevents deadlocks. Source Claim mutations follow those locks, and the `routing` generation advances last.
@@ -1033,7 +1052,16 @@ Optional `dry_run` defaults false and preserves the `202` operation shape. It ru
 
 `items` is non-empty and synchronously capped by `limits.batch_candidates` (default 100). Splitting removes the candidate overlay between batches, which costs a retry rather than correctness: dependencies converge through the reconciliation loop `cpt-cf-types-registry-fr-two-phase-init` already requires, and since the graph is acyclic (ADR-0012) no group of candidates has to travel together.
 
-Each item contains its GTS Identifier, authored GTS JSON and optional `expected_resource_version`: present requires that version; absent requires nonexistence. The identifier is authoritative; a Type Schema's `$id` must spell the same identity as `gts://<gts_id>` or acceptance refuses the request. Literal `0` is invalid because absence already expresses creation and versions never equal zero.
+Each item contains its GTS Identifier, authored GTS JSON and optional
+`expected_resource_version`: present requires that version; absent requires
+nonexistence. A creation colliding with an existing ID, including a
+tombstone, is accepted as an operation whose item fails `already_exists`.
+An update with an absent target or a mismatched version on an active target
+instead fails `precondition_failed`; a deleted target fails `entity_deleted`.
+The identifier is authoritative; a Type Schema's
+`$id` must spell the same identity as `gts://<gts_id>` or acceptance
+refuses the request. Literal `0` is invalid because absence already
+expresses creation and versions never equal zero.
 
 Registration has one operation model:
 
@@ -1049,7 +1077,7 @@ RegistrationItemResult {
     status: pending | running | succeeded | unchanged | failed,
     gts_uuid?,
     resource_version?,
-    error?                 // structured canonical error, including precondition_failed
+    error?                 // structured error, including already_exists and precondition_failed
 }
 ```
 
