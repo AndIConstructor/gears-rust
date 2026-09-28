@@ -5,45 +5,13 @@ import pytest
 from .helpers import (
     RECEIPT,
     assert_operation,
+    completed,
     delete_batch_and_poll,
     delete_one_and_poll,
+    outcome,
     read_entity,
     read_tombstone,
 )
-
-
-def completed(items):
-    """A terminal deletion operation carrying exactly these item outcomes."""
-    return {
-        "operation_id": "<operation_id>",
-        "kind": "deletion",
-        "dry_run": False,
-        "status": "completed",
-        "created_at": "<created_at>",
-        "started_at": "<started_at>",
-        "completed_at": "<completed_at>",
-        "items": items,
-    }
-
-
-def deleted(gts_id, resource_version):
-    """A successful deletion reports the version its tombstone now carries."""
-    return {
-        "gts_id": gts_id,
-        "status": "succeeded",
-        "resource_version": resource_version,
-        "error": None,
-    }
-
-
-def refused(gts_id, reason):
-    """A refusal allocates no version; the message wording is not a contract."""
-    return {
-        "gts_id": gts_id,
-        "status": "failed",
-        "resource_version": None,
-        "error": {"reason": reason, "message": "<message>"},
-    }
 
 
 @pytest.mark.smoke
@@ -62,7 +30,9 @@ async def test_delete_one_entity_leaves_a_readable_tombstone(
         registry_http, registry_api_path, schema["gts_id"], 1, RECEIPT
     )
     assert_operation(
-        operation, completed([deleted(schema["gts_id"], 2)]), ordered=True
+        operation,
+        completed("deletion", outcome(schema, "succeeded", 2)),
+        ordered=True,
     )
     await read_tombstone(registry_http, registry_api_path, before, operation)
 
@@ -87,7 +57,9 @@ async def test_batch_deletion_orders_dependants_before_their_target(
     )
     assert_operation(
         operation,
-        completed([deleted(schema["gts_id"], 2), deleted(instance["gts_id"], 2)]),
+        completed(
+            "deletion", outcome(schema, "succeeded", 2), outcome(instance, "succeeded", 2)
+        ),
         ordered=True,
     )
     for candidate in (schema, instance):
@@ -116,7 +88,9 @@ async def test_batch_deletion_reports_outcomes_in_request_order(
     )
     assert_operation(
         operation,
-        completed([deleted(person["gts_id"], 2), deleted(other["gts_id"], 2)]),
+        completed(
+            "deletion", outcome(person, "succeeded", 2), outcome(other, "succeeded", 2)
+        ),
         ordered=True,
     )
 
@@ -134,7 +108,7 @@ async def test_a_stale_expected_version_is_a_terminal_item_not_a_412(
     )
     assert_operation(
         operation,
-        completed([refused(schema["gts_id"], "precondition_failed")]),
+        completed("deletion", outcome(schema, "failed", None, "precondition_failed")),
         ordered=True,
     )
 
@@ -160,18 +134,15 @@ async def test_a_live_dependant_outside_the_batch_blocks_the_deletion(
     assert_operation(
         operation,
         completed(
-            [
-                {
-                    "gts_id": schema["gts_id"],
-                    "status": "failed",
-                    "resource_version": None,
-                    "error": {
-                        "reason": "has_registered_dependents",
-                        "message": f"'{schema['gts_id']}' has 1 live direct registered "
-                        "dependants; delete or revise them first",
-                    },
-                },
-            ]
+            "deletion",
+            outcome(
+                schema,
+                "failed",
+                None,
+                "has_registered_dependents",
+                message=f"'{schema['gts_id']}' has 1 live direct registered "
+                "dependants; delete or revise them first",
+            ),
         ),
         ordered=True,
         exact_messages=True,

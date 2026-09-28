@@ -21,6 +21,7 @@ use super::dto::{
 };
 use super::params::{DiscoveryParams, ExactReadSelection, NoQuery};
 use super::paths::V2;
+use crate::domain::admission::worker::WorkerError;
 use crate::domain::admission::{Accepted, Candidate, SubmitRequest};
 use crate::domain::enums::OperationKind;
 use crate::domain::error::DomainError;
@@ -329,7 +330,7 @@ pub async fn get_operation(
         .operation(operation_id)
         .await
         .map_err(CanonicalError::from)?
-        .ok_or_else(|| CanonicalError::from(DomainError::not_found_by_uuid(operation_id)))?;
+        .ok_or_else(|| CanonicalError::from(WorkerError::OperationNotFound { operation_id }))?;
     Ok((no_store(), Json(record.into())))
 }
 

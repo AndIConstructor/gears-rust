@@ -9,8 +9,14 @@ use crate::domain::error::DomainError;
 use crate::domain::registry_service::{MAX_BATCH_GET_KEYS, MAX_KEY_LEN, ServiceError};
 use crate::domain::selection::{EntityField, SelectionError};
 
-#[resource_error(gts_id!("cf.types_registry.registry.type.v1~"))]
+#[resource_error(gts_id!("cf.core.types_registry.entity.v1~"))]
 pub struct TypeRegistryError;
+
+/// Errors naming an admission operation rather than an entity: a missing
+/// operation, and the operation an `Idempotency-Key` is already bound to.
+/// `resource_name` is then an operation UUID, so the type says so.
+#[resource_error(gts_id!("cf.core.types_registry.operation.v1~"))]
+pub struct OperationError;
 
 impl From<DomainError> for CanonicalError {
     fn from(e: DomainError) -> Self {
@@ -187,7 +193,7 @@ impl From<WorkerError> for CanonicalError {
             // `ItemFailure` recorded on the operation item. Everything else in
             // this type is an infrastructure failure, so all of it is opaque.
             WorkerError::OperationNotFound { operation_id } => {
-                TypeRegistryError::not_found(format!("No operation with id: {operation_id}"))
+                OperationError::not_found(format!("No operation with id: {operation_id}"))
                     .with_resource(operation_id.to_string())
                     .create()
             }
@@ -760,7 +766,7 @@ impl From<AcceptanceError> for CanonicalError {
             // The operation id is given in both the detail and the resource: the
             // caller needs it to read what its key is already bound to.
             AcceptanceError::FingerprintConflict { operation_id } => {
-                TypeRegistryError::already_exists(format!(
+                OperationError::already_exists(format!(
                     "this Idempotency-Key is already bound to operation {operation_id} \
                      with a different request"
                 ))
@@ -982,6 +988,26 @@ mod tests {
         let conflict = acceptance_problem(AcceptanceError::FingerprintConflict { operation_id });
         assert_eq!(conflict.status, Some(409));
         assert!(conflict.detail.contains(&operation_id.to_string()));
+        assert_operation_resource(&conflict, operation_id);
+    }
+
+    /// An operation error names the operation, so its `resource_type` is the
+    /// operation type the SDK publishes, never the entity type.
+    fn assert_operation_resource(problem: &Problem, operation_id: uuid::Uuid) {
+        assert_eq!(
+            problem
+                .context
+                .get("resource_type")
+                .and_then(serde_json::Value::as_str),
+            Some(types_registry_sdk::gts::OPERATION_RESOURCE_TYPE),
+        );
+        assert_eq!(
+            problem
+                .context
+                .get("resource_name")
+                .and_then(serde_json::Value::as_str),
+            Some(operation_id.to_string().as_str()),
+        );
     }
 
     #[test]
@@ -1010,6 +1036,7 @@ mod tests {
             operation_id: uuid::Uuid::nil(),
         });
         assert_eq!(missing.status, Some(404));
+        assert_operation_resource(&missing, uuid::Uuid::nil());
 
         let cases = [
             worker_problem(WorkerError::MissingPayload { item_id: 42 }),

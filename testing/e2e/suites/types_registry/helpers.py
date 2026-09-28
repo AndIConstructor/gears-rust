@@ -11,6 +11,14 @@ import httpx
 
 
 GTS_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "gts")
+# Every request carries this valid W3C `traceparent`, so the wire `trace_id` the
+# canonical error layer echoes is deterministic. `extract_trace_id` prefers the
+# live OTel span, but the request span continues this inbound `traceparent`, so
+# its trace-id equals the header's; with OTel off the header is used directly.
+# Either way the value is TRACE_ID, the header's 32-hex trace-id segment. Uses
+# the W3C spec's example ids.
+TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
+TRACEPARENT = f"00-{TRACE_ID}-b7ad6b7169203331-01"
 # Everything a registration writes except `provenance`, whose implementation
 # versions are not a scenario claim. The default projection is document-free.
 ENTITY_SELECT = "origin,content,resolved_schema,effective_traits,effective_traits_schema"
@@ -32,6 +40,48 @@ def assert_json(actual, expected):
     assert json.dumps(actual, indent=2, sort_keys=True) == json.dumps(
         expected, indent=2, sort_keys=True
     )
+
+
+def completed(kind, *items, dry_run=False):
+    """A complete terminal operation with caller-specified item outcomes."""
+    return {
+        "operation_id": "<operation_id>",
+        "kind": kind,
+        "dry_run": dry_run,
+        "status": "completed",
+        "created_at": "<created_at>",
+        "started_at": "<started_at>",
+        "completed_at": "<completed_at>",
+        "items": list(items),
+    }
+
+
+def outcome(document, status, resource_version, reason=None, **error_fields):
+    """A complete operation item; error messages alone are non-contractual."""
+    return {
+        "gts_id": document["gts_id"],
+        "status": status,
+        "resource_version": resource_version,
+        "error": None
+        if reason is None
+        else {"reason": reason, "message": "<message>", **error_fields},
+    }
+
+
+def not_found(key):
+    """The whole RFC-9457 response for an absent registry key."""
+    return {
+        "type": "gts://gts.cf.core.errors.err.v1~cf.core.err.not_found.v1~",
+        "title": "Not Found",
+        "status": 404,
+        "detail": "<detail>",
+        "instance": "<request_path>",
+        "trace_id": TRACE_ID,
+        "context": {
+            "resource_type": "gts.cf.core.types_registry.entity.v1~",
+            "resource_name": key,
+        },
+    }
 
 
 def timestamp(value):
@@ -79,40 +129,80 @@ def assert_operation(operation, expected, *, ordered=False, exact_messages=False
 
 
 async def read_created(client, api_path, expected, operation):
-    entity = await read_entity(client, api_path, expected["gts_id"])
-    actual = deepcopy(entity)
-    assert actual["gts_uuid"] == str(uuid.uuid5(GTS_NAMESPACE, expected["gts_id"]))
-    origin = actual["origin"]
-    created = timestamp(origin["created_at"])
-    assert created == timestamp(origin["updated_at"]), actual
+    """Read an entity this operation created and compare the whole exact read.
+
+    Status, `ETag` and body are compared as `assert_exact` does. Beyond that,
+    `created_at` must fall inside the operation's run and equal `updated_at`,
+    because nothing has revised the entity since.
+    """
+    response = await get_entity(client, api_path, expected["gts_id"], select=ENTITY_SELECT)
+    assert_exact(response, {"status": 200, "etag": "<etag>", "body": expected})
+    entity = response.json()
+    created = timestamp(entity["origin"]["created_at"])
+    assert created == timestamp(entity["origin"]["updated_at"]), entity
     assert timestamp(operation["started_at"]) <= created <= timestamp(
         operation["completed_at"]
-    ), actual
-    actual["gts_uuid"] = "<gts_uuid>"
-    for field in ("created_at", "updated_at"):
-        origin[field] = f"<{field}>"
-    assert_json(actual, expected)
+    ), entity
     return entity
 
 
 def _problem(response, status):
     assert response.status_code == status, response.text
     assert response.headers["content-type"].startswith("application/problem+json")
+    assert "location" not in response.headers, response.headers
     actual = response.json()
     assert actual["instance"] == response.request.url.path, actual
     actual["instance"] = "<request_path>"
     return actual
 
 
+def assert_problem(response, status, expected):
+    """Compare a whole RFC-9457 response; only the path is masked.
+
+    A refusal never carries an operation `Location`: nothing was admitted.
+    """
+    assert_json(_problem(response, status), expected)
+
+
 def assert_not_found(response, expected):
+    """A 404 names what is missing; its `detail` wording is not a contract."""
     actual = _problem(response, 404)
     replace_text(actual, "detail")
     assert_json(actual, expected)
 
 
+async def assert_absent(client, api_path, document):
+    """Read an absent entity and compare its complete Problem response."""
+    key = document["gts_id"]
+    response = await client.get(f"{api_path}/entities/{key}")
+    assert_not_found(response, not_found(key))
+
+
 def assert_bad_request(response, expected):
     """A refusal names its field; its wording and trace are compared."""
-    assert_json(_problem(response, 400), expected)
+    assert_problem(response, 400, expected)
+
+
+def invalid_argument(field, reason, description, *, resource_name=None):
+    """The whole `400 invalid_argument` response with one field violation.
+
+    `resource_name` is present when the refusal is about one named entity.
+    """
+    context = {"resource_type": "gts.cf.core.types_registry.entity.v1~"}
+    if resource_name is not None:
+        context["resource_name"] = resource_name
+    context["field_violations"] = [
+        {"field": field, "reason": reason, "description": description},
+    ]
+    return {
+        "type": "gts://gts.cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~",
+        "title": "Invalid Argument",
+        "status": 400,
+        "detail": "Request validation failed",
+        "instance": "<request_path>",
+        "trace_id": TRACE_ID,
+        "context": context,
+    }
 
 
 def gts_uuid(gts_id):
@@ -141,6 +231,35 @@ def managed(resource_version):
         "resource_version": resource_version,
         "created_at": "<created_at>",
         "updated_at": "<updated_at>",
+    }
+
+
+def schema_entity(document, resource_version, lifecycle_status="active", resolved_schema=None):
+    """Full selected read of a registration schema without authored traits."""
+    return {
+        **mandatory(document, lifecycle_status),
+        "origin": managed(resource_version),
+        "content": document["content"],
+        "resolved_schema": document["content"] if resolved_schema is None else resolved_schema,
+        "effective_traits": {},
+        "effective_traits_schema": {"$schema": "http://json-schema.org/draft-07/schema#"},
+    }
+
+
+def schema_with_id(template, gts_id):
+    """Copy an authored schema under a new GTS ID with its matching `$id`."""
+    document = deepcopy(template)
+    document["gts_id"] = gts_id
+    document["content"]["$id"] = f"gts://{gts_id}"
+    return document
+
+
+def instance_entity(document, resource_version, lifecycle_status="active"):
+    """Full selected Instance read, with schema-only fields absent."""
+    return {
+        **mandatory(document, lifecycle_status),
+        "origin": managed(resource_version),
+        "content": document["content"],
     }
 
 
@@ -184,6 +303,13 @@ async def get_entity(client, api_path, key, *, select=None, if_none_match=None):
     params = {} if select is None else {"$select": select}
     headers = {} if if_none_match is None else {"If-None-Match": if_none_match}
     return await client.get(f"{api_path}/entities/{key}", params=params, headers=headers)
+
+
+async def assert_exact_entity(client, api_path, document, expected, *, etag="<etag>"):
+    """Read every registration document field and compare the whole HTTP result."""
+    response = await get_entity(client, api_path, document["gts_id"], select=ENTITY_SELECT)
+    assert_exact(response, {"status": 200, "etag": etag, "body": expected})
+    return response
 
 
 def assert_exact(response, expected, *, known_etags=()):
@@ -313,7 +439,7 @@ def _accept(response, expected_receipt):
     return receipt, urljoin(str(response.url), response.headers["location"])
 
 
-async def _poll(client, receipt, location, kind):
+async def poll_operation(client, receipt, location, kind, *, dry_run=False):
     """Return terminal outcomes; completed never implies all items succeeded."""
     last_operation = None
     try:
@@ -325,7 +451,7 @@ async def _poll(client, receipt, location, kind):
                 last_operation = polled.json()
                 assert last_operation["operation_id"] == receipt["operation_id"]
                 assert last_operation["kind"] == kind, last_operation
-                assert last_operation["dry_run"] is False, last_operation
+                assert last_operation["dry_run"] is dry_run, last_operation
                 status = last_operation["status"]
                 assert status in {"pending", "running", "completed"}, last_operation
                 if status == "completed":
@@ -342,13 +468,45 @@ def _idempotency_key():
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
-async def submit_and_poll(client, api_path, candidates, expected_receipt):
+async def post_registration(client, api_path, candidates, *, idempotency_key=None, dry_run=False):
+    """Submit registration and return the raw HTTP response for receipt/refusal tests."""
+    body = {"items": candidates}
+    if dry_run:
+        body["dry_run"] = True
+    return await client.post(
+        f"{api_path}/entities",
+        headers={
+            "Idempotency-Key": str(uuid.uuid4()) if idempotency_key is None else idempotency_key
+        },
+        json=body,
+    )
+
+
+async def submit_and_poll(
+    client, api_path, candidates, expected_receipt, *, dry_run=False, idempotency_key=None
+):
     """Register a batch through `POST {api}/entities`."""
-    response = await client.post(
-        f"{api_path}/entities", headers=_idempotency_key(), json={"items": candidates}
+    response = await post_registration(
+        client, api_path, candidates, dry_run=dry_run, idempotency_key=idempotency_key
     )
     receipt, location = _accept(response, expected_receipt)
-    return await _poll(client, receipt, location, "registration")
+    return await poll_operation(client, receipt, location, "registration", dry_run=dry_run)
+
+
+async def register_and_assert(
+    client, api_path, candidates, *items, dry_run=False, idempotency_key=None
+):
+    """Submit, poll and compare the whole registration operation."""
+    operation = await submit_and_poll(
+        client,
+        api_path,
+        candidates,
+        RECEIPT,
+        dry_run=dry_run,
+        idempotency_key=idempotency_key,
+    )
+    assert_operation(operation, completed("registration", *items, dry_run=dry_run))
+    return operation
 
 
 async def delete_batch_and_poll(client, api_path, targets, expected_receipt):
@@ -363,7 +521,7 @@ async def delete_batch_and_poll(client, api_path, targets, expected_receipt):
         json={"items": targets},
     )
     receipt, location = _accept(response, expected_receipt)
-    return await _poll(client, receipt, location, "deletion")
+    return await poll_operation(client, receipt, location, "deletion")
 
 
 async def delete_one_and_poll(client, api_path, key, expected_resource_version, expected_receipt):
@@ -374,7 +532,7 @@ async def delete_one_and_poll(client, api_path, key, expected_resource_version, 
         params={"expected_resource_version": expected_resource_version},
     )
     receipt, location = _accept(response, expected_receipt)
-    return await _poll(client, receipt, location, "deletion")
+    return await poll_operation(client, receipt, location, "deletion")
 
 
 async def read_entity(client, api_path, key):

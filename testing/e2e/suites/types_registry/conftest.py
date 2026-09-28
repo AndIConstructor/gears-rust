@@ -9,19 +9,10 @@ import uuid
 import httpx
 import pytest
 
-from .helpers import RECEIPT, assert_operation, submit_and_poll
+from .helpers import RECEIPT, TRACEPARENT, assert_operation, submit_and_poll
 
 
 SCENARIO_TESTS = pytest.StashKey[dict[str, list[str]]]()
-
-# Every request carries this valid W3C `traceparent`, so the wire `trace_id` the
-# canonical error layer echoes is deterministic. `extract_trace_id` prefers the
-# live OTel span, but the request span continues this inbound `traceparent`, so
-# its trace-id equals the header's; with OTel off the header is used directly.
-# Either way the value is TRACE_ID, the header's 32-hex trace-id segment. Uses
-# the W3C spec's example ids.
-TRACE_ID = "0af7651916cd43dd8448eb211c80319c"
-TRACEPARENT = f"00-{TRACE_ID}-b7ad6b7169203331-01"
 
 
 @pytest.fixture

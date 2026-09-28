@@ -15,13 +15,13 @@ from .helpers import (
     discover,
     get_entity,
     gts_uuid,
+    invalid_argument,
     managed,
     mandatory,
     namespace_pattern,
     paged,
     walk,
 )
-from .conftest import TRACE_ID
 
 
 SCHEMAS = (
@@ -387,25 +387,11 @@ async def test_a_changed_pattern_cannot_reuse_a_cursor(
                 "cursor": first["page_info"]["next_cursor"],
             },
         ),
-        {
-            "type": "gts://gts.cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~",
-            "title": "Invalid Argument",
-            "status": 400,
-            "detail": "Request validation failed",
-            "instance": "<request_path>",
-            "trace_id": TRACE_ID,
-            "context": {
-                "resource_type": "gts.cf.types_registry.registry.type.v1~",
-                "field_violations": [
-                    {
-                        "field": "cursor",
-                        "reason": "VALIDATION_FAILED",
-                        "description": "the cursor cannot be used for this request: "
-                        "FILTER_MISMATCH",
-                    },
-                ],
-            },
-        },
+        invalid_argument(
+            "cursor",
+            "VALIDATION_FAILED",
+            "the cursor cannot be used for this request: FILTER_MISMATCH",
+        ),
     )
 
 

@@ -14,55 +14,25 @@ from .helpers import (
     assert_operation,
     assert_pages,
     batch_get,
+    completed,
     delete_one_and_poll,
     get_entity,
+    invalid_argument,
     gts_uuid,
     managed,
     mandatory,
     namespace_pattern,
+    not_found,
+    outcome,
     provenance,
     submit_and_poll,
     timestamp,
     walk,
 )
-from .conftest import TRACE_ID
 
 
 # The two independent schema/Instance pairs most scenarios register.
 PAIRS = ("person_schema", "person_instance", "other_schema", "other_instance")
-
-
-def completed(kind, *items):
-    """A terminal operation carrying exactly these item outcomes."""
-    return {
-        "operation_id": "<operation_id>",
-        "kind": kind,
-        "dry_run": False,
-        "status": "completed",
-        "created_at": "<created_at>",
-        "started_at": "<started_at>",
-        "completed_at": "<completed_at>",
-        "items": list(items),
-    }
-
-
-def outcome(document, status, resource_version):
-    return {
-        "gts_id": document["gts_id"],
-        "status": status,
-        "resource_version": resource_version,
-        "error": None,
-    }
-
-
-def failure(document, reason):
-    """A refusal allocates no version; the message wording is not a contract."""
-    return {
-        "gts_id": document["gts_id"],
-        "status": "failed",
-        "resource_version": None,
-        "error": {"reason": reason, "message": "<message>"},
-    }
 
 
 def resolved_employee_schema(derived, **base_keywords):
@@ -96,21 +66,6 @@ def resolved_employee_schema(derived, **base_keywords):
             },
         },
         "required": ["payload"],
-    }
-
-
-def not_found(key):
-    return {
-        "type": "gts://gts.cf.core.errors.err.v1~cf.core.err.not_found.v1~",
-        "title": "Not Found",
-        "status": 404,
-        "detail": "<detail>",
-        "instance": "<request_path>",
-        "trace_id": TRACE_ID,
-        "context": {
-            "resource_type": "gts.cf.types_registry.registry.type.v1~",
-            "resource_name": key,
-        },
     }
 
 
@@ -242,7 +197,9 @@ async def test_effective_documents_are_selected_independently(
     # The inherited envelope is closed: an undeclared top-level field is refused.
     intruder = reading_fixture("trait_derived_extra_field_instance")
     operation = await submit_and_poll(registry_http, registry_api_path, [intruder], RECEIPT)
-    assert_operation(operation, completed("registration", failure(intruder, "invalid_value")))
+    assert_operation(
+        operation, completed("registration", outcome(intruder, "failed", None, "invalid_value"))
+    )
     assert_not_found(
         await get_entity(registry_http, registry_api_path, intruder["gts_id"]),
         not_found(intruder["gts_id"]),
@@ -410,23 +367,6 @@ async def test_absent_and_impossible_keys_are_one_not_found(
         assert_not_found(
             await get_entity(registry_http, registry_api_path, key), not_found(key)
         )
-
-
-def invalid_argument(field, reason, description):
-    return {
-        "type": "gts://gts.cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~",
-        "title": "Invalid Argument",
-        "status": 400,
-        "detail": "Request validation failed",
-        "instance": "<request_path>",
-        "trace_id": TRACE_ID,
-        "context": {
-            "resource_type": "gts.cf.types_registry.registry.type.v1~",
-            "field_violations": [
-                {"field": field, "reason": reason, "description": description},
-            ],
-        },
-    }
 
 
 @pytest.mark.scenario("TR-READ-101")

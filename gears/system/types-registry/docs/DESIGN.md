@@ -610,11 +610,11 @@ The actions are `register` and `delete`. `register` covers creation and revision
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-tech-pdp-resource-shape`
 
-Every registry evaluation, under either action set, names one resource type — `gts.cf.toolkit.types_registry.entity.v1~` — and carries the identifier or pattern under discussion in the `gts_id` resource property, as `cpt-cf-types-registry-fr-registration-authority` already requires of writes.
+Every registry evaluation, under either action set, names one resource type — `gts.cf.core.types_registry.entity.v1~` — and carries the identifier or pattern under discussion in the `gts_id` resource property, as `cpt-cf-types-registry-fr-registration-authority` already requires of writes.
 
 The metatype is load-bearing rather than a formality. A request naming `gts.acme.billing.invoice.v1~` as its resource type would be indistinguishable from the billing gear asking about an invoice object, so one grant would cover both the contract and the objects governed by it. Registry-specific verbs hid this: `register` and `delete` collide with nothing, while `read` and `list` are verbs every gear uses.
 
-A GTS Identifier Region therefore constrains that property rather than appearing as a wildcard in `resource_type`. It is the same notion registration policy and Source Claims use — one trailing wildcard on a token boundary, so any two Regions are nested or disjoint — applied here to a grant. Every declared permission carries the bare metatype, and the Region belongs to the grant binding an identity to one. Its form is a [GTS](https://github.com/GlobalTypeSystem/gts-spec/blob/main/README.md) §3.3 predicate over the property, `gts.cf.toolkit.types_registry.entity.v1~[gts_id="gts.acme.*"]`: §3.5 gives exactly that shape for access control, and §3.3 admits predicates in policy evaluation while keeping them out of stored identifiers. One property name serves all four actions; a second name for the pattern case would force one grant per action.
+A GTS Identifier Region therefore constrains that property rather than appearing as a wildcard in `resource_type`. It is the same notion registration policy and Source Claims use — one trailing wildcard on a token boundary, so any two Regions are nested or disjoint — applied here to a grant. Every declared permission carries the bare metatype, and the Region belongs to the grant binding an identity to one. Its form is a [GTS](https://github.com/GlobalTypeSystem/gts-spec/blob/main/README.md) §3.3 predicate over the property, `gts.cf.core.types_registry.entity.v1~[gts_id="gts.acme.*"]`: §3.5 gives exactly that shape for access control, and §3.3 admits predicates in policy evaluation while keeping them out of stored identifiers. One property name serves all four actions; a second name for the pattern case would force one grant per action.
 
 Two obligations on the PDP follow. Both belong to the §4 binding prerequisite, because [`PERMISSION_GTS_TYPE.md`](../../../../docs/arch/authorization/PERMISSION_GTS_TYPE.md) settles neither today:
 
@@ -1086,6 +1086,12 @@ Results preserve request order but remain keyed by `gts_id`. Real `succeeded` an
 Dry-run `succeeded` omits `resource_version` because none was allocated; dry-run `unchanged` returns the existing version because the real operation would also write nothing. Both return identifier-derived `gts_uuid`. `ck_tr_operation_item_state` enforces the stored `result_revision_no` and `result_resource_version` states. Public results omit revision number; future writes precondition on `resource_version`.
 
 Errors use canonical RFC-9457 vocabulary and stable reasons. Optimistic-lock failure is an async item result, not HTTP `412`; envelope, authorization, malformed precondition, batch limit, and idempotency failures are synchronous. Reusing a scoped key with another request fingerprint returns `409`.
+Resource-scoped errors name one of two GTS resource types:
+
+| `resource_type` | Names | `resource_name` |
+|---|---|---|
+| `gts.cf.core.types_registry.entity.v1~` | a registry entity — the same resource type the PDP evaluates | the requested GTS Identifier or Registry Reference |
+| `gts.cf.core.types_registry.operation.v1~` | an admission operation: `404` for an unknown operation, and the `409` for a key bound to another request | the operation UUID |
 
 `202` returns operation `Location` and advisory `Retry-After`. Same-key replay returns the immutable stored operation (`202` non-terminal, `200` terminal), independent of current content. Scope includes authorization scope, owning tenant, and principal, preventing cross-principal receipt reuse.
 

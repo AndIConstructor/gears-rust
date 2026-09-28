@@ -2,10 +2,12 @@
 
 End-to-end registration scenarios cover HTTP submission, outbox admission, persisted outcomes and reads. The local launcher uses **SQLite**; these tests do not prove PostgreSQL/MySQL or tenant/PDP behavior.
 
-TR-REG-001–003 and TR-REG-101–102 have tests and fixture files today. The later IDs
-specify planned e2e tests; their fixture files will be added with those tests. Each
-scenario describes its starting entities, requests, terminal item outcomes and
-observable reads. Separate scenarios may share one pytest setup or test function.
+Every TR-REG scenario has an e2e test. Fixture files are linked where a scenario
+uses them; some revisions and identifier variants are built from those fixtures
+inside the test. Each scenario describes its starting entities, requests, terminal
+item outcomes and observable reads. Separate scenarios may share one test function.
+TR-REG-902 runs under the force-disabled launcher profile; the default launcher
+has force enabled for TR-REG-903.
 
 Unless a scenario says otherwise, each mutation uses a fresh `Idempotency-Key`.
 An accepted mutation returns a JSON receipt with `202` and a `Location` for
@@ -13,8 +15,9 @@ An accepted mutation returns a JSON receipt with `202` and a `Location` for
 status reports progress, while its items report success or failure. A synchronous
 refusal returns a Problem response without an operation `Location` and admits no
 batch item. Reads mentioned below use an explicit selection for the fields asserted.
-All fixture IDs belong to a fresh namespace, except the deliberately disallowed
-vendor in TR-REG-901.
+All fixture IDs belong to a fresh namespace. TR-REG-901 and TR-REG-904 replace
+the vendor and package (`gts.acme.outside.` and `gts.acme.e2e.`) but keep that
+namespace segment.
 
 Valid root Type Schema fixtures use the GTS §4.4.1 closed-envelope pattern: the top level rejects undeclared properties and `payload` is the explicit open extension point. The intentionally unresolved derived schema inherits no known root constraints and is not closed locally. Instances carry `payload`, even when it is empty.
 
@@ -93,8 +96,9 @@ B also reports `dependency_kind=ref` and the missing ID. A is readable; B and C 
 
 **Given:** the [person schema](../fixtures/registration/person_schema.json) was
 created under key K1. Save its `operation_id`, terminal operation body and
-receipt `Location`. Revise that schema under K2, and confirm its current
-`resource_version` is 2.
+receipt `Location`. Under K2, revise only its `title` with
+`expected_resource_version=1`, and confirm by exact read that it is now at
+`resource_version` 2 with that title.
 
 **When:** send the byte-for-byte same creation request again under K1, then
 follow the returned `Location`.
@@ -113,12 +117,16 @@ follow the returned `Location`.
 ### TR-REG-202 — Reusing a key for a different request is a conflict
 
 **Given:** K1 completed a successful creation of the [person schema](../fixtures/registration/person_schema.json)
-at version 1. Prepare a request for the same ID with different authored content.
+at version 1. Prepare a request for the same ID whose authored content differs
+only by a `title`; `$id` and `$schema` stay valid, so the request passes static
+validation and reaches the key check.
 
 **When:** submit that different request under K1.
 
 **Then:** the response is synchronous `409` RFC-9457 `already_exists`, naming
-the original operation as the conflicting resource. It has no new operation
+the original operation as the conflicting resource: `resource_type` is the
+operation type `gts.cf.core.types_registry.operation.v1~` and
+`resource_name` its `operation_id`. It has no new operation
 `Location`. Polling the original ID still yields the original outcome, and
 reading the schema still returns its version-1 content.
 
@@ -135,6 +143,17 @@ item has `status=failed`, `resource_version=null` and
 `error.reason=already_exists`. The existing schema remains at version 1 with
 the same content and timestamps. This differs from both K1 replay
 (TR-REG-201) and an update with a matching precondition (TR-REG-303).
+
+### TR-REG-204 — An unknown operation is a 404 naming an operation
+
+**Given:** a random operation UUID that no submission returned.
+
+**When:** poll `GET /operations/{operation_id}`.
+
+**Then:** the response is `404` RFC-9457 `not_found` whose `resource_type`
+is the operation type `gts.cf.core.types_registry.operation.v1~` and
+whose `resource_name` is the requested UUID. It does not claim that an
+entity is missing.
 
 ## Content revisions and optimistic preconditions
 
@@ -170,7 +189,8 @@ remains at version 1 with unchanged authored content.
 
 **Given:** the [person schema](../fixtures/registration/person_schema.json)
 and [person Instance](../fixtures/registration/person_instance.json) are
-registered. Retain the Instance's version-1 content and `origin` timestamps.
+registered. Read the Instance and keep its version-1 content and `origin`
+timestamps for comparison after the operation.
 
 **When:** submit the same Instance ID and authored content under a new key
 with `expected_resource_version=1`.
@@ -183,19 +203,22 @@ revision.
 ### TR-REG-304 — A stale writer reads again and retries
 
 **Given:** two callers A and B read the [person schema](../fixtures/registration/person_schema.json)
-at version 1 and independently prepare different compatible title revisions.
+at version 1. B prepares a `title` revision; A prepares a `description`
+revision.
 
 **When:**
 
 1. B submits with `expected_resource_version=1` and completes at version 2.
-2. A submits its older version-1 precondition under another key, reads again
-   after refusal, and resubmits its intended change under a third key with
-   `expected_resource_version=2`.
+2. A submits its `description` change with the older version-1 precondition
+   under another key. After the refusal A reads again and rebuilds its change on
+   the current document, keeping B's `title`, then resubmits under a third key
+   with `expected_resource_version=2`.
 
 **Then:** A's stale request is accepted with `202` but its item finishes
 `failed`, `resource_version=null` and `error.reason=precondition_failed`;
 there is no HTTP `412` and B's content remains current. A's reconciled
-request succeeds at version 3, which exact read returns.
+request succeeds at version 3; exact read returns both B's `title` and A's
+`description`.
 
 ### TR-REG-305 — Registration cannot reuse a tombstoned name
 
@@ -216,10 +239,11 @@ Registry Reference.
 
 ### TR-REG-401 — Register a derived Type Schema before its base
 
-**Given:** a new base Type Schema with a closed root and open `payload`
-extension point, plus a valid derived Type Schema whose GTS ID names that
-base and whose own constraint requires `payload.employee_id`. Neither is
-registered.
+**Given:** a new [person base Type Schema](../fixtures/registration/person_schema.json)
+with a closed root and open `payload` extension point, plus a valid
+[derived employee Type Schema](../fixtures/registration/derived_employee_schema.json)
+whose GTS ID names that base and whose own constraint requires
+`payload.employee_id`. Neither is registered.
 
 **When:** submit `[derived, base]` in one batch and await completion.
 
@@ -230,15 +254,17 @@ require a separate prerequisite operation.
 
 ### TR-REG-402 — Resolve an in-batch `$ref` target submitted later
 
-**Given:** two new, independently named Type Schemas: a valid target and a
-referrer whose authored `$ref` names that target. The target is absent before
-the request.
+**Given:** two new, independently named Type Schemas: a valid
+[person target](../fixtures/registration/person_schema.json) and a
+[referrer](../fixtures/registration/person_referrer_schema.json) whose authored
+`$ref` names that target. The target is absent before the request.
 
 **When:** submit `[referrer, target]` in one batch.
 
 **Then:** both items `succeeded` at version 1. Reading the referrer's
-`resolved_schema` shows the target's constraints, and both authored
-documents retain their exact `$ref` and `$id` values.
+`resolved_schema` shows the target's constraints in place of the `$ref`.
+Each authored document reads back unchanged, including the referrer's `$ref`
+and both `$id` values.
 
 ### TR-REG-403 — Reconcile an Instance after its missing schema arrives
 
@@ -274,9 +300,12 @@ whole is `completed` even though an item failed.
 
 ### TR-REG-405 — An in-batch failed revision blocks its new referrer
 
-**Given:** a registered base Type Schema at version 1. Prepare an
+**Given:** a registered [person base Type Schema](../fixtures/registration/person_schema.json)
+at version 1. Prepare an
 incompatible revision that removes a property accepted by its current
-closed schema, plus a new Type Schema whose `$ref` names that base ID.
+closed schema, plus the new
+[referrer Type Schema](../fixtures/registration/person_referrer_schema.json)
+whose `$ref` names that base ID.
 
 **When:** submit `[referrer, base revision]` in one batch with the base's
 `expected_resource_version=1`.
@@ -289,9 +318,13 @@ remains absent.
 
 ### TR-REG-406 — A cycle fails beside an independent success
 
-**Given:** new schemas A and B whose `$ref` and/or derivation edges form
-one cycle, and new schema C with no dependency on either. All three IDs
-are absent.
+**Given:** new schemas [A](../fixtures/registration/cycle_a_schema.json) and
+[B](../fixtures/registration/cycle_b_schema.json) that `$ref` each other,
+forming one cycle, and the independent
+[person schema C](../fixtures/registration/person_schema.json). All three IDs
+are absent. A cycle
+of derivation edges alone is impossible: a base ID is always a proper prefix
+of its derived ID.
 
 **When:** submit C, B and A in one batch and await completion.
 
@@ -319,8 +352,9 @@ with the successful closed-level addition in TR-REG-301.
 
 ### TR-REG-502 — A live direct Instance prevents an abstract transition
 
-**Given:** a concrete Type Schema with `x-gts-abstract=false` and one
-active, directly conforming Instance. Retain the schema's version-1 body
+**Given:** a concrete [person Type Schema](../fixtures/registration/person_schema.json)
+with `x-gts-abstract=false` and one active, directly conforming
+[Instance](../fixtures/registration/person_instance.json). Retain the schema's version-1 body
 and the Instance's body.
 
 **When:** revise only `x-gts-abstract` to `true` under
@@ -332,8 +366,10 @@ active and unchanged.
 
 ### TR-REG-503 — A live derived Type Schema prevents a final transition
 
-**Given:** a base Type Schema with `x-gts-final=false` and an active
-derived Type Schema whose identifier names it. Retain both version-1
+**Given:** a [person base Type Schema](../fixtures/registration/person_schema.json)
+with `x-gts-final=false` and an active
+[derived employee Type Schema](../fixtures/registration/derived_employee_schema.json)
+whose identifier names it. Retain both version-1
 bodies.
 
 **When:** revise the base to `x-gts-final=true` with
@@ -346,8 +382,9 @@ change is otherwise only an annotation.
 
 ### TR-REG-504 — Publish a breaking contract under a new major
 
-**Given:** a registered `person.v1~` Type Schema, optionally with a
-conforming v1 Instance. Prepare `person.v2~` in the same version family
+**Given:** a registered [person.v1~ Type Schema](../fixtures/registration/person_schema.json)
+and a conforming [v1 Instance](../fixtures/registration/person_instance.json).
+Prepare `person.v2~` in the same version family
 with an intentionally incompatible accepted-value set and its own
 matching `$id`.
 
@@ -363,20 +400,24 @@ No compatibility verdict is required across different majors.
 
 ### TR-REG-601 — Order contiguous minors within one batch
 
-**Given:** new compatible Type Schemas `person.v1.0~` and
-`person.v1.1~` in one family, each with its own matching `$id`.
+**Given:** new compatible Type Schemas
+[person.v1.0~](../fixtures/registration/person_minor_0_schema.json) and
+[person.v1.1~](../fixtures/registration/person_minor_1_schema.json) in one
+family, each with its own matching `$id`.
 Neither minor exists.
 
 **When:** submit `[v1.1, v1.0]` in one batch.
 
 **Then:** both items `succeeded` at their own resource version 1.
-Exact reads find both distinct GTS IDs and Registry References; neither
-is synthesized as the major-only `person.v1~` identity.
+Exact reads find both distinct GTS IDs and Registry References. That an
+exact key never falls back to the major-only `person.v1~` is TR-READ-203's
+claim and is not repeated here.
 
 ### TR-REG-602 — Refuse a minor with a missing predecessor
 
-**Given:** `person.v1.0~` is registered, while `person.v1.1~` is absent.
-Prepare a compatible `person.v1.2~` candidate.
+**Given:** [person.v1.0~](../fixtures/registration/person_minor_0_schema.json)
+is registered, while `person.v1.1~` is absent. Prepare a compatible
+[person.v1.2~](../fixtures/registration/person_minor_2_schema.json) candidate.
 
 **When:** submit v1.2 alone and await completion.
 
@@ -399,20 +440,24 @@ and do not find either rejected ID.
 
 ### TR-REG-604 — Refuse a content revision of a minor-bearing schema
 
-**Given:** `person.v1.0~` is registered at resource version 1.
+**Given:** [person.v1.0~](../fixtures/registration/person_minor_0_schema.json)
+is registered at resource version 1.
 Prepare changed content for that same ID.
 
-**When:** submit it with `expected_resource_version=1`.
+**When:** submit it with `expected_resource_version=1`; separately, submit
+an absent `person.v1.1~` with `expected_resource_version=1`.
 
 **Then:** acceptance refuses the request synchronously with `400`
 RFC-9457 `invalid_argument` and a field violation for
 `expected_resource_version`. There is no `202` or operation `Location`;
-exact read still returns the original version-1 document. The refusal
-does not depend on whether the named minor currently exists.
+exact read still returns the original version-1 document. The absent
+minor is refused the same way: the refusal does not depend on whether the
+named minor currently exists.
 
 ### TR-REG-605 — A failed predecessor blocks the next minor
 
-**Given:** both `person.v1.0~` and `person.v1.1~` are absent.
+**Given:** both [person.v1.0~](../fixtures/registration/person_minor_0_schema.json)
+and [person.v1.1~](../fixtures/registration/person_minor_1_schema.json) are absent.
 The v1.0 candidate refers to a missing schema; v1.1 would otherwise be
 compatible with a valid predecessor.
 
@@ -465,20 +510,21 @@ timestamps or successful-item versions.
 
 **Given:** an absent [person schema](../fixtures/registration/person_schema.json)
 and its valid [Instance](../fixtures/registration/person_instance.json).
-Replace the schema's top-level `$schema` with one of: absent, a
-non-Draft-07 dialect, or a Draft-07 root with a divergent nested
-`$schema`.
+Remove the schema's top-level `$schema`. Other inadmissible spellings
+(a non-Draft-07 dialect, a divergent nested `$schema`) are covered by Rust
+acceptance tests.
 
 **When:** submit `[instance, schema]` in one request.
 
 **Then:** the entire request receives synchronous `400` RFC-9457
-`invalid_argument` and no operation `Location`. Neither ID is
-readable. The registry does not admit the valid batch neighbour and
+`invalid_argument` with one `entity` field violation naming the schema, and
+no operation `Location`. Neither ID is readable. The registry does not admit the valid batch neighbour and
 does not infer a default dialect.
 
 ### TR-REG-802 — Major zero allows breaking revisions but no registered Instance
 
-**Given:** a valid Type Schema `person.v0~` is registered at version 1.
+**Given:** a valid [person.v0~ Type Schema](../fixtures/registration/person_major_zero_schema.json)
+is registered at version 1.
 Prepare a revision whose accepted-value set is incompatible with the
 first definition. Also prepare a new conforming Instance whose **own
 last segment** is stable `v1`, so its only unstable marker is the
@@ -495,9 +541,13 @@ identifier refusal for an Instance whose own last segment is v0.
 
 ### TR-REG-803 — Stable schemas cannot derive from or `$ref` major zero
 
-**Given:** a registered `base.v0~` Type Schema. Prepare two new stable
-`v1~` schemas: one derives directly from that base, and the other
-contains an authored `$ref` to it.
+**Given:** a registered [person.v0~ Type Schema](../fixtures/registration/person_major_zero_schema.json) as the base.
+Prepare two new stable
+`v1~` schemas: one derives from that base by identifier only, with no
+authored `$ref` to it, and the other is an independent root containing an
+authored `$ref` to it. A derived schema that also `$ref`s its base reports
+`stable_refs_major_zero`, because the first quarantined edge in extraction
+order wins.
 
 **When:** submit both candidates in a registration batch and poll.
 
@@ -509,38 +559,45 @@ refusals.
 
 ## Deployment policy and compatibility waiver
 
-### TR-REG-901 — A closed region refuses a non-platform vendor
+### TR-REG-901 — A region outside the allowlist refuses a non-platform vendor
 
 **Given:** a new valid Type Schema whose GTS ID has a last-segment
 vendor other than `cf`, such as an `acme` root Type Schema, and a
-matching authored `$id`. The local launcher has the default closed
-`registration_policy`.
+matching authored `$id`, built from the person schema by replacing its
+vendor and package so the ID falls under `gts.acme.outside.*`. The local
+launcher allows `acme` only under `gts.acme.e2e.*`; other regions retain
+the closed default.
 
 **When:** submit it as a creation.
 
 **Then:** acceptance refuses it synchronously with `400` RFC-9457
-`failed_precondition`, identifying the closed region and
-`allowed_vendors` parameter. There is no operation `Location` and
+`failed_precondition`: one `REGISTRATION_POLICY_ALLOWED_VENDORS`
+violation whose subject is the implicit `<default>` region, because no
+matching region provides `allowed_vendors`. There is no operation `Location` and
 the ID is not readable. A `cf`-vendor ID would not exercise this
 policy gate.
 
 ### TR-REG-902 — Disabled `force` is a synchronous refusal
 
-**Given:** a registered first minor `person.v1.0~` and a candidate
-`person.v1.1~` carrying `force=true`. The local launcher keeps
-`allow_compatibility_force=false`.
+**Given:** a registered first minor
+[person.v1.0~](../fixtures/registration/person_minor_0_schema.json) and a
+[person.v1.1~](../fixtures/registration/person_minor_1_schema.json) candidate
+carrying `force=true`. The local launcher keeps
+`allow_compatibility_force=false` in its `force-disabled` profile.
 
-**When:** submit the candidate, including a `dry_run=true` variant.
+**When:** submit the candidate, then submit it again with `dry_run=true`.
 
 **Then:** each request is refused before `202` with `400` RFC-9457
 `invalid_argument` and a `force` field violation. Neither creates
-an operation or v1.1 entity.
+an operation or v1.1 entity: a dry run cannot be used to probe a
+waiver the deployment does not allow.
 
 ### TR-REG-903 — Enabled `force` records a waived minor transition
 
-**Given:** a separate launcher profile with
-`allow_compatibility_force=true`. A stable `person.v1.0~` schema is
-registered. Its `person.v1.1~` candidate is incompatible with v1.0
+**Given:** the default launcher has `allow_compatibility_force=true`. A stable
+[person.v1.0~](../fixtures/registration/person_minor_0_schema.json) schema is
+registered. Its [person.v1.1~](../fixtures/registration/person_minor_1_schema.json)
+candidate is incompatible with v1.0
 but carries `force=true`.
 
 **When:** submit v1.1 and await completion, then read both minors with
@@ -549,5 +606,20 @@ but carries `force=true`.
 **Then:** v1.1 `succeeded` at version 1, with its incompatible content
 and `provenance.compat_forced=true`. V1.0 remains unchanged and reports
 `compat_forced=false`. The waiver belongs only to the cross-minor
-comparison and does not revise v1.0. This scenario needs an explicit
-force-enabled e2e profile; it does not run under the default launcher.
+comparison and does not revise v1.0. The default e2e launcher runs this
+scenario; the force-disabled profile skips it.
+
+### TR-REG-904 — A configured region admits its allowed vendor
+
+**Given:** the local launcher configures `registration_policy` with
+`gts.acme.e2e.*` allowing vendor `acme`. Build a new
+[person schema](../fixtures/registration/person_schema.json) in the fresh e2e
+namespace by changing its vendor from `cf` to `acme`, with a matching authored
+`$id`.
+
+**When:** submit the schema as a creation and await completion.
+
+**Then:** acceptance returns `202`; its item `succeeded` at resource version 1.
+An exact read returns the complete authored and resolved schema under its
+`acme` GTS ID and deterministic Registry Reference. TR-REG-901 confirms that
+the same vendor remains refused outside the configured region.

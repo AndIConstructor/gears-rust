@@ -6,11 +6,26 @@ The suite covers two APIs:
 
 | Path | Covers |
 |---|---|
-| `test_registration.py`, `test_deletion.py` | the asynchronous admission API (`202` + `GET /operations/{id}`), written as numbered scenarios |
+| `test_registration_*.py`, `test_deletion.py` | the asynchronous admission API (`202` + `GET /operations/{id}`), written as numbered scenarios |
 | `test_reading.py`, `test_discovery.py` | exact reads, `:batchGet` and discovery pages over that API, also numbered scenarios |
 | [`legacy/`](legacy/README.md) | the original synchronous `v1` API (`200` + a `results` array) |
 
-Async scenarios pair tests, `scenarios/` documentation and `fixtures/` data: [registration](scenarios/registration.md) (`TR-REG-*`), [deletion](scenarios/deletion.md) (`TR-DEL-*`), [exact/batch reads](scenarios/reading.md) (`TR-READ-*`) and [discovery](scenarios/discovery.md) (`TR-DISC-*`). Registration also lists planned scenarios awaiting fixtures and tests.
+Async scenarios pair tests, `scenarios/` documentation and `fixtures/` data: [registration](scenarios/registration.md) (`TR-REG-*`), [deletion](scenarios/deletion.md) (`TR-DEL-*`), [exact/batch reads](scenarios/reading.md) (`TR-READ-*`) and [discovery](scenarios/discovery.md) (`TR-DISC-*`). The default Types Registry e2e config enables compatibility force and allows vendor `acme` only under `gts.acme.e2e.*`. TR-REG-902 uses the force-disabled profile; the default profile skips it.
+
+Each section of [registration.md](scenarios/registration.md) has one test file:
+
+| Scenario section | Test file |
+|---|---|
+| Successful registration | `test_registration_success.py` |
+| Partial success and refusals | `test_registration_refusals.py` |
+| Request identity and idempotency | `test_registration_idempotency.py` |
+| Content revisions and optimistic preconditions | `test_registration_revisions.py` |
+| Dependency graph and partial admission | `test_registration_graph.py` |
+| Compatibility and dependent safety | `test_registration_compatibility.py` |
+| Minor versions and version-family shape | `test_registration_versions.py` |
+| Dry-run admission | `test_registration_dry_run.py` |
+| Managed schema dialect and unstable major-zero profile | `test_registration_schema_profile.py` |
+| Deployment policy and compatibility waiver | `test_registration_deployment_policy.py` |
 
 `conftest.py` provides HTTP/fixture setup, `given_registered` and scenario-ID binding; `helpers.py` provides submit-and-poll and read helpers, expected-body builders and comparators. Pytest collects both sets.
 
@@ -29,7 +44,7 @@ Leave exhaustive parameter combinations, malformed inputs, numeric boundaries, a
 ## Execution rules
 
 - `registry_api` defaults to `v2` today. Set `TYPES_REGISTRY_API_VERSION` explicitly when running against another version; there is no fallback.
-- Each test gets a fresh `cf.e2e.r<uuid>.` namespace. Fixture loaders rewrite IDs and `$ref` targets, not schema constraints or values.
+- Each test gets a fresh `cf.e2e.r<uuid>.` namespace. Fixture loaders rewrite IDs and `$ref` targets, not schema constraints or values. TR-REG-901 and TR-REG-904 change the vendor and package after loading to exercise the configured policy region.
 - Submissions use a fresh `Idempotency-Key` by default. Replay and conflict
   scenarios intentionally reuse the key they are testing.
 - Registration outcomes match by GTS ID. Deletion outcomes preserve request order and use `assert_operation(..., ordered=True)`.
@@ -50,6 +65,9 @@ make e2e-local SUITE=types-registry
 
 # Scenario tests only.
 .venv/bin/python tools/scripts/run_e2e.py --suite types-registry -- -m scenario
+
+# Disabled-force refusal (TR-REG-902).
+.venv/bin/python tools/scripts/run_e2e.py --suite types-registry --profile force-disabled -- -k test_disabled_force_rejects_commit_and_dry_run
 
 # Legacy tests only.
 .venv/bin/python tools/scripts/run_e2e.py --suite types-registry -- -m "not scenario"
