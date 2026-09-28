@@ -18,11 +18,10 @@ use anyhow::Context as _;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use percent_encoding::percent_decode_str;
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
-use crate::config::{ClickHousePluginConfig, is_plaintext_url};
+use crate::config::{ClickHousePluginConfig, decode_userinfo, is_plaintext_url};
 
 /// Endpoint components split out of a `database_url` for the `clickhouse`
 /// crate's connection-configuration methods.
@@ -58,21 +57,33 @@ struct ParsedEndpoint {
 /// yield the encoded form, but `Client::with_user` / `with_password` need the
 /// literal credentials. Callers embedding `${VAR}`-expanded secrets that
 /// contain URL-reserved characters must still percent-encode them in
-/// `database_url` so the URL parses. The database name is the URL path with
-/// leading/trailing slashes trimmed; an empty path yields `None`
-/// (`ClickHouse` then uses the server's default database for the resolved
-/// user).
+/// `database_url` so the URL parses, and the encoded bytes must decode to
+/// valid UTF-8. The database name is the URL path with leading/trailing
+/// slashes trimmed; an empty path yields `None` (`ClickHouse` then uses the
+/// server's default database for the resolved user).
 ///
 /// # Errors
 ///
-/// Returns [`url::ParseError`] if `database_url` is not a valid absolute URL.
-fn parse_endpoint(database_url: &str) -> Result<ParsedEndpoint, url::ParseError> {
-    let mut url = Url::parse(database_url)?;
+/// Returns an error if `database_url` is not a valid absolute URL, or if its
+/// percent-encoded username or password does not decode to valid UTF-8 (see
+/// [`decode_userinfo`]). Neither error carries the credential value.
+fn parse_endpoint(database_url: &str) -> anyhow::Result<ParsedEndpoint> {
+    let mut url = Url::parse(database_url).context("database_url is not a valid absolute URL")?;
 
-    let user = (!url.username().is_empty()).then(|| decode_userinfo(url.username()));
-    let password = url
-        .password()
-        .map(|p| SecretString::from(decode_userinfo(p)));
+    let user = if url.username().is_empty() {
+        None
+    } else {
+        Some(
+            decode_userinfo(url.username())
+                .context("database_url username is not valid UTF-8 after percent-decoding")?,
+        )
+    };
+    let password = match url.password() {
+        Some(p) => Some(SecretString::from(decode_userinfo(p).context(
+            "database_url password is not valid UTF-8 after percent-decoding",
+        )?)),
+        None => None,
+    };
     let database = {
         let path = url.path().trim_matches('/');
         (!path.is_empty()).then(|| path.to_owned())
@@ -94,14 +105,6 @@ fn parse_endpoint(database_url: &str) -> Result<ParsedEndpoint, url::ParseError>
         password,
         database,
     })
-}
-
-/// Percent-decode a URL userinfo component for `with_user` / `with_password`.
-///
-/// Invalid UTF-8 after decoding is lossily replaced — credentials are opaque
-/// bytes at the wire level, but the `clickhouse` client takes `&str`.
-fn decode_userinfo(encoded: &str) -> String {
-    percent_decode_str(encoded).decode_utf8_lossy().into_owned()
 }
 
 /// Embedded schema migration SQL.
@@ -205,8 +208,9 @@ fn new_base_client() -> anyhow::Result<clickhouse::Client> {
 /// # Errors
 ///
 /// Propagates [`new_base_client`]'s fail-closed error when no rustls
-/// `CryptoProvider` has been installed process-wide. An unparseable
-/// `database_url` is *not* an error here — see the inert-client note below.
+/// `CryptoProvider` has been installed process-wide, and [`parse_endpoint`]'s
+/// error when `database_url` is not a valid absolute URL or its percent-encoded
+/// credentials do not decode to valid UTF-8.
 pub fn build_client(cfg: &ClickHousePluginConfig) -> anyhow::Result<clickhouse::Client> {
     // The config's `SecretString` is zeroized on drop, but that guarantee stops
     // at this boundary: `clickhouse` 0.15.1 stores the user and password as
@@ -228,30 +232,15 @@ pub fn build_client(cfg: &ClickHousePluginConfig) -> anyhow::Result<clickhouse::
         );
     }
 
-    // On the production path this branch is unreachable: `Gear::init` always
-    // calls `ClickHousePluginConfig::validate` before `build_client`, and
-    // `validate` rejects a `database_url` that `Url::parse` cannot handle. It
-    // only defends call sites that construct a client without validating first
-    // (direct unit/integration use of `build_client`), where returning an inert
-    // client is preferable to panicking.
-    //
-    // The resulting client cannot connect anywhere: the `clickhouse` crate
-    // re-parses `Client::url` on every request, so the same parse failure
-    // surfaces as `Error::InvalidParams` before any socket is opened — no
-    // request is sent and no credentials leave the process.
-    let endpoint = parse_endpoint(url).unwrap_or_else(|err| {
-        tracing::warn!(
-            error = %err,
-            "database_url failed to parse as a URL; every ClickHouse request will fail with \
-             an invalid-params error before any connection is attempted"
-        );
-        ParsedEndpoint {
-            base_url: url.to_owned(),
-            user: None,
-            password: None,
-            database: None,
-        }
-    });
+    // On the production path this cannot fail: `Gear::init` always calls
+    // `ClickHousePluginConfig::validate` before `build_client`, and `validate`
+    // rejects both an unparseable `database_url` and one whose credentials do
+    // not decode to UTF-8. For call sites that skip validation (direct
+    // unit/integration use of `build_client`) an error is the honest result:
+    // falling back to a client with `user: None` / `password: None` would be
+    // another silent credential drop, which is exactly what this path guards
+    // against.
+    let endpoint = parse_endpoint(url)?;
 
     // `send_timeout` and `receive_timeout` are standard `ClickHouse` HTTP API
     // settings accepted as URL query parameters or per-request headers.

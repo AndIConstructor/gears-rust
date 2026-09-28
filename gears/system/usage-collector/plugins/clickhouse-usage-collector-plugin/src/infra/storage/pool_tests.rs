@@ -241,6 +241,53 @@ fn parse_endpoint_percent_decodes_userinfo_with_reserved_chars() {
 }
 
 #[test]
+fn parse_endpoint_decodes_valid_non_ascii_utf8_userinfo() {
+    // `%C3%A9` is a well-formed multibyte sequence (U+00E9, `e` with acute);
+    // strict decoding must still accept it — only *invalid* UTF-8 is rejected.
+    let endpoint = parse_endpoint("http://us%C3%A9r:p%C3%A9ss@ch:8123/usage").unwrap();
+    assert_eq!(endpoint.user.as_deref(), Some("us\u{e9}r"));
+    assert_eq!(
+        endpoint.password.as_ref().map(ExposeSecret::expose_secret),
+        Some("p\u{e9}ss")
+    );
+}
+
+#[test]
+fn parse_endpoint_rejects_invalid_utf8_in_password() {
+    // `%FF` is never valid UTF-8. A lossy decode would turn this into a
+    // *different* password (U+FFFD) and the gear would start, then loop on
+    // auth failures; it must fail here instead, without echoing the secret.
+    let Err(err) = parse_endpoint("http://chuser:p%FF@ch:8123/usage") else {
+        panic!("invalid UTF-8 in the password must be rejected");
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("password") && msg.contains("UTF-8"),
+        "unexpected error: {msg}"
+    );
+    assert!(
+        !msg.contains("p%FF"),
+        "error must not leak the credential: {msg}"
+    );
+}
+
+#[test]
+fn parse_endpoint_rejects_invalid_utf8_in_username() {
+    let Err(err) = parse_endpoint("http://u%FF:s3cret@ch:8123/usage") else {
+        panic!("invalid UTF-8 in the username must be rejected");
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("username") && msg.contains("UTF-8"),
+        "unexpected error: {msg}"
+    );
+    assert!(
+        !msg.contains("u%FF") && !msg.contains("s3cret"),
+        "error must not leak the credentials: {msg}"
+    );
+}
+
+#[test]
 fn parse_endpoint_rejects_malformed_url() {
     assert!(parse_endpoint("not a url").is_err());
 }
@@ -487,12 +534,12 @@ fn build_client_accepts_plaintext_http_when_override_set() {
     let _client = build_client(&cfg).expect("client builds once a provider is installed");
 }
 
-/// The fallback client is inert: an unparseable `database_url` fails every
-/// request at parameter-validation time, before a socket is opened, so nothing
-/// (credentials included) is ever sent anywhere. `validate()` rejects such a
-/// URL on the production path; this covers the call sites that skip it.
-#[tokio::test]
-async fn build_client_falls_back_to_inert_client_on_unparseable_url() {
+/// An unparseable `database_url` is a hard error from `build_client`, not an
+/// inert client: a fallback with no credentials would be a silent credential
+/// drop. `validate()` rejects such a URL on the production path; this covers
+/// the call sites that skip it.
+#[test]
+fn build_client_rejects_unparseable_url() {
     use super::build_client;
     use secrecy::SecretString;
 
@@ -507,16 +554,47 @@ async fn build_client_falls_back_to_inert_client_on_unparseable_url() {
         .expect_err("an unparseable database_url must not pass validation");
 
     install_test_crypto_provider();
-    let client =
-        build_client(&cfg).expect("an unparseable URL degrades to an inert client, not an error");
-    let err = client
-        .query("SELECT 1")
-        .execute()
-        .await
-        .expect_err("a client built from an unparseable URL must not reach a server");
+    let Err(err) = build_client(&cfg) else {
+        panic!("an unparseable URL must not build a client");
+    };
+    let msg = format!("{err:#}");
     assert!(
-        matches!(err, clickhouse::error::Error::InvalidParams(_)),
-        "expected an invalid-params failure before any connection attempt, got: {err}"
+        msg.contains("valid absolute URL"),
+        "unexpected error: {msg}"
+    );
+}
+
+/// A percent-encoded credential that decodes to invalid UTF-8 must fail
+/// client construction rather than be lossily rewritten into a different
+/// secret that would then loop on authentication failures. The error names
+/// the component but never the credential.
+#[test]
+fn build_client_rejects_invalid_utf8_userinfo() {
+    use super::build_client;
+    use secrecy::SecretString;
+
+    use crate::config::ClickHousePluginConfig;
+
+    let cfg = ClickHousePluginConfig {
+        database_url: SecretString::from("https://chuser:p%FF@clickhouse.example:8443/usage_db"),
+        request_timeout_secs: 15,
+        ..ClickHousePluginConfig::default()
+    };
+    cfg.validate()
+        .expect_err("invalid-UTF-8 credentials must not pass validation");
+
+    install_test_crypto_provider();
+    let Err(err) = build_client(&cfg) else {
+        panic!("invalid-UTF-8 credentials must not build a client");
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("password") && msg.contains("UTF-8"),
+        "unexpected error: {msg}"
+    );
+    assert!(
+        !msg.contains("p%FF"),
+        "error must not leak the credential: {msg}"
     );
 }
 

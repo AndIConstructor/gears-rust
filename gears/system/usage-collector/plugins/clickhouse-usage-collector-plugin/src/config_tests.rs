@@ -116,6 +116,50 @@ fn validate_rejects_unparseable_database_url() {
     );
 }
 
+/// A percent-encoded password that decodes to invalid UTF-8 (a truncated or
+/// corrupted secret) must fail validation at startup. The previous lossy
+/// decode silently substituted U+FFFD, so the gear registered and then looped
+/// on authentication failures with the root cause misattributed.
+#[test]
+fn validate_rejects_invalid_utf8_in_password() {
+    let json = r#"{ "database_url": "http://u:p%FF@h/db", "allow_insecure_http": true }"#;
+    let cfg: ClickHousePluginConfig = serde_json::from_str(json).unwrap();
+    let err = cfg
+        .validate()
+        .expect_err("invalid UTF-8 in the password must be rejected");
+    assert!(
+        err.contains("password") && err.contains("UTF-8"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        !err.contains("p%FF"),
+        "error must not leak the credential: {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_invalid_utf8_in_username() {
+    let json = r#"{ "database_url": "http://u%FF:p@h/db", "allow_insecure_http": true }"#;
+    let cfg: ClickHousePluginConfig = serde_json::from_str(json).unwrap();
+    let err = cfg
+        .validate()
+        .expect_err("invalid UTF-8 in the username must be rejected");
+    assert!(
+        err.contains("username") && err.contains("UTF-8"),
+        "unexpected error: {err}"
+    );
+}
+
+/// Strict decoding only rejects *invalid* UTF-8; a well-formed multibyte
+/// sequence (`%C3%A9` = `é`) is an ordinary credential and must pass.
+#[test]
+fn validate_accepts_percent_encoded_non_ascii_utf8_userinfo() {
+    let json = r#"{ "database_url": "http://u:p%C3%A9@h/db", "allow_insecure_http": true }"#;
+    let cfg: ClickHousePluginConfig = serde_json::from_str(json).unwrap();
+    cfg.validate()
+        .expect("valid multibyte UTF-8 credentials must pass validation");
+}
+
 #[test]
 fn validate_rejects_zero_request_timeout() {
     let json = r#"{ "database_url": "http://u:p@h/db", "request_timeout_secs": 0 }"#;

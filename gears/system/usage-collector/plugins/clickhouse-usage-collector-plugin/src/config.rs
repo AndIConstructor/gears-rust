@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+
+use percent_encoding::percent_decode_str;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -24,6 +27,31 @@ pub(crate) fn is_plaintext_url(url: &str) -> bool {
         Ok(parsed) => parsed.scheme() == "http",
         Err(_) => true,
     }
+}
+
+/// Percent-decode a `database_url` userinfo component (username or password)
+/// into the literal credential expected by `Client::with_user` /
+/// `with_password`.
+///
+/// `Url::username` / `Url::password` return the encoded form, so an operator
+/// who embeds a secret containing URL-reserved characters must percent-encode
+/// it, and this is the one place it is decoded back. Shared by
+/// [`ClickHousePluginConfig::validate`] (fail-closed at startup) and
+/// [`crate::infra::storage::pool::build_client`] (the actual decode) so both
+/// agree on what is acceptable.
+///
+/// # Errors
+///
+/// Returns [`std::str::Utf8Error`] when the decoded bytes are not valid UTF-8.
+/// This is deliberately *not* a lossy decode: the `clickhouse` client takes
+/// `&str`, and replacing an invalid sequence with U+FFFD would silently turn a
+/// corrupted or truncated secret into a *different* credential, so the gear
+/// would start and then loop on authentication failures with no hint that the
+/// config was wrong. The error carries only a byte offset, never the value.
+pub(crate) fn decode_userinfo(encoded: &str) -> Result<String, std::str::Utf8Error> {
+    percent_decode_str(encoded)
+        .decode_utf8()
+        .map(Cow::into_owned)
 }
 
 /// Configuration for the `ClickHouse` Usage Collector storage backend.
@@ -229,7 +257,9 @@ impl ClickHousePluginConfig {
     /// # Errors
     ///
     /// Returns an error string for an empty `database_url`, one whose scheme is
-    /// neither `http` nor `https`, a plaintext `http` `database_url` without
+    /// neither `http` nor `https`, one whose percent-encoded username or
+    /// password does not decode to valid UTF-8 (see [`decode_userinfo`]), a
+    /// plaintext `http` `database_url` without
     /// [`Self::allow_insecure_http`], a zero timeout, a
     /// `request_timeout_secs` below `MIN_ASYNC_INSERT_TIMEOUT_SECS` while
     /// [`Self::async_insert`] is enabled, a retention window outside
@@ -252,6 +282,24 @@ impl ClickHousePluginConfig {
                  HTTP interface only, so database_url must use https:// (or http:// with \
                  allow_insecure_http = true for local development/test)",
                 parsed.scheme()
+            ));
+        }
+        // Credentials embedded in the URL are percent-encoded and must decode
+        // to valid UTF-8; otherwise `build_client` would either alter the secret
+        // (lossy decode) or drop it, and the gear would start and then loop on
+        // authentication failures. Only the component name and the decoder's
+        // byte offset are reported — never the credential itself.
+        // (An absent username is the empty string, which decodes trivially.)
+        if let Err(e) = decode_userinfo(parsed.username()) {
+            return Err(format!(
+                "database_url username is not valid UTF-8 after percent-decoding ({e}); \
+                 check the percent-encoding of the embedded credential"
+            ));
+        }
+        if let Some(Err(e)) = parsed.password().map(decode_userinfo) {
+            return Err(format!(
+                "database_url password is not valid UTF-8 after percent-decoding ({e}); \
+                 check the percent-encoding of the embedded credential"
             ));
         }
         if self.request_timeout_secs == 0 {
