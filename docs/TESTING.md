@@ -308,7 +308,11 @@ containers left behind by a crashed run (where `atexit` never fired) are swept o
 next start by age rather than by label alone. Set `CF_GEARS_E2E_RUN_ID` to pin the run
 identity, and `CF_GEARS_E2E_REAP_MIN_AGE_SECS` (default 3600) to change how old a
 foreign container must be before it counts as leaked — lowering it below the length of
-a full session reintroduces the cross-session reap it exists to prevent.
+a full session reintroduces the cross-session reap it exists to prevent. Values below
+the 600s floor (`REAP_MIN_AGE_FLOOR_SECS`), and anything that is not an integer, are
+rejected at import with an error naming the variable; unset or empty means the default.
+`reap_stale()` refuses a sub-floor threshold passed directly too, so neither a bad
+override nor a careless caller can turn the age-gated sweep into a host-wide removal.
 
 Other quality-related GitHub Actions under `.github/workflows` complement the E2E
 workflow:

@@ -33,11 +33,15 @@ import subprocess
 import pytest
 
 from lib.sidecars import (
+    DEFAULT_REAP_MIN_AGE_SECS,
+    ENV_REAP_MIN_AGE_SECS,
     LABEL_KEY,
+    REAP_MIN_AGE_FLOOR_SECS,
     REAP_MIN_AGE_SECS,
     RUN_ID,
     ClickHouseSidecar,
     TimescaleDbSidecar,
+    reap_min_age_secs,
 )
 
 from .conftest import BACKEND
@@ -166,6 +170,10 @@ def test_reap_stale_spares_a_concurrent_run_and_removes_a_leaked_one(
     """
     sidecar_cls.pull()  # see the sibling test below for why this is explicit
 
+    # The default sweep below is only safe because the threshold in force is
+    # at or above the floor; the parser tests pin how that is enforced.
+    assert REAP_MIN_AGE_SECS >= REAP_MIN_AGE_FLOOR_SECS
+
     other_run_label = f"{selftest_label}-otherrun"
     orphan = subprocess.run(
         ["docker", "run", "-d", "--label", other_run_label,
@@ -187,6 +195,63 @@ def test_reap_stale_spares_a_concurrent_run_and_removes_a_leaked_one(
     finally:
         subprocess.run(["docker", "rm", "-f", orphan],
                        capture_output=True, timeout=60, check=False)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["0", "-1", str(REAP_MIN_AGE_FLOOR_SECS - 1), "abc", "1.5"],
+)
+def test_reap_min_age_secs_rejects_zero_negative_and_garbage(monkeypatch, value):
+    """A bad override must fail at import, not silently defeat the age gate.
+
+    `stale_ids` selects on `age >= min_age_secs`, so 0 or a negative value
+    would make every foreign labelled container eligible the moment it
+    started — a concurrent session's live database included. Anything under
+    the floor is rejected, and the error names the variable so a CI lane
+    that set it wrong can be found from the traceback alone.
+    """
+    monkeypatch.setenv(ENV_REAP_MIN_AGE_SECS, value)
+    with pytest.raises(ValueError, match=ENV_REAP_MIN_AGE_SECS):
+        reap_min_age_secs()
+
+
+def test_reap_min_age_secs_accepts_unset_empty_and_floor(monkeypatch):
+    monkeypatch.delenv(ENV_REAP_MIN_AGE_SECS, raising=False)
+    assert reap_min_age_secs() == DEFAULT_REAP_MIN_AGE_SECS
+
+    # Empty and whitespace mean "default", same as the image-tag overrides.
+    monkeypatch.setenv(ENV_REAP_MIN_AGE_SECS, "  ")
+    assert reap_min_age_secs() == DEFAULT_REAP_MIN_AGE_SECS
+
+    monkeypatch.setenv(ENV_REAP_MIN_AGE_SECS, str(REAP_MIN_AGE_FLOOR_SECS))
+    assert reap_min_age_secs() == REAP_MIN_AGE_FLOOR_SECS
+
+    monkeypatch.setenv(ENV_REAP_MIN_AGE_SECS, " 7200 ")
+    assert reap_min_age_secs() == 7200
+
+    assert DEFAULT_REAP_MIN_AGE_SECS >= REAP_MIN_AGE_FLOOR_SECS, (
+        "the default must itself pass the floor, or an unset variable fails"
+    )
+
+
+@pytest.mark.parametrize("sidecar_cls,selftest_label", SIDECARS)
+def test_reap_stale_refuses_a_threshold_below_the_floor(monkeypatch, sidecar_cls, selftest_label):
+    """The destructive path refuses a sub-floor threshold before touching Docker.
+
+    This is the second line of defence behind the import-time check: a caller
+    passing `min_age_secs=0` directly must get an error, not a host-wide
+    removal. Both Docker helpers are stubbed to fail loudly, so this holds
+    even with a live daemon and never risks the very reap it is pinning.
+    """
+    def _never(*_args, **_kwargs):
+        pytest.fail("reap_stale touched Docker despite a sub-floor threshold")
+
+    monkeypatch.setattr(sidecar_cls, "_ids_labelled", staticmethod(_never))
+    monkeypatch.setattr(sidecar_cls, "_rm", staticmethod(_never))
+
+    for threshold in (0, -1, REAP_MIN_AGE_FLOOR_SECS - 1):
+        with pytest.raises(ValueError, match="reap_stale refuses"):
+            sidecar_cls.reap_stale(min_age_secs=threshold, own_label=selftest_label)
 
 
 @pytest.mark.timeout(600)

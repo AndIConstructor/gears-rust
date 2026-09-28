@@ -108,7 +108,45 @@ RUN_ID = (
 # still alive, so age is the proxy: this MUST exceed the longest plausible
 # session (cold image pull plus a full suite) or a new run would delete a live
 # concurrent one — the very bug the per-run label exists to prevent.
-REAP_MIN_AGE_SECS = int(os.environ.get("CF_GEARS_E2E_REAP_MIN_AGE_SECS", "3600"))
+ENV_REAP_MIN_AGE_SECS = "CF_GEARS_E2E_REAP_MIN_AGE_SECS"
+DEFAULT_REAP_MIN_AGE_SECS = 3600
+# Lowest threshold `reap_stale` will act on, whether it comes from the
+# environment or a caller. One cold sidecar start (image pull plus readiness)
+# can take PULL_TIMEOUT alone, so any threshold below it is provably shorter
+# than even a one-test session: an override of 0 would otherwise turn the
+# sweep into "remove every other session's live database".
+REAP_MIN_AGE_FLOOR_SECS = PULL_TIMEOUT
+
+
+def reap_min_age_secs() -> int:
+    """Effective reap threshold, honoring CF_GEARS_E2E_REAP_MIN_AGE_SECS.
+
+    Unset *or empty* means the default, matching `timescaledb_tag()`. Anything
+    else must be an integer of at least REAP_MIN_AGE_FLOOR_SECS; otherwise
+    raise ValueError naming the variable, so a misconfigured CI lane fails at
+    import instead of deleting a concurrent session's database on its first
+    `start()`. Failing beats clamping: a silently raised value would hide the
+    misconfiguration while still reaping anything older than the floor.
+    """
+    raw = os.environ.get(ENV_REAP_MIN_AGE_SECS, "").strip()
+    if not raw:
+        return DEFAULT_REAP_MIN_AGE_SECS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"{ENV_REAP_MIN_AGE_SECS}={raw!r} is not an integer"
+        ) from None
+    if value < REAP_MIN_AGE_FLOOR_SECS:
+        raise ValueError(
+            f"{ENV_REAP_MIN_AGE_SECS}={value} is below the "
+            f"{REAP_MIN_AGE_FLOOR_SECS}s floor; a threshold that short would "
+            "reap a live concurrent session's sidecar"
+        )
+    return value
+
+
+REAP_MIN_AGE_SECS = reap_min_age_secs()
 
 
 class DockerUnavailable(RuntimeError):
@@ -304,11 +342,15 @@ class _DockerSidecar:
         prefix: one run can hold containers under more than one prefix
         (`usage-collector` and `usage-collector-ch`), and a second sidecar's
         `start()` sweep would otherwise treat the first one as foreign and
-        reap it the moment age said so — a skewed daemon clock or a lowered
-        `CF_GEARS_E2E_REAP_MIN_AGE_SECS` is enough, and under a pinned
-        CF_GEARS_E2E_RUN_ID the two backend sessions are one run by
-        definition. It defaults to this process's RUN_ID so no caller can
-        forget it; pass `run_id=None` to sweep by age alone.
+        reap it the moment age said so — a skewed daemon clock or a
+        `CF_GEARS_E2E_REAP_MIN_AGE_SECS` lowered to the floor is enough, and
+        under a pinned CF_GEARS_E2E_RUN_ID the two backend sessions are one
+        run by definition. It defaults to this process's RUN_ID so no caller
+        can forget it; pass `run_id=None` to sweep by age alone.
+
+        Unlike `reap_stale`, `min_age_secs` is NOT floored here: this is the
+        read-only query, and the self-tests rely on `min_age_secs=0` to prove
+        the age decision without a removal.
         """
         own = cls._label_value(own_label) if own_label is not None else None
         mine = f"-{run_id}" if run_id else None
@@ -346,7 +388,20 @@ class _DockerSidecar:
         "never reap your own session" holds even if a skewed daemon clock made
         our own container look old — and holds for every backend the run
         started, not just the one calling this. See `stale_ids`.
+
+        A `min_age_secs` below REAP_MIN_AGE_FLOOR_SECS is refused rather than
+        honoured: at that point the sweep is no longer age-gated in any useful
+        sense and would remove live sessions' containers host-wide. The
+        environment override is floored the same way at import, so this guard
+        only fires on an explicit caller argument.
         """
+        if min_age_secs < REAP_MIN_AGE_FLOOR_SECS:
+            raise ValueError(
+                f"reap_stale refuses min_age_secs={min_age_secs}: below the "
+                f"{REAP_MIN_AGE_FLOOR_SECS}s floor it would remove live "
+                "sessions' containers; use stale_ids() to inspect the "
+                "selection without removing anything"
+            )
         cls._rm(cls.stale_ids(
             min_age_secs=min_age_secs, own_label=own_label, run_id=run_id,
         ))
