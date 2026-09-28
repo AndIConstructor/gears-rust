@@ -435,8 +435,8 @@ impl toolkit_db::outbox::LeasedMessageHandler for UsageEventHandler {
 /// - Plugin resolution error, or an instance registered in types-registry
 ///   whose client is not in `ClientHub` → `Retry` (plugin may not be ready yet)
 ///
-/// Every outcome except "plugin not configured" is counted in
-/// `mini_chat_audit_emit_total{result}`.
+/// Every outcome is counted in `mini_chat_audit_emit_total{result}`; a
+/// "plugin not configured" drop as `result = dropped`.
 pub struct AuditEventHandler {
     pub(crate) audit_gateway: Arc<AuditGateway>,
     pub(crate) metrics: Arc<dyn MiniChatMetricsPort>,

@@ -502,6 +502,47 @@ mod tests {
         assert_eq!(wire(AttachmentKindDto::from_db("bogus")), "document");
     }
 
+    /// Turn status wire shape: optional fields are omitted when unset,
+    /// `updated_at` is RFC 3339.
+    #[test]
+    fn turn_status_response_wire_shape() {
+        let request_id = Uuid::nil();
+        let running = TurnStatusResponse {
+            request_id,
+            state: TurnStatusState::Running,
+            error_code: None,
+            assistant_message_id: None,
+            updated_at: time::macros::datetime!(2026-09-28 12:00:00 UTC),
+        };
+        assert_eq!(
+            serde_json::to_value(&running).unwrap(),
+            serde_json::json!({
+                "request_id": request_id,
+                "state": "running",
+                "updated_at": "2026-09-28T12:00:00Z"
+            })
+        );
+        let failed = TurnStatusResponse {
+            state: TurnStatusState::Error,
+            error_code: Some("provider_error".to_owned()),
+            assistant_message_id: Some(request_id),
+            ..running
+        };
+        let v = serde_json::to_value(&failed).unwrap();
+        assert_eq!(v["state"], "error");
+        assert_eq!(v["error_code"], "provider_error");
+        assert_eq!(v["assistant_message_id"], serde_json::json!(request_id));
+    }
+
+    /// `content` is required in an edit request.
+    #[test]
+    fn edit_turn_request_requires_content() {
+        let ok: EditTurnRequest =
+            serde_json::from_value(serde_json::json!({"content": "x"})).unwrap();
+        assert_eq!(ok.content, "x");
+        assert!(serde_json::from_value::<EditTurnRequest>(serde_json::json!({})).is_err());
+    }
+
     #[test]
     fn entity_enums_map_to_wire_enums() {
         assert_eq!(wire(ReactionKindDto::from(ReactionKind::Like)), "like");

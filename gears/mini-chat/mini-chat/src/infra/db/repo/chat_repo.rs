@@ -69,11 +69,12 @@ impl crate::domain::repos::ChatRepository for ChatRepository {
             .secure()
             .scope_with(scope);
 
+        let query = super::with_id_tiebreaker(query, ("updated_at", SortDir::Desc), SortDir::Desc);
         let page = paginate_odata::<ChatCursorField, ChatODataMapper, _, _, _, _>(
             base_query,
             conn,
-            query,
-            ("updated_at", SortDir::Desc),
+            &query,
+            ("id", SortDir::Desc),
             self.limit_cfg,
             Into::into,
         )

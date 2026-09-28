@@ -1578,3 +1578,35 @@ async fn summary_frontier_excludes_the_finalized_turn() {
         .unwrap();
     assert!(none.is_none());
 }
+
+/// The effective list order always ends with `id`: after the default key
+/// when the client sets no `$orderby`, after the client's keys otherwise. A
+/// cursor keeps its own order.
+#[test]
+fn list_order_always_ends_with_id() {
+    use toolkit_odata::{ODataOrderBy, ODataQuery, OrderKey, SortDir};
+    let fields = |q: &ODataQuery| {
+        q.order
+            .0
+            .iter()
+            .map(|k| {
+                format!(
+                    "{}{}",
+                    if k.dir == SortDir::Desc { "-" } else { "+" },
+                    k.field
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let default = ("updated_at", SortDir::Desc);
+
+    let q = crate::infra::db::repo::with_id_tiebreaker(&ODataQuery::new(), default, SortDir::Desc);
+    assert_eq!(fields(&q), ["-updated_at", "-id"]);
+
+    let by_title = ODataQuery::new().with_order(ODataOrderBy(vec![OrderKey {
+        field: "title".to_owned(),
+        dir: SortDir::Asc,
+    }]));
+    let q = crate::infra::db::repo::with_id_tiebreaker(&by_title, default, SortDir::Desc);
+    assert_eq!(fields(&q), ["+title", "-updated_at", "-id"]);
+}

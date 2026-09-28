@@ -198,11 +198,12 @@ impl crate::domain::repos::MessageRepository for MessageRepository {
             .secure()
             .scope_with(scope);
 
+        let query = super::with_id_tiebreaker(query, ("created_at", SortDir::Asc), SortDir::Asc);
         let page = paginate_odata::<MessageField, MessageODataMapper, _, _, _, _>(
             base_query,
             runner,
-            query,
-            ("created_at", SortDir::Asc),
+            &query,
+            ("id", SortDir::Asc),
             self.limit_cfg,
             std::convert::identity,
         )
