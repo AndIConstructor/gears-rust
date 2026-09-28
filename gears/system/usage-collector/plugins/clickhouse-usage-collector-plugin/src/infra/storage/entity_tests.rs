@@ -116,8 +116,6 @@ fn ch_uuid_json_rejects_malformed() {
 
 #[test]
 fn usage_kind_round_trips_through_code_form() {
-    // `UsageTypeKindCode` is a closed `#[repr(i8)]` enum, so there is no
-    // "rejects unknown" case to test — only the From/Into round-trip.
     for kind in [UsageKind::Counter, UsageKind::Gauge] {
         let code = UsageTypeKindCode::from(kind);
         assert_eq!(UsageKind::from(code), kind);
@@ -132,4 +130,22 @@ fn usage_record_status_round_trips_through_code_form() {
         let code = UsageRecordStatusCode::from(status);
         assert_eq!(UsageRecordStatus::from(code), status);
     }
+}
+
+// The discriminants are the on-disk `Enum8` values in `migrations/0001_init.sql`
+// and must never change; the From/Into round-trips above would still pass if
+// they were swapped, so pin them directly.
+#[test]
+fn enum8_discriminants_are_pinned_to_ddl() {
+    assert_eq!(UsageTypeKindCode::Counter as i8, 1);
+    assert_eq!(UsageTypeKindCode::Gauge as i8, 2);
+    assert_eq!(UsageRecordStatusCode::Active as i8, 1);
+    assert_eq!(UsageRecordStatusCode::Inactive as i8, 2);
+}
+
+#[test]
+fn enum8_codes_reject_unknown_discriminant() {
+    assert!(serde_json::from_str::<UsageTypeKindCode>("3").is_err());
+    assert!(serde_json::from_str::<UsageRecordStatusCode>("3").is_err());
+    assert!(serde_json::from_str::<UsageRecordStatusCode>("0").is_err());
 }

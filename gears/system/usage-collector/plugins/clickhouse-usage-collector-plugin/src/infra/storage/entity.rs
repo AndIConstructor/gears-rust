@@ -232,6 +232,11 @@ impl TryFrom<HashMap<String, String>> for ValidatedMetadata {
 }
 
 /// `Enum8('active' = 1, 'inactive' = 2)` — discriminants match `migrations/0001_init.sql`.
+///
+/// Storage encoding only: the wire form is the lowercase string of
+/// [`UsageRecordStatus`]. Discriminants are permanent — never renumber or
+/// reuse one; a new variant takes the next unused value alongside a migration
+/// extending the `Enum8` (see DESIGN.md §3.7 "`Enum8` value stability").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum UsageRecordStatusCode {
@@ -370,6 +375,11 @@ impl From<(&UsageRecord, u64)> for UsageRecordRow {
 }
 
 /// `Enum8('counter' = 1, 'gauge' = 2)` — discriminants match `migrations/0001_init.sql`.
+///
+/// Storage encoding only: the wire form is the lowercase string of
+/// [`UsageKind`]. Discriminants are permanent — never renumber or reuse one;
+/// a new variant takes the next unused value alongside a migration extending
+/// the `Enum8` (see DESIGN.md §3.7 "`Enum8` value stability").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum UsageTypeKindCode {
