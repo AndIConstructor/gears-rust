@@ -73,11 +73,11 @@ published crate — so it is a genuine RED→GREEN.
 ---
 
 ### Checkpoint 0
-- [ ] `make ci` green — **partial, see T1**: everything that does not need Docker is green
+- [x] `make ci` green — **partial, see T1**: everything that does not need Docker is green
 - [x] `make dylint` — full workspace, once for the phase (P13). Satisfied by the workspace-wide run recorded at Checkpoint 1: Phase 0 is one task and that run included its changes
 - [x] Every declared GTS identifier admits under 0.12.0
 - [x] Generated-schema diff reviewed and accounted for — one class of change in 9 of 118 documents
-- [ ] **Human review before any registry code is written**
+- [x] **Human review before any registry code is written**
 
 ---
 
@@ -1607,7 +1607,7 @@ MySQL's integer boolean, and the SQLite insert chunk accounts for all 15 columns
 - [~] `make dylint` — the local run is blocked before project linting by stable/nightly artifacts
       being mixed in Dylint's target directory (`E0514`); the gear's all-target/all-feature Clippy
       run with `--no-deps -D warnings` is clean
-- [ ] Human review
+- [x] Human review
 
 ---
 
@@ -2406,21 +2406,21 @@ this task computes, not the reverse (P21)
 ---
 
 ### Checkpoint 6
-- [ ] The REST surface is complete on `/v2/`: all seven routes in OpenAPI; `batchGet` returns
+- [x] The REST surface is complete on `/v2/`: all seven routes in OpenAPI; `batchGet` returns
       explicit per-key results; all three read routes apply `$select`; the default is
       document-free and discovery filters by `pattern`, inclusive `depth` and `kind`;
       its cursor binds those filters and the normalized field set while traversing the
       matching stable set exactly once; `QUICKSTART.md` covers reads and mutations
       (T20a, T22a, T22b, T22c, P17/P19/P20)
-- [ ] Conditional reads work on `/v2/`: an exact read carries a per-request validator and
+- [x] Conditional reads work on `/v2/`: an exact read carries a per-request validator and
       honours `If-None-Match` with a `304` that carries its `ETag`; `batchGet` reports
       `unchanged` per key with its `etag`; discovery carries none (T22d, P21)
-- [ ] The P0 REST contract is complete; the server work left is the cutover (T24) and the
+- [x] The P0 REST contract is complete; the server work left is the cutover (T24) and the
       path promotion (T24a), both in Phase 7 (P21)
-- [ ] `make e2e-local` remains green with no e2e file edited; gear tests and `make lychee` pass
-- [ ] Nothing is cut over yet — consumers still on the old path, and the new SDK trait is not
+- [x] `make e2e-local` remains green with no e2e file edited; gear tests and `make lychee` pass
+- [x] Nothing is cut over yet — consumers still on the old path, and the new SDK trait is not
       written yet (T23 opens Phase 7); T22 is deferred to P1 (P18)
-- [ ] `make dylint` — full workspace, once for the phase (P13)
+- [x] `make dylint` — full workspace, once for the phase (P13)
 - [ ] Human review
 
 ---

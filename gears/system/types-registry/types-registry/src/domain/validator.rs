@@ -17,14 +17,6 @@ const VERSION: u8 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Validator([u8; 16]);
 
-/// The decoded wire object: field order and spelling are not part of the identity.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Wire {
-    v: u8,
-    d: String,
-}
-
 impl Validator {
     /// Instances pass no fingerprint: they have no derived form.
     #[must_use]
@@ -51,23 +43,21 @@ impl Validator {
         Self(digest)
     }
 
-    /// base64url of `{"v":1,"d":"<base64url digest>"}`; neither value needs escaping.
+    /// base64url of `version || digest` (DESIGN §3.3).
     #[must_use]
     pub fn encode(self) -> String {
-        let digest = URL_SAFE_NO_PAD.encode(self.0);
-        URL_SAFE_NO_PAD.encode(format!(r#"{{"v":{VERSION},"d":"{digest}"}}"#))
+        URL_SAFE_NO_PAD.encode([&[VERSION], self.0.as_slice()].concat())
     }
 
     /// `None` for anything but a well-formed current-version token, which the
     /// caller then answers with a full result (DESIGN §3.3).
     #[must_use]
     pub fn decode(token: &str) -> Option<Self> {
-        let json = URL_SAFE_NO_PAD.decode(token).ok()?;
-        let wire: Wire = serde_json::from_slice(&json).ok()?;
-        if wire.v != VERSION {
+        let wire = URL_SAFE_NO_PAD.decode(token).ok()?;
+        let (&version, digest) = wire.split_first()?;
+        if version != VERSION {
             return None;
         }
-        let digest = URL_SAFE_NO_PAD.decode(wire.d).ok()?;
         Some(Self(digest.try_into().ok()?))
     }
 }

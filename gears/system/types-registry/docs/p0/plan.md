@@ -353,7 +353,7 @@ does not survive DESIGN §3.3's own input table
 The tenant inputs are not missing in P0; they **do not participate** in a platform-plane read.
 So a P0 validator is fully computable: a versioned digest over `resource_version`,
 `resolution_fingerprint` and a projection marker. DESIGN even fixes the wire form — base64url
-of a versioned JSON object, 128-bit managed digest, ~48 characters.
+of a version byte and a 128-bit managed digest, 23 characters.
 
 The framework is not a blocker either. `OperationBuilder::no_content_response` takes an
 arbitrary status, so `304` is declarable, and `file-storage` already returns

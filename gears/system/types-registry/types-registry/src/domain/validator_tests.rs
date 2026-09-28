@@ -1,6 +1,5 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use serde_json::json;
 
 use super::*;
 
@@ -10,8 +9,16 @@ fn select(names: &[&str]) -> FieldSelection {
     FieldSelection::parse(names).expect("valid selection")
 }
 
-fn token(value: &serde_json::Value) -> String {
-    URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).expect("serializable"))
+/// A managed token laid out by hand: `version || digest`.
+fn token(version: u8, digest: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode([&[version], digest].concat())
+}
+
+fn digest_of(validator: Validator) -> Vec<u8> {
+    let wire = URL_SAFE_NO_PAD
+        .decode(validator.encode())
+        .expect("base64url");
+    wire[1..].to_vec()
 }
 
 #[test]
@@ -68,17 +75,17 @@ fn equal_normalized_selections_give_one_validator() {
 }
 
 #[test]
-fn the_wire_form_is_base64url_of_a_versioned_json_object() {
+fn the_wire_form_is_base64url_of_the_version_byte_and_the_digest() {
     let encoded = Validator::compute(3, Some(FINGERPRINT), FieldSelection::default()).encode();
-    assert_eq!(encoded.len(), 48, "DESIGN §3.3's managed length: {encoded}");
-    let json: serde_json::Value =
-        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&encoded).expect("base64url"))
-            .expect("a JSON object");
-    assert_eq!(json["v"], 1);
-    let digest = URL_SAFE_NO_PAD
-        .decode(json["d"].as_str().expect("digest string"))
-        .expect("base64url digest");
-    assert_eq!(digest.len(), 16, "a 128-bit digest");
+    // Computed outside this crate, so it pins the version byte, its place in the
+    // hash, the digest order and the base64url form rather than echoing `encode`.
+    assert_eq!(encoded, "Aby5xyTYZYPWusA09fVX6Co");
+    let wire = URL_SAFE_NO_PAD.decode(&encoded).expect("base64url");
+    assert_eq!(
+        (wire[0], wire.len()),
+        (1, 17),
+        "a version byte, then a 128-bit digest"
+    );
 }
 
 #[test]
@@ -88,45 +95,30 @@ fn a_token_decodes_back_to_its_validator() {
 }
 
 #[test]
-fn decoding_compares_fields_not_the_encoded_spelling() {
-    let validator = Validator::compute(3, Some(FINGERPRINT), FieldSelection::default());
-    let wire: serde_json::Value = serde_json::from_slice(
-        &URL_SAFE_NO_PAD
-            .decode(validator.encode())
-            .expect("base64url"),
-    )
-    .expect("json");
-    let respelled = token(&json!({ "d": wire["d"], "v": 1 }));
-    assert_ne!(respelled, validator.encode());
-    assert_eq!(Validator::decode(&respelled), Some(validator));
-}
-
-#[test]
 fn an_unknown_version_is_not_a_match() {
     let validator = Validator::compute(3, Some(FINGERPRINT), FieldSelection::default());
-    let wire: serde_json::Value = serde_json::from_slice(
-        &URL_SAFE_NO_PAD
-            .decode(validator.encode())
-            .expect("base64url"),
-    )
-    .expect("json");
-    assert_eq!(
-        Validator::decode(&token(&json!({ "v": 2, "d": wire["d"] }))),
-        None
-    );
+    assert_eq!(Validator::decode(&token(2, &digest_of(validator))), None);
 }
 
 #[test]
 fn a_malformed_token_is_not_a_match() {
-    let short = URL_SAFE_NO_PAD.encode([0_u8; 8]);
     for bad in [
         String::new(),
         "not base64!".to_owned(),
-        URL_SAFE_NO_PAD.encode(b"not json"),
-        token(&json!({ "v": 1, "d": short })),
-        token(&json!({ "v": 1, "d": URL_SAFE_NO_PAD.encode([0_u8; 16]), "x": 0 })),
-        token(&json!([1, "d"])),
+        URL_SAFE_NO_PAD.encode([1_u8]),
+        token(1, &[0; 8]),
+        token(1, &[0; 17]),
     ] {
         assert_eq!(Validator::decode(&bad), None, "{bad:?}");
     }
+}
+
+/// The JSON envelope this form replaced: a client still holding one gets a full
+/// result rather than a match or an error.
+#[test]
+fn a_json_envelope_token_is_not_a_match() {
+    let validator = Validator::compute(3, Some(FINGERPRINT), FieldSelection::default());
+    let digest = URL_SAFE_NO_PAD.encode(digest_of(validator));
+    let json = URL_SAFE_NO_PAD.encode(format!(r#"{{"v":1,"d":"{digest}"}}"#));
+    assert_eq!(Validator::decode(&json), None);
 }
