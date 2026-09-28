@@ -18,9 +18,10 @@ use std::time::Instant;
 
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::{InstrumentationScope, KeyValue, global};
+use tokio_util::sync::CancellationToken;
 
 /// `OpenTelemetry` instrumentation scope (meter name) for every plugin series.
-const SCOPE_NAME: &str = "uc.clickhouse";
+pub(crate) const SCOPE_NAME: &str = "uc.clickhouse";
 
 /// Seconds-valued duration histogram bucket boundaries for backend operations.
 /// Brackets the §1.2 p95 budgets with finer low-end resolution so client-side
@@ -178,13 +179,23 @@ pub struct Metrics {
     usage_type_catalog_size: Gauge<u64>,
     /// `uc_clickhouse_ready` — 1 = healthy, 0 = degraded.
     ///
-    /// Set to 0 at the start of `init()`, to 1 once the full init sequence has
-    /// succeeded, and back to 0 when the gear's cancellation token fires, so a
-    /// missing series (never started) is distinguishable from a published 0
-    /// (starting up, failed to start, or shut down). MUST NOT be re-armed to 1
-    /// by the drain-time catalog-size refresh worker after the cancellation
-    /// token fires.
+    /// Lifecycle: 0 at the start of `init()`; 1 once the full init sequence
+    /// has succeeded; 0 via [`Metrics::clear_ready`] when a request-path call
+    /// hits a connectivity-class `ClickHouse` error or the client-side
+    /// deadline expires; 1 again via [`Metrics::rearm_ready`] on the next
+    /// successful round-trip; and 0 for good once the gear's cancellation
+    /// token fires (the shutdown watcher records it and `rearm_ready` becomes
+    /// a no-op). A missing series (never started) is therefore
+    /// distinguishable from a published 0 (starting up, failed to start,
+    /// backend unreachable, or shut down). The catalog-size refresh worker
+    /// never touches it.
     ready: Gauge<u64>,
+    /// Gear shutdown token; gates [`Metrics::rearm_ready`] so the request path
+    /// cannot flip `uc_clickhouse_ready` back to 1 once the shutdown watcher
+    /// owns the gauge. [`Metrics::with_meter`] / [`Metrics::new`] install a
+    /// fresh token that never fires; production wiring swaps in the gear's
+    /// token via [`Metrics::with_shutdown`].
+    shutdown: CancellationToken,
     // Intentionally omitted instruments (each has a reason):
     //
     // - No `uc_clickhouse_dedup_stale_total`: `ClickHouse` has no server-side
@@ -324,7 +335,20 @@ impl Metrics {
             orphaned_reference_detected,
             usage_type_catalog_size,
             ready,
+            shutdown: CancellationToken::new(),
         }
+    }
+
+    /// Bind the gear's cancellation token so [`Metrics::rearm_ready`] stops
+    /// re-arming `uc_clickhouse_ready` once shutdown begins.
+    ///
+    /// Production wiring calls this once in `Gear::init` with the gear token.
+    /// Tests that do not exercise shutdown keep the default never-firing
+    /// token installed by [`Metrics::with_meter`].
+    #[must_use]
+    pub fn with_shutdown(mut self, shutdown: CancellationToken) -> Self {
+        self.shutdown = shutdown;
+        self
     }
 
     // --- Histogram recording helpers ---
@@ -412,11 +436,33 @@ impl Metrics {
 
     /// Set the plugin-local readiness gauge (1 when ready, else 0).
     ///
-    /// Called with `false` at the start of `init()`, with `true` after a
-    /// successful `init()`, and with `false` again by the shutdown watcher.
-    /// Must NOT be called with `true` after the cancellation token fires.
+    /// The lifecycle entry points: `false` at the start of `init()`, `true`
+    /// after a successful `init()`, and `false` again from the shutdown
+    /// watcher. Must NOT be called with `true` after the cancellation token
+    /// fires — the request path goes through [`Metrics::rearm_ready`], which
+    /// enforces that, rather than calling this directly.
     pub(crate) fn set_ready(&self, ready: bool) {
         self.ready.record(u64::from(ready), &[]);
+    }
+
+    /// Re-arm `uc_clickhouse_ready` to 1 after a successful backend
+    /// round-trip, unless the shutdown token has fired.
+    ///
+    /// Once `cancel` fires the shutdown watcher owns the gauge, so a
+    /// drain-time success must not flip it back to 1. The check-then-set
+    /// window against the watcher is a sub-tick blip on a best-effort gauge
+    /// during one-way shutdown — accepted rather than serialized, as in the
+    /// reference plugin.
+    pub(crate) fn rearm_ready(&self) {
+        if !self.shutdown.is_cancelled() {
+            self.set_ready(true);
+        }
+    }
+
+    /// Clear `uc_clickhouse_ready` to 0 on a connectivity-class backend
+    /// error or client-side deadline expiry on the request path.
+    pub(crate) fn clear_ready(&self) {
+        self.set_ready(false);
     }
 }
 
@@ -474,4 +520,4 @@ impl Drop for OpDurationGuard {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "metrics_tests.rs"]
-mod metrics_tests;
+pub(crate) mod metrics_tests;

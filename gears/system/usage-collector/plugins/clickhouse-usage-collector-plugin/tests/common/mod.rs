@@ -194,6 +194,17 @@ pub fn record_store_over(_h: &ChHarness, client: clickhouse::Client) -> ChRecord
     ChRecordStore::new(client, metrics(), TEST_REQUEST_TIMEOUT, true)
 }
 
+/// Same as [`record_store_over`], but sharing a caller-supplied metric
+/// inventory, so a test can assert what the store did to a gauge (e.g.
+/// `uc_clickhouse_ready`) across several stores over one series.
+#[must_use]
+pub fn record_store_with_metrics(
+    client: clickhouse::Client,
+    metrics: Arc<Metrics>,
+) -> ChRecordStore {
+    ChRecordStore::new(client, metrics, TEST_REQUEST_TIMEOUT, true)
+}
+
 /// Same as [`record_store`], but with `async_insert = false`.
 ///
 /// On the shipped non-replicated `ReplacingMergeTree`, `ClickHouse` enforces

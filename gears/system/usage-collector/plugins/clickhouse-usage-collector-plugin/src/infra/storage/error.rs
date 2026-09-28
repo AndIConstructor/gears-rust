@@ -8,7 +8,10 @@
 //! - `is_connectivity_error` matches on the [`clickhouse::error::Error`]
 //!   *variant* (`Network`, `TimedOut`, `Compression`, `Decompression`). This is
 //!   the "the backend is unreachable" signal, and it alone drives the
-//!   readiness gauge (see [`acquire_error_clears_readiness`]).
+//!   `uc_clickhouse_ready` gauge: [`tracked_ch_err`] clears it on those
+//!   variants (see `error_clears_readiness`), and [`with_deadline`] re-arms it
+//!   on a successful round-trip and clears it when the client-side deadline
+//!   expires.
 //! - `is_retryable` additionally accepts a fixed allowlist of server-reported
 //!   `ClickHouse` error codes carried in a `BadResponse` body (see
 //!   `RETRYABLE_CH_CODES`). Those are overload, backpressure, and
@@ -150,6 +153,12 @@ pub fn map_ch_err(err: &ChError) -> UsageCollectorPluginError {
 /// Single definition shared by every store so the transient/internal split
 /// used for the metric label can never drift from the one [`map_ch_err`]
 /// applies to the returned error.
+///
+/// Also clears `uc_clickhouse_ready` when the error is connectivity-class
+/// (see [`error_clears_readiness`]): this is the one place every store's
+/// error path funnels through, so the readiness signal cannot be missed by
+/// a call site that maps its error directly rather than via
+/// [`with_deadline`].
 #[must_use]
 pub fn tracked_ch_err(metrics: &Metrics, err: &ChError) -> UsageCollectorPluginError {
     let class = if is_retryable(err) {
@@ -158,6 +167,9 @@ pub fn tracked_ch_err(metrics: &Metrics, err: &ChError) -> UsageCollectorPluginE
         ErrorClass::Internal
     };
     metrics.inc_backend_error(class);
+    if error_clears_readiness(err) {
+        metrics.clear_ready();
+    }
     map_ch_err(err)
 }
 
@@ -180,7 +192,12 @@ pub fn tracked_ch_err(metrics: &Metrics, err: &ChError) -> UsageCollectorPluginE
 ///
 /// An expired deadline is counted as [`ErrorClass::Transient`] — the same class
 /// [`ChError::TimedOut`] gets — so the backend-error counter cannot disagree
-/// with the returned error's class.
+/// with the returned error's class. For the same reason an expired deadline
+/// clears `uc_clickhouse_ready`, exactly as `TimedOut` does: both mean "no
+/// answer within budget", and the gauge must not tell them apart when the
+/// counter does not. A completed future re-arms the gauge (unless the gear
+/// is shutting down — see [`Metrics::rearm_ready`]), so a single slow request
+/// is a blip that the next success clears.
 ///
 /// # Errors
 ///
@@ -192,10 +209,14 @@ pub async fn with_deadline<T>(
     fut: impl Future<Output = Result<T, ChError>>,
 ) -> Result<T, UsageCollectorPluginError> {
     match tokio::time::timeout(deadline, fut).await {
-        Ok(Ok(value)) => Ok(value),
+        Ok(Ok(value)) => {
+            metrics.rearm_ready();
+            Ok(value)
+        }
         Ok(Err(err)) => Err(tracked_ch_err(metrics, &err)),
         Err(_elapsed) => {
             metrics.inc_backend_error(ErrorClass::Transient);
+            metrics.clear_ready();
             tracing::warn!(
                 deadline_secs = deadline.as_secs(),
                 "ClickHouse request exceeded the client-side deadline"
@@ -207,19 +228,21 @@ pub async fn with_deadline<T>(
     }
 }
 
-/// Whether a `ClickHouse` client error on the acquire path should clear the
-/// readiness gauge.
+/// Whether a `ClickHouse` client error should clear the `uc_clickhouse_ready`
+/// gauge. Consulted by [`tracked_ch_err`] on every mapped error.
 ///
-/// Mirrors the reference plugin's `acquire_error_clears_readiness`: only
-/// connectivity-class errors represent a genuine outage; protocol or decode
-/// errors on the happy path are non-outage Internal errors.
+/// The counterpart of the reference plugin's `acquire_error_clears_readiness`
+/// — there is no pool-acquire step over HTTP, so the decision is taken on the
+/// request itself: only connectivity-class errors represent a genuine
+/// outage; protocol or decode errors on the happy path are non-outage
+/// Internal errors.
 ///
 /// Deliberately consults `is_connectivity_error` and **not** `is_retryable`.
 /// A server-reported overload code (`TOO_MANY_PARTS`, say) is retryable but
 /// proves the opposite of an outage — the backend answered. Clearing readiness
 /// on it would report the backend as down every time it pushed back.
 #[must_use]
-pub fn acquire_error_clears_readiness(err: &ChError) -> bool {
+fn error_clears_readiness(err: &ChError) -> bool {
     is_connectivity_error(err)
 }
 

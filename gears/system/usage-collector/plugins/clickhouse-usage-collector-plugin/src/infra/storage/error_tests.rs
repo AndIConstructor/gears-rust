@@ -3,8 +3,12 @@ use std::time::Duration;
 use clickhouse::error::Error as ChError;
 use usage_collector_sdk::UsageCollectorPluginError;
 
-use super::{acquire_error_clears_readiness, map_ch_err, with_deadline};
-use crate::infra::metrics::Metrics;
+use opentelemetry::metrics::MeterProvider as _;
+use tokio_util::sync::CancellationToken;
+
+use super::{error_clears_readiness, map_ch_err, tracked_ch_err, with_deadline};
+use crate::infra::metrics::metrics_tests::{gauge_last_u64, local_provider};
+use crate::infra::metrics::{Metrics, SCOPE_NAME};
 
 /// Assert `text` in a `BadResponse` body is classified as retryable.
 #[track_caller]
@@ -142,17 +146,17 @@ fn non_retryable_http_status_fallback_maps_to_internal() {
 #[test]
 fn network_error_clears_readiness() {
     let err = ChError::Network(Box::new(std::io::Error::other("refused")));
-    assert!(acquire_error_clears_readiness(&err));
+    assert!(error_clears_readiness(&err));
 }
 
 #[test]
 fn timed_out_clears_readiness() {
-    assert!(acquire_error_clears_readiness(&ChError::TimedOut));
+    assert!(error_clears_readiness(&ChError::TimedOut));
 }
 
 #[test]
 fn bad_response_does_not_clear_readiness() {
-    assert!(!acquire_error_clears_readiness(&ChError::BadResponse(
+    assert!(!error_clears_readiness(&ChError::BadResponse(
         "oops".to_owned()
     )));
 }
@@ -171,7 +175,7 @@ fn a_retryable_server_code_is_transient_yet_not_an_outage() {
         "backpressure is retryable"
     );
     assert!(
-        !acquire_error_clears_readiness(&err),
+        !error_clears_readiness(&err),
         "but the backend answered, so readiness must stay set"
     );
 }
@@ -210,5 +214,135 @@ async fn with_deadline_maps_an_expired_deadline_to_transient() {
     assert!(
         matches!(err, UsageCollectorPluginError::Transient { .. }),
         "a timed-out request is retryable, got {err:?}"
+    );
+}
+
+/// Build a `Metrics` over a local in-memory provider and pre-set the readiness
+/// gauge, so a test can assert what the request path did to it.
+fn metrics_with_ready(
+    ready: bool,
+) -> (
+    opentelemetry_sdk::metrics::SdkMeterProvider,
+    opentelemetry_sdk::metrics::InMemoryMetricExporter,
+    Metrics,
+) {
+    let (provider, exporter) = local_provider();
+    let metrics = Metrics::with_meter(&provider.meter(SCOPE_NAME));
+    metrics.set_ready(ready);
+    (provider, exporter, metrics)
+}
+
+/// Read the last recorded `uc_clickhouse_ready` value.
+fn ready_gauge(
+    provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    exporter: &opentelemetry_sdk::metrics::InMemoryMetricExporter,
+) -> Option<u64> {
+    provider.force_flush().expect("flush in-memory metrics");
+    gauge_last_u64(exporter, "uc_clickhouse_ready")
+}
+
+/// A refused connection surfacing through `with_deadline` is a live outage:
+/// the readiness gauge must drop to 0, not merely bump the error counter.
+#[tokio::test]
+async fn with_deadline_clears_readiness_on_a_connectivity_error() {
+    let (provider, exporter, metrics) = metrics_with_ready(true);
+    let err = with_deadline(&metrics, Duration::from_secs(30), async {
+        Err::<(), _>(ChError::Network(Box::new(std::io::Error::other(
+            "connection refused",
+        ))))
+    })
+    .await
+    .expect_err("the inner failure must surface");
+    assert!(matches!(err, UsageCollectorPluginError::Transient { .. }));
+    assert_eq!(
+        ready_gauge(&provider, &exporter),
+        Some(0),
+        "a connectivity-class error must clear the readiness gauge"
+    );
+}
+
+/// The direct `tracked_ch_err` path (used by the insert `write`/`end` sites
+/// that do not go through `with_deadline`) clears readiness the same way.
+#[tokio::test]
+async fn tracked_ch_err_clears_readiness_on_a_connectivity_error() {
+    let (provider, exporter, metrics) = metrics_with_ready(true);
+    let err = tracked_ch_err(&metrics, &ChError::TimedOut);
+    assert!(matches!(err, UsageCollectorPluginError::Transient { .. }));
+    assert_eq!(ready_gauge(&provider, &exporter), Some(0));
+}
+
+/// Server-side backpressure is retryable but the backend answered, so the
+/// gauge must stay at 1 — otherwise every overload pushback would page as an
+/// outage.
+#[tokio::test]
+async fn with_deadline_leaves_readiness_set_on_a_server_answer() {
+    let (provider, exporter, metrics) = metrics_with_ready(true);
+    let err = with_deadline(&metrics, Duration::from_secs(30), async {
+        Err::<(), _>(ChError::BadResponse(
+            "Code: 252. DB::Exception: Too many parts".to_owned(),
+        ))
+    })
+    .await
+    .expect_err("the inner failure must surface");
+    assert!(matches!(err, UsageCollectorPluginError::Transient { .. }));
+    assert_eq!(
+        ready_gauge(&provider, &exporter),
+        Some(1),
+        "a server-reported overload code must not clear the readiness gauge"
+    );
+}
+
+/// The gauge recovers without a restart: the next successful round-trip after
+/// an outage re-arms it.
+#[tokio::test]
+async fn with_deadline_rearms_readiness_on_success() {
+    let (provider, exporter, metrics) = metrics_with_ready(false);
+    let value = with_deadline(&metrics, Duration::from_secs(30), async { Ok(7_u32) })
+        .await
+        .expect("a future that resolves in time must pass through");
+    assert_eq!(value, 7);
+    assert_eq!(
+        ready_gauge(&provider, &exporter),
+        Some(1),
+        "a successful round-trip must re-arm the readiness gauge"
+    );
+}
+
+/// Once the gear's cancellation token has fired the shutdown watcher owns the
+/// gauge; a drain-time success must not report the drained replica as ready.
+#[tokio::test]
+async fn with_deadline_does_not_rearm_readiness_after_shutdown() {
+    let (provider, exporter) = local_provider();
+    let shutdown = CancellationToken::new();
+    let metrics = Metrics::with_meter(&provider.meter(SCOPE_NAME)).with_shutdown(shutdown.clone());
+    shutdown.cancel();
+    metrics.set_ready(false);
+
+    let value = with_deadline(&metrics, Duration::from_secs(30), async { Ok(1_u32) })
+        .await
+        .expect("a future that resolves in time must pass through");
+    assert_eq!(value, 1);
+    assert_eq!(
+        ready_gauge(&provider, &exporter),
+        Some(0),
+        "no re-arm once the shutdown token has fired"
+    );
+}
+
+/// A client-side deadline expiry is classified exactly like `TimedOut` for the
+/// error counter, so it must clear the readiness gauge the same way.
+#[tokio::test]
+async fn with_deadline_clears_readiness_when_the_deadline_expires() {
+    let (provider, exporter, metrics) = metrics_with_ready(true);
+    let err = with_deadline(&metrics, Duration::from_millis(20), async {
+        std::future::pending::<Result<(), ChError>>().await
+    })
+    .await
+    .expect_err("an unbounded future must be cut off at the deadline");
+    assert!(matches!(err, UsageCollectorPluginError::Transient { .. }));
+    assert_eq!(
+        ready_gauge(&provider, &exporter),
+        Some(0),
+        "an expired client-side deadline must clear the readiness gauge"
     );
 }

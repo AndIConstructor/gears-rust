@@ -80,8 +80,9 @@ Backend Observability codifies the metric contract for this plugin: the instrume
 **Steps**:
 
 1. [ ] - `p3` - At `init` entry, after config validation and before any startup I/O: record `uc_clickhouse_ready = 0`, so a plugin whose `init` never completes is distinguishable from a gear that never started at all (no series) - `inst-ch-obs-ready-1`
-2. [ ] - `p3` - After successful schema provisioning and registration: set `uc_clickhouse_ready` gauge to `1`, exactly once, at the end of `init` - `inst-ch-obs-ready-2`
+2. [ ] - `p3` - After successful schema provisioning and registration: set `uc_clickhouse_ready` gauge to `1` at the end of `init` - `inst-ch-obs-ready-2`
 3. [ ] - `p3` - On shutdown: a watcher task spawned after the `1` is recorded awaits the gear cancellation token and records `0`, so a drained replica does not report ready forever; a failed `init` (which reports `uc_clickhouse_migration_failures_total` and aborts registration) leaves the gauge at the startup `0`, and the catalog-size refresh worker must never re-arm it to `1` - `inst-ch-obs-ready-3`
+4. [ ] - `p3` - On the request path: a connectivity-class `ClickHouse` error (`Network`, `TimedOut`, `Compression`, `Decompression`) or a client-side deadline expiry records `0`; the next successful round-trip records `1` again unless the cancellation token has fired. A server-reported retryable code (overload/backpressure) never clears it — the backend answered - `inst-ch-obs-ready-4`
 
 ### Metric Recording on Request Path
 
@@ -136,7 +137,7 @@ There is **no** `uc_clickhouse_dedup_outcomes_total` and no `outcome` label: the
 
 | Instrument | Kind | Labels | Description |
 | --- | --- | --- | --- |
-| `uc_clickhouse_ready` | Gauge | — | `0` recorded at `init` entry, `1` once after successful registration, back to `0` when the gear cancellation token fires (see [§4](#4-states-cdsl)). |
+| `uc_clickhouse_ready` | Gauge | — | `0` recorded at `init` entry, `1` after successful registration, `0` on a connectivity-class request-path error or client-side deadline expiry, `1` again on the next successful round-trip, and `0` once the gear cancellation token fires — never `1` afterwards (see [§4](#4-states-cdsl)). |
 | `uc_clickhouse_backend_errors_total` | Counter | `error_category: transient \| internal` | `ClickHouse`/backend errors by the SPI transient-vs-internal classification only. |
 | `uc_clickhouse_migration_failures_total` | Counter | — | Schema-migration failures at plugin startup (the signal that pairs with a readiness gauge stuck at `0`). |
 | `uc_clickhouse_usage_type_referenced_total` | Counter | — | `delete_usage_type` calls refused because the pre-delete probe found referencing rows (the 409 path). |
@@ -176,9 +177,10 @@ Why the worker is still safe to defer: the two ways an orphan can arise are both
 | --- | --- | --- |
 | Not started | _(no series)_ | The gear never reached `init`; no series exists at all. |
 | Initializing | `0` | Recorded at `init` entry, before any startup I/O, so a stuck `init` is distinguishable from a process that never started. |
-| Ready | `1` | `init` complete; backend is registered and serving SPI calls. Recorded exactly once. |
+| Ready | `1` | `init` complete; backend is registered and serving SPI calls. Recorded at the end of `init` and again by every successful round-trip while not shutting down. |
 | Failed `init` | `0` (unchanged) | Provisioning or registration failed; the gauge stays at the startup `0` and `uc_clickhouse_migration_failures_total` carries the failure signal. |
-| Shutting down | `0` | A watcher task spawned at the end of `init` awaits the gear cancellation token and records `0`, so a drained replica stops reporting ready; the catalog-size refresh worker **MUST NOT** re-arm it to `1` afterwards. |
+| Backend unreachable | `0` | A connectivity-class error or client-side deadline expiry on the request path; recovers to Ready on the next successful round-trip. A server-reported overload code (e.g. `252` `TOO_MANY_PARTS`) does not enter this state — the backend answered. |
+| Shutting down | `0` | A watcher task spawned at the end of `init` awaits the gear cancellation token and records `0`, so a drained replica stops reporting ready; neither the catalog-size refresh worker nor the request path re-arms it to `1` afterwards. |
 
 ## 5. Definitions of Done
 
@@ -206,7 +208,7 @@ The system **MUST** implement `uc_clickhouse_query_duration_seconds` (Histogram,
 
 - [x] `p3` - **ID**: `cpt-cf-uc-ch-plugin-dod-observability-gauges`
 
-The system **MUST** implement `uc_clickhouse_ready` (Gauge, recorded `0` at `init` entry, `1` exactly once after a successful `init()`, and `0` again when the cancellation token fires — see [§4](#4-states-cdsl)), `uc_clickhouse_backend_errors_total` (Counter, label `error_category` with the two values `transient` / `internal`), `uc_clickhouse_migration_failures_total` (Counter, incremented when startup schema provisioning fails), `uc_clickhouse_usage_type_catalog_size` (Gauge, updated by the background catalog-size refresh worker in `ChCatalogStore`, and **not** monotone since `delete_usage_type` removes rows), `uc_clickhouse_usage_type_referenced_total` (Counter, incremented when a delete is refused for a referenced type), and `uc_clickhouse_orphaned_reference_detected_total` (Counter, incremented when a delete's post-delete sweep finds orphans).
+The system **MUST** implement `uc_clickhouse_ready` (Gauge, recorded `0` at `init` entry, `1` after a successful `init()`, `0` on a connectivity-class request-path error or client-side deadline expiry, `1` again on the next successful round-trip before shutdown, and `0` for good when the cancellation token fires — see [§4](#4-states-cdsl)), `uc_clickhouse_backend_errors_total` (Counter, label `error_category` with the two values `transient` / `internal`), `uc_clickhouse_migration_failures_total` (Counter, incremented when startup schema provisioning fails), `uc_clickhouse_usage_type_catalog_size` (Gauge, updated by the background catalog-size refresh worker in `ChCatalogStore`, and **not** monotone since `delete_usage_type` removes rows), `uc_clickhouse_usage_type_referenced_total` (Counter, incremented when a delete is refused for a referenced type), and `uc_clickhouse_orphaned_reference_detected_total` (Counter, incremented when a delete's post-delete sweep finds orphans).
 
 **Implements**: `cpt-cf-uc-ch-plugin-algo-observability-inventory` (health/catalog instruments), `cpt-cf-uc-ch-plugin-flow-observability-readiness`
 
@@ -229,7 +231,7 @@ The system **MUST** implement `uc_clickhouse_orphaned_reference_detected_total` 
 - [x] All `uc_clickhouse_*` instruments (except the explicitly deferred orphan counter) are registered and recorded at the appropriate call sites in Features 1–5.
 - [x] No `tenant_id`, `gts_id`, record `id`, or any other unbounded caller-supplied string is used as a metric label.
 - [x] All histograms declare explicit bucket boundaries.
-- [x] `uc_clickhouse_ready` is `0` from `init` entry, `1` exactly once after successful registration, and `0` again once the cancellation token fires; it is never re-armed to `1` by the catalog-size refresh worker.
+- [x] `uc_clickhouse_ready` is `0` from `init` entry, `1` after successful registration, `0` on a connectivity-class request-path error or client-side deadline expiry, `1` again on the next successful round-trip before shutdown, and `0` once the cancellation token fires; it is never re-armed to `1` afterwards, and never by the catalog-size refresh worker.
 - [x] `uc_clickhouse_dedup_absorbed_total`, `uc_clickhouse_idempotency_conflicts_total`, and `uc_clickhouse_compensations_total` are incremented for their respective outcomes on both the single and batch insert paths.
 - [x] `uc_clickhouse_usage_type_referenced_total` and `uc_clickhouse_orphaned_reference_detected_total` are registered, and `delete_usage_type` increments them on the refused-delete and swept-orphan paths respectively.
 - [ ] **Reconciliation worker deferred, not asserted**: `uc_clickhouse_orphaned_reference_detected_total` is registered and asserted per the criterion above; its periodic background reconciliation worker is not implemented, so no acceptance test asserts the worker's existence or behavior (see the DoD note in [§5](#5-definitions-of-done)).

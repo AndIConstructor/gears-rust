@@ -11,7 +11,7 @@ use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMete
 /// process-global) provider so the recording assertions are parallel-safe:
 /// [`Metrics::with_meter`] takes the meter explicitly, so tests never mutate
 /// `opentelemetry::global` state.
-fn local_provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
+pub fn local_provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
     let exporter = InMemoryMetricExporter::default();
     let provider = SdkMeterProvider::builder()
         .with_reader(PeriodicReader::builder(exporter.clone()).build())
@@ -71,7 +71,7 @@ fn counter_sum_with_label(
 }
 
 /// Last value of the `u64` Gauge named `name`, if recorded.
-fn gauge_last_u64(exporter: &InMemoryMetricExporter, name: &str) -> Option<u64> {
+pub fn gauge_last_u64(exporter: &InMemoryMetricExporter, name: &str) -> Option<u64> {
     let metrics = exporter.get_finished_metrics().unwrap();
     for resource_metrics in &metrics {
         for scope_metrics in resource_metrics.scope_metrics() {
@@ -236,4 +236,44 @@ fn default_builds_the_same_inventory_as_new() {
     // instrument is registered, not left uninitialised.
     from_default.inc_query_request(QueryKind::Raw);
     from_default.set_catalog_size(3);
+}
+
+/// The request path re-arms readiness through [`Metrics::rearm_ready`], which
+/// must become a no-op once the gear's cancellation token fires: from then on
+/// the shutdown watcher owns the gauge and a drain-time success must not
+/// report a drained replica as ready again.
+#[tokio::test]
+async fn rearm_ready_is_a_no_op_once_the_shutdown_token_fires() {
+    let (provider, exporter) = local_provider();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let metrics =
+        Metrics::with_meter(&provider.meter(super::SCOPE_NAME)).with_shutdown(shutdown.clone());
+
+    // Before shutdown a re-arm records 1.
+    metrics.set_ready(false);
+    metrics.rearm_ready();
+    provider.force_flush().unwrap();
+    assert_eq!(gauge_last_u64(&exporter, "uc_clickhouse_ready"), Some(1));
+
+    // After shutdown the watcher's 0 sticks through a re-arm attempt. The
+    // exporter keeps every flushed export, so drop the first one before
+    // reading the second.
+    shutdown.cancel();
+    metrics.set_ready(false);
+    metrics.rearm_ready();
+    exporter.reset();
+    provider.force_flush().unwrap();
+    assert_eq!(gauge_last_u64(&exporter, "uc_clickhouse_ready"), Some(0));
+}
+
+/// [`Metrics::clear_ready`] records 0 regardless of shutdown state.
+#[tokio::test]
+async fn clear_ready_records_zero() {
+    let (provider, exporter) = local_provider();
+    let metrics = Metrics::with_meter(&provider.meter(super::SCOPE_NAME));
+
+    metrics.set_ready(true);
+    metrics.clear_ready();
+    provider.force_flush().unwrap();
+    assert_eq!(gauge_last_u64(&exporter, "uc_clickhouse_ready"), Some(0));
 }

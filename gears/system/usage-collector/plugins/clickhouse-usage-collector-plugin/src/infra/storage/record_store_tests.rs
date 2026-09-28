@@ -1867,3 +1867,42 @@ async fn an_ungrouped_aggregate_assembles_its_query_and_reaches_the_backend() {
         "an ungrouped aggregate must fail at the backend, not while building: {err:?}"
     );
 }
+
+/// Mirrors the reference plugin's `acquire_failure_clears_ready_gauge`: a
+/// real `ChError::Network` from a refused connection, flowing through the
+/// production `get` path, must clear `uc_clickhouse_ready` to 0. No Docker —
+/// port 1 is reserved and never bound.
+#[tokio::test]
+async fn get_against_an_unreachable_backend_clears_readiness() {
+    use opentelemetry::metrics::MeterProvider as _;
+
+    use crate::infra::metrics::SCOPE_NAME;
+    use crate::infra::metrics::metrics_tests::{gauge_last_u64, local_provider};
+
+    let (provider, exporter) = local_provider();
+    let metrics = Arc::new(Metrics::with_meter(&provider.meter(SCOPE_NAME)));
+    metrics.set_ready(true);
+
+    let store = ChRecordStore::new(
+        clickhouse::Client::default().with_url("http://127.0.0.1:1"),
+        Arc::clone(&metrics),
+        std::time::Duration::from_secs(5),
+        true,
+    );
+
+    let err = store
+        .get(Uuid::from_u128(0xdead))
+        .await
+        .expect_err("a get against a dead port must fail");
+    assert!(
+        matches!(err, UsageCollectorPluginError::Transient { .. }),
+        "a refused connection is retryable, got {err:?}"
+    );
+
+    provider.force_flush().expect("flush in-memory metrics");
+    assert_eq!(
+        gauge_last_u64(&exporter, "uc_clickhouse_ready"),
+        Some(0),
+        "a connection failure on the request path must clear the readiness gauge"
+    );
+}

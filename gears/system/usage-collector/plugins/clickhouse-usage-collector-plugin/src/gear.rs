@@ -42,7 +42,10 @@ impl Gear for ClickHouseUsageCollectorPlugin {
         })?;
 
         // Build the metric inventory once; shared via Arc across all stores.
-        let metrics = Arc::new(Metrics::new());
+        // The gear token is bound so the request path stops re-arming the
+        // readiness gauge once shutdown begins (`Metrics::rearm_ready`).
+        let cancel = ctx.cancellation_token().clone();
+        let metrics = Arc::new(Metrics::new().with_shutdown(cancel.clone()));
 
         // Publish readiness as 0 before any startup I/O so an init that never
         // completes is distinguishable from a gear that never started at all
@@ -57,7 +60,6 @@ impl Gear for ClickHouseUsageCollectorPlugin {
         // inside the raced block so it still fires on a provisioning error; a
         // cancellation drops the future and is not counted as a failure. The
         // block yields the `client` it built.
-        let cancel = ctx.cancellation_token().clone();
         let client_deadline = cfg.client_deadline();
         let client = tokio::select! {
             biased;
@@ -139,13 +141,25 @@ impl Gear for ClickHouseUsageCollectorPlugin {
                 service,
             );
 
-        // Signal plugin-local readiness after a successful init; the background
-        // catalog-size refresh worker MUST NOT re-arm this to 1. The Gear trait
-        // exposes no shutdown hook, so the cancellation token is the only
-        // shutdown signal: a detached watcher clears the gauge instead of
-        // leaving it stuck at 1 for a drained replica. Spawned after
-        // `set_ready(true)` so a cancellation that already fired is still
-        // observed — `cancelled()` resolves immediately on a cancelled token.
+        // Signal plugin-local readiness after a successful init. From here on
+        // the request path owns the gauge's live value: `tracked_ch_err`
+        // clears it on a connectivity-class error and `with_deadline` re-arms
+        // it on the next successful round-trip (`Metrics::clear_ready` /
+        // `Metrics::rearm_ready`); the background catalog-size refresh worker
+        // never touches it. The Gear trait exposes no shutdown hook, so the
+        // cancellation token is the only shutdown signal: a detached watcher
+        // clears the gauge instead of leaving it stuck at 1 for a drained
+        // replica, and `rearm_ready` is a no-op once the token has fired.
+        // Spawned after `set_ready(true)` so a cancellation that already fired
+        // is still observed — `cancelled()` resolves immediately on a
+        // cancelled token.
+        //
+        // The watcher deliberately does not `remove_scoped` the ClientHub
+        // registration: the gear token is a child of the process root token
+        // and only fires at process shutdown, ClientHub is process-local
+        // memory that dies with it, and pulling the entry mid-drain would fail
+        // in-flight requests the drain exists to finish. The reference plugin
+        // behaves the same way.
         metrics.set_ready(true);
         let ready_metrics = Arc::clone(&metrics);
         tokio::spawn(async move {

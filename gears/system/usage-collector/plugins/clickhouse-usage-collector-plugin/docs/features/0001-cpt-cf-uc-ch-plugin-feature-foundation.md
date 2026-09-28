@@ -143,7 +143,7 @@ Foundation owns the cross-cutting plumbing every other feature builds on: the Pl
 3. [ ] - `p1` - **IF** the error is retryable (ClickHouse connection loss, request timeout, client-side deadline expiry) - `inst-ch-err-3`
    1. [ ] - `p1` - Classify as `Transient` (retryable) - `inst-ch-err-3a`
    2. [ ] - `p1` - Treat a server-reported error code on the fixed overload/backpressure/replication allowlist as retryable too (`159`, `202`, `203`, `209`, `210`, `252`, `279`, `285`, `999`, plus HTTP `502`/`503`/`504` when the body is unreadable), read from the *start* of the response text so a nested exception from another node cannot reclassify a permanent outer error; `241` `MEMORY_LIMIT_EXCEEDED` and `319` `UNKNOWN_STATUS_OF_INSERT` are deliberately excluded - `inst-ch-err-3b`
-   3. [ ] - `p1` - Clear the backend-readiness gauge only for the unreachable-backend cases, never for a server-reported retryable code — a server that answered with backpressure is degraded, not down - `inst-ch-err-3c`
+   3. [ ] - `p1` - Clear the backend-readiness gauge only for the unreachable-backend cases, never for a server-reported retryable code — a server that answered with backpressure is degraded, not down; a client-side deadline expiry counts as unreachable, and the gauge is re-armed on the next successful round-trip unless the gear is shutting down - `inst-ch-err-3c`
 4. [ ] - `p1` - **ELSE** - `inst-ch-err-4`
    1. [ ] - `p1` - Classify as `Internal` (non-retryable) - `inst-ch-err-4a`
 5. [ ] - `p1` - **RETURN** the classified error so the host applies retry/fail-closed behavior uniformly - `inst-ch-err-5`
