@@ -21,6 +21,7 @@ fn session(created_at: String) -> SyncSessionRecord {
         progress_percent: 0,
         error: None,
         summary_json: None,
+        telemetry_json: None,
         created_at,
         started_at: None,
         ended_at: None,

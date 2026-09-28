@@ -47,6 +47,7 @@ fn session_record(id: Uuid, status: SessionStatus, created_at: &str) -> SyncSess
         progress_percent: 0,
         error: None,
         summary_json: None,
+        telemetry_json: None,
         created_at: created_at.to_owned(),
         started_at: None,
         ended_at: None,
@@ -265,7 +266,7 @@ async fn a_heartbeat_writes_progress_and_nothing_else() {
         .await
         .expect("the running session must insert");
 
-    repo.record_heartbeat(&scope, id, 40, "2026-08-25T10:00:20Z")
+    repo.record_heartbeat(&scope, id, 40, "{}", "2026-08-25T10:00:20Z")
         .await
         .expect("the heartbeat must write");
 
@@ -320,7 +321,7 @@ async fn a_heartbeat_for_a_session_that_is_not_there_is_an_error() {
     .expect("the real session must insert");
 
     let outcome = repo
-        .record_heartbeat(&scope, Uuid::new_v4(), 40, "2026-08-25T10:00:20Z")
+        .record_heartbeat(&scope, Uuid::new_v4(), 40, "{}", "2026-08-25T10:00:20Z")
         .await;
 
     assert!(

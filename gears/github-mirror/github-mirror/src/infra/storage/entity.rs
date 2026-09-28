@@ -893,6 +893,7 @@ pub mod sync_sessions {
         pub error: Option<String>,
         /// The run's `SyncSummary` as raw JSON, when it completed.
         pub summary_json: Option<String>,
+        pub telemetry_json: Option<String>,
         /// RFC3339 timestamps kept as text (engine-agnostic), as elsewhere.
         pub created_at: String,
         pub started_at: Option<String>,

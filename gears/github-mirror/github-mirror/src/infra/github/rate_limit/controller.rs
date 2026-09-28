@@ -185,19 +185,22 @@ impl RateLimitController {
     /// 2. `in_flight < soft_cap` AND effective `remaining > reserve`.
     ///
     /// The caller **must** call [`Self::release`] after the response is
-    /// received (success or error).
+    /// received (success or error). Returns whether the caller was parked.
     ///
     /// # Errors
     /// Returns [`RateLimitError::BudgetExhausted`] if the quota is spent and no
     /// future reset window is known to wait for.
-    pub async fn admit(&self) -> Result<(), RateLimitError> {
-        while self.admit_attempt().await? == AdmitStep::Retry {}
+    pub async fn admit(&self) -> Result<bool, RateLimitError> {
+        let mut parked = false;
+        while self.admit_attempt().await? == AdmitStep::Retry {
+            parked = true;
+        }
         self.in_flight.fetch_add(1, Ordering::AcqRel);
         debug!(
             in_flight = self.in_flight.load(Ordering::Relaxed),
             "request admitted"
         );
-        Ok(())
+        Ok(parked)
     }
 
     /// One admission attempt: evaluate every gate once. Returns

@@ -24,6 +24,7 @@ use crate::domain::repo::{
     ReviewCommentRecord, ReviewRecord, ReviewThreadRecord, TagRecord, WorkflowJobRecord,
     WorkflowRunRecord,
 };
+use crate::domain::sync::telemetry::{GithubApi, RequestOutcome, SessionTelemetry};
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
 use crate::infra::github::compression::MAX_BODY_BYTES;
 use crate::infra::github::metrics::{GithubRequestMetrics, Outcome};
@@ -398,11 +399,18 @@ impl GithubClient {
     /// cancelled run gives up the wait instead of holding the shutdown.
     async fn admit(
         &self,
+        telemetry: &SessionTelemetry,
         cancel: &CancellationToken,
     ) -> Result<(Admission<'_>, SemaphorePermit<'_>), DomainError> {
+        let asked = Instant::now();
         tokio::select! {
-            admitted = self.controller.admit() => admitted
-                .map_err(|e| DomainError::internal(format!("GitHub rate limit: {e}")))?,
+            admitted = self.controller.admit() => {
+                let parked = admitted
+                    .map_err(|e| DomainError::internal(format!("GitHub rate limit: {e}")))?;
+                if parked {
+                    telemetry.add_rate_limit_wait(asked.elapsed());
+                }
+            }
             () = cancel.cancelled() => return Err(DomainError::Cancelled),
         }
         let admission = Admission {
@@ -423,7 +431,8 @@ impl GithubClient {
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
-        method: &'static str,
+        api: GithubApi,
+        telemetry: &SessionTelemetry,
         cancel: &CancellationToken,
     ) -> Result<(reqwest::Result<reqwest::Response>, Duration), DomainError> {
         let started = Instant::now();
@@ -433,8 +442,9 @@ impl GithubClient {
         };
         let took = started.elapsed();
         if outcome.is_err() {
-            self.metrics.request(
-                method,
+            self.count(
+                telemetry,
+                api,
                 0,
                 Outcome::Failed,
                 took,
@@ -442,6 +452,20 @@ impl GithubClient {
             );
         }
         Ok((outcome, took))
+    }
+
+    fn count(
+        &self,
+        telemetry: &SessionTelemetry,
+        api: GithubApi,
+        status: u16,
+        outcome: Outcome,
+        took: Duration,
+        seen: &RateLimitHeaders,
+    ) {
+        self.metrics
+            .request(http_method(api), status, outcome, took, seen);
+        telemetry.count_request(api, request_outcome(outcome));
     }
 
     /// Feed a response's rate-limit headers to the token's controller.
@@ -468,11 +492,13 @@ impl GithubClient {
         &self,
         seen: &RateLimitHeaders,
         attempt: u32,
+        telemetry: &SessionTelemetry,
         cancel: &CancellationToken,
     ) -> Result<(), DomainError> {
         if seen.retry_after_secs.is_none() && seen.remaining.is_none_or(|left| left > 0) {
+            let delay = fallback_delay(attempt);
             tokio::select! {
-                () = tokio::time::sleep(fallback_delay(attempt)) => {}
+                () = tokio::time::sleep(delay) => telemetry.add_rate_limit_wait(delay),
                 () = cancel.cancelled() => return Err(DomainError::Cancelled),
             }
         }
@@ -552,11 +578,12 @@ impl GithubClient {
         // A retry gives them up first: a request asleep on a backoff is not
         // in flight.
         let (response, rate_limited, _admission, _permit) = loop {
-            let (admission, permit) = self.admit(&options.cancel).await?;
+            let (admission, permit) = self.admit(&options.telemetry, &options.cancel).await?;
             let (outcome, took) = self
                 .send(
                     self.conditional_request(url, cached.as_ref()),
-                    "GET",
+                    GithubApi::Rest,
+                    &options.telemetry,
                     &options.cancel,
                 )
                 .await?;
@@ -578,8 +605,14 @@ impl GithubClient {
             let status = response.status();
             let seen = self.observe(response.headers(), status).await;
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
-                self.metrics
-                    .request("GET", status.as_u16(), Outcome::Failed, took, &seen);
+                self.count(
+                    &options.telemetry,
+                    GithubApi::Rest,
+                    status.as_u16(),
+                    Outcome::Failed,
+                    took,
+                    &seen,
+                );
                 drop(permit);
                 drop(admission);
                 self.back_off_upstream(url, &status.to_string(), upstream_attempt, &options.cancel)
@@ -590,8 +623,14 @@ impl GithubClient {
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || (status == reqwest::StatusCode::FORBIDDEN && is_rate_limited(&seen));
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
-                self.metrics
-                    .request("GET", status.as_u16(), Outcome::RateLimited, took, &seen);
+                self.count(
+                    &options.telemetry,
+                    GithubApi::Rest,
+                    status.as_u16(),
+                    Outcome::RateLimited,
+                    took,
+                    &seen,
+                );
                 tracing::warn!(
                     url = %redacted_word(url),
                     %status,
@@ -602,19 +641,30 @@ impl GithubClient {
                 );
                 drop(permit);
                 drop(admission);
-                self.wait_without_guidance(&seen, attempt, &options.cancel)
+                self.wait_without_guidance(&seen, attempt, &options.telemetry, &options.cancel)
                     .await?;
                 attempt += 1;
                 continue;
             }
-            self.metrics
-                .request("GET", status.as_u16(), outcome_of(status), took, &seen);
+            self.count(
+                &options.telemetry,
+                GithubApi::Rest,
+                status.as_u16(),
+                outcome_of(status),
+                took,
+                &seen,
+            );
             break (response, rate_limited, admission, permit);
         };
 
         let status = response.status();
         if status == reqwest::StatusCode::NOT_MODIFIED {
-            return Self::serve_from_cache(url, cached.as_ref(), response.headers());
+            return Self::serve_from_cache(
+                url,
+                cached.as_ref(),
+                response.headers(),
+                &options.telemetry,
+            );
         }
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(DomainError::NotFound);
@@ -650,6 +700,7 @@ impl GithubClient {
             next_page,
         };
         self.metrics.response_bytes("GET", entry.body.len());
+        options.telemetry.add_downloaded(entry.body.len());
 
         let parsed = serde_json::from_str(&entry.body)
             .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))?;
@@ -668,10 +719,12 @@ impl GithubClient {
         url: &str,
         cached: Option<&CachedResponse>,
         headers: &reqwest::header::HeaderMap,
+        telemetry: &SessionTelemetry,
     ) -> Result<FetchedPage<T>, DomainError> {
         let entry = cached.ok_or_else(|| {
             DomainError::internal(format!("GitHub answered 304 for {url} with nothing cached"))
         })?;
+        telemetry.add_saved(entry.body.len());
         tracing::debug!(%url, "304 Not Modified - served from cache, no quota spent");
 
         let parsed = serde_json::from_str(&entry.body).map_err(|e| {
@@ -813,16 +866,18 @@ impl GithubClient {
         &self,
         query: &str,
         variables: serde_json::Value,
-        cancel: &CancellationToken,
+        options: &FetchOptions,
     ) -> Result<serde_json::Value, DomainError> {
         let url = graphql_url(&self.api_base_url);
+        let cancel = &options.cancel;
+        let telemetry = &options.telemetry;
 
         let mut attempt: u32 = 0;
         let mut upstream_attempt: u32 = 0;
         // GraphQL shares the REST ceilings: both spend the same token's
         // budget, though the controller only reads the core budget headers.
         let (response, _admission, _permit) = loop {
-            let (admission, permit) = self.admit(cancel).await?;
+            let (admission, permit) = self.admit(telemetry, cancel).await?;
             let mut request = self
                 .http
                 .post(&url)
@@ -830,7 +885,9 @@ impl GithubClient {
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
-            let (outcome, took) = self.send(request, "POST", cancel).await?;
+            let (outcome, took) = self
+                .send(request, GithubApi::Graphql, telemetry, cancel)
+                .await?;
             let response = match outcome {
                 Ok(response) => response,
                 Err(e) if upstream_attempt < UPSTREAM_RETRIES => {
@@ -851,8 +908,14 @@ impl GithubClient {
             let status = response.status();
             let seen = self.observe(response.headers(), status).await;
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
-                self.metrics
-                    .request("POST", status.as_u16(), Outcome::Failed, took, &seen);
+                self.count(
+                    telemetry,
+                    GithubApi::Graphql,
+                    status.as_u16(),
+                    Outcome::Failed,
+                    took,
+                    &seen,
+                );
                 drop(permit);
                 drop(admission);
                 self.back_off_upstream(&url, &status.to_string(), upstream_attempt, cancel)
@@ -863,8 +926,14 @@ impl GithubClient {
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || (status == reqwest::StatusCode::FORBIDDEN && is_rate_limited(&seen));
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
-                self.metrics
-                    .request("POST", status.as_u16(), Outcome::RateLimited, took, &seen);
+                self.count(
+                    telemetry,
+                    GithubApi::Graphql,
+                    status.as_u16(),
+                    Outcome::RateLimited,
+                    took,
+                    &seen,
+                );
                 tracing::warn!(
                     %status,
                     attempt,
@@ -874,12 +943,19 @@ impl GithubClient {
                 );
                 drop(permit);
                 drop(admission);
-                self.wait_without_guidance(&seen, attempt, cancel).await?;
+                self.wait_without_guidance(&seen, attempt, telemetry, cancel)
+                    .await?;
                 attempt += 1;
                 continue;
             }
-            self.metrics
-                .request("POST", status.as_u16(), outcome_of(status), took, &seen);
+            self.count(
+                telemetry,
+                GithubApi::Graphql,
+                status.as_u16(),
+                outcome_of(status),
+                took,
+                &seen,
+            );
             break (response, admission, permit);
         };
 
@@ -892,7 +968,28 @@ impl GithubClient {
 
         let bytes = read_capped(response).await?;
         self.metrics.response_bytes("POST", bytes.len());
-        graphql_answer(&bytes)
+        telemetry.add_downloaded(bytes.len());
+        let answer = graphql_answer(&bytes)?;
+        if let Some(cost) = answer["data"]["rateLimit"]["cost"].as_u64() {
+            telemetry.add_graphql_points(cost);
+        }
+        Ok(answer)
+    }
+}
+
+const fn http_method(api: GithubApi) -> &'static str {
+    match api {
+        GithubApi::Rest => "GET",
+        GithubApi::Graphql => "POST",
+    }
+}
+
+const fn request_outcome(outcome: Outcome) -> RequestOutcome {
+    match outcome {
+        Outcome::Fresh => RequestOutcome::Fresh,
+        Outcome::NotModified => RequestOutcome::NotModified,
+        Outcome::RateLimited => RequestOutcome::RateLimited,
+        Outcome::Failed => RequestOutcome::Failed,
     }
 }
 
@@ -1951,7 +2048,7 @@ fn commit_file_record(repo_id: i64, commit_sha: &str, f: GhPullFile) -> CommitFi
 /// The query text is fixed; `owner`, `name` and the pull number travel as
 /// GraphQL variables so no request value is ever spliced into the query
 /// string itself.
-const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $first: Int!, $after: String) {      repository(owner: $owner, name: $name) {      pullRequest(number: $number) { reviewThreads(first: $first, after: $after) {      pageInfo { hasNextPage endCursor }      nodes { id isResolved isOutdated path line resolvedBy { login }      comments(first: 1) { totalCount } } } } } }";
+const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $first: Int!, $after: String) {      rateLimit { cost }      repository(owner: $owner, name: $name) {      pullRequest(number: $number) { reviewThreads(first: $first, after: $after) {      pageInfo { hasNextPage endCursor }      nodes { id isResolved isOutdated path line resolvedBy { login }      comments(first: 1) { totalCount } } } } } }";
 
 /// A pull request with more review threads than one page holds is common on a
 /// busy repository, and the walk stops at [`REVIEW_THREAD_PAGES`] pages so a
@@ -2530,7 +2627,7 @@ impl GithubPort for GithubClient {
                 .post_graphql(
                     REVIEW_THREADS_QUERY,
                     review_threads_variables(owner, name, number, after.as_deref()),
-                    &options.cancel,
+                    options,
                 )
                 .await
             {

@@ -40,8 +40,8 @@ use super::repo::{
 };
 use super::scope::ScopeConfig;
 use super::sync::{
-    ChangeGate, Family, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskFailure,
-    TaskKind, Worker,
+    ChangeGate, Family, MirrorWorker, RepoPhaseRunner, RunState, SessionTelemetry, SweepWatermark,
+    TaskFailure, TaskKind, Worker,
 };
 use super::validate::{repo_full_name, validate_commit_sha, validate_owner, validate_repo_path};
 
@@ -192,6 +192,10 @@ fn stored_summary_json(session_id: Uuid, summary: &SyncSummary) -> Option<String
             None
         }
     }
+}
+
+fn telemetry_json(telemetry: &SessionTelemetry) -> String {
+    serde_json::to_string(&telemetry.snapshot()).unwrap_or_default()
 }
 
 fn now_rfc3339() -> String {
@@ -3744,6 +3748,7 @@ impl Service {
             progress_percent: 0,
             error: None,
             summary_json: None,
+            telemetry_json: None,
             created_at: now.clone(),
             started_at: None,
             ended_at: None,
@@ -3973,7 +3978,10 @@ impl Service {
             .await?;
 
         let progress = SyncProgress::new();
-        let outcome = self.sync_within_deadline(job, &progress, cancel).await;
+        let telemetry = Arc::new(SessionTelemetry::default());
+        let outcome = self
+            .sync_within_deadline(job, &progress, &telemetry, cancel)
+            .await;
 
         let completed = outcome.is_ok();
         match &outcome {
@@ -4001,6 +4009,7 @@ impl Service {
         // stopped. What happened is in `status` and `error`.
         progress.finished();
         session.progress_percent = i32::from(progress.percent());
+        session.telemetry_json = Some(telemetry_json(&telemetry));
         session.ended_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.ended_at);
         let repo_full_name = session.repo_full_name.clone();
@@ -4038,11 +4047,12 @@ impl Service {
         &self,
         job: &SyncJob,
         progress: &SyncProgress,
+        telemetry: &Arc<SessionTelemetry>,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
         let job_cancel = cancel.child_token();
         let deadline = self.config.sync_deadline;
-        let sync = self.sync_with_heartbeat(job, progress, &job_cancel);
+        let sync = self.sync_with_heartbeat(job, progress, telemetry, &job_cancel);
         let mut sync = std::pin::pin!(sync);
 
         tokio::select! {
@@ -4068,6 +4078,7 @@ impl Service {
         &self,
         job: &SyncJob,
         progress: &SyncProgress,
+        telemetry: &Arc<SessionTelemetry>,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
         let percent = progress.handle();
@@ -4078,6 +4089,7 @@ impl Service {
             force: job.force,
             since: job.since,
             cancel: cancel.clone(),
+            telemetry: Arc::clone(telemetry),
         };
         let sync =
             self.sync_repository(&job.ctx, &job.owner, &job.name, &options, progress, cancel);
@@ -4089,7 +4101,12 @@ impl Service {
                 () = tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_SECS)) => {
                     let progress_percent = i32::from(percent.load(Ordering::Relaxed));
                     if let Err(e) = self
-                        .save_session_progress(&job.ctx, job.session_id, progress_percent)
+                        .save_session_progress(
+                            &job.ctx,
+                            job.session_id,
+                            progress_percent,
+                            &telemetry_json(telemetry),
+                        )
                         .await
                     {
                         tracing::warn!(
@@ -4103,16 +4120,24 @@ impl Service {
         }
     }
 
-    /// One heartbeat write, on its own scope: progress and `updated_at` only.
+    /// One heartbeat write, on its own scope: progress, telemetry and
+    /// `updated_at` only.
     async fn save_session_progress(
         &self,
         ctx: &SecurityContext,
         session_id: Uuid,
         progress_percent: i32,
+        telemetry_json: &str,
     ) -> Result<(), DomainError> {
         let scope = self.session_scope(ctx, actions::UPSERT).await?;
         self.sync_sessions
-            .record_heartbeat(&scope, session_id, progress_percent, &now_rfc3339())
+            .record_heartbeat(
+                &scope,
+                session_id,
+                progress_percent,
+                telemetry_json,
+                &now_rfc3339(),
+            )
             .await
     }
 

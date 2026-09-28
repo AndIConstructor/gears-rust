@@ -5252,6 +5252,7 @@ fn sync_session_active_model(tenant_id: Uuid, r: &SyncSessionRecord) -> sync_ses
         progress_percent: ActiveValue::Set(r.progress_percent),
         error: ActiveValue::Set(r.error.clone()),
         summary_json: ActiveValue::Set(r.summary_json.clone()),
+        telemetry_json: ActiveValue::Set(r.telemetry_json.clone()),
         created_at: ActiveValue::Set(r.created_at.clone()),
         started_at: ActiveValue::Set(r.started_at.clone()),
         ended_at: ActiveValue::Set(r.ended_at.clone()),
@@ -5271,6 +5272,7 @@ impl TryFrom<sync_sessions::Model> for SyncSessionRecord {
             progress_percent: m.progress_percent,
             error: m.error,
             summary_json: m.summary_json,
+            telemetry_json: m.telemetry_json,
             created_at: m.created_at,
             started_at: m.started_at,
             ended_at: m.ended_at,
@@ -5299,6 +5301,7 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             sync_sessions::Column::ProgressPercent,
             sync_sessions::Column::Error,
             sync_sessions::Column::SummaryJson,
+            sync_sessions::Column::TelemetryJson,
             sync_sessions::Column::CreatedAt,
             sync_sessions::Column::StartedAt,
             sync_sessions::Column::EndedAt,
@@ -5339,6 +5342,7 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
         scope: &AccessScope,
         id: Uuid,
         progress_percent: i32,
+        telemetry_json: &str,
         updated_at: &str,
     ) -> Result<(), DomainError> {
         let conn = self.db.conn()?;
@@ -5349,6 +5353,10 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             .col_expr(
                 sync_sessions::Column::ProgressPercent,
                 Expr::value(progress_percent),
+            )
+            .col_expr(
+                sync_sessions::Column::TelemetryJson,
+                Expr::value(telemetry_json),
             )
             .col_expr(sync_sessions::Column::UpdatedAt, Expr::value(updated_at))
             .exec(&conn)

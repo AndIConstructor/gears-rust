@@ -459,6 +459,7 @@ fn opts(scope: ScopeConfig) -> FetchOptions {
         force: false,
         since: None,
         cancel: tokio_util::sync::CancellationToken::new(),
+        telemetry: std::sync::Arc::default(),
     }
 }
 
@@ -1458,6 +1459,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
         force: false,
         since: None,
         cancel: tokio_util::sync::CancellationToken::new(),
+        telemetry: std::sync::Arc::default(),
     };
 
     let fresh = fetch_repository(&client, "rust-lang", "rust", &options)

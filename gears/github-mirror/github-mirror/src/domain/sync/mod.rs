@@ -22,6 +22,7 @@ pub mod queue;
 pub mod runner;
 pub mod sweep_watermark;
 pub mod task;
+pub mod telemetry;
 pub mod verification;
 pub mod worker;
 
@@ -34,5 +35,6 @@ pub use sweep_watermark::SweepWatermark;
 pub use task::{
     Entity, ExtractionTask, Family, Lane, NewTask, TaskKind, TaskPhase, TaskPriority, TaskStatus,
 };
+pub use telemetry::{GithubApi, RequestOutcome, SessionTelemetry, TelemetrySnapshot};
 pub use verification::{CountGap, GapOutcome, MAX_REPAIR};
 pub use worker::{Worker, WorkerContext, WorkerDispatcher};

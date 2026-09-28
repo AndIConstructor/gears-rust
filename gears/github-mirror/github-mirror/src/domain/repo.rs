@@ -1600,6 +1600,7 @@ pub struct SyncSessionRecord {
     pub progress_percent: i32,
     pub error: Option<String>,
     pub summary_json: Option<String>,
+    pub telemetry_json: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
@@ -1621,13 +1622,15 @@ pub trait SyncSessionRepository: Send + Sync {
         id: Uuid,
     ) -> Result<Option<SyncSessionRecord>, DomainError>;
 
-    /// The heartbeat's write: `progress_percent` and `updated_at` only, so a
-    /// tick never overwrites the rest of the row with a stale copy.
+    /// The heartbeat's write: `progress_percent`, `telemetry_json` and
+    /// `updated_at` only, so a tick never overwrites the rest of the row with
+    /// a stale copy.
     async fn record_heartbeat(
         &self,
         scope: &AccessScope,
         id: Uuid,
         progress_percent: i32,
+        telemetry_json: &str,
         updated_at: &str,
     ) -> Result<(), DomainError>;
 

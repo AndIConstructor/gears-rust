@@ -43,6 +43,7 @@ pub mod m0040_node_id;
 pub mod m0041_pull_request_file_patch;
 pub mod m0042_review_comment_anchors;
 pub mod m0043_review_comment_review_id;
+pub mod m0044_session_telemetry;
 pub mod support;
 
 pub struct Migrator;
@@ -94,6 +95,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0041_pull_request_file_patch::Migration),
             Box::new(m0042_review_comment_anchors::Migration),
             Box::new(m0043_review_comment_review_id::Migration),
+            Box::new(m0044_session_telemetry::Migration),
         ]
     }
 }

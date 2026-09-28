@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use strum::IntoEnumIterator;
 
@@ -18,6 +19,7 @@ use crate::domain::repo::{
     WorkflowRunRecord,
 };
 use crate::domain::scope::ScopeConfig;
+use crate::domain::sync::telemetry::SessionTelemetry;
 
 /// Everything one fetch needs beyond the repository's name.
 #[domain_model]
@@ -38,6 +40,7 @@ pub struct FetchOptions {
     /// both end as soon as it fires, so a shutdown does not wait out a
     /// rate-limit cooldown.
     pub cancel: CancellationToken,
+    pub telemetry: Arc<SessionTelemetry>,
 }
 
 /// A top-level listing the sync can reconcile deletions for.
