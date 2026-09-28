@@ -1,0 +1,9 @@
+{
+  "gts_id": "gts.cf.e2e.reading.record.v1~cf.e2e.reading.employee.v1~",
+  "expected_properties": {
+    "required_root": ["name", "payload"],
+    "required_payload": ["employee_id"],
+    "effective_traits": { "category": "internal" },
+    "category_enum": ["internal", "public"]
+  }
+}

@@ -24,7 +24,7 @@ TRACEPARENT = f"00-{TRACE_ID}-b7ad6b7169203331-01"
 
 @pytest.fixture
 def registry_api_path():
-    """T24a changes this default to v1; there is intentionally no fallback."""
+    """Use the configured API version without an automatic fallback."""
     return f"types-registry/{os.getenv('TYPES_REGISTRY_API_VERSION', 'v2')}"
 
 
@@ -73,6 +73,18 @@ def registration_fixture():
 def deletion_fixture():
     """Load the files linked from scenarios/deletion.md."""
     return _topic_loader("deletion")
+
+
+@pytest.fixture
+def discovery_fixture():
+    """Load the inheritance trees linked from scenarios/discovery.md."""
+    return _topic_loader("discovery")
+
+
+@pytest.fixture
+def reading_fixture():
+    """Load authored documents and expected artifacts for read scenarios."""
+    return _topic_loader("reading")
 
 
 def pytest_configure(config):

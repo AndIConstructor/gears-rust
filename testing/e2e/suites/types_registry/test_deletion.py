@@ -144,7 +144,7 @@ async def test_batch_deletion_reports_outcomes_in_request_order(
     )
 
 
-@pytest.mark.scenario("TR-DEL-004")
+@pytest.mark.scenario("TR-DEL-101")
 async def test_a_stale_expected_version_is_a_terminal_item_not_a_412(
     registry_http, registry_api_path, deletion_fixture, given_registered
 ):
@@ -166,7 +166,7 @@ async def test_a_stale_expected_version_is_a_terminal_item_not_a_412(
     assert after["origin"]["resource_version"] == 1, after
 
 
-@pytest.mark.scenario("TR-DEL-005")
+@pytest.mark.scenario("TR-DEL-102")
 async def test_a_live_dependant_outside_the_batch_blocks_the_deletion(
     registry_http, registry_api_path, deletion_fixture, given_registered
 ):

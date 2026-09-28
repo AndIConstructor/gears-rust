@@ -1,8 +1,9 @@
 {
-  "gts_id": "gts.cf.e2e.registration.person.v1~",
+  "gts_id": "gts.cf.e2e.reading.person.v1.0~",
   "content": {
-    "$id": "gts://gts.cf.e2e.registration.person.v1~",
+    "$id": "gts://gts.cf.e2e.reading.person.v1.0~",
     "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Person Minor Zero",
     "type": "object",
     "properties": {
       "name": {

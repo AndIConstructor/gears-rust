@@ -1,0 +1,89 @@
+# Discovery scenarios (`GET /entities`)
+
+## Paged discovery and returned fields
+
+### TR-DISC-001 — Limit-one cursor visits every row exactly once
+
+**Given:** Register independent [person_schema](../fixtures/discovery/person_schema.json) and [device_schema](../fixtures/discovery/device_schema.json) Type Schemas in the target namespace. In a neighbouring namespace register [person_schema](../fixtures/discovery/person_schema.json)/[person_instance](../fixtures/discovery/person_instance.json) and [device_schema](../fixtures/discovery/device_schema.json)/[device_instance](../fixtures/discovery/device_instance.json) as distinct control pairs. Both target schemas are active.
+
+**When:** GET with the target namespace pattern and `limit=1`, then follow every cursor with the same pattern and limit.
+
+**Then:** exactly two pages of one item each: the first has a `next_cursor`, the second none, and the IDs appear once each in canonical order.
+
+### TR-DISC-002 — Pattern excludes neighbouring namespaces
+
+**Given:** Register six Type Schemas ([person_schema](../fixtures/discovery/person_schema.json) → [employee_schema](../fixtures/discovery/employee_schema.json) → [manager_schema](../fixtures/discovery/manager_schema.json) → [director_schema](../fixtures/discovery/director_schema.json), sibling [contractor_schema](../fixtures/discovery/contractor_schema.json), independent [device_schema](../fixtures/discovery/device_schema.json)) and their six Instances ([person_instance](../fixtures/discovery/person_instance.json), [employee_instance](../fixtures/discovery/employee_instance.json), [manager_instance](../fixtures/discovery/manager_instance.json), [director_instance](../fixtures/discovery/director_instance.json), [contractor_instance](../fixtures/discovery/contractor_instance.json), [device_instance](../fixtures/discovery/device_instance.json)) in one fresh namespace, in dependency order; all are active. Register a second [person_schema](../fixtures/discovery/person_schema.json) with a distinct namespace prefix.
+
+**When:** discover using the first namespace's pattern, then the pattern formed by appending `*` to [employee_schema](../fixtures/discovery/employee_schema.json)'s `gts_id`, then a valid pattern for an unregistered name in the first namespace.
+
+**Then:** the namespace walk contains exactly its 12 entities and excludes the neighbouring schema. The employee branch walk contains exactly [employee_schema](../fixtures/discovery/employee_schema.json), [manager_schema](../fixtures/discovery/manager_schema.json), [director_schema](../fixtures/discovery/director_schema.json), [employee_instance](../fixtures/discovery/employee_instance.json), [manager_instance](../fixtures/discovery/manager_instance.json), and [director_instance](../fixtures/discovery/director_instance.json); the contractor branch, direct person Instance and device tree stay outside it. The non-matching pattern returns an empty `items` array with no cursor, not a `404`.
+
+### TR-DISC-003 — Content projection survives page continuation
+
+**Given:** Register six Type Schemas ([person_schema](../fixtures/discovery/person_schema.json) → [employee_schema](../fixtures/discovery/employee_schema.json) → [manager_schema](../fixtures/discovery/manager_schema.json) → [director_schema](../fixtures/discovery/director_schema.json), sibling [contractor_schema](../fixtures/discovery/contractor_schema.json), independent [device_schema](../fixtures/discovery/device_schema.json)) and their six Instances ([person_instance](../fixtures/discovery/person_instance.json), [employee_instance](../fixtures/discovery/employee_instance.json), [manager_instance](../fixtures/discovery/manager_instance.json), [director_instance](../fixtures/discovery/director_instance.json), [contractor_instance](../fixtures/discovery/contractor_instance.json), [device_instance](../fixtures/discovery/device_instance.json)) in one fresh namespace, in dependency order; all are active.
+
+**When:** Traverse the target namespace pattern with `limit=1&$select=content` on every page.
+
+**Then:** each item contains only the mandatory `gts_id`, `gts_uuid`, `kind`, and `lifecycle_status` and its whole authored `content`; no `origin` or other document appears. All 12 fixture documents survive the cursor walk unchanged, including derived schemas' authored `$ref` values and deeply derived Instance payloads.
+
+### TR-DISC-004 — Inapplicable selected artifacts remain absent on Instances
+
+**Given:** Register six Type Schemas ([person_schema](../fixtures/discovery/person_schema.json) → [employee_schema](../fixtures/discovery/employee_schema.json) → [manager_schema](../fixtures/discovery/manager_schema.json) → [director_schema](../fixtures/discovery/director_schema.json), sibling [contractor_schema](../fixtures/discovery/contractor_schema.json), independent [device_schema](../fixtures/discovery/device_schema.json)) and their six Instances ([person_instance](../fixtures/discovery/person_instance.json), [employee_instance](../fixtures/discovery/employee_instance.json), [manager_instance](../fixtures/discovery/manager_instance.json), [director_instance](../fixtures/discovery/director_instance.json), [contractor_instance](../fixtures/discovery/contractor_instance.json), [device_instance](../fixtures/discovery/device_instance.json)) in one fresh namespace, in dependency order; all are active.
+
+**When:** Discover using the target namespace pattern and `$select=resolved_schema`.
+
+**Then:** all six Type Schema items have a nonempty `resolved_schema` object; all six Instance items have `kind=instance` and omit `resolved_schema`, at every depth. Each item carries the mandatory `gts_id`, `gts_uuid`, `kind`, and `lifecycle_status`.
+
+## Filters
+
+### TR-DISC-101 — Kind selects Type Schemas or Instances
+
+**Given:** Register six Type Schemas ([person_schema](../fixtures/discovery/person_schema.json) → [employee_schema](../fixtures/discovery/employee_schema.json) → [manager_schema](../fixtures/discovery/manager_schema.json) → [director_schema](../fixtures/discovery/director_schema.json), sibling [contractor_schema](../fixtures/discovery/contractor_schema.json), independent [device_schema](../fixtures/discovery/device_schema.json)) and their six Instances ([person_instance](../fixtures/discovery/person_instance.json), [employee_instance](../fixtures/discovery/employee_instance.json), [manager_instance](../fixtures/discovery/manager_instance.json), [director_instance](../fixtures/discovery/director_instance.json), [contractor_instance](../fixtures/discovery/contractor_instance.json), [device_instance](../fixtures/discovery/device_instance.json)) in one fresh namespace, in dependency order; all are active.
+
+**When:** Traverse the target namespace separately with `kind=type_schema` and `kind=instance`, each at `limit=2`.
+
+**Then:** the first walk returns exactly the six schema fixtures and the second exactly the six Instance fixtures, each in canonical order regardless of depth or branch. Each page contains only its requested kind, with default metadata fields and no authored content.
+
+### TR-DISC-102 — Pattern, depth, kind, and selection compose
+
+**Given:** Register six Type Schemas ([person_schema](../fixtures/discovery/person_schema.json) → [employee_schema](../fixtures/discovery/employee_schema.json) → [manager_schema](../fixtures/discovery/manager_schema.json) → [director_schema](../fixtures/discovery/director_schema.json), sibling [contractor_schema](../fixtures/discovery/contractor_schema.json), independent [device_schema](../fixtures/discovery/device_schema.json)) and their six Instances ([person_instance](../fixtures/discovery/person_instance.json), [employee_instance](../fixtures/discovery/employee_instance.json), [manager_instance](../fixtures/discovery/manager_instance.json), [director_instance](../fixtures/discovery/director_instance.json), [contractor_instance](../fixtures/discovery/contractor_instance.json), [device_instance](../fixtures/discovery/device_instance.json)) in one fresh namespace, in dependency order; all are active. In a second namespace register [person_schema](../fixtures/discovery/person_schema.json), then [employee_schema](../fixtures/discovery/employee_schema.json) and [employee_instance](../fixtures/discovery/employee_instance.json), rewriting their IDs and `$ref` to that namespace.
+
+**When:** discover with `pattern` equal to [employee_schema](../fixtures/discovery/employee_schema.json)'s `gts_id` followed by `*`, `depth=3`, `kind=instance`, and `$select=content`.
+
+**Then:** only the target namespace's [employee_instance](../fixtures/discovery/employee_instance.json) appears, with its authored content and mandatory fields. The neighbouring employee Instance and local contractor Instance test pattern exclusion, the local employee and manager schemas test kind exclusion, and the local manager Instance tests depth exclusion independently. A `depth=2` repeat returns an empty result and terminates.
+
+### TR-DISC-103 — Lifecycle filter separates live rows and tombstones
+
+**Given:** Register [person_schema](../fixtures/discovery/person_schema.json) and [device_schema](../fixtures/discovery/device_schema.json) as independent target schemas, then delete [person_schema](../fixtures/discovery/person_schema.json) and await completion; [device_schema](../fixtures/discovery/device_schema.json) remains active. In a neighbouring namespace register [person_schema](../fixtures/discovery/person_schema.json)/[person_instance](../fixtures/discovery/person_instance.json) and [device_schema](../fixtures/discovery/device_schema.json)/[device_instance](../fixtures/discovery/device_instance.json) as distinct control pairs.
+
+**When:** Discover using the target namespace pattern with absent lifecycle, `active`, `deleted`, and `all`.
+
+**Then:** absent and `active` return only the target live schema, `deleted` only the target tombstone, and `all` both target schemas in canonical order. No neighbouring control appears. The tombstone remains exact-readable.
+
+## Cursor continuation
+
+### TR-DISC-201 — A changed pattern cannot reuse a cursor
+
+**Given:** Register independent [person_schema](../fixtures/discovery/person_schema.json) and [device_schema](../fixtures/discovery/device_schema.json) Type Schemas in the target namespace. In a neighbouring namespace register [person_schema](../fixtures/discovery/person_schema.json)/[person_instance](../fixtures/discovery/person_instance.json) and [device_schema](../fixtures/discovery/device_schema.json)/[device_instance](../fixtures/discovery/device_instance.json) as distinct control pairs. Obtain a first page at `limit=1` under the target namespace pattern, with a nonempty cursor.
+
+**When:** Resume the cursor with the neighbouring namespace pattern, keeping `limit=1` and the original selection.
+
+**Then:** `400` Problem JSON rejects the continuation rather than mixing traversals.
+
+### TR-DISC-202 — Page size may change without changing cursor identity
+
+**Given:** Generate independent closed-envelope roots from [person_schema](../fixtures/discovery/person_schema.json), rewriting each `gts_id` and authored `$id` consistently. Register four target roots named `item000` through `item003` in one namespace; their canonical order is known before reading. In a neighbouring namespace register [person_schema](../fixtures/discovery/person_schema.json)/[person_instance](../fixtures/discovery/person_instance.json) and [device_schema](../fixtures/discovery/device_schema.json)/[device_instance](../fixtures/discovery/device_instance.json) as distinct control pairs.
+
+**When:** request the first page with `limit=1`, the namespace pattern and `$select=content`. Resume its cursor with `limit=2`, preserving the pattern and selection, and continue with limit 2 until no cursor remains.
+
+**Then:** the first page reports limit 1 and contains exactly the first expected entity. The next request succeeds with `200`, reports limit 2 and contains exactly the next two expected entities; subsequent pages contain at most two items and report limit 2. Every item retains the requested projection and expected authored content. The completed walk returns all four entities once in canonical order and terminates. Changing page size neither invalidates the cursor nor resets or skips its position.
+
+## Read discovered entities with batchGet
+
+### TR-DISC-301 — Discovered references can hydrate the complete set through batchGet
+
+**Given:** Register six Type Schemas ([person_schema](../fixtures/discovery/person_schema.json) → [employee_schema](../fixtures/discovery/employee_schema.json) → [manager_schema](../fixtures/discovery/manager_schema.json) → [director_schema](../fixtures/discovery/director_schema.json), sibling [contractor_schema](../fixtures/discovery/contractor_schema.json), independent [device_schema](../fixtures/discovery/device_schema.json)) and their six Instances ([person_instance](../fixtures/discovery/person_instance.json), [employee_instance](../fixtures/discovery/employee_instance.json), [manager_instance](../fixtures/discovery/manager_instance.json), [director_instance](../fixtures/discovery/director_instance.json), [contractor_instance](../fixtures/discovery/contractor_instance.json), [device_instance](../fixtures/discovery/device_instance.json)) in one fresh namespace, in dependency order; all are active. Its 12 GTS IDs and authored documents are known from these fixtures, and no mutation occurs during the reads.
+
+**When:** traverse namespace-scoped discovery with `limit=1` and no `$select`. Collect each item's `gts_uuid` in discovery order and submit those returned references directly as batchGet keys, with top-level `"$select": "content"`. Do not derive UUIDs or substitute fixture GTS IDs for the discovered references.
+
+**Then:** discovery returns exactly the 12 expected entities in canonical GTS-ID order, with default metadata and no documents or validators, and the walk terminates. BatchGet returns `200` with 12 `found` results, each carrying an `etag` and echoing a UUID key. Match results by key after checking completeness and uniqueness; batch response order is not contractual. Each entity has exactly its mandatory fields and authored `content`; its identity matches the corresponding discovery item and its content matches the independent fixture. Every discovered reference resolves, and no expected entity is missing or duplicated in the hydrated result.

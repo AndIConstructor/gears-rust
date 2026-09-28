@@ -1,18 +1,12 @@
 # Entity registration scenarios
 
-End-to-end registration scenarios cover HTTP submission, outbox admission,
-persisted outcomes and reads. The local launcher uses **SQLite**; these tests do
-not prove PostgreSQL/MySQL or tenant/PDP behavior.
+End-to-end registration scenarios cover HTTP submission, outbox admission, persisted outcomes and reads. The local launcher uses **SQLite**; these tests do not prove PostgreSQL/MySQL or tenant/PDP behavior.
 
-Each heading maps to `@pytest.mark.scenario("TR-REG-NNN")` in
-[test_registration.py](../test_registration.py). Collection rejects unknown IDs;
-tests contain complete expected bodies.
+Each scenario names its input fixtures, mutation request and expected operation outcome.
 
-The shared execution rules these scenarios rely on — per-test namespaces,
-idempotency keys, outcome matching — and the commands that run them are in the
-[suite README](../README.md).
+Valid root Type Schema fixtures use the GTS §4.4.1 closed-envelope pattern: the top level rejects undeclared properties and `payload` is the explicit open extension point. The intentionally unresolved derived schema inherits no known root constraints and is not closed locally. Instances carry `payload`, even when it is empty.
 
-## Scenarios
+## Successful registration
 
 ### TR-REG-001 — Create a Type Schema
 
@@ -28,36 +22,34 @@ idempotency keys, outcome matching — and the commands that run them are in the
 
 ### TR-REG-002 — Register an Instance in a later operation
 
-**Given:** a [schema](../fixtures/registration/person_schema.json) and conforming
-[Instance](../fixtures/registration/person_instance.json).
+**Given:** a [schema](../fixtures/registration/person_schema.json) and conforming [Instance](../fixtures/registration/person_instance.json).
 
 **When:**
 
 1. Submit and complete the schema operation.
 2. Submit and complete the Instance under a new key.
 
-**Then:** the Instance succeeds at version 1 and reads back with its exact content;
-schema-only artifacts are `null`.
+**Then:** the Instance succeeds at version 1 and reads back with its exact content; schema-only artifacts are `null`.
 
 ### TR-REG-003 — Register an Instance before its schema in one batch
 
-**Given:** the same schema and Instance, both absent.
+**Given:** [person_schema](../fixtures/registration/person_schema.json) and its conforming [person_instance](../fixtures/registration/person_instance.json) are both absent from a fresh namespace.
 
-**When:** submit `[person_instance, person_schema]` in one batch.
+**When:** submit [person_instance](../fixtures/registration/person_instance.json) before [person_schema](../fixtures/registration/person_schema.json) in one batch.
 
 **Then:** both succeed at version 1 and read back with the expected kind and content.
 
 This checks batch-level ordering, not every graph-ordering case.
 
-### TR-REG-004 — Preserve partial success and structured failures
+## Partial success and refusals
+
+### TR-REG-101 — Preserve partial success and structured failures
 
 **Given:**
 
 - A: valid, independent [person schema](../fixtures/registration/person_schema.json).
-- B: [missing_ref_schema.json](../fixtures/registration/missing_ref_schema.json),
-  referencing absent `absent.v1~`.
-- C: [blocked_instance.json](../fixtures/registration/blocked_instance.json), an
-  Instance conforming to B.
+- B: [missing_ref_schema.json](../fixtures/registration/missing_ref_schema.json), referencing absent `absent.v1~`.
+- C: [blocked_instance.json](../fixtures/registration/blocked_instance.json), an Instance conforming to B.
 
 **When:** submit exactly `[C, B, A]` in one request and await completion.
 
@@ -69,14 +61,13 @@ This checks batch-level ordering, not every graph-ordering case.
 | B | failed | null | dependency_not_found |
 | C | failed | null | blocked_by_dependency |
 
-B also reports `dependency_kind=ref` and the missing ID. A is readable; B and C
-return RFC-9457 `404` responses.
+B also reports `dependency_kind=ref` and the missing ID. A is readable; B and C return RFC-9457 `404` responses.
 
-### TR-REG-005 — Refuse a Type Schema whose `$id` does not name its item
+### TR-REG-102 — Refuse a Type Schema whose `$id` does not name its item
 
 **Given:** the [person schema](../fixtures/registration/person_schema.json) and its conforming [Instance](../fixtures/registration/person_instance.json), both absent, with the schema's `content.$id` replaced by one of: absent, a non-string, a malformed URI, or the `gts://` URI of another Type Schema.
 
-**When:** submit `[person_instance, person_schema]` in one request.
+**When:** submit [person_instance](../fixtures/registration/person_instance.json) before [person_schema](../fixtures/registration/person_schema.json) in one request.
 
 **Then:**
 

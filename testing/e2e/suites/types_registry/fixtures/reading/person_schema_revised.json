@@ -1,8 +1,9 @@
 {
-  "gts_id": "gts.cf.e2e.registration.person.v1~",
+  "gts_id": "gts.cf.e2e.reading.person.v1~",
   "content": {
-    "$id": "gts://gts.cf.e2e.registration.person.v1~",
+    "$id": "gts://gts.cf.e2e.reading.person.v1~",
     "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Revised Person",
     "type": "object",
     "properties": {
       "name": {
@@ -18,5 +19,6 @@
       "payload"
     ],
     "additionalProperties": false
-  }
+  },
+  "expected_resource_version": 1
 }

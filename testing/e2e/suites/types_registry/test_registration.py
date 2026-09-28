@@ -230,7 +230,7 @@ async def test_register_batch_with_instance_first(
         await read_created(registry_http, registry_api_path, expected_entity, operation)
 
 
-@pytest.mark.scenario("TR-REG-004")
+@pytest.mark.scenario("TR-REG-101")
 async def test_register_batch_with_partial_failure(
     registry_http, registry_api_path, registration_fixture, register_entities
 ):
@@ -342,7 +342,7 @@ def _expected_id_refusal(gts_id, description):
     }
 
 
-@pytest.mark.scenario("TR-REG-005")
+@pytest.mark.scenario("TR-REG-102")
 @pytest.mark.parametrize(
     "declared_id",
     [
