@@ -49,9 +49,8 @@ async fn the_pool_runs_every_queued_sync_and_stops_when_cancelled() {
         .await
         .expect("the job receiver must still be available");
     let cancel = CancellationToken::new();
-    let pool = tokio::spawn(
-        SyncPoolRunner::new(Arc::clone(&service), jobs, 1, cancel.clone()).run(),
-    );
+    let pool =
+        tokio::spawn(SyncPoolRunner::new(Arc::clone(&service), jobs, 1, cancel.clone()).run());
 
     let mut sessions = Vec::new();
     for _ in 0..3 {
@@ -74,7 +73,8 @@ async fn the_pool_runs_every_queued_sync_and_stops_when_cancelled() {
         let mut status = serde_json::Value::Null;
         for _ in 0..200 {
             let uri = format!("/github-mirror/v1/sessions/{id}");
-            status = body_json(send(router.clone(), Method::GET, &uri).await).await["status"].clone();
+            status =
+                body_json(send(router.clone(), Method::GET, &uri).await).await["status"].clone();
             if status == "complete" {
                 break;
             }

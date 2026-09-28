@@ -75,15 +75,32 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .require_license_features::<License>([])
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
-        .query_param_typed("force", false, "Bypass the HTTP cache and re-fetch everything", "boolean")
+        .query_param_typed(
+            "force",
+            false,
+            "Bypass the HTTP cache and re-fetch everything",
+            "boolean",
+        )
         .query_param(
             "include",
             false,
             "Comma-separated object types to collect, e.g. `issues,pull_requests`",
         )
-        .query_param("actions_scope", false, "`all`, `open` or `none` for CI results")
-        .query_param("reactions_scope", false, "`all`, `open` or `none` for reactions")
-        .query_param("timeline_scope", false, "`all`, `open` or `none` for timeline events")
+        .query_param(
+            "actions_scope",
+            false,
+            "`all`, `open` or `none` for CI results",
+        )
+        .query_param(
+            "reactions_scope",
+            false,
+            "`all`, `open` or `none` for reactions",
+        )
+        .query_param(
+            "timeline_scope",
+            false,
+            "`all`, `open` or `none` for timeline events",
+        )
         .query_param(
             "since",
             false,
