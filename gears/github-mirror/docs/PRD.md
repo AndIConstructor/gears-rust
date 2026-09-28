@@ -744,9 +744,14 @@ The library **MUST** collect structured telemetry per synchronization session an
 - Overall progress: tasks pending/running/completed/failed, entities indexed/refined/skipped, queue depth snapshots
 - Session summary: total API calls, total 304s, bytes downloaded/saved, cache hit ratio, elapsed time, final report
 
-The library **MUST** support writing telemetry to a caller-specified file (append-only, JSON Lines) and **MUST** expose telemetry via the public API so that the CLI tool can print it and the REST API service can attach it to synchronization job status responses.
+Telemetry **MUST** leave the gear in two ways, and the gear **MUST NOT** write telemetry files of its own (see `cpt-cf-github-mirror-fr-log-redaction`):
 
-- **Rationale**: Telemetry is essential for cost analysis, diagnostics, and optimization. Programmatic access enables both CLI rendering and REST API job status enrichment.
+- **Process-wide metrics** through the platform's OpenTelemetry meter provider: request counts by method, status and outcome (fresh, not modified, rate limited, failed), request duration, response bytes and rate-limit headroom. Metric labels **MUST** stay low-cardinality: URLs, repository names, tenant ids and session ids **MUST NOT** be labels. Per-request detail such as the URL and the ETag used goes to `debug` logs instead.
+- **Per-session totals** stored with the synchronization session and returned by the session status API (`GET /github-mirror/v1/sessions/{id}`) and the SDK: REST calls, GraphQL calls and points, 304s, bytes downloaded and saved, cache hit ratio, rate-limit waits and failed requests. They **MUST** be updated while the run is in flight, not only when it ends.
+
+The CLI tool, when it exists, prints the per-session totals from the same API.
+
+- **Rationale**: Telemetry is essential for cost analysis, diagnostics, and optimization. Gears push telemetry over OTLP only and expose no scrape endpoint or telemetry file (`docs/TRACING_SETUP.md`), and job-level numbers live on the job, as in the other gears; a caller-specified JSON Lines file is therefore left out.
 - **Actors**: `cpt-cf-github-mirror-actor-lib-consumer`, `cpt-cf-github-mirror-actor-cli-operator`, `cpt-cf-github-mirror-actor-api-consumer`
 
 ### 5.17 Environment Independence
