@@ -162,7 +162,12 @@ impl ChCatalogStore {
     /// wiring change cannot silently leave a store on a default that disagrees
     /// with the configured budget.
     ///
-    /// Must be invoked within a Tokio runtime (the worker is spawned eagerly).
+    /// # Panics
+    ///
+    /// Panics if called outside the context of a Tokio runtime: the refresh
+    /// worker is spawned eagerly via [`tokio::spawn`], which panics when no
+    /// runtime is entered on the current thread. Production wiring constructs
+    /// the store from the gear's async `init`, so this cannot fire there.
     #[must_use]
     pub fn new(
         client: clickhouse::Client,
