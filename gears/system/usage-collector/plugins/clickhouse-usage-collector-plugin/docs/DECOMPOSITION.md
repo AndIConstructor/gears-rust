@@ -39,9 +39,8 @@ The load-bearing difference from the reference plugin's decomposition is that **
 - **Depends On**: None
 
 - **Scope**:
-  - Overall backend design node and tech stack (`toolkit::gear` + `types-registry-sdk` wiring, `usage-collector-sdk` domain types, `clickhouse`/`opentelemetry` infrastructure). No coordination backend: the plugin declares no `cluster` dependency.
+  - Overall backend design node and tech stack (`toolkit::gear` + `types-registry-sdk` wiring, `usage-collector-sdk` domain types, `clickhouse`/`opentelemetry` infrastructure).
   - Plugin Module lifecycle: config load, ClickHouse client construction (via `build_client` — parses `database_url` into a bare base URL plus separate user/password/database via `ParsedEndpoint`), schema migration invocation plus `ensure_retention_ttl` (DDL bakes a 1-year default; startup `ALTER TABLE … MODIFY TTL` when config differs) and `ensure_insert_dedup_window` (retrofits `non_replicated_deduplication_window` onto pre-existing tables), and GTS + ClientHub registration. Foundation owns the call sites; [§2.5](#25-data-retention) owns the retention semantics.
-  - **Retired: Coordination Lock Manager, `CatalogLockPort`, `LockGuardPort`.** `infra/coordination/` no longer exists. Both stores are constructed from a ClickHouse client, the metric inventory and a deadline only; nothing in the plugin coordinates across processes.
   - SPI Storage Adapter: pure delegation, no business logic, owns backend-error classification (realizing `cpt-cf-uc-ch-plugin-fr-error-classification`) and keyset cursor encoding.
   - Schema Migration: the embedded `migrations/0001_init.sql` DDL runner (idempotent, re-runnable as a no-op; fixed 1-year TTL default) plus `ensure_retention_ttl`; `--` comment lines stripped and statements split while respecting single-quoted string literals before execution; no versioned-migration framework for non-TTL schema evolution (PRD.md §13 Open Questions).
   - TLS-defaulted, secret-wrapped DSN (`secrecy::SecretString` with redacted `Debug`, no `Display`/`Serialize`, zeroized on drop).
@@ -79,8 +78,6 @@ The load-bearing difference from the reference plugin's decomposition is that **
   - [x] `p2` - `cpt-cf-uc-ch-plugin-component-module`
   - [x] `p2` - `cpt-cf-uc-ch-plugin-component-adapter`
   - [x] `p2` - `cpt-cf-uc-ch-plugin-component-migrations`
-  - [x] `p2` - `cpt-cf-uc-ch-plugin-component-lock-manager` — **retired**; no such component exists. The ID is retained so cross-artifact references stay resolvable (DESIGN.md §1.3).
-  - [x] `p2` - `cpt-cf-uc-ch-plugin-component-catalog-lock-port` — **retired** with the lock manager; both stores are constructed from a client, metrics and a deadline only, so no lock seam trait is needed.
 
 - **API**:
   - [x] `p1` - `cpt-cf-uc-ch-plugin-interface-storage-spi`
@@ -93,7 +90,6 @@ The load-bearing difference from the reference plugin's decomposition is that **
 
 - **Contracts**:
   - [x] `p1` - `cpt-cf-uc-ch-plugin-contract-clickhouse`
-  - [x] `p1` - `cpt-cf-uc-ch-plugin-contract-coordination-lock` — **retired**; the plugin consumes no coordination backend and declares no `cluster` gear dependency.
   - [x] `p2` - `cpt-cf-uc-ch-plugin-contract-gts-registration`
 
 ### 2.2 Record Persistence & Lifecycle
@@ -105,7 +101,7 @@ The load-bearing difference from the reference plugin's decomposition is that **
 - **Depends On**: `cpt-cf-uc-ch-plugin-feature-foundation`
 
 - **Scope**:
-  - Plugin-owned pre-insert referential-integrity check against the catalog (DESIGN.md §3.6 Ingest sequence steps 2-3), rejecting a reference to an absent (including previously deleted) usage type with `UsageTypeNotFound`. This is this feature's half of `cpt-cf-uc-ch-plugin-fr-referential-integrity`; the delete-side half — reference probe, catalog-row removal, orphan sweep — is owned by [§2.4](#24-usage-type-catalog--referential-integrity). **No mutual exclusion** is involved on either side: this plugin holds no coordination lock (DESIGN.md §3.5), so this check is not ordered against a concurrent delete, and the residual window that leaves is bounded by this same check once the catalog row is gone.
+  - Plugin-owned pre-insert referential-integrity check against the catalog (DESIGN.md §3.6 Ingest sequence steps 2-3), rejecting a reference to an absent (including previously deleted) usage type with `UsageTypeNotFound`. This is this feature's half of `cpt-cf-uc-ch-plugin-fr-referential-integrity`; the delete-side half — reference probe, catalog-row removal, orphan sweep — is owned by [§2.4](#24-usage-type-catalog--referential-integrity). **No mutual exclusion** is involved on either side (DESIGN.md §3.5), so this check is not ordered against a concurrent delete, and the residual window that leaves is bounded by this same check once the catalog row is gone.
   - Single insert with read-before-insert dedup check and `ReplacingMergeTree` convergence backstop; `metadata` persisted verbatim into `Map(String, String)`; `status = 'active'` on first accept.
   - Batch insert as exactly three statements regardless of how many usage types the batch spans — one catalog existence query over the distinct `gts_id`s, one dedup pre-read, one multi-row `INSERT` — with per-record results in input order.
   - Compensation persistence: signed `value` + optional `corrects_id` on the ordinary insert path; no netting computed.
@@ -217,8 +213,7 @@ The load-bearing difference from the reference plugin's decomposition is that **
 
 - **Design Principles Covered**: None (realizes principles owned by [§2.1](#21-foundation-bootstrap-schema--spi-wiring))
 
-- **Design Constraints Covered**:
-  - [x] `p2` - `cpt-cf-uc-ch-plugin-constraint-gts-lock-required` — **superseded**; the ID is retained so cross-artifact references stay resolvable (DESIGN.md §2.2).
+- **Design Constraints Covered**: None
 
 - **Domain Model Entities**: `UsageType`
 
@@ -282,7 +277,6 @@ The load-bearing difference from the reference plugin's decomposition is that **
 
 - **Scope**:
   - The `uc_clickhouse_*` metric inventory (insert/query/deactivate/pool-acquire duration, backend-error classification, readiness gauge, catalog-size gauge, dedup-outcome counters) with bounded label cardinality.
-  - **No coordination-lock instrument set**: there is no lock to instrument, so no acquire-duration histogram, contention counter or lock-manager-unavailable counter is registered.
   - The periodic orphan-reconciliation *scan*. The `uc_clickhouse_orphaned_reference_detected_total` counter itself ships, incremented by [§2.4](#24-usage-type-catalog--referential-integrity)'s post-delete sweep; what remains deferred is the background job that would also catch orphans the delete path never observed — one left by an insert committing after the sweep, or by an out-of-band `usage_type_catalog` deletion. *
   - Recording each SPI dispatch's ClickHouse work under the host's ambient tracing span.
 
@@ -308,9 +302,9 @@ The load-bearing difference from the reference plugin's decomposition is that **
 
 ### 2.7 Deliberate Omissions
 
-- **Multi-shard distributed-table topology, ClickHouse's own replication-serving cluster/cluster lock coordination** — governed by the operator's ClickHouse deployment guide, not by plugin features (PRD.md §4.2). This is distinct from, and does not include, this plugin's own use of the cluster gear's `DistributedLockV1` as a coordination-lock facade for referential integrity, which **is** in scope and owned jointly by [§2.1](#21-foundation-bootstrap-schema--spi-wiring) (client construction and `CatalogLockPort`/`LockGuardPort` traits), [§2.2](#22-record-persistence--lifecycle) (exclusive lock usage on the create path), and [§2.4](#24-usage-type-catalog--referential-integrity) (exclusive lock usage on the delete path).
+- **Multi-shard distributed-table topology and ClickHouse's own replication coordination** — governed by the operator's ClickHouse deployment guide, not by plugin features (PRD.md §4.2).
 - **Product-level gear concerns** (authentication, PDP authorization, attribution/shape validation, idempotency-key presence, counter/gauge semantics, data classification) — owned by the parent Usage Collector gear, surfaced only as the pure-persistence boundary in [§2.1](#21-foundation-bootstrap-schema--spi-wiring).
-- **DB-enforced serializable dedup** — structurally unavailable on ClickHouse; not a deferred feature, a permanent architectural constraint documented in DESIGN.md §2.2/§3.6/§3.8 rather than assigned to a feature to "complete" later. (Referential integrity is in the same position: with no coordination lock, [§2.4](#24-usage-type-catalog--referential-integrity)'s delete side bounds its concurrent-reference window via the probe/sweep protocol and [§2.2](#22-record-persistence--lifecycle)'s insert-time check, rather than closing it.)
+- **DB-enforced serializable dedup** — structurally unavailable on ClickHouse; not a deferred feature, a permanent architectural constraint documented in DESIGN.md §2.2/§3.6/§3.8 rather than assigned to a feature to "complete" later. (Referential integrity is in the same position: with no mutual-exclusion primitive, [§2.4](#24-usage-type-catalog--referential-integrity)'s delete side bounds its concurrent-reference window via the probe/sweep protocol and [§2.2](#22-record-persistence--lifecycle)'s insert-time check, rather than closing it.)
 - **Read/write pool split for workload isolation** — noted as a possible future, additive revision in DESIGN.md §3.5 if production experience shows contention; not committed to v1 scope.
 - **General schema-evolution / versioned-migration mechanism** — not designed in v1 (DESIGN.md §4 Deferred, PRD.md §13 Open Questions); Foundation ([§2.1](#21-foundation-bootstrap-schema--spi-wiring)) provisions only the initial schema shape.
 
@@ -332,7 +326,7 @@ cpt-cf-uc-ch-plugin-feature-foundation
     └─→ cpt-cf-uc-ch-plugin-feature-observability                       [build-order; cross-cutting runtime]   (instruments record-persistence, query-aggregation, usage-type-catalog, retention)
 ```
 
-**Dependency Rationale**: identical structural rationale to the reference plugin's ([`timescaledb-usage-collector-plugin/docs/DECOMPOSITION.md` §3](../../timescaledb-usage-collector-plugin/docs/DECOMPOSITION.md#3-feature-dependencies)) — Record Persistence requires Foundation's ClickHouse client and Coordination Lock Manager; Query & Aggregation requires both Foundation and Record Persistence (nothing to read until records exist); Usage-Type Catalog requires only Foundation (its FK-emulation protocol is self-contained at build-order level, coordinating with Record Persistence only at runtime through the shared `gts_id` coordination lock and the shared catalog-existence read both features perform, not through a build-order dependency); Retention and Observability each require only Foundation to exist, instrumenting/expiring the other features' data cross-cuttingly.
+**Dependency Rationale**: identical structural rationale to the reference plugin's ([`timescaledb-usage-collector-plugin/docs/DECOMPOSITION.md` §3](../../timescaledb-usage-collector-plugin/docs/DECOMPOSITION.md#3-feature-dependencies)) — Record Persistence requires Foundation's ClickHouse client; Query & Aggregation requires both Foundation and Record Persistence (nothing to read until records exist); Usage-Type Catalog requires only Foundation (its FK-emulation protocol is self-contained at build-order level, coordinating with Record Persistence only at runtime through the shared catalog-existence read both features perform, not through a build-order dependency); Retention and Observability each require only Foundation to exist, instrumenting/expiring the other features' data cross-cuttingly.
 
 ## 4. Documentation Inventory
 
@@ -346,5 +340,5 @@ cpt-cf-uc-ch-plugin-feature-foundation
 | 6 | `docs/features/0003-cpt-cf-uc-ch-plugin-feature-query-aggregation.md` | Feature Spec | Pushed-down aggregation, keyset-paginated list, query translation, and workload-isolation analysis. |
 | 7 | `docs/features/0004-cpt-cf-uc-ch-plugin-feature-usage-type-catalog.md` | Feature Spec | Usage-type create / get / list, and why delete is withheld. |
 | 8 | `docs/features/0005-cpt-cf-uc-ch-plugin-feature-retention.md` | Feature Spec | `retention_period_secs` config field, TTL semantics, and dedup-key-reuse-after-expiry coupling. |
-| 9 | `docs/features/0006-cpt-cf-uc-ch-plugin-feature-observability.md` | Feature Spec | `uc_clickhouse_*` metric inventory, lock instrument set, and deferred orphan-detection counter. |
+| 9 | `docs/features/0006-cpt-cf-uc-ch-plugin-feature-observability.md` | Feature Spec | `uc_clickhouse_*` metric inventory and deferred orphan-reconciliation scan. |
 | 10 | `README.md` | README | Operator-facing deployment guide, configuration reference, workload-isolation mitigation guidance, and consistency-profile caveats.

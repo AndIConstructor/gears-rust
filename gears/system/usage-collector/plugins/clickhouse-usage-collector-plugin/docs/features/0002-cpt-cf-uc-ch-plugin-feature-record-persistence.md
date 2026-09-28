@@ -15,7 +15,7 @@
   - [Deactivate Usage Record (Cascade)](#deactivate-usage-record-cascade)
 - [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [Ingest with Dedup and Referential Integrity Check](#ingest-with-dedup-and-referential-integrity-check)
-  - [Batch Partition by gts_id](#batch-partition-by-gts_id)
+  - [Batch Resolution in Three Statements](#batch-resolution-in-three-statements)
   - [Versioned-Marker Deactivation Cascade](#versioned-marker-deactivation-cascade)
 - [4. States (CDSL)](#4-states-cdsl)
   - [Usage Record Lifecycle](#usage-record-lifecycle)
@@ -94,15 +94,13 @@ Record Persistence owns the full lifecycle write path: referential-integrity che
 **Steps**:
 
 1. [ ] - `p1` - Compute the deterministic record `id` (ADR-0013/ADR-0014 4-tuple: `tenant_id`, `gts_id`, `idempotency_key`, `created_at`) - `inst-ch-rec-create-1`
-2. [ ] - ~~`p1` - Acquire the exclusive `gts_id` coordination lock~~ — **superseded**: there is no coordination primitive; the three statements below are independent and unordered against a concurrent create for the same dedup key (DESIGN.md §3.6) - `inst-ch-rec-create-2`
-3. [ ] - `p1` - Plugin-owned referential-integrity check: `SELECT gts_id FROM usage_type_catalog WHERE gts_id = ? LIMIT 1` (existence is version-invariant, so no resolution is needed) — absent → **RETURN** `UsageTypeNotFound` - `inst-ch-rec-create-3`
-4. [ ] - `p1` - Dedup point-lookup: `SELECT ... FROM usage_records WHERE tenant_id=? AND gts_id=? AND created_at=? AND idempotency_key=? ORDER BY id ASC, version DESC LIMIT 1 BY id` - `inst-ch-rec-create-4`
-5. [ ] - `p1` - **IF** not found — proceed to insert - `inst-ch-rec-create-5`
-   1. [ ] - ~~`p1` - Call `ClusterLockGuard::ensure_still_held()` (lease renew) immediately before the INSERT~~ — **superseded**: no lease exists to renew - `inst-ch-rec-create-5a`
-   2. [ ] - `p1` - `INSERT` one row with `status='active'`, `version=<monotonic epoch_μs>`, carrying `insert_deduplication_token = UUIDv5(record namespace, id)` so a racing identical insert is dropped by the engine on a synchronous insert (`non_replicated_deduplication_window`; async inserts are deduplicated only on `Replicated*` engines) - `inst-ch-rec-create-5b`
-   3. [ ] - `p1` - **RETURN** the new record - `inst-ch-rec-create-5c`
-6. [ ] - `p1` - **IF** found, canonical fields equal — silent absorb: **RETURN** the stored record - `inst-ch-rec-create-6`
-7. [ ] - `p1` - **IF** found, canonical fields differ — **RETURN** `IdempotencyConflict` - `inst-ch-rec-create-7`
+2. [ ] - `p1` - Plugin-owned referential-integrity check: `SELECT gts_id FROM usage_type_catalog WHERE gts_id = ? LIMIT 1` (existence is version-invariant, so no resolution is needed) — absent → **RETURN** `UsageTypeNotFound` - `inst-ch-rec-create-3`
+3. [ ] - `p1` - Dedup point-lookup: `SELECT ... FROM usage_records WHERE tenant_id=? AND gts_id=? AND created_at=? AND idempotency_key=? ORDER BY id ASC, version DESC LIMIT 1 BY id` - `inst-ch-rec-create-4`
+4. [ ] - `p1` - **IF** not found — proceed to insert - `inst-ch-rec-create-5`
+   1. [ ] - `p1` - `INSERT` one row with `status='active'`, `version=<monotonic epoch_μs>`, carrying `insert_deduplication_token = UUIDv5(record namespace, id)` so a racing identical insert is dropped by the engine on a synchronous insert (`non_replicated_deduplication_window`; async inserts are deduplicated only on `Replicated*` engines) - `inst-ch-rec-create-5b`
+   2. [ ] - `p1` - **RETURN** the new record - `inst-ch-rec-create-5c`
+5. [ ] - `p1` - **IF** found, canonical fields equal — silent absorb: **RETURN** the stored record - `inst-ch-rec-create-6`
+6. [ ] - `p1` - **IF** found, canonical fields differ — **RETURN** `IdempotencyConflict` - `inst-ch-rec-create-7`
 
 ### Create Batch of Usage Records
 
@@ -136,7 +134,7 @@ Record Persistence owns the full lifecycle write path: referential-integrity che
 
 **Steps**:
 
-1. [ ] - `p1` - `SELECT ... FROM usage_records WHERE id = ? ORDER BY version DESC LIMIT 1 BY gts_id, tenant_id, created_at, id` (no lock required for a point read) - `inst-ch-rec-get-1`
+1. [ ] - `p1` - `SELECT ... FROM usage_records WHERE id = ? ORDER BY version DESC LIMIT 1 BY gts_id, tenant_id, created_at, id` - `inst-ch-rec-get-1`
 2. [ ] - `p1` - **IF** not found — **RETURN** `UsageRecordNotFound` - `inst-ch-rec-get-2`
 3. [ ] - `p1` - **RETURN** the found record - `inst-ch-rec-get-3`
 
@@ -157,7 +155,7 @@ Record Persistence owns the full lifecycle write path: referential-integrity che
 
 **Steps**:
 
-1. [ ] - `p1` - `SELECT ... FROM (SELECT ... WHERE id=? OR corrects_id=? ORDER BY version DESC LIMIT 1 BY gts_id, tenant_id, created_at, id) WHERE id=? OR (corrects_id=? AND status='active')` — resolve target status and depth-1 active compensations in one unlocked read; the `status` half of the predicate has to sit above the resolution step - `inst-ch-rec-deact-1`
+1. [ ] - `p1` - `SELECT ... FROM (SELECT ... WHERE id=? OR corrects_id=? ORDER BY version DESC LIMIT 1 BY gts_id, tenant_id, created_at, id) WHERE id=? OR (corrects_id=? AND status='active')` — resolve target status and depth-1 active compensations in one read; the `status` half of the predicate has to sit above the resolution step - `inst-ch-rec-deact-1`
 2. [ ] - `p1` - **IF** target not found → **RETURN** `UsageRecordNotFound` - `inst-ch-rec-deact-2`
 3. [ ] - `p1` - **IF** target already `inactive` → **RETURN** `UsageRecordAlreadyInactive` - `inst-ch-rec-deact-3`
 4. [ ] - `p1` - Compose one versioned marker row per affected `id` (target + compensations), each with `status='inactive'` and `version` strictly greater than the superseded row - `inst-ch-rec-deact-4`
@@ -170,15 +168,15 @@ Record Persistence owns the full lifecycle write path: referential-integrity che
 
 - [ ] `p2` - **ID**: `cpt-cf-uc-ch-plugin-algo-record-persistence-ingest-dedup`
 
-The create-side referential-integrity half of `cpt-cf-uc-ch-plugin-fr-referential-integrity`: a catalog-existence check immediately before the dedup check and `INSERT`. **No lock is held** — this plugin has no coordination primitive (DESIGN.md §3.5; an earlier revision's per-`gts_id` cluster mutex was removed) — so the check and the `INSERT` are **not** ordered against a concurrent `delete_usage_type` for the same `gts_id`. `plugin-spi.md` Method 9's "MUST NOT admit a window" is therefore not satisfied without qualification; the delete side (Feature 4) sweeps the records that land inside its own probe→delete window, and the residual — a check that passed before the delete followed by an `INSERT` that commits after the sweep — is accepted and documented in PRD.md §5.
+The create-side referential-integrity half of `cpt-cf-uc-ch-plugin-fr-referential-integrity`: a catalog-existence check immediately before the dedup check and `INSERT`. This plugin has no mutual-exclusion primitive (DESIGN.md §3.5), so the check and the `INSERT` are **not** ordered against a concurrent `delete_usage_type` for the same `gts_id`. `plugin-spi.md` Method 9's "MUST NOT admit a window" is therefore not satisfied without qualification; the delete side (Feature 4) sweeps the records that land inside its own probe→delete window, and the residual — a check that passed before the delete followed by an `INSERT` that commits after the sweep — is accepted and documented in PRD.md §5.
 
 This check is nonetheless what *bounds* that window rather than leaving it open-ended: from the moment the delete has removed the catalog row, every subsequent insert for the `gts_id` is refused here. The `ReplacingMergeTree(version)` convergence backstop is a defense-in-depth layer for duplicate creates, not a referential-integrity mechanism.
 
-### Batch Partition by gts_id
+### Batch Resolution in Three Statements
 
 - [ ] `p2` - **ID**: `cpt-cf-uc-ch-plugin-algo-record-persistence-batch-partition`
 
-The batch MUST be resolved with exactly three ClickHouse statements — one catalog existence query over the distinct `gts_id`s, one dedup pre-read over the records that passed it, one multi-row `INSERT` of the composed rows — regardless of how many usage types it spans. This replaces the former per-`gts_id` partition fan-out, which existed only so each partition could take its own coordination lock; with no lock there is nothing to partition for, and three statements is strictly fewer round-trips than one pipeline per distinct type. Within-batch dedup stays correct because the composition map is keyed on the canonical dedup tuple, which is global to the batch rather than partition-local. Failure granularity is per slot: a failed catalog read fails every slot, a failed dedup read fails the slots that passed the catalog check, and a failed `INSERT` fails only the slots backed by a composed row.
+The batch MUST be resolved with exactly three ClickHouse statements — one catalog existence query over the distinct `gts_id`s, one dedup pre-read over the records that passed it, one multi-row `INSERT` of the composed rows — regardless of how many usage types it spans. There is no per-`gts_id` fan-out: three statements is strictly fewer round-trips than one pipeline per distinct type. Within-batch dedup stays correct because the composition map is keyed on the canonical dedup tuple, which is global to the batch. Failure granularity is per slot: a failed catalog read fails every slot, a failed dedup read fails the slots that passed the catalog check, and a failed `INSERT` fails only the slots backed by a composed row.
 
 ### Versioned-Marker Deactivation Cascade
 
@@ -220,7 +218,7 @@ The system **MUST** implement `create_usage_record` as: run the catalog-existenc
 
 - [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-dod-record-persistence-create-batch`
 
-The system **MUST** implement `create_usage_records` with `gts_id`-partitioned locking: one lock + catalog check per distinct `gts_id` partition, a single batched dedup pre-check `SELECT` per partition, and one multi-row `INSERT` of that partition's non-duplicate rows. Each partition's pipeline (acquire → catalog check → dedup pre-check → resolve → `ensure_still_held` → `INSERT` → release) **MUST** run concurrently with the other partitions', and its lock **MUST** be held for its own critical section only — acquired no earlier than that partition's own work and released as soon as its own `INSERT` completes, on every exit path. A partition **MUST NOT** hold more than one lock at a time (which is what precludes cross-batch deadlock). Per-record outcomes **MUST** be returned in input order. A partition failure **MUST NOT** affect other partitions.
+The system **MUST** implement `create_usage_records` with exactly three ClickHouse statements however many usage types the batch spans: one catalog existence query over the batch's distinct `gts_id`s, one batched dedup pre-read over the records that passed it, and one multi-row `INSERT` of the composed rows (a no-op when nothing was composed), carrying an `insert_deduplication_token` derived from the sorted row ids and always synchronous. Per-record outcomes **MUST** be returned in input order. A failed catalog read **MUST** be reported in every slot, a failed dedup read only in the slots that passed the catalog check, and a failed `INSERT` only in the slots backed by a composed row.
 
 **Implements**: `cpt-cf-uc-ch-plugin-algo-record-persistence-batch-partition`, `cpt-cf-uc-ch-plugin-flow-record-persistence-create-batch`
 
@@ -267,7 +265,7 @@ The system **MUST** implement `get_usage_record` as a version-resolved point rea
 
 - [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-dod-record-persistence-deactivate`
 
-The system **MUST** implement `deactivate_usage_record` as: one version-resolved read to resolve the target's current status plus all depth-1 active compensations, with the `status = 'active'` predicate applied above the resolution step, then one multi-row `INSERT` of versioned marker rows with `status='inactive'`. No lock is acquired (the cascade is unlocked). Target not found → `UsageRecordNotFound`; target already `inactive` → `UsageRecordAlreadyInactive`.
+The system **MUST** implement `deactivate_usage_record` as: one version-resolved read to resolve the target's current status plus all depth-1 active compensations, with the `status = 'active'` predicate applied above the resolution step, then one multi-row `INSERT` of versioned marker rows with `status='inactive'`. Target not found → `UsageRecordNotFound`; target already `inactive` → `UsageRecordAlreadyInactive`.
 
 **Implements**: `cpt-cf-uc-ch-plugin-algo-record-persistence-deactivation-cascade`, `cpt-cf-uc-ch-plugin-flow-record-persistence-deactivate`
 
@@ -278,17 +276,14 @@ The system **MUST** implement `deactivate_usage_record` as: one version-resolved
 ## 6. Acceptance Criteria
 
 - [ ] Single-row `usage_records` `INSERT`s carry `async_insert = 1` and `wait_for_async_insert = 1` (verifiable in `system.query_log`), while multi-row `INSERT`s and every `usage_type_catalog` write carry neither. Every `usage_records` `INSERT` carries a UUID `insert_deduplication_token`; on a synchronous store two racing identical single creates, or two racing identical batches, store exactly one physical row per id, and a deactivation marker is stored next to the row it supersedes rather than deduplicated against it. An exact create retry is still absorbed rather than inserting a second row, which is what proves the acknowledgement implies queryability.
-- [x] `create_usage_record` takes no lock of any kind: catalog check, dedup pre-read and `INSERT` are three independent statements.
 - [x] The catalog-existence check is `SELECT gts_id FROM usage_type_catalog WHERE gts_id = ? LIMIT 1`; an absent type returns `UsageTypeNotFound`, including a type that `delete_usage_type` previously removed.
 - [x] The dedup lookup keys on the canonical `(tenant_id, gts_id, created_at, idempotency_key)` tuple — emitted in sorting-key order (`gts_id` first) so it leads with the three-column sort-key prefix, never on `id` — and resolves versions per `id` (`ORDER BY id ASC, version DESC LIMIT 1 BY id`).
 - [x] An identical re-submission (same canonical fields) is absorbed silently; a re-submission with differing canonical fields returns `IdempotencyConflict`.
-- [x] No lease-renew step exists on the insert path; the engine's `insert_deduplication_token` window, not a lock, is what makes a racing retry of the same row a no-op.
 - [x] `create_usage_records` issues exactly three statements however many usage types the batch spans — one catalog existence query, one dedup pre-read, one multi-row `INSERT` — with per-record outcomes in input order.
 - [x] A failed `INSERT` is reported only in the slots backed by a composed row; slots absorbed from storage keep the outcome the dedup pre-read decided.
 - [x] `deactivate_usage_record` flips the target and all depth-1 active compensations in a single multi-row `INSERT`; no partial cascade is observable by a version-resolving reader.
 - [x] `deactivate_usage_record` returns `UsageRecordNotFound` when the target does not exist and `UsageRecordAlreadyInactive` when it is already inactive.
 - [x] No `UPDATE` or `ALTER TABLE ... DELETE` statement is issued on any request-path code path.
-- [x] No lock is acquired anywhere on the write path, so no release path exists to get wrong.
 
 ## 7. Non-Applicable Concerns
 

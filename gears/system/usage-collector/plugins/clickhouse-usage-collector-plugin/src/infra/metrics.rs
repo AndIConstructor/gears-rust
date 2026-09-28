@@ -205,9 +205,6 @@ pub struct Metrics {
     //   `hyper-util` legacy client's internal connection pool and exposes no
     //   pool-size counters.
     //
-    // - No `uc_clickhouse_lock_*` series: the plugin uses no coordination lock
-    //   (DESIGN.md §3.5), so nothing could ever increment them.
-    //
     // `uc_clickhouse_orphaned_reference_detected_total` IS registered above.
     // It was previously omitted because its only intended incrementer was the
     // deferred periodic orphan-reconciliation worker; the `delete_usage_type`

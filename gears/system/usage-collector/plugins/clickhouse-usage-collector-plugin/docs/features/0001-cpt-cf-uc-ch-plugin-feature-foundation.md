@@ -17,7 +17,6 @@
 - [4. States (CDSL)](#4-states-cdsl)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [Implement the Plugin Module lifecycle](#implement-the-plugin-module-lifecycle)
-  - [Register no Coordination Lock Manager](#register-no-coordination-lock-manager)
   - [Implement the SPI Storage Adapter shell and error classification](#implement-the-spi-storage-adapter-shell-and-error-classification)
   - [Implement idempotent Schema Migrations](#implement-idempotent-schema-migrations)
   - [Implement GTS-scoped registration](#implement-gts-scoped-registration)
@@ -62,9 +61,9 @@ Foundation owns the cross-cutting plumbing every other feature builds on: the Pl
 - **PRD**: [PRD.md](../PRD.md)
 - **Design**: [DESIGN.md](../DESIGN.md)
 - **Decomposition**: `cpt-cf-uc-ch-plugin-feature-foundation`
-- **Design elements**: `cpt-cf-uc-ch-plugin-component-module`, `cpt-cf-uc-ch-plugin-component-adapter`, `cpt-cf-uc-ch-plugin-component-migrations`, `cpt-cf-uc-ch-plugin-component-lock-manager`, `cpt-cf-uc-ch-plugin-component-catalog-lock-port`, `cpt-cf-uc-ch-plugin-db-schema`
+- **Design elements**: `cpt-cf-uc-ch-plugin-component-module`, `cpt-cf-uc-ch-plugin-component-adapter`, `cpt-cf-uc-ch-plugin-component-migrations`, `cpt-cf-uc-ch-plugin-db-schema`
 - **Interfaces**: `cpt-cf-uc-ch-plugin-interface-storage-spi`
-- **Contracts**: `cpt-cf-uc-ch-plugin-contract-clickhouse`, `cpt-cf-uc-ch-plugin-contract-coordination-lock` (**retired** — no coordination backend is consumed; the ID is retained so cross-artifact references stay resolvable), `cpt-cf-uc-ch-plugin-contract-gts-registration`
+- **Contracts**: `cpt-cf-uc-ch-plugin-contract-clickhouse`, `cpt-cf-uc-ch-plugin-contract-gts-registration`
 - **Dependencies**: None
 
 ### 1.5 Out of Scope
@@ -91,25 +90,22 @@ Foundation owns the cross-cutting plumbing every other feature builds on: the Pl
 **Error Scenarios**:
 
 - Invalid config (e.g. plaintext `http://` URL without `allow_insecure_http = true`), unreachable ClickHouse, or schema DDL failure — `init` fails fast; the plugin does not register and the host does not bind it.
-- There is no coordination backend to be unbound: the plugin declares no `cluster` dependency, so no startup or first-acquire failure mode exists for one.
 
 **Steps**:
 
 1. [ ] - `p1` - Host process starts with the ClickHouse plugin enabled; ToolKit invokes the gear `init` - `inst-ch-boot-1`
 2. [ ] - `p1` - Load and validate `ClickHousePluginConfig` (database URL, `allow_insecure_http`, `request_timeout_secs`, `async_insert`, `retention_period_secs`, vendor, priority) - `inst-ch-boot-2`
    1. [ ] - `p1` - **IF** the parsed `database_url` scheme is neither `http` nor `https` — **RETURN** gear initialization failure naming the unsupported scheme (the client speaks ClickHouse's HTTP interface only); independent of `allow_insecure_http` - `inst-ch-boot-2a`
-   2. [ ] - ~~`p1` - **IF** `lock_ttl_secs <= request_timeout_secs + 5` (the client deadline) — **RETURN** gear initialization failure stating both values~~ — **superseded**: the coordination lock and both `lock_*` config fields were removed (see DESIGN.md §2.2 / §3.5); this invariant no longer exists - `inst-ch-boot-2b`
-   3. [ ] - `p1` - **IF** `async_insert == true` AND `request_timeout_secs < 2` — **RETURN** gear initialization failure naming both values: `wait_for_async_insert = 1` blocks each `INSERT` until the server flushes its async-insert buffer (`async_insert_busy_timeout_ms`, adaptive 50-200ms), so the request budget must leave room for that wait plus the part commit; the remedy is to raise `request_timeout_secs` or set `async_insert = false` - `inst-ch-boot-2c`
+   2. [ ] - `p1` - **IF** `async_insert == true` AND `request_timeout_secs < 2` — **RETURN** gear initialization failure naming both values: `wait_for_async_insert = 1` blocks each `INSERT` until the server flushes its async-insert buffer (`async_insert_busy_timeout_ms`, adaptive 50-200ms), so the request budget must leave room for that wait plus the part commit; the remedy is to raise `request_timeout_secs` or set `async_insert = false` - `inst-ch-boot-2c`
 3. [ ] - `p1` - **IF** the parsed (lowercase-normalized) `database_url` scheme is plaintext `http` AND `allow_insecure_http == false` - `inst-ch-boot-3`
    1. [ ] - `p1` - **RETURN** gear initialization failure: TLS enforcement violation - `inst-ch-boot-3a`
 4. [ ] - `p1` - Build the `clickhouse::Client` via `build_client` / `ParsedEndpoint` — parse URL into bare base URL + user/password/database, emit `tracing::warn!` if plaintext - `inst-ch-boot-4`
 5. [ ] - `p1` - Run `apply_migrations` (idempotent `CREATE TABLE IF NOT EXISTS` with fixed 1-year TTL default), then `ensure_retention_ttl` to reconcile `retention_period_secs`, then `ensure_insert_dedup_window` to retrofit `non_replicated_deduplication_window` onto a pre-existing table (schema migrations first — fail fast on schema errors) - `inst-ch-boot-5`
-6. [ ] - ~~`p1` - Construct the `LockManager` with the cluster hub handle~~ — **superseded**: the coordination lock and the `cluster` gear dependency were removed (see DESIGN.md §3.5); there is no lock manager to construct - `inst-ch-boot-6`
-7. [ ] - `p1` - **IF** provisioning fails - `inst-ch-boot-7`
+6. [ ] - `p1` - **IF** provisioning fails - `inst-ch-boot-7`
    1. [ ] - `p1` - **RETURN** gear initialization failure without registering - `inst-ch-boot-7a`
-8. [ ] - `p1` - Build the `PluginV1<UsageCollectorPluginSpecV1>` registration and publish to `types-registry` - `inst-ch-boot-8`
-9. [ ] - `p1` - Register the SPI `StorageAdapter` as a scoped `UsageCollectorPluginV1` client via ClientHub under the GTS instance scope, carrying the configured vendor and priority - `inst-ch-boot-9`
-10. [ ] - `p1` - **RETURN** backend registered and ready; the host performs vendor/priority selection - `inst-ch-boot-10`
+7. [ ] - `p1` - Build the `PluginV1<UsageCollectorPluginSpecV1>` registration and publish to `types-registry` - `inst-ch-boot-8`
+8. [ ] - `p1` - Register the SPI `StorageAdapter` as a scoped `UsageCollectorPluginV1` client via ClientHub under the GTS instance scope, carrying the configured vendor and priority - `inst-ch-boot-9`
+9. [ ] - `p1` - **RETURN** backend registered and ready; the host performs vendor/priority selection - `inst-ch-boot-10`
 
 ## 3. Processes / Business Logic (CDSL)
 
@@ -191,19 +187,6 @@ The system **MUST** implement the `#[toolkit::gear]` `init` that loads and valid
 - Component: `cpt-cf-uc-ch-plugin-component-module`
 - Entities: `UsageCollectorPluginV1`, `ClickHousePluginConfig`
 
-### Register no Coordination Lock Manager
-
-- [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-dod-foundation-lock-manager`
-
-The system **MUST NOT** construct any coordination primitive: no `LockManager`, no `CatalogLockPort` / `LockGuardPort` seam, and no `cluster` gear dependency. `infra/coordination/` does not exist, and both stores are constructed from a ClickHouse client, the metric inventory and a deadline only. Write-path concurrency is reconciled by `ReplacingMergeTree(version)` and the engine's `insert_deduplication_token` window instead (DESIGN.md §3.5, §3.6).
-
-**Implements**: `cpt-cf-uc-ch-plugin-flow-foundation-bind-startup`
-
-**Touches**:
-
-- Component: `cpt-cf-uc-ch-plugin-component-lock-manager` (retired), `cpt-cf-uc-ch-plugin-component-catalog-lock-port` (retired)
-- Contract: `cpt-cf-uc-ch-plugin-contract-coordination-lock` (retired)
-
 ### Implement the SPI Storage Adapter shell and error classification
 
 - [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-dod-foundation-adapter`
@@ -282,8 +265,7 @@ The system **MUST** keep all ClickHouse-specific SQL, schema, and client depende
 - [x] `build_client` emits `tracing::warn!` on every startup when `allow_insecure_http == true` and the URL is `http://`.
 - [x] Backend/ClickHouse errors are surfaced as `UsageCollectorPluginError` classified `Transient` vs `Internal` plus the typed domain variants.
 - [x] Invalid config or an unreachable ClickHouse fails `init` fast; the plugin does not register.
-- [x] No coordination primitive is constructed anywhere: `infra/coordination/` does not exist and the gear declares no `cluster` dependency.
-- [x] `ChRecordStore` and `ChCatalogStore` are constructed from a ClickHouse client, the metric inventory and a deadline only (plus `async_insert` on the record store); neither takes a lock port.
+- [x] `ChRecordStore` and `ChCatalogStore` are constructed from a ClickHouse client, the metric inventory and a deadline only (plus `async_insert` on the record store).
 - [x] The single-node consistency profile is documented as effectively immediate read-after-write; the replicated profile is documented with its lag bound and `insert_quorum` guidance.
 
 ## 7. Non-Applicable Concerns

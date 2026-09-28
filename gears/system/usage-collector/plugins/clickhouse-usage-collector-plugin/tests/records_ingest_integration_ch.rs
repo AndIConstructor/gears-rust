@@ -729,8 +729,9 @@ async fn ch_dedup_race_converges() {
     };
     let tenant = Uuid::from_u128(0xDED);
 
-    // Two identical records; both contend for the same exclusive per-gts_id
-    // mutex, and whichever loses the race sees the winner's row.
+    // Two identical records racing through the unserialised read-then-insert
+    // path; the engine's insert dedup window or version resolution must leave
+    // exactly one visible row.
     let rec_a = common::fixture_usage_record(VCPU_GTS, tenant, "idem-race", Decimal::new(1, 0));
     let rec_b = rec_a.clone(); // exact duplicate — same 4-tuple key
     // Captured before the records move into the spawned tasks.

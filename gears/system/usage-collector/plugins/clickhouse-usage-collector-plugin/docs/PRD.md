@@ -69,7 +69,6 @@ The parent gear glossary and the TimescaleDB plugin's glossary are the primary s
 | Term | Definition |
 | --- | --- |
 | Versioned row | A backend-internal mechanism (DESIGN.md §3.1/§3.7) by which a status transition or dedup-convergence outcome is represented as a new row rather than an in-place update. |
-| Coordination lock | **Retired.** An earlier revision held a per-`gts_id` exclusive cluster mutex via the cluster gear `DistributedLockV1`. It existed to make `delete_usage_type` race-free; `delete_usage_type` now documents its residual race instead, so the lock lost its only justification and was removed along with the `cluster` dependency (DESIGN.md §3.5/§3.6). The term is kept here so older cross-artifact references stay readable. |
 | Bucket cap | The SPI's `MAX_AGGREGATION_BUCKETS` memory guard (plugin-spi.md Method 3) that every aggregation-capable backend, including this one, must enforce server-side. |
 
 ## 2. Actors
@@ -86,7 +85,7 @@ This plugin has no direct human actors and shares the TimescaleDB plugin's singl
 
 **ID**: `cpt-cf-uc-ch-plugin-actor-operator`
 
-- **Role**: The platform operator who deploys and configures the plugin (sets `retention_period_secs`, `allow_insecure_http`, `async_insert`, etc.) and is responsible for ClickHouse deployment and for monitoring the plugin's operational metrics. No coordination backend has to be provisioned.
+- **Role**: The platform operator who deploys and configures the plugin (sets `retention_period_secs`, `allow_insecure_http`, `async_insert`, etc.) and is responsible for ClickHouse deployment and for monitoring the plugin's operational metrics.
 
 #### ClickHouse Server
 
@@ -101,10 +100,9 @@ This plugin operates within the standard Gears ToolKit lifecycle. At startup it 
 ### 3.1 Gear-Specific Environment Constraints
 
 - Requires a reachable ClickHouse server (self-hosted or ClickHouse Cloud) reachable over its HTTP interface; the plugin provisions its tables at startup.
-- Requires no coordination backend and declares no `cluster` gear dependency. Any number of gear process instances may run against one ClickHouse backend; concurrent writers are reconciled by `ReplacingMergeTree(version)` and the engine's `insert_deduplication_token` window rather than serialized ([§5](#5-functional-requirements)).
+- Any number of gear process instances may run against one ClickHouse backend; concurrent writers are reconciled by `ReplacingMergeTree(version)` and the engine's `insert_deduplication_token` window rather than serialized ([§5](#5-functional-requirements)).
 - Requires a TLS-capable ClickHouse endpoint for production deployments; the plugin rejects a plaintext `database_url` at startup by default and requires an explicit, logged config override (`allow_insecure_http = true`) to permit one, for development/test only.
 - The `database_url` config field embeds the ClickHouse HTTP endpoint, user, password, and database name as a single URL (e.g. `https://user:pass@host:8443/db`). Credentials with URL-reserved characters must be percent-encoded in the URL.
-- The plugin exposes two lock-related config fields: `lock_ttl_secs` (the cluster lock lease TTL — should be sized above worst-case critical-section latency, i.e. above the ClickHouse round-trips performed while the exclusive lock is held; the lease is renewed via `ensure_still_held()` immediately before every mutating write) and `lock_timeout_secs` (the maximum wait to acquire the lock before failing closed with `Transient`). The TTL's relation to the request budget is a startup-validated invariant, not just guidance: `lock_ttl_secs` must be strictly greater than the client deadline (`request_timeout_secs` plus the 5s client-deadline grace), because a single ClickHouse round-trip may consume that entire deadline and the write that follows the renew must not outlive the lease it was just granted. Raising `request_timeout_secs` therefore requires raising `lock_ttl_secs` with it, or startup fails.
 - Usage records and the usage-type catalog reside in the same ClickHouse database, so the referential-integrity emulation ([§5](#5-functional-requirements)) operates entirely within one backend's reach.
 - The plugin is statically linked into the Usage Collector gear process; ClickHouse cluster topology (replication, sharding, sizing) follows the operator's ClickHouse deployment guide. This plugin targets a single-shard (optionally replicated) deployment for v1; multi-shard distributed-table topology is out of scope ([§4.2](#42-out-of-scope)). The consistency guarantee this plugin can offer differs materially between the single-node and replicated case — see DESIGN.md §3.8 for the concrete, numeric bounds and [§6.1](#61-gear-specific-nfrs) for the NFR statement.
 
@@ -120,14 +118,14 @@ This plugin operates within the standard Gears ToolKit lifecycle. At startup it 
 - Server-side aggregation (SUM / COUNT / MIN / MAX / AVG with grouping) and keyset pagination pushed into ClickHouse's vectorized execution engine, with the SPI's `MAX_AGGREGATION_BUCKETS` cap enforced server-side.
 - A native ClickHouse expiry mechanism providing time-based retention for usage records: a fixed one-year TTL default in the initial DDL, reconciled on every startup to the operator-configured `retention_period_secs`.
 - Injection-safe translation of the host-supplied filter, aggregation, and pagination into parameterized ClickHouse queries.
-- Push-based OpenTelemetry metrics for the plugin's backend-internal operation, under a distinct `uc_clickhouse_*` sub-namespace: backend readiness, error classification, insert/query/lock instruments, and the catalog-size gauge ([§5](#5-functional-requirements)). The orphaned-reference detection-backstop counter is **deferred** and not registered — see [§9](#9-acceptance-criteria) and feature 0006 §5.
+- Push-based OpenTelemetry metrics for the plugin's backend-internal operation, under a distinct `uc_clickhouse_*` sub-namespace: backend readiness, error classification, insert/query instruments, and the catalog-size gauge ([§5](#5-functional-requirements)). The orphaned-reference detection-backstop counter is **deferred** and not registered — see [§9](#9-acceptance-criteria) and feature 0006 §5.
 - Typed classification of every backend error into the SDK's `UsageCollectorPluginError` vocabulary (Transient vs. Internal, plus the typed domain variants).
-- Runtime discovery/registration and operator configuration of the connection, request and lock timeouts, retention window, and GTS instance selection (vendor, priority). Connection-pool sizing is **not** configurable — see [§6.1](#61-gear-specific-nfrs).
+- Runtime discovery/registration and operator configuration of the connection and request timeouts, retention window, and GTS instance selection (vendor, priority). Connection-pool sizing is **not** configurable — see [§6.1](#61-gear-specific-nfrs).
 
 ### 4.2 Out of Scope
 
 - Any product-level behavior owned by the gear core — authentication, PDP authorization, attribution and shape validation, idempotency-key presence enforcement, counter/gauge semantics, and metadata closed-shape validation. These are inherited from the parent gear, not re-implemented here.
-- Multi-shard distributed-table topology, cross-cluster replication configuration, and ClickHouse's own replication coordination (whatever ensemble the ClickHouse server itself requires for it) — governed by the operator's ClickHouse deployment guide, not by this plugin. **Not included in this exclusion**: this plugin's own use of the cluster gear's distributed lock as a coordination-lock backend for referential integrity ([§5](#5-functional-requirements)) — that usage is in scope and owned by this plugin, distinct from and unrelated to ClickHouse's own replication coordination.
+- Multi-shard distributed-table topology, cross-cluster replication configuration, and ClickHouse's own replication coordination (whatever ensemble the ClickHouse server itself requires for it) — governed by the operator's ClickHouse deployment guide, not by this plugin.
 - Strict, DB-enforced serializability for the dedup path — ClickHouse structurally cannot provide this; the plugin provides the closest achievable approximation and documents the residual race explicitly (see [§5](#5-functional-requirements), DESIGN.md §2.2, §3.6, §3.8). The referential-integrity path is in the same position: with no foreign key and no coordination primitive, its delete side bounds the concurrent-reference window rather than eliminating it — see [§5](#5-functional-requirements) and the deviations table.
 - Permanent (unbounded) idempotency-key preservation beyond the configured retention window — the same narrowing the reference plugin already documents (and leaves as an open question) for a time-partitioned backend; see [§13](#13-open-questions).
 - Schema evolution beyond the v1 shape (adding/changing columns post-release) — not designed in v1; see [§13](#13-open-questions) and DESIGN.md §4 Deferred.
@@ -142,9 +140,9 @@ This plugin operates within the standard Gears ToolKit lifecycle. At startup it 
 
 - [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-fr-idempotent-dedup`
 
-The plugin **MUST** deduplicate records on the SPI's canonical `(tenant_id, gts_id, idempotency_key, created_at)` 4-tuple (ADR-0014) using an application-level mechanism appropriate for a backend without native uniqueness constraints (concrete mechanism: DESIGN.md §3.6 Ingest sequence). It **MUST NOT** key the lookup on the derived record `id` alone: `id` is a projection of that same tuple, so a stored row whose `id` disagrees with its own tuple would be missed and re-inserted under an idempotency key already in use. On an exact-equality retry the plugin **MUST** return the stored record (silent absorb); on a canonical-field mismatch under the same dedup tuple — including a stored `id` that differs from the incoming record's derived `id` — it **MUST** return an idempotency-conflict error. Unlike the reference plugin, this backend **MUST NOT** claim atomic serialization of concurrent same-key submissions from any source. Nothing orders two concurrent submissions sharing a dedup identity: this plugin holds no coordination lock (an earlier revision's per-`gts_id` cluster mutex was removed — DESIGN.md §3.5), and ClickHouse offers no row lock or transaction that could stand in. The read-before-insert check is therefore **best-effort**: both submissions can pass it and both can insert. What catches them instead is the engine's `insert_deduplication_token` window — both carry the same token, since the record `id` is derived from the dedup tuple — which drops the second block on a synchronous insert (**first-writer-wins**, no `IdempotencyConflict` for the loser), with `ReplacingMergeTree(version)` convergence as the backstop. `IdempotencyConflict` is therefore raised only when the earlier row is already visible at pre-read time. This residual **MUST** be documented in the plugin's README rather than presented as equivalent to the reference plugin's DB-enforced guarantee.
+The plugin **MUST** deduplicate records on the SPI's canonical `(tenant_id, gts_id, idempotency_key, created_at)` 4-tuple (ADR-0014) using an application-level mechanism appropriate for a backend without native uniqueness constraints (concrete mechanism: DESIGN.md §3.6 Ingest sequence). It **MUST NOT** key the lookup on the derived record `id` alone: `id` is a projection of that same tuple, so a stored row whose `id` disagrees with its own tuple would be missed and re-inserted under an idempotency key already in use. On an exact-equality retry the plugin **MUST** return the stored record (silent absorb); on a canonical-field mismatch under the same dedup tuple — including a stored `id` that differs from the incoming record's derived `id` — it **MUST** return an idempotency-conflict error. Unlike the reference plugin, this backend **MUST NOT** claim atomic serialization of concurrent same-key submissions from any source. Nothing orders two concurrent submissions sharing a dedup identity: this plugin carries no mutual-exclusion primitive (DESIGN.md §3.5), and ClickHouse offers no row lock or transaction that could stand in. The read-before-insert check is therefore **best-effort**: both submissions can pass it and both can insert. What catches them instead is the engine's `insert_deduplication_token` window — both carry the same token, since the record `id` is derived from the dedup tuple — which drops the second block on a synchronous insert (**first-writer-wins**, no `IdempotencyConflict` for the loser), with `ReplacingMergeTree(version)` convergence as the backstop. `IdempotencyConflict` is therefore raised only when the earlier row is already visible at pre-read time. This residual **MUST** be documented in the plugin's README rather than presented as equivalent to the reference plugin's DB-enforced guarantee.
 
-- **Rationale**: ClickHouse has no `INSERT ... ON CONFLICT` and no row-level locking, so mutual exclusion would have to come from outside ClickHouse — and this plugin deliberately carries no such primitive (DESIGN.md §3.5). The engine's `insert_deduplication_token` window is what catches racing identical writes instead, with `ReplacingMergeTree` convergence as the backstop; both are engine-side mechanisms, neither is mutual exclusion, and the residual is stated above rather than closed (see DESIGN.md §2.2, §3.6).
+- **Rationale**: ClickHouse has no `INSERT ... ON CONFLICT` and no row-level locking, so mutual exclusion would have to come from outside ClickHouse — and this plugin carries no such primitive (DESIGN.md §3.5). The engine's `insert_deduplication_token` window is what catches racing identical writes instead, with `ReplacingMergeTree` convergence as the backstop; both are engine-side mechanisms, neither is mutual exclusion, and the residual is stated above rather than closed (see DESIGN.md §2.2, §3.6).
 - **Actors**: `cpt-cf-uc-ch-plugin-actor-plugin-host`
 - **Realizes (gear)**: `cpt-cf-usage-collector-fr-idempotency`, narrowed per the above and per [§13](#13-open-questions).
 
@@ -172,7 +170,7 @@ The plugin **MUST** emulate, at the application level, that a usage type referen
 
 The probe is a snapshot, not an authoritative verify: a record referencing the type can land between the probe and the removal. The sweep removes those arrivals, but an insert whose own catalog check passed before the removal and which commits after the sweep **MAY** still orphan a row. This construction therefore **bounds** the concurrent-reference race; it does not eliminate it. Deleting a type while ingest for it is in flight is an operational error the plugin cannot prevent — the counter above is the signal that it happened.
 
-- **Rationale**: ClickHouse has no native foreign key, `ON DELETE RESTRICT`, or any other primitive that could close this race from within ClickHouse alone, and closing it from outside requires a mutual-exclusion primitive this plugin deliberately does not carry (an earlier revision used a cluster distributed lock; it was removed along with the `cluster` dependency — DESIGN.md §3.5). The alternatives were to withhold the operation, as a previous revision did, or to offer it with the residual stated. Withholding it left operators no way to remove a mis-registered type except hand-written SQL, which admits the same window with none of the probe, the sweep, the 409 refusal, or the counter — so the operation is offered and the deviation recorded. `plugin-spi.md` Method 9's "MUST NOT admit a window" clause is knowingly unmet; the gear-level SPI contract is **not** relaxed to match, because the reference plugin does satisfy it natively.
+- **Rationale**: ClickHouse has no native foreign key, `ON DELETE RESTRICT`, or any other primitive that could close this race from within ClickHouse alone, and closing it from outside requires a mutual-exclusion primitive this plugin does not carry (DESIGN.md §3.5). The alternatives were to withhold the operation or to offer it with the residual stated. Withholding it would leave operators no way to remove a mis-registered type except hand-written SQL, which admits the same window with none of the probe, the sweep, the 409 refusal, or the counter — so the operation is offered and the deviation recorded. `plugin-spi.md` Method 9's "MUST NOT admit a window" clause is knowingly unmet; the gear-level SPI contract is **not** relaxed to match, because the reference plugin does satisfy it natively.
 - **Actors**: `cpt-cf-uc-ch-plugin-actor-plugin-host`
 - **Realizes (gear)**: `cpt-cf-usage-collector-fr-usage-type-deletion`
 
@@ -223,7 +221,7 @@ Aggregation queries over a 30-day range for a single tenant **MUST** complete wi
 
 - [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-nfr-ingestion-throughput`
 
-The plugin **MUST** sustain the parent gear's ingestion envelope (≥ 10,000 records/sec sustained) through the batch write path. ClickHouse's part-oriented write model favors large batched inserts over many small single-row inserts; the plugin's batch path **MUST** issue one multi-row `INSERT` per distinct `gts_id` partition in the batch — exactly one for the common single-`gts_id` batch — rather than N single-row inserts. Partitioning the write this way is what lets each `gts_id`'s coordination lock cover only its own critical section, so a batch spanning several types is not serialized behind whichever one is contended. The referential-integrity coordination lock ([§5](#5-functional-requirements)) **MUST** be acquired once per distinct `gts_id` present in the batch, not once per record, so its coordination-service round-trip is amortized across every record sharing a `gts_id` rather than added to this NFR's per-record budget; a batch is not restricted to a single `gts_id` (concrete mechanism: DESIGN.md §3.6 Batch Ingest sequence).
+The plugin **MUST** sustain the parent gear's ingestion envelope (≥ 10,000 records/sec sustained) through the batch write path. ClickHouse's part-oriented write model favors large batched inserts over many small single-row inserts; the plugin's batch path **MUST** resolve a batch with a fixed number of statements regardless of how many usage types it spans — one catalog existence query over the batch's distinct `gts_id`s, one dedup pre-read, and one multi-row `INSERT` — rather than N single-row inserts or a per-type fan-out; a batch is not restricted to a single `gts_id` (concrete mechanism: DESIGN.md §3.6 Batch Ingest sequence).
 
 - **Threshold**: ≥ 10,000 records/sec sustained through the batch write path.
 - **Architecture Allocation**: See DESIGN.md §1.2 (NFR Allocation).
@@ -294,14 +292,6 @@ The plugin **MUST** emit push-based OpenTelemetry metrics for its backend-intern
 - **Protocol/Format**: ClickHouse HTTP interface (via the official `clickhouse` Rust crate), TLS-preferred.
 - **Compatibility**: The plugin provisions its initial schema idempotently at startup (see [§5](#5-functional-requirements) and [§13](#13-open-questions) for the schema-evolution limitation); it requires a ClickHouse version supporting the storage engine, expiry, and map-typed-column features this plugin's schema depends on (DESIGN.md §3.7) — all long-stable ClickHouse capabilities.
 
-#### Coordination Lock Backend Contract (Retired)
-
-- [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-contract-coordination-lock`
-
-- **Direction**: **retired** — nothing is required from the platform. The ID is retained so cross-artifact references stay resolvable; an earlier revision consumed the cluster gear's `DistributedLockV1` under profile `usage-collector`.
-- **Protocol/Format**: none. The plugin links no coordination SDK and declares no `cluster` gear dependency.
-- **Compatibility**: not applicable. A deployment that still binds a cluster `usage-collector` profile for other gears is unaffected — this plugin never resolves it.
-
 #### GTS Registration Contract
 
 - [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-contract-gts-registration`
@@ -322,16 +312,14 @@ The plugin **MUST** emit push-based OpenTelemetry metrics for its backend-intern
 **Main Flow**:
 
 1. The core calls the SPI to persist a usage record referencing the usage type.
-2. No lock is taken; the call proceeds directly.
-3. The plugin's own referential-integrity check finds the type present and proceeds. Absent a concurrent delete, the answer cannot go stale before the `INSERT`.
-4. The record is stored and returned.
+2. The plugin's own referential-integrity check finds the type present and proceeds. Absent a concurrent delete, the answer cannot go stale before the `INSERT`.
+3. The record is stored and returned.
 
 **Postconditions**: The record is durably stored and its usage type is still present. A `delete_usage_type` racing this flow can invalidate that postcondition; its post-delete sweep removes the record in that case (DESIGN.md §3.6).
 
 **Alternative Flows**:
 
 - **Type already deleted**: the plugin's referential-integrity check finds the type absent and rejects the record with `UsageTypeNotFound`, mirroring the reference plugin's FK-violation mapping.
-- **Coordination-lock backend unavailable**: not applicable — no coordination backend is consumed.
 
 ### Ingest a Usage Record with Idempotent Dedup
 
@@ -385,22 +373,20 @@ The plugin **MUST** emit push-based OpenTelemetry metrics for its backend-intern
 
 **Actor**: `cpt-cf-uc-ch-plugin-actor-plugin-host`
 
-**Preconditions**: Valid plugin configuration (connection, request timeout, retention, `async_insert`, vendor/priority) is provided; ClickHouse is reachable. No coordination backend is required or probed.
+**Preconditions**: Valid plugin configuration (connection, request timeout, retention, `async_insert`, vendor/priority) is provided; ClickHouse is reachable.
 
 **Main Flow**:
 
 1. The plugin loads and validates config and creates its ClickHouse client.
 2. The plugin provisions its initial schema idempotently (`CREATE TABLE IF NOT EXISTS` with a fixed one-year TTL default on `usage_records`), then reconciles the live TTL to `retention_period_secs` via `ensure_retention_ttl` (`ALTER TABLE … MODIFY TTL` when the interval differs or TTL is missing).
-3. The plugin constructs its Coordination Lock Manager (`LockManager`) for lazy `DistributedLockV1` resolution on first acquire — no lock-backend client is constructed and no lock-backend probe is issued at startup. It follows schema provisioning because it performs no I/O of its own and nothing earlier in the sequence needs a lock.
-4. The plugin registers itself as a scoped SPI client under a GTS instance identifier, carrying vendor/priority.
-5. The host discovers and binds the backend by vendor/priority.
+3. The plugin registers itself as a scoped SPI client under a GTS instance identifier, carrying vendor/priority.
+4. The host discovers and binds the backend by vendor/priority.
 
 **Postconditions**: The backend is bound and ready; the backend-readiness signal is set.
 
 **Alternative Flows**:
 
 - **Invalid config / unreachable ClickHouse / schema provisioning failure**: startup fails fast; the plugin does not register and the host does not bind it.
-- **Unbound or unavailable `usage-collector` lock profile**: does not fail startup; the first create/delete lock acquire fails closed with `Transient`.
 
 ## 9. Acceptance Criteria
 
@@ -413,12 +399,11 @@ The plugin **MUST** emit push-based OpenTelemetry metrics for its backend-intern
 - [x] Aggregation (SUM/COUNT/MIN/MAX/AVG) with grouping is computed in ClickHouse over the active-row set, honors the host filter and scope, and never returns more than `MAX_AGGREGATION_BUCKETS + 1` (100,001) grouped rows even when the underlying data would produce more.
 - [x] `delete_usage_type` refuses an absent type with `UsageTypeNotFound` (404) and a referenced one with `UsageTypeReferenced` (409) after a capped probe, otherwise removes the catalog row under `mutations_sync = 1` and sweeps records that landed inside its own probe→delete window. A record's usage type can still be removed out from under it by a delete racing an in-flight insert; that residual is recorded in the deviations table below.
 - [x] Concurrent `create_usage_type` calls for the same `gts_id` are not serialized: both may insert, and `ReplacingMergeTree(version)` converges them last-writer-wins with both callers receiving `Ok`. There is no create/delete race, because delete does not exist.
-- [x] No coordination backend exists to be unavailable: record creation depends only on ClickHouse reachability.
 - [x] `usage_records` rows older than the configured retention window are dropped by the native expiry mechanism; the catalog is not retention-bounded.
 - [x] ClickHouse connections default to TLS in production; the connection string and credentials never appear in logs, errors, or debug output; no caller-supplied string reaches query text as a literal or identifier.
 - [x] Aggregation over a 30-day single-tenant range completes within 500ms at p95, and the batch write path sustains ≥ 10,000 records/sec.
 - [x] The plugin publishes its numerically-bounded consistency profile (single-node vs. replicated) explicitly, not as equivalent to the reference plugin's.
-- [x] The plugin emits the `uc_clickhouse_*` OpenTelemetry metrics, including a backend-readiness signal and a backend-error classification counter. No coordination-lock instruments are registered — the plugin holds no lock. (The orphaned-reference detection-backstop counter is **deferred**: its reconciliation worker was not built, so the instrument is not registered — see DESIGN.md §4 Observability and feature 0006 §5.)
+- [x] The plugin emits the `uc_clickhouse_*` OpenTelemetry metrics, including a backend-readiness signal and a backend-error classification counter. (The orphaned-reference detection-backstop counter is **deferred**: its reconciliation worker was not built, so the instrument is not registered — see DESIGN.md §4 Observability and feature 0006 §5.)
 - [x] Every backend failure surfaces as one of the SDK's declared `UsageCollectorPluginError` variants; no new top-level error type is introduced; a host-contract breach surfaces as `Internal`.
 - [x] The plugin registers under a GTS instance identifier with its configured vendor and priority and does not self-select as the active backend.
 
@@ -429,8 +414,6 @@ The plugin **MUST** emit push-based OpenTelemetry metrics for its backend-intern
 | usage-collector-sdk | Storage SPI trait, domain models, error vocabulary, and GTS plugin spec — the contract the plugin implements | p1 |
 | ClickHouse server/cluster | Durable system of record; provides columnar storage and the engine/expiry features this plugin's schema depends on | p1 |
 | `clickhouse` crate | Official async Rust HTTP client (clickhouse-rs); typed Row inserts/reads, `JSONEachRow` reads for aggregates. Runtime SQL is hand-assembled and parameterised — no SQL-builder crate | p1 |
-| Cluster gear (`usage-collector` profile) | **Retired** — no longer a dependency of this plugin | — |
-| `cluster-sdk` | **Retired** — no longer linked by this plugin | — |
 | types-registry (+ ClientHub) | Publishes the plugin's GTS instance for host discovery and scoped binding | p1 |
 | Platform registry / orchestration | Operator-driven active-backend selection | p1 |
 
@@ -438,14 +421,14 @@ The plugin **MUST** emit push-based OpenTelemetry metrics for its backend-intern
 
 - The Usage Collector core performs all authentication, PDP authorization, attribution and shape validation, and semantics decisions before every SPI call; the plugin trusts each call as authorized and structurally valid, while still performing its own referential-integrity check as a storage-layer (not business-logic) obligation ([§5](#5-functional-requirements)).
 - The gateway derives each record's id and idempotency key; the plugin stores them verbatim and does not mint identity.
-- The operator provisions a reachable ClickHouse server/cluster, TLS-capable for production, sized for the deployment's throughput and retention ([§3.1](#31-gear-specific-environment-constraints)). No coordination backend has to be provisioned.
+- The operator provisions a reachable ClickHouse server/cluster, TLS-capable for production, sized for the deployment's throughput and retention ([§3.1](#31-gear-specific-environment-constraints)).
 - Operators accept the narrower consistency and dedup-atomicity guarantees documented in [§5](#5-functional-requirements)/[§6](#6-non-functional-requirements) as the tradeoff for ClickHouse's columnar query performance — this is a conscious backend choice, not a silent regression from the reference plugin.
 
 ## 12. Risks
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Concurrent creates for one dedup key are not serialized (no coordination primitive) | Both callers can pass the dedup pre-read and both insert. Identical payloads converge and both get `Ok`; differing payloads converge to one row without an `IdempotencyConflict` being raised, so one caller believes a payload is stored that is not | Narrowed at the engine rather than by a lock: every `usage_records` `INSERT` carries an `insert_deduplication_token` matched against the table's `non_replicated_deduplication_window`, and `ReplacingMergeTree(version)` convergence is the backstop. The window and its exact consequences are enumerated per sequence in DESIGN.md §3.6 rather than claimed away |
+| Concurrent creates for one dedup key are not serialized (no coordination primitive) | Both callers can pass the dedup pre-read and both insert. Identical payloads converge and both get `Ok`; differing payloads converge to one row without an `IdempotencyConflict` being raised, so one caller believes a payload is stored that is not | Narrowed at the engine: every `usage_records` `INSERT` carries an `insert_deduplication_token` matched against the table's `non_replicated_deduplication_window`, and `ReplacingMergeTree(version)` convergence is the backstop. The window and its exact consequences are enumerated per sequence in DESIGN.md §3.6 rather than claimed away |
 | `delete_usage_type` does not meet `plugin-spi.md` Method 9's "MUST NOT admit a window" clause | A `create_usage_record` whose catalog check passed before the catalog row was removed can commit after the post-delete sweep, orphaning a record that references a nonexistent usage type. `async_insert` (the default) widens the window from microseconds to the server-side flush interval. Two concurrent deletes both return `Ok(())`. On a replicated deployment the removal is visible to other nodes only eventually | Deliberate and accepted: no foreign key, and no mutual-exclusion primitive to order the probe against a concurrent insert. Narrowed rather than closed — the catalog row is removed before the sweep so the insert-time check bounds the window, the sweep cleans the window's own arrivals, and `uc_clickhouse_orphaned_reference_detected_total` reports when it was hit. Deleting a type while its ingest is in flight is an operational error the plugin cannot prevent (DESIGN.md §3.6) |
 | ClickHouse client/connection pool contention between ingestion and aggregation bursts | Aggregation-query latency NFR miss under heavy simultaneous ingestion | Operational mitigation guidance in the deployment README (pool sizing is not configurable — server-side quotas/settings profiles, or separate plugin instances); documented as a known, accepted contention point for v1 ([§6.1](#61-gear-specific-nfrs)) |
 | Operator misconfigures the retention window shorter than the maximum client replay/backfill horizon | A dedup identity whose row was expired is accepted as a fresh insert, admitting a duplicate | Same mitigation as the reference plugin: operators size retention above the maximum replay/backfill horizon; tracked as a shared open question ([§13](#13-open-questions)) |

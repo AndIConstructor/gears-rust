@@ -20,7 +20,6 @@
 - [5. Definitions of Done](#5-definitions-of-done)
   - [Implement write-path metric instruments](#implement-write-path-metric-instruments)
   - [Implement read-path metric instruments](#implement-read-path-metric-instruments)
-  - [Register no coordination-lock metric instruments](#register-no-coordination-lock-metric-instruments)
   - [Implement backend-readiness and catalog-size gauges](#implement-backend-readiness-and-catalog-size-gauges)
   - [Implement orphaned-reference detection counter](#implement-orphaned-reference-detection-counter)
 - [6. Acceptance Criteria](#6-acceptance-criteria)
@@ -44,7 +43,7 @@ Implement the `uc_clickhouse_*` OpenTelemetry instrument inventory for the Click
 
 ### 1.2 Purpose
 
-Backend Observability codifies the metric contract for this plugin: the instrument names, label keys, bucket boundaries, and the conventions (no unbounded-identifier labels, explicit bucket boundaries). It adds separate dedup-outcome counters specific to this backend's `ReplacingMergeTree`-based dedup emulation (`uc_clickhouse_dedup_absorbed_total`, `uc_clickhouse_idempotency_conflicts_total`, `uc_clickhouse_compensations_total` — one counter per outcome rather than a single counter with an `outcome` label), no coordination-lock instruments (there is no lock to instrument), and — specified but **deferred** — the `uc_clickhouse_orphaned_reference_detected_total` defense-in-depth counter, whose reconciliation worker was never built, so neither the worker nor the instrument exists in the crate. It also instruments the catalog-size background refresh worker and the readiness gauge.
+Backend Observability codifies the metric contract for this plugin: the instrument names, label keys, bucket boundaries, and the conventions (no unbounded-identifier labels, explicit bucket boundaries). It adds separate dedup-outcome counters specific to this backend's `ReplacingMergeTree`-based dedup emulation (`uc_clickhouse_dedup_absorbed_total`, `uc_clickhouse_idempotency_conflicts_total`, `uc_clickhouse_compensations_total` — one counter per outcome rather than a single counter with an `outcome` label), and — specified but **deferred** — the `uc_clickhouse_orphaned_reference_detected_total` defense-in-depth counter, whose reconciliation worker was never built, so neither the worker nor the instrument exists in the crate. It also instruments the catalog-size background refresh worker and the readiness gauge.
 
 **Constraints**: Following the existing `uc_timescaledb_*` pattern: bounded labels, explicit histogram bucket boundaries, no tenant/GTS identifier labels.
 
@@ -94,8 +93,7 @@ Backend Observability codifies the metric contract for this plugin: the instrume
 
 1. [ ] - `p3` - At each SPI call entry: start a timer for the operation-duration histogram - `inst-ch-obs-req-1`
 2. [ ] - `p3` - At SPI call exit (success or error): record the elapsed duration to the appropriate histogram (duration histograms are recorded via a drop guard, so error returns are captured too); increment the request-count counter on the query paths; increment `uc_clickhouse_backend_errors_total` if applicable, labelled by `error_category` with the two implemented values `transient` / `internal` (typed domain outcomes are not error-category values — they have their own counters where instrumented, e.g. `uc_clickhouse_idempotency_conflicts_total`) - `inst-ch-obs-req-2`
-3. [ ] - `p3` - There is no lock-acquisition step to instrument: the plugin holds no coordination lock, so no lock-acquire histogram, contention counter or unavailability counter is recorded anywhere on the request path - `inst-ch-obs-req-3`
-4. [ ] - `p3` - At insert: record the batch row count to `uc_clickhouse_batch_rows` (batch path), the insert duration to `uc_clickhouse_insert_duration_seconds{mode}`, and the dedup outcome to the counter for that outcome — `uc_clickhouse_dedup_absorbed_total` (exact-equality absorb) or `uc_clickhouse_idempotency_conflicts_total` (canonical mismatch); a fresh insert increments no dedup counter, and a `corrects_id`-carrying insert additionally increments `uc_clickhouse_compensations_total` - `inst-ch-obs-req-4`
+3. [ ] - `p3` - At insert: record the batch row count to `uc_clickhouse_batch_rows` (batch path), the insert duration to `uc_clickhouse_insert_duration_seconds{mode}`, and the dedup outcome to the counter for that outcome — `uc_clickhouse_dedup_absorbed_total` (exact-equality absorb) or `uc_clickhouse_idempotency_conflicts_total` (canonical mismatch); a fresh insert increments no dedup counter, and a `corrects_id`-carrying insert additionally increments `uc_clickhouse_compensations_total` - `inst-ch-obs-req-4`
 
 ## 3. Processes / Business Logic (CDSL)
 
@@ -132,7 +130,7 @@ There is **no** `uc_clickhouse_dedup_outcomes_total` and no `outcome` label: the
 | --- | --- | --- | --- |
 | `uc_clickhouse_usage_type_catalog_size` | Gauge | — | Current distinct `usage_type_catalog` `gts_id` count (refreshed by the background worker). **Not** monotone: `delete_usage_type` removes rows and signals the same worker. |
 
-There are **no coordination-lock instruments**: the plugin uses no lock (DESIGN.md §3.5), so nothing could increment them. `uc_clickhouse_usage_type_referenced_total` and `uc_clickhouse_orphaned_reference_detected_total` **are** registered — `delete_usage_type` increments the first when it refuses a referenced type and the second when its post-delete sweep finds records that landed inside the probe→delete window (DESIGN.md §3.6).
+`uc_clickhouse_usage_type_referenced_total` and `uc_clickhouse_orphaned_reference_detected_total` **are** registered — `delete_usage_type` increments the first when it refuses a referenced type and the second when its post-delete sweep finds records that landed inside the probe→delete window (DESIGN.md §3.6).
 
 **Backend health**:
 
@@ -155,7 +153,7 @@ There are **no coordination-lock instruments**: the plugin uses no lock (DESIGN.
 1. **No unbounded identifier labels**: `tenant_id`, `gts_id`, record `id`, or any other unbounded caller-supplied string is never a metric label key or value.
 2. **Explicit histogram bucket boundaries**: every histogram **MUST** declare explicit bucket boundaries (not the OpenTelemetry SDK default). Every duration histogram shares one seconds-valued layout — `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0` — chosen to bracket the §1.2 p95 budgets with finer low-end resolution (pool acquire, single insert) while still covering the 500ms aggregation budget; `uc_clickhouse_batch_rows` uses the row-count layout `1, 5, 10, 50, 100, 500, 1000`.
 3. **`error_category` label values** for `uc_clickhouse_backend_errors_total` are exactly the two SPI classifications: `transient` and `internal`. Typed domain outcomes (`IdempotencyConflict`, `UsageTypeReferenced`, `UsageRecordNotFound`, `UsageTypeAlreadyExists`, …) are **not** `error_category` values — they are ordinary SPI results, and the ones worth counting have their own dedicated counters (`uc_clickhouse_idempotency_conflicts_total`). Each label value is backed by a closed Rust enum (`ErrorClass`), so an out-of-set value is unrepresentable at a call site.
-4. **`mode` label values**: `single` / `batch` on `uc_clickhouse_insert_duration_seconds` (write shape) — the only `mode`-labelled instrument, now that there are no coordination-lock series. `single`/`batch` and `raw`/`aggregated` are each backed by a closed Rust enum (`InsertMode`, `QueryKind`).
+4. **`mode` label values**: `single` / `batch` on `uc_clickhouse_insert_duration_seconds` (write shape) — the only `mode`-labelled instrument. `single`/`batch` and `raw`/`aggregated` are each backed by a closed Rust enum (`InsertMode`, `QueryKind`).
 5. All instruments are registered through the `opentelemetry` crate's SDK-agnostic API (meter obtained from the global `MeterProvider`); the plugin does not depend on a specific OTLP exporter.
 
 ### Orphaned Reference Reconciliation (Defense-in-Depth)
@@ -204,16 +202,6 @@ The system **MUST** implement `uc_clickhouse_query_duration_seconds` (Histogram,
 
 **Touches**: `infra/metrics.rs`; `ChRecordStore` query call sites
 
-### Register no coordination-lock metric instruments
-
-- [x] `p3` - **ID**: `cpt-cf-uc-ch-plugin-dod-observability-lock-instruments`
-
-The system **MUST NOT** register `uc_clickhouse_lock_acquire_duration_seconds`, `uc_clickhouse_lock_contention_total`, or `uc_clickhouse_lock_manager_unavailable_total`. The plugin has no coordination lock, so nothing could ever increment them; registering an instrument that stays at zero is indistinguishable from a healthy one and is worse than its absence. The system **MUST** register `uc_clickhouse_usage_type_referenced_total` and `uc_clickhouse_orphaned_reference_detected_total`, both of which `delete_usage_type` increments.
-
-**Implements**: `cpt-cf-uc-ch-plugin-algo-observability-inventory` (lock instruments), `cpt-cf-uc-ch-plugin-flow-observability-request-path`
-
-**Touches**: `infra/metrics.rs`
-
 ### Implement backend-readiness and catalog-size gauges
 
 - [x] `p3` - **ID**: `cpt-cf-uc-ch-plugin-dod-observability-gauges`
@@ -228,7 +216,7 @@ The system **MUST** implement `uc_clickhouse_ready` (Gauge, recorded `0` at `ini
 
 - [ ] `p3` - **ID**: `cpt-cf-uc-ch-plugin-dod-observability-orphan-counter`
 
-> **PARTIALLY DEFERRED — intentionally unchecked.** The counter exists and `delete_usage_type`'s post-delete sweep increments it; the periodic reconciliation *worker* specified below does not. The worker is not scheduled for v1, but it is no longer merely defense-in-depth over a closed race: this plugin has no coordination lock, so the delete admits a residual orphaning window (DESIGN.md §3.6) that only a scan can detect after the fact (see [§3 Orphaned Reference Reconciliation](#orphaned-reference-reconciliation-defense-in-depth)). Closing it requires new code, not a documentation change.
+> **PARTIALLY DEFERRED — intentionally unchecked.** The counter exists and `delete_usage_type`'s post-delete sweep increments it; the periodic reconciliation *worker* specified below does not. The worker is not scheduled for v1, but it is no longer merely defense-in-depth over a closed race: the delete admits a residual orphaning window (DESIGN.md §3.6) that only a scan can detect after the fact (see [§3 Orphaned Reference Reconciliation](#orphaned-reference-reconciliation-defense-in-depth)). Closing it requires new code, not a documentation change.
 
 The system **MUST** implement `uc_clickhouse_orphaned_reference_detected_total` (Counter) and a periodic background reconciliation worker that increments it for each orphaned `usage_records` row whose `gts_id` is absent from `usage_type_catalog`. The worker **MUST** be bounded (use `LIMIT` to avoid full-table scans), race against the gear cancellation token for prompt shutdown, and default to a low-frequency schedule (configurable, defaulting to 5 minutes).
 
@@ -243,7 +231,6 @@ The system **MUST** implement `uc_clickhouse_orphaned_reference_detected_total` 
 - [x] All histograms declare explicit bucket boundaries.
 - [x] `uc_clickhouse_ready` is `0` from `init` entry, `1` exactly once after successful registration, and `0` again once the cancellation token fires; it is never re-armed to `1` by the catalog-size refresh worker.
 - [x] `uc_clickhouse_dedup_absorbed_total`, `uc_clickhouse_idempotency_conflicts_total`, and `uc_clickhouse_compensations_total` are incremented for their respective outcomes on both the single and batch insert paths.
-- [x] No `uc_clickhouse_lock_*` series is registered: the plugin has no coordination lock.
 - [x] `uc_clickhouse_usage_type_referenced_total` and `uc_clickhouse_orphaned_reference_detected_total` are registered, and `delete_usage_type` increments them on the refused-delete and swept-orphan paths respectively.
 - [ ] **Deferred, not asserted**: `uc_clickhouse_orphaned_reference_detected_total` and its reconciliation worker are not implemented, so no acceptance test asserts the instrument's existence or its value (see the DoD note in [§5](#5-definitions-of-done)).
 - [x] `uc_clickhouse_usage_type_catalog_size` is refreshed **asynchronously and eventually**, not synchronously per mutation: a `create_usage_type` signals the background worker via `tokio::sync::Notify`, and the worker coalesces a burst into at most one `SELECT uniqExact(gts_id) FROM usage_type_catalog` per wake (feature 0004 `cpt-cf-uc-ch-plugin-algo-catalog-size-refresh`). The gauge therefore lags a mutation briefly and a burst of *n* creates does not produce *n* gauge updates.

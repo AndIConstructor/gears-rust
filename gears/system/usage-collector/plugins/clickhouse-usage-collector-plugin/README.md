@@ -28,7 +28,7 @@ gears:
       priority: 10
 ```
 
-The plugin's only gear dependency is `types-registry` (for the registration handshake). It does not require the `cluster` gear.
+The plugin's only gear dependency is `types-registry` (for the registration handshake).
 
 ## Operational requirements
 

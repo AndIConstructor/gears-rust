@@ -47,7 +47,7 @@ This feature owns the create-idempotency absorb, the catalog point-read and keys
 
 **Requirements**: `cpt-cf-uc-ch-plugin-fr-referential-integrity` (the delete-side half; the create-side half is owned by Feature 2)
 
-**Constraints**: `cpt-cf-uc-ch-plugin-constraint-no-transactions`. `cpt-cf-uc-ch-plugin-constraint-gts-lock-required` is superseded — no coordination lock exists in this plugin (DESIGN.md §2.2).
+**Constraints**: `cpt-cf-uc-ch-plugin-constraint-no-transactions`.
 
 ### 1.3 Actors
 
@@ -70,7 +70,6 @@ This feature owns the create-idempotency absorb, the catalog point-read and keys
 - Metadata-key validation, counter/gauge derivation — inherited pure-persistence posture; enforced upstream by the gear core.
 - `usage_records` schema — Feature 1 (`cpt-cf-uc-ch-plugin-feature-foundation`).
 - The create-side pre-insert catalog check — Feature 2 (`cpt-cf-uc-ch-plugin-feature-record-persistence`).
-- Any coordination lock — none exists in this plugin.
 
 ## 2. Actor Flows (CDSL)
 
@@ -167,7 +166,7 @@ Nothing serializes two concurrent creates for the same `gts_id`. Both may pass t
 
 **Step order is the whole design.** The catalog row is removed *before* the orphan sweep. From that moment the record store's insert-time catalog existence check (Feature 2) refuses new records for the `gts_id` on its own, so the sweep has only the probe→delete window's own arrivals to clean up. Sweeping first would leave a strictly wider window, since new records could keep arriving until the catalog row went away.
 
-**The residual race.** The probe is a snapshot. A `create_usage_record` whose own catalog check passed before step 3 can commit after step 4 and orphan a row; with `async_insert` on (the default) it can sit in a server-side buffer, widening the window from microseconds to the flush interval. `plugin-spi.md` Method 9's "MUST NOT admit a window" clause is therefore **not** met by this backend — the window is bounded and instrumented, not closed. An earlier revision of this plugin used a per-`gts_id` exclusive cluster lock to close it and, once that lock was removed, withheld the operation entirely. Offering it with the race documented was chosen over withholding it: an append-only catalog left operators no way to remove a mis-registered type except hand-written SQL, which admits the same window with none of the probe, the sweep, the 409, or the counter.
+**The residual race.** The probe is a snapshot. A `create_usage_record` whose own catalog check passed before step 3 can commit after step 4 and orphan a row; with `async_insert` on (the default) it can sit in a server-side buffer, widening the window from microseconds to the flush interval. `plugin-spi.md` Method 9's "MUST NOT admit a window" clause is therefore **not** met by this backend — the window is bounded and instrumented, not closed. Offering the operation with the race documented was chosen over withholding it: an append-only catalog would leave operators no way to remove a mis-registered type except hand-written SQL, which admits the same window with none of the probe, the sweep, the 409, or the counter.
 
 The mutation is a heavyweight `ALTER TABLE … DELETE`, not a lightweight `DELETE FROM`: it removes the physical rows, so a later `create_usage_type` for the same `gts_id` has no surviving `ReplacingMergeTree` copy to outrank.
 
@@ -233,7 +232,7 @@ The system **MUST** implement `list_usage_types` as a version-resolved keyset-pa
 
 The system **MUST** implement `delete_usage_type` as: an existence read (absent → `UsageTypeNotFound { gts_id }`, never a silent success); a capped reference probe over `usage_records` counting rows of every `status` (non-zero → `uc_clickhouse_usage_type_referenced_total` incremented and `UsageTypeReferenced { gts_id, sample_ref_count }` returned with the catalog row untouched); `ALTER TABLE usage_type_catalog DELETE WHERE gts_id = ?` under `mutations_sync = 1`; and a re-probe-gated `ALTER TABLE usage_records DELETE WHERE gts_id = ?` sweep that increments `uc_clickhouse_orphaned_reference_detected_total` when it fires.
 
-The catalog row **MUST** be removed before the sweep, so Feature 2's insert-time check bounds the window. A post-delete probe or sweep failure **MUST** be logged at `error` and **MUST NOT** be propagated — the type is deleted. A failure on the existence read or the pre-delete probe **MUST** surface as a backend error and **MUST NOT** be reported as `UsageTypeNotFound`. The catalog-size refresh worker **MUST** be signalled on success. `ChCatalogStore` **MUST** remain constructible without any coordination dependency (`new(client, cancel, metrics, request_timeout)`).
+The catalog row **MUST** be removed before the sweep, so Feature 2's insert-time check bounds the window. A post-delete probe or sweep failure **MUST** be logged at `error` and **MUST NOT** be propagated — the type is deleted. A failure on the existence read or the pre-delete probe **MUST** surface as a backend error and **MUST NOT** be reported as `UsageTypeNotFound`. The catalog-size refresh worker **MUST** be signalled on success. `ChCatalogStore` **MUST** remain constructible from `new(client, cancel, metrics, request_timeout)` alone.
 
 **Implements**: `cpt-cf-uc-ch-plugin-flow-catalog-delete-type`
 
@@ -246,7 +245,7 @@ The catalog row **MUST** be removed before the sweep, so Feature 2's insert-time
 
 ## 6. Acceptance Criteria
 
-- [x] `create_usage_type` absorbs silently on identical re-submission; returns `UsageTypeAlreadyExists` on a payload mismatch once the earlier row is visible; inserts with `version = current_epoch_μs()` on first create. No lock is taken; two concurrent creates for the same `gts_id` may both succeed and converge last-writer-wins.
+- [x] `create_usage_type` absorbs silently on identical re-submission; returns `UsageTypeAlreadyExists` on a payload mismatch once the earlier row is visible; inserts with `version = current_epoch_μs()` on first create. Two concurrent creates for the same `gts_id` may both succeed and converge last-writer-wins.
 - [x] `get_usage_type` resolves versions (`ORDER BY version DESC LIMIT 1`); absent `gts_id` returns `UsageTypeNotFound`.
 - [x] `list_usage_types` resolves versions in an inner subquery (`LIMIT 1 BY gts_id`), returns pages ordered by `gts_id ASC`, uses `n+1` look-ahead cursor pattern.
 - [x] `delete_usage_type` removes an unreferenced type, and `get_usage_type` reports `UsageTypeNotFound` on the very next read (the mutation is synchronous).
@@ -255,8 +254,8 @@ The catalog row **MUST** be removed before the sweep, so Feature 2's insert-time
 - [x] A type deleted and then re-created is readable, with no surviving earlier row to outrank.
 - [x] Once a type is deleted, `create_usage_record` for its `gts_id` returns `UsageTypeNotFound` — the property that bounds the delete's race window.
 - [x] Against an unreachable backend, `delete_usage_type` surfaces the failure and does **not** report `UsageTypeNotFound`.
-- [x] `ChCatalogStore` can be unit-tested offline without a live ClickHouse or any coordination backend.
-- [x] The `uc_clickhouse_usage_type_referenced_total` counter and every `uc_clickhouse_lock_*` series are not registered — nothing could increment them.
+- [x] `ChCatalogStore` can be unit-tested offline without a live ClickHouse.
+- [x] `uc_clickhouse_usage_type_referenced_total` is incremented on every refused delete, and `uc_clickhouse_orphaned_reference_detected_total` whenever the post-delete sweep fires.
 
 ## 7. Non-Applicable Concerns
 
@@ -264,5 +263,5 @@ The catalog row **MUST** be removed before the sweep, so Feature 2's insert-time
 - **Security — Audit Trail**: Not applicable.
 - **Data Privacy / Compliance**: Not applicable — `kind` and `metadata_fields` are opaque strings passed through from callers; no classification is performed here.
 - **Usability (UX)**: Not applicable — no user interface.
-- **Observability (OPS-FDESIGN-001)**: the `uc_clickhouse_usage_type_catalog_size` gauge is allocated to Feature 6 (`cpt-cf-uc-ch-plugin-feature-observability`); this feature provides the catalog write path it instruments. The once-specified lock-acquire histogram and `uc_clickhouse_orphaned_reference_detected_total` counter are **not registered**, so nothing in this feature emits them.
+- **Observability (OPS-FDESIGN-001)**: the `uc_clickhouse_usage_type_catalog_size` gauge is allocated to Feature 6 (`cpt-cf-uc-ch-plugin-feature-observability`); this feature provides the catalog write path it instruments. `delete_usage_type` increments `uc_clickhouse_usage_type_referenced_total` and `uc_clickhouse_orphaned_reference_detected_total`, both registered by Feature 6.
 - **Retention / TTL**: Not applicable — `usage_type_catalog` is reference data and is never retention-bounded (Feature 5 scope covers `usage_records` only).
