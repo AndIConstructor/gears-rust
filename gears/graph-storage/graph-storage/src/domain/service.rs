@@ -870,6 +870,7 @@ impl GraphServices {
             .authorize(ctx, &authz::node_resource(), authz::actions::READ)
             .await?;
         admission::admit_projection(&self.config, type_patterns, &query)?;
+        let query = admission::bind_filter_to_cursor(query)?;
         let type_set = self.resolve_patterns(&auth, type_patterns).await?;
         let page = self
             .store

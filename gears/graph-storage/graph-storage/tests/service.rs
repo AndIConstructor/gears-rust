@@ -2552,3 +2552,66 @@ async fn every_caller_supplied_identifier_is_bounded_before_it_reaches_the_store
         );
     }
 }
+
+/// A continuation cursor belongs to the listing that minted it, `$filter`
+/// included. Replaying one without its filter used to resume an unfiltered
+/// walk at a filtered position and answer an empty page with success, which a
+/// caller forwarding only the cursor read as the end of the listing.
+#[tokio::test]
+async fn a_cursor_is_bound_to_the_filter_it_was_minted_under() {
+    let harness = Harness::allowed();
+    let ctx = harness.ctx();
+    let filter = |text: &str| {
+        toolkit_odata::parse_filter_string(text)
+            .expect("filter parses")
+            .into_expr()
+    };
+    let minted = toolkit_odata::short_filter_hash(Some(&filter("name eq 'x'")));
+    let cursor = |f: Option<String>| toolkit_odata::CursorV1 {
+        k: vec!["v:x".to_owned()],
+        o: toolkit_odata::SortDir::Asc,
+        s: "+node_key".to_owned(),
+        f,
+        d: "fwd".to_owned(),
+    };
+
+    for (case, query) in [
+        (
+            "minted under a filter, replayed without it",
+            toolkit_odata::ODataQuery::new().with_cursor(cursor(minted.clone())),
+        ),
+        (
+            "minted without a filter, replayed with one",
+            toolkit_odata::ODataQuery::new()
+                .with_filter(filter("name eq 'x'"))
+                .with_cursor(cursor(None)),
+        ),
+        (
+            "minted under one filter, replayed under another",
+            toolkit_odata::ODataQuery::new()
+                .with_filter(filter("name eq 'y'"))
+                .with_cursor(cursor(minted.clone())),
+        ),
+    ] {
+        match harness.services.project_nodes(&ctx, &[], query).await {
+            Err(DomainError::InvalidArgument { message }) => assert!(
+                message.contains("$filter"),
+                "{case}: the refusal says which option broke the listing: {message}"
+            ),
+            other => panic!("{case}: expected an invalid-argument refusal, got {other:?}"),
+        }
+    }
+
+    // The same filter is the same listing: it is not refused for its cursor.
+    let same = toolkit_odata::ODataQuery::new()
+        .with_filter(filter("name eq 'x'"))
+        .with_cursor(cursor(minted));
+    if let Err(DomainError::InvalidArgument { message }) =
+        harness.services.project_nodes(&ctx, &[], same).await
+    {
+        assert!(
+            !message.contains("$filter"),
+            "the same filter continues its own listing: {message}"
+        );
+    }
+}

@@ -682,10 +682,11 @@ async fn project_over_payload(
                 "backward paging is not available over a payload ordering".to_owned(),
             ));
         }
-        if let (Some(hash), Some(recorded)) =
-            (req.query.filter_hash.as_deref(), cursor.f.as_deref())
-            && hash != recorded
-        {
+        // The whole `Option`, not only two present hashes: a cursor minted
+        // under a filter and replayed without one is a different listing too
+        // (the service refuses it first, `admission::bind_filter_to_cursor`;
+        // this keeps the store honest for a caller that reaches it directly).
+        if cursor.f.as_deref() != req.query.filter_hash.as_deref() {
             return Err(invalid(
                 "the cursor was minted under a different $filter".to_owned(),
             ));

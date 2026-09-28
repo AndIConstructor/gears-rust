@@ -423,6 +423,52 @@ pub fn admit_neighborhood(
     admit_identifier(cfg, "root", root)
 }
 
+/// Bind a continuation cursor to the `$filter` of the listing that minted it.
+///
+/// A cursor records the hash of the filter its first page ran under (`f`),
+/// and a page is the continuation of that listing only under the same filter.
+/// The comparison is on the whole `Option`: a cursor minted under a filter and
+/// replayed without one would otherwise resume an *unfiltered* walk at a
+/// filtered position, which answered an empty page with `200` -- a caller
+/// forwarding only the cursor concluded the listing had ended. The reverse,
+/// a filter added to a cursor minted without one, is refused for the same
+/// reason.
+///
+/// The REST extractor stamps the hash; an in-process query built with
+/// `ODataQuery::with_filter` carries none, so it is stamped here with the
+/// extractor's own function, and both transports mint and check the same
+/// value.
+///
+/// # Errors
+///
+/// [`DomainError::InvalidArgument`] when the cursor's filter is not the
+/// query's.
+pub fn bind_filter_to_cursor(
+    mut query: toolkit_odata::ODataQuery,
+) -> Result<toolkit_odata::ODataQuery, DomainError> {
+    if query.filter_hash.is_none() {
+        query.filter_hash = toolkit_odata::short_filter_hash(query.filter.as_deref());
+    }
+    if let Some(cursor) = &query.cursor
+        && cursor.f != query.filter_hash
+    {
+        return Err(DomainError::invalid(
+            match (&cursor.f, &query.filter_hash) {
+                (Some(_), None) => {
+                    "the cursor was minted under a $filter; send the same $filter with it"
+                        .to_owned()
+                }
+                (None, Some(_)) => {
+                    "the cursor was minted without a $filter; a filter cannot be added mid-listing"
+                        .to_owned()
+                }
+                _ => "the cursor was minted under a different $filter".to_owned(),
+            },
+        ));
+    }
+    Ok(query)
+}
+
 /// The tabular projection: the type patterns it is narrowed to, and the
 /// `OData` query it is shaped by.
 ///
