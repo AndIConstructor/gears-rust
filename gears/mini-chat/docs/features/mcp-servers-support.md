@@ -126,13 +126,15 @@ Mini-chat does not resolve secrets or manage tokens directly. When creating the 
 Mini-chat never sees the authorization code exchange, refresh tokens, or client secrets — it only relays `state`/`code` and reads a boolean status. Gateway failures surface as `mcp_server_unavailable` (502).
 
 **Concurrency and resilience:**
-- Per-server semaphores cap concurrent `tools/call` requests
-- Per-tenant/global semaphores prevent a single tenant from exhausting worker capacity
+- Per-server semaphores cap concurrent `tools/call` requests (`mcp.max_concurrent_calls_per_server`, default `8`, range `1..=64`)
+- Per-tenant/global semaphores prevent a single tenant from exhausting worker capacity (`mcp.max_concurrent_calls_per_tenant`, default `32`, range `1..=256`; `mcp.max_concurrent_calls_global`, default `256`, range `1..=4096`)
+- The in-memory caches are bounded: the tool cache holds at most `mcp.tool_cache_max_entries` servers (default `10000`, range `100..=100000`) with TTL `mcp.tool_cache_ttl_secs` (default `30`, range `5..=300`); the effective resolution cache and the per-user OAuth status cache hold at most `10000` entries each with a fixed 30 s TTL
+- These bounds are proposed defaults and ranges for the not-implemented feature ([ADR-0006](../ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)); startup validation would reject values outside the ranges
 - Per-server circuit breaker opens after repeated timeouts/failures and fails fast until backoff expires (OAGW provides additional circuit breaker at the upstream level)
 - Response bodies, SSE event buffers, schemas, and tool outputs have explicit byte limits
 - OAGW enforces SSRF protection, rate limiting, and request size limits at the proxy layer
 - `tools/call` is not retried automatically because tools may mutate external systems
-- **`tools/list` refresh throttling** — the admin `POST /v1/mcp-servers/{id}/tools:refresh` endpoint triggers an outbound `tools/list` call and MUST be rate-limited per server so an admin (or a compromised admin credential) cannot spam it and DDoS the MCP server. `McpService` enforces a **minimum interval between refreshes per server** (`mcp.min_refresh_interval_secs`, default `60`; `0` disables): a manual refresh is rejected with `429 Too Many Requests` (error code `mcp_refresh_rate_limited`, `Retry-After` header set to the remaining seconds) if the server's last successful refresh (tracked via `mcp_servers.last_health_check_at` / the tools' `last_seen_at`) is within the window, **before** any outbound `tools/list` call is made. A **per-server single-flight guard** (semaphore of 1) additionally collapses concurrent refresh requests for the same server so parallel admin calls result in at most one in-flight `tools/list` — the losing callers await and observe the winner's result rather than fanning out. The background refresh worker shares the same single-flight guard, so a manual refresh and a scheduled cycle never double-hit a server concurrently.
+- **`tools/list` refresh throttling** — the admin `POST /v1/mcp-servers/{id}/tools:refresh` endpoint triggers an outbound `tools/list` call and MUST be rate-limited per server so an admin (or a compromised admin credential) cannot spam it and DDoS the MCP server. `McpService` enforces a **minimum interval between refreshes per server** (`mcp.min_refresh_interval_secs`, default `60`, range `10..=3600`; it cannot be disabled): a manual refresh is rejected with `429 Too Many Requests` (error code `mcp_refresh_rate_limited`, `Retry-After` header set to the remaining seconds) if the server's last successful refresh (tracked via `mcp_servers.last_health_check_at` / the tools' `last_seen_at`) is within the window, **before** any outbound `tools/list` call is made. A **per-server single-flight guard** (semaphore of 1) additionally collapses concurrent refresh requests for the same server so parallel admin calls result in at most one in-flight `tools/list` — the losing callers await and observe the winner's result rather than fanning out. The background refresh worker shares the same single-flight guard, so a manual refresh and a scheduled cycle never double-hit a server concurrently.
 
 ## Tool Discovery & Injection
 
@@ -221,7 +223,9 @@ TerminalOutcome::ToolUse { tool_use_id, name, input } => {
 | Max agentic iterations exceeded (hard) | `agentic_iterations_exceeded` — finalize as `Failed` |
 | Cancellation during MCP call | Check `cancel.is_cancelled()`, stop yielding events |
 
-**Per-call timeout:** Configurable via `mcp.call_timeout_secs` (default: 30) with per-server override. Uses `tokio::time::timeout`.
+**Per-call timeout:** Configurable via `mcp.call_timeout_secs` (default: 30, range `1..=120`; proposed for the not-implemented feature) with per-server override in the same range. Uses `tokio::time::timeout`.
+
+**In-flight calls on access revocation or policy change** (planned design; not implemented): a `tools/call` already sent to the MCP server runs to completion or to its call timeout; it is not cancelled. A revoked role grant, a disabled or deleted server, a revoked OAuth connection or a changed tool policy applies to the next `tools/list` / `tools/call`, within one policy refresh window (the 30 s TTL of the effective resolution cache).
 
 ## Server Provisioning & Role-Level Access
 
@@ -335,7 +339,7 @@ mini-chat:
         secret_ref: "mcp-hub-token"
       tool_cache_ttl_secs: 30              # in-memory read-through cache TTL over mcp_server_tools DB
       background_refresh_interval_secs: 300 # periodic tools/list -> DB upsert sync interval
-      min_refresh_interval_secs: 60        # min interval between manual tools:refresh calls per server (0 disables); protects MCP servers from refresh spam
+      min_refresh_interval_secs: 60        # min interval between manual tools:refresh calls per server (10-3600); protects MCP servers from refresh spam
       max_tools_per_chat: 20
       max_tool_schema_bytes: 16384
       max_tool_output_chars: 8192
@@ -482,9 +486,9 @@ The following parts of DESIGN.md described MCP outside §4 and were replaced the
 
 Design IDs: `cpt-cf-mini-chat-component-mcp-pool`, `cpt-cf-mini-chat-component-mcp-service` (defined in DESIGN.md).
 
-- **McpPool (infra/mcp)** — - **McpPool (infra/mcp)** — MCP client infrastructure layer. Manages multiple `McpClient` instances (one per MCP server) with `moka`-backed in-memory tool cache (read-through of `mcp_server_tools` DB table, 30s TTL, no explicit invalidation). Provides `get_tools()` (cache/DB read, never outbound `tools/list` on the stream hot path), `refresh_tools_from_server()` (background `tools/list` → DB upsert, routed via OAGW), `call_tool()` (JSON-RPC `tools/call` routed via OAGW proxy using `ServiceGatewayClientV1.proxy_request()`), and `remove_server()` / `shutdown()` for pool eviction. Per-server semaphores cap concurrent `tools/call` requests; per-server circuit breakers fail fast after repeated transport failures. Auth credentials resolved by OAGW's built-in auth plugins (Bearer, API Key, OAuth 2.0 client credentials) from credstore using the calling user's `SecurityContext` — mini-chat does not manage secrets or tokens directly. See MCP Servers Support (section 4).
+- **McpPool (infra/mcp)** — MCP client infrastructure layer. Manages multiple `McpClient` instances (one per MCP server) with `moka`-backed in-memory tool cache (read-through of `mcp_server_tools` DB table, 30s TTL, no explicit invalidation). Provides `get_tools()` (cache/DB read, never outbound `tools/list` on the stream hot path), `refresh_tools_from_server()` (background `tools/list` → DB upsert, routed via OAGW), `call_tool()` (JSON-RPC `tools/call` routed via OAGW proxy using `ServiceGatewayClientV1.proxy_request()`), and `remove_server()` / `shutdown()` for pool eviction. Per-server semaphores cap concurrent `tools/call` requests; per-server circuit breakers fail fast after repeated transport failures. Auth credentials resolved by OAGW's built-in auth plugins (Bearer, API Key, OAuth 2.0 client credentials) from credstore using the calling user's `SecurityContext` — mini-chat does not manage secrets or tokens directly. See MCP Servers Support (section 4).
 
-- **McpService (domain)** — - **McpService (domain)** — Domain service for MCP server management, OAGW upstream lifecycle, and effective tool resolution. Provides admin operations (register/update/delete MCP servers with synchronized OAGW upstream CRUD via `ServiceGatewayClientV1`, assign/revoke MCP servers to/from roles), server listing, and `resolve_tools()` called by `StreamService` at stream time. When a server is registered, `McpService` creates the corresponding OAGW upstream + route; the OAGW upstream ID is stored in `mcp_servers.oagw_upstream_id`. Owns `EffectiveMcpResolver` which merges config-defined, hub-discovered, and role-granted servers, applies policy (tenant/role/model/tool allow/deny), and returns the effective `Vec<LlmTool>` + `McpToolRoutingMap`. Effective resolution is cached in-memory with a short TTL (30s); no explicit invalidation triggers — changes propagate within one TTL window. See MCP Servers Support (section 4).
+- **McpService (domain)** — Domain service for MCP server management, OAGW upstream lifecycle, and effective tool resolution. Provides admin operations (register/update/delete MCP servers with synchronized OAGW upstream CRUD via `ServiceGatewayClientV1`, assign/revoke MCP servers to/from roles), server listing, and `resolve_tools()` called by `StreamService` at stream time. When a server is registered, `McpService` creates the corresponding OAGW upstream + route; the OAGW upstream ID is stored in `mcp_servers.oagw_upstream_id`. Owns `EffectiveMcpResolver` which merges config-defined, hub-discovered, and role-granted servers, applies policy (tenant/role/model/tool allow/deny), and returns the effective `Vec<LlmTool>` + `McpToolRoutingMap`. Effective resolution is cached in-memory with a short TTL (30s); no explicit invalidation triggers — changes propagate within one TTL window. See MCP Servers Support (section 4).
 
 ### REST endpoints (DESIGN §3.3)
 
@@ -633,12 +637,17 @@ Join table: administrators assign MCP servers to user roles. At stream time, onl
 | `mcp.hub_url` | `string` | — | **ConfigMap** | Optional MCP hub discovery endpoint |
 | `mcp.hub_auth.type` | `string` | `none` | **ConfigMap** | Hub auth type: `none`, `bearer`, `api_key` |
 | `mcp.hub_auth.secret_ref` | `string` | — | **ConfigMap** | Credstore reference for hub auth |
-| `mcp.tool_cache_ttl_secs` | `integer` | `30` | **ConfigMap** | In-memory tool list cache TTL |
+| `mcp.tool_cache_ttl_secs` | `integer` | `30` | **ConfigMap** | In-memory tool list cache TTL (proposed range `5..=300`) |
+| `mcp.tool_cache_max_entries` | `integer` | `10000` | **ConfigMap** | Maximum servers in the tool list cache (proposed range `100..=100000`) |
+| `mcp.min_refresh_interval_secs` | `integer` | `60` | **ConfigMap** | Minimum interval between manual `tools:refresh` calls per server (proposed range `10..=3600`) |
+| `mcp.max_concurrent_calls_per_server` | `integer` | `8` | **ConfigMap** | Per-server `tools/call` semaphore (proposed range `1..=64`) |
+| `mcp.max_concurrent_calls_per_tenant` | `integer` | `32` | **ConfigMap** | Per-tenant `tools/call` semaphore (proposed range `1..=256`) |
+| `mcp.max_concurrent_calls_global` | `integer` | `256` | **ConfigMap** | Process-wide `tools/call` semaphore (proposed range `1..=4096`) |
 | `mcp.max_tools_per_chat` | `integer` | `20` | **ConfigMap** | Cap on total tools (built-in + MCP) per request |
 | `mcp.max_tool_schema_bytes` | `integer` | `16384` | **ConfigMap** | Maximum normalized JSON Schema size per tool |
 | `mcp.max_tool_output_chars` | `integer` | `8192` | **ConfigMap** | Maximum sanitized tool output characters |
 | `mcp.max_mcp_calls_per_message` | `integer` | `10` | **ConfigMap** | Soft per-message MCP call limit |
-| `mcp.call_timeout_secs` | `integer` | `30` | **ConfigMap** | Default per-call timeout (per-server override available) |
+| `mcp.call_timeout_secs` | `integer` | `30` | **ConfigMap** | Default per-call timeout (per-server override available; proposed range `1..=120`) |
 | `mcp.http.require_https` | `bool` | `true` | **ConfigMap** | Require HTTPS for MCP server connections |
 | `mcp.http.deny_private_ip_ranges` | `bool` | `true` | **ConfigMap** | SSRF protection: block private IP ranges |
 | `mcp.http.allow_redirects` | `bool` | `false` | **ConfigMap** | Allow HTTP redirects to MCP servers |

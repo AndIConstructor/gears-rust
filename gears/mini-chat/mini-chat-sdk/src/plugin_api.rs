@@ -78,7 +78,11 @@ pub trait MiniChatModelPolicyPluginClientV1: Send + Sync {
 /// # Delivery semantics
 ///
 /// Audit emission uses the transactional outbox with leased processing: at
-/// least once, so a plugin can see the same event more than once.
+/// least once, so a plugin can see the same event more than once. Dedupe on
+/// `(tenant_id, event_type, request_id)` for `turn_completed`, `turn_failed`
+/// and `turn_delete`, and on `(tenant_id, event_type, new_request_id)` for
+/// `turn_retry` and `turn_edit`; a redelivery is byte-identical (the same
+/// stored outbox payload).
 /// `Transient` and `PluginTimeout` (30 s deadline) make the outbox retry the
 /// event; `Permanent` dead-letters it. Cancellation is handled by the
 /// framework via future dropping - no explicit `CancellationToken` needed.
