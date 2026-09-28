@@ -93,6 +93,43 @@ async fn init_rejects_plaintext_http_database_url_without_override() {
     );
 }
 
+/// An already-cancelled token must abort `init` before any startup I/O.
+///
+/// `cfg.validate()` runs before the cancel race, so the config must be valid
+/// (`https://` keeps `allow_insecure_http` out of it); the backend is never
+/// dialed. No crypto provider is installed on purpose: the biased `select!`
+/// short-circuits before step A, so `build_client` never runs — had it run,
+/// `init` would fail with a crypto-provider error instead of the cancellation.
+#[tokio::test]
+async fn init_aborts_before_startup_io_when_already_cancelled() {
+    let provider = Arc::new(StaticConfig(json!({
+        "config": {
+            "database_url": "https://user:pass@127.0.0.1:1/usage"
+        }
+    })));
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let ctx = GearCtx::new(
+        "clickhouse-usage-collector-plugin",
+        Uuid::from_u128(10),
+        provider,
+        Arc::new(ClientHub::default()),
+        cancel,
+    );
+
+    let err = ClickHouseUsageCollectorPlugin
+        .init(&ctx)
+        .await
+        .expect_err("a cancelled token must abort init before any startup I/O");
+
+    assert!(
+        err.to_string().contains("init cancelled during shutdown"),
+        "unexpected error: {err}"
+    );
+}
+
 /// A config that validates but names a backend nothing answers on must fail
 /// `init` at the migration step rather than reporting the gear ready.
 ///

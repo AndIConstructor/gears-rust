@@ -51,35 +51,51 @@ impl Gear for ClickHouseUsageCollectorPlugin {
 
         // --- Three-step init sequence ---
 
-        // Step A: Build the ClickHouse HTTP client and configure timeouts / pool.
-        // Fallible: the transport is built from the process-wide rustls
-        // CryptoProvider, which `toolkit::bootstrap::init_procedure` installs
-        // before any `Gear::init` runs. Absent one, fail rather than fall back
-        // to the `clickhouse` crate's hardcoded provider.
-        let client = build_client(&cfg)?;
-
-        // Step B: Run the embedded idempotent schema migration, then reconcile
-        // usage_records TTL with the configured retention window. Both are
-        // bounded by the same client-side deadline the request path uses: a
-        // hung init is worse than a failed one, since it never surfaces.
+        // Steps A and B are raced against the gear's cancellation token so a
+        // shutdown mid-startup aborts promptly instead of blocking on each
+        // call's own `client_deadline`. The migration-failure counter stays
+        // inside the raced block so it still fires on a provisioning error; a
+        // cancellation drops the future and is not counted as a failure. The
+        // block yields the `client` it built.
+        let cancel = ctx.cancellation_token().clone();
         let client_deadline = cfg.client_deadline();
-        apply_migrations(&client, client_deadline)
-            .await
-            .inspect_err(|_| metrics.inc_migration_failure())?;
-        ensure_retention_ttl(&client, cfg.retention_period_secs, client_deadline)
-            .await
-            .inspect_err(|_| metrics.inc_migration_failure())?;
-        ensure_insert_dedup_window(&client, client_deadline)
-            .await
-            .inspect_err(|_| metrics.inc_migration_failure())?;
+        let client = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(anyhow::anyhow!("init cancelled during shutdown"));
+            }
+            res = async {
+                // Step A: Build the ClickHouse HTTP client and configure
+                // timeouts / pool. Fallible: the transport is built from the
+                // process-wide rustls CryptoProvider, which
+                // `toolkit::bootstrap::init_procedure` installs before any
+                // `Gear::init` runs. Absent one, fail rather than fall back to
+                // the `clickhouse` crate's hardcoded provider.
+                let client = build_client(&cfg)?;
+
+                // Step B: Run the embedded idempotent schema migration, then
+                // reconcile usage_records TTL with the configured retention
+                // window. Both are bounded by the same client-side deadline the
+                // request path uses: a hung init is worse than a failed one,
+                // since it never surfaces.
+                apply_migrations(&client, client_deadline)
+                    .await
+                    .inspect_err(|_| metrics.inc_migration_failure())?;
+                ensure_retention_ttl(&client, cfg.retention_period_secs, client_deadline)
+                    .await
+                    .inspect_err(|_| metrics.inc_migration_failure())?;
+                ensure_insert_dedup_window(&client, client_deadline)
+                    .await
+                    .inspect_err(|_| metrics.inc_migration_failure())?;
+                Ok::<_, anyhow::Error>(client)
+            } => res?,
+        };
 
         // Step C: Build the domain stores and wire them into the StorageAdapter.
         //
         // Both stores share the same ClickHouse client (cheaply cloneable handle
         // to the shared HTTP pool). The cancel token is threaded in so the
         // catalog-size refresh worker aborts on shutdown.
-        let cancel = ctx.cancellation_token().clone();
-
         let record_store: Arc<dyn RecordStore> = Arc::new(ChRecordStore::new(
             client.clone(),
             Arc::clone(&metrics),
@@ -89,7 +105,7 @@ impl Gear for ClickHouseUsageCollectorPlugin {
 
         let catalog_store: Arc<dyn CatalogStore> = Arc::new(ChCatalogStore::new(
             client,
-            cancel,
+            cancel.clone(),
             Arc::clone(&metrics),
             client_deadline,
         ));
@@ -131,10 +147,9 @@ impl Gear for ClickHouseUsageCollectorPlugin {
         // `set_ready(true)` so a cancellation that already fired is still
         // observed — `cancelled()` resolves immediately on a cancelled token.
         metrics.set_ready(true);
-        let shutdown = ctx.cancellation_token().clone();
         let ready_metrics = Arc::clone(&metrics);
         tokio::spawn(async move {
-            shutdown.cancelled().await;
+            cancel.cancelled().await;
             ready_metrics.set_ready(false);
         });
 
