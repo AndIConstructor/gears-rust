@@ -8,6 +8,7 @@
 //! entity's detail, in its own transaction, so a run interrupted anywhere
 //! leaves nothing half-written.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
@@ -17,29 +18,20 @@ use github_mirror_sdk::{CountDrift, SyncSummary};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
-use super::change_gate::{self, ChangeGate, GateInputs, entities};
-use super::runner::REPOSITORY_ENTITY;
-use super::sweep_watermark::{SweepWatermark, high_water, is_stale, sweep_families};
-use super::task::{ExtractionTask, NewTask, TaskPhase, TaskPriority};
+use super::change_gate::{self, ChangeGate, GateInputs};
+use super::sweep_watermark::{SweepWatermark, high_water, is_stale};
+use super::task::{Entity, ExtractionTask, Family, NewTask, RunIdentity, TaskKind, TaskPriority};
 use super::verification::{CountGap, GapOutcome, pull_gaps};
 use super::worker::{Worker, WorkerContext};
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
-    FetchOptions, GithubPort, IssueDetailWants, ListingCompleteness,
+    FetchOptions, GithubPort, IssueDetailWants, ListCursor, ListingCompleteness, RepoRef,
 };
 use crate::domain::repo::{
-    CommitRecord, IssueRecord, PullRequestRecord, SyncWriter, WorkflowRunRecord,
+    CommitRecord, ContributorRecord, IssueRecord, PullRequestRecord, PullRequestRepository,
+    SyncWriter, WorkflowRunRecord,
 };
 use crate::domain::scope::CollectionMode;
-
-/// Entity types of the Indexing tasks, one per family the scope can enable.
-mod families {
-    pub const ISSUES: &str = "issues";
-    pub const PULL_REQUESTS: &str = "pull_requests";
-    pub const COMMITS: &str = "commits";
-    pub const METADATA: &str = "metadata";
-    pub const ACTIONS: &str = "actions";
-}
 
 /// Everything the tasks of one run share.
 ///
@@ -55,9 +47,14 @@ pub struct RunState {
     pub options: FetchOptions,
     repo_id: OnceLock<i64>,
     complete: Mutex<ListingCompleteness>,
-    swept: Mutex<HashMap<&'static str, Option<String>>>,
+    swept: Mutex<HashMap<Family, Option<String>>>,
     summary: Mutex<SyncSummary>,
     drift: Mutex<Vec<CountDrift>>,
+    contributors: Mutex<HashMap<i64, ContributorRecord>>,
+    /// The size of the last count gap seen per pull request and entity type,
+    /// so a repair pass can tell a shrinking gap from one GitHub will not
+    /// close.
+    gap_sizes: Mutex<HashMap<(i64, String), u64>>,
 }
 
 impl RunState {
@@ -85,6 +82,8 @@ impl RunState {
                 ..SyncSummary::default()
             }),
             drift: Mutex::new(Vec::new()),
+            contributors: Mutex::new(HashMap::new()),
+            gap_sizes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -98,6 +97,24 @@ impl RunState {
             .get()
             .copied()
             .ok_or_else(|| DomainError::internal("repository was not discovered before indexing"))
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> RunIdentity {
+        RunIdentity {
+            session_id: self.session_id,
+            tenant_id: self.tenant_id,
+        }
+    }
+
+    /// # Errors
+    /// As [`Self::repo_id`]: the repository must have been discovered.
+    pub fn repo_ref(&self) -> Result<RepoRef<'_>, DomainError> {
+        Ok(RepoRef {
+            owner: &self.owner,
+            name: &self.name,
+            repo_id: self.repo_id()?,
+        })
     }
 
     /// Which listings this run walked to their end.
@@ -129,7 +146,7 @@ impl RunState {
     /// may be promoted. Independent of [`Self::completeness`]: a walk bounded
     /// by `updated_after` saw everything it asked for without seeing everything there
     /// is, so it may advance the watermark but not drive reconciliation.
-    fn mark_swept(&self, family: &'static str, page1_etag: Option<String>) {
+    fn mark_swept(&self, family: Family, page1_etag: Option<String>) {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -137,19 +154,19 @@ impl RunState {
     }
 
     #[must_use]
-    pub fn is_swept(&self, family: &str) -> bool {
+    pub fn is_swept(&self, family: Family) -> bool {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(family)
+            .contains_key(&family)
     }
 
     #[must_use]
-    pub fn swept_page1_etag(&self, family: &str) -> Option<String> {
+    pub fn swept_page1_etag(&self, family: Family) -> Option<String> {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(family)
+            .get(&family)
             .cloned()
             .flatten()
     }
@@ -169,6 +186,39 @@ impl RunState {
             .clone()
     }
 
+    fn absorb_contributors(&self, records: Vec<ContributorRecord>) {
+        let mut known = self
+            .contributors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for record in records {
+            match known.entry(record.user_id) {
+                Entry::Vacant(slot) => {
+                    slot.insert(record);
+                }
+                Entry::Occupied(mut slot) => slot.get_mut().absorb(record),
+            }
+        }
+    }
+
+    /// Record how wide `entity_type`'s gap on this pull request is now, and
+    /// answer with how wide it was on the pass before.
+    fn note_gap(&self, pull_number: i64, entity_type: &str, size: u64) -> Option<u64> {
+        self.gap_sizes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((pull_number, entity_type.to_owned()), size)
+    }
+
+    #[must_use]
+    pub fn take_contributors(&self) -> Vec<ContributorRecord> {
+        let mut known = self
+            .contributors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *known).into_values().collect()
+    }
+
     fn tally(&self, add: impl FnOnce(&mut SyncSummary)) {
         add(&mut self.summary.lock().unwrap_or_else(PoisonError::into_inner));
     }
@@ -180,6 +230,7 @@ pub struct MirrorWorker {
     writer: Arc<dyn SyncWriter>,
     gate: Arc<ChangeGate>,
     watermark: Arc<SweepWatermark>,
+    pull_requests: Arc<dyn PullRequestRepository>,
     run: Arc<RunState>,
 }
 
@@ -190,6 +241,7 @@ impl MirrorWorker {
         writer: Arc<dyn SyncWriter>,
         gate: Arc<ChangeGate>,
         watermark: Arc<SweepWatermark>,
+        pull_requests: Arc<dyn PullRequestRepository>,
         run: Arc<RunState>,
     ) -> Self {
         Self {
@@ -197,44 +249,65 @@ impl MirrorWorker {
             writer,
             gate,
             watermark,
+            pull_requests,
             run,
         }
     }
 
-    async fn needs_refinement(
+    async fn seed_refinements(
         &self,
-        family: &str,
-        entity_id: &str,
-        inputs: &GateInputs,
-    ) -> Result<bool, DomainError> {
+        ctx: &WorkerContext,
+        entity: Entity,
+        candidates: Vec<RefinementCandidate>,
+    ) -> Result<(), DomainError> {
+        if candidates.is_empty() {
+            return Ok(());
+        }
         let run = &self.run;
-        let reason = self
+        let items: Vec<(&str, &GateInputs)> = candidates
+            .iter()
+            .map(|candidate| (candidate.entity_id.as_str(), &candidate.inputs))
+            .collect();
+        let reasons = self
             .gate
-            .evaluate(
+            .evaluate_page(
                 &run.scope,
                 run.tenant_id,
                 run.repo_id()?,
-                family,
-                entity_id,
-                inputs,
+                entity,
+                &items,
                 Utc::now(),
                 run.options.force,
             )
             .await?;
-        if let Some(reason) = reason {
-            tracing::debug!(family, entity_id, reason = reason.as_str(), "refining");
+        for (candidate, reason) in candidates.into_iter().zip(reasons) {
+            let Some(reason) = reason else {
+                continue;
+            };
+            tracing::debug!(
+                entity = %entity,
+                entity_id = %candidate.entity_id,
+                reason = reason.as_str(),
+                "refining"
+            );
+            self.seed(
+                ctx,
+                TaskKind::Refine(entity),
+                Some(candidate.entity_id),
+                candidate.priority,
+            );
         }
-        Ok(reason.is_some())
+        Ok(())
     }
 
-    async fn mark_refined(&self, family: &str, entity_id: &str) -> Result<(), DomainError> {
+    async fn mark_refined(&self, entity: Entity, entity_id: &str) -> Result<(), DomainError> {
         let run = &self.run;
         self.gate
             .mark_refined(
                 &run.scope,
                 run.tenant_id,
                 run.repo_id()?,
-                family,
+                entity,
                 entity_id,
                 Utc::now(),
             )
@@ -244,28 +317,24 @@ impl MirrorWorker {
     fn seed(
         &self,
         ctx: &WorkerContext,
-        phase: TaskPhase,
-        entity_type: &str,
+        kind: TaskKind,
         entity_id: Option<String>,
         priority: TaskPriority,
     ) {
-        self.seed_attempt(ctx, phase, entity_type, entity_id, priority, 0);
+        self.seed_attempt(ctx, kind, entity_id, priority, 0);
     }
 
     fn seed_attempt(
         &self,
         ctx: &WorkerContext,
-        phase: TaskPhase,
-        entity_type: &str,
+        kind: TaskKind,
         entity_id: Option<String>,
         priority: TaskPriority,
         attempt: u32,
     ) {
         ctx.queue.enqueue_task(&NewTask {
-            session_id: self.run.session_id,
-            tenant_id: self.run.tenant_id,
-            phase,
-            entity_type: entity_type.to_owned(),
+            run: self.run.identity(),
+            kind,
             entity_id,
             priority,
             attempt,
@@ -290,26 +359,26 @@ impl MirrorWorker {
         let objects = run.options.scope.objects;
         let seeds = [
             (
-                families::PULL_REQUESTS,
+                Family::PullRequests,
                 objects.pull_requests,
                 TaskPriority::OPEN_PR,
             ),
-            (families::ISSUES, objects.issues, TaskPriority::OPEN_ISSUE),
-            (families::COMMITS, objects.commits, TaskPriority::GLOBAL),
+            (Family::Issues, objects.issues, TaskPriority::OPEN_ISSUE),
+            (Family::Commits, objects.commits, TaskPriority::GLOBAL),
             (
-                families::METADATA,
+                Family::Metadata,
                 objects.labels || objects.milestones || objects.releases || objects.branches,
                 TaskPriority::GLOBAL,
             ),
             (
-                families::ACTIONS,
+                Family::Actions,
                 objects.github_actions,
                 TaskPriority::GLOBAL,
             ),
         ];
         for (family, enabled, priority) in seeds {
             if enabled {
-                self.seed(ctx, TaskPhase::Indexing, family, None, priority);
+                self.seed(ctx, TaskKind::Index(family), None, priority);
             }
         }
         Ok(())
@@ -320,12 +389,7 @@ impl MirrorWorker {
         let repo_id = run.repo_id()?;
         let start = self
             .watermark
-            .start_sweep(
-                &run.scope,
-                repo_id,
-                sweep_families::ISSUES,
-                run.options.force,
-            )
+            .start_sweep(&run.scope, repo_id, Family::Issues, run.options.force)
             .await?;
         let updated_after = start.updated_after;
         let collection = run.options.scope.collection;
@@ -335,15 +399,15 @@ impl MirrorWorker {
         let mut continue_from: Option<String> = None;
 
         while !ctx.cancel.is_cancelled() {
-            let listing = self
+            let mut listing = self
                 .github
                 .list_issues(
-                    &run.owner,
-                    &run.name,
-                    repo_id,
-                    updated_after,
-                    start.page1_etag.as_deref(),
-                    continue_from.as_deref(),
+                    run.repo_ref()?,
+                    ListCursor {
+                        updated_after,
+                        page1_etag: start.page1_etag.as_deref(),
+                        continue_from: continue_from.as_deref(),
+                    },
                     &run.options,
                 )
                 .await?;
@@ -352,7 +416,7 @@ impl MirrorWorker {
                 page1_etag.clone_from(&listing.page1_etag);
             }
             if listing.swept_to_end {
-                run.mark_swept(sweep_families::ISSUES, page1_etag.clone());
+                run.mark_swept(Family::Issues, page1_etag.clone());
             }
             let seen: Vec<&str> = listing
                 .issues
@@ -364,40 +428,33 @@ impl MirrorWorker {
                 return Ok(());
             }
 
+            let mut candidates = Vec::new();
             for issue in &listing.issues {
                 if !swept.insert(issue.number) || is_stale(Some(&issue.updated_at), updated_after) {
                     continue;
                 }
                 let open = issue.state == "open";
-                if !(collection.reactions.includes(open) || collection.timeline.includes(open)) {
+                if !collection.wants_issue_detail(open) {
                     continue;
                 }
-                let entity_id = issue.number.to_string();
-                if !self
-                    .needs_refinement(entities::ISSUE, &entity_id, &issue_inputs(issue))
-                    .await?
-                {
-                    continue;
-                }
-                let priority = if open {
-                    TaskPriority::OPEN_ISSUE
-                } else {
-                    TaskPriority::CLOSED_ISSUE
-                };
-                self.seed(
-                    ctx,
-                    TaskPhase::Refinement,
-                    entities::ISSUE,
-                    Some(entity_id),
-                    priority,
-                );
+                candidates.push(RefinementCandidate {
+                    entity_id: issue.number.to_string(),
+                    inputs: issue_inputs(issue),
+                    priority: if open {
+                        TaskPriority::OPEN_ISSUE
+                    } else {
+                        TaskPriority::CLOSED_ISSUE
+                    },
+                });
             }
+            self.seed_refinements(ctx, Entity::Issue, candidates)
+                .await?;
 
-            let (issues, comments, events, people) = (
+            run.absorb_contributors(std::mem::take(&mut listing.contributors));
+            let (issues, comments, events) = (
                 count(&listing.issues),
                 count(&listing.comments),
                 count(&listing.issue_events),
-                count(&listing.contributors),
             );
             let next = listing.next.clone();
             self.writer
@@ -407,7 +464,6 @@ impl MirrorWorker {
                 s.issues_synced += issues;
                 s.comments_synced += comments;
                 s.issue_events_synced += events;
-                s.contributors_synced += people;
             });
             match next {
                 Some(next) => continue_from = Some(next),
@@ -416,13 +472,7 @@ impl MirrorWorker {
         }
 
         self.watermark
-            .stage(
-                &run.scope,
-                run.tenant_id,
-                repo_id,
-                sweep_families::ISSUES,
-                high,
-            )
+            .stage(&run.scope, run.tenant_id, repo_id, Family::Issues, high)
             .await?;
         Ok(())
     }
@@ -433,13 +483,14 @@ impl MirrorWorker {
         let number = entity_number(task)?;
         let open = task.priority.is_open_tier();
         let collection = run.options.scope.collection;
+
         let wants = IssueDetailWants {
             reactions: collection.reactions.includes(open),
             timeline: collection.timeline.includes(open),
         };
         let detail = self
             .github
-            .refine_issue(&run.owner, &run.name, repo_id, number, wants, &run.options)
+            .refine_issue(run.repo_ref()?, number, wants, &run.options)
             .await?;
         let (reactions, timeline) = (count(&detail.reactions), count(&detail.timeline));
         self.writer
@@ -449,8 +500,7 @@ impl MirrorWorker {
             s.issue_reactions_synced += reactions;
             s.issue_timeline_synced += timeline;
         });
-        self.mark_refined(entities::ISSUE, &number.to_string())
-            .await
+        self.mark_refined(Entity::Issue, &number.to_string()).await
     }
 
     async fn index_pull_requests(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
@@ -458,12 +508,7 @@ impl MirrorWorker {
         let repo_id = run.repo_id()?;
         let start = self
             .watermark
-            .start_sweep(
-                &run.scope,
-                repo_id,
-                sweep_families::PULL_REQUESTS,
-                run.options.force,
-            )
+            .start_sweep(&run.scope, repo_id, Family::PullRequests, run.options.force)
             .await?;
         let updated_after = start.updated_after;
         let mut high = updated_after;
@@ -472,14 +517,15 @@ impl MirrorWorker {
         let mut continue_from: Option<String> = None;
 
         while !ctx.cancel.is_cancelled() {
-            let listing = self
+            let mut listing = self
                 .github
                 .list_pull_requests(
-                    &run.owner,
-                    &run.name,
-                    repo_id,
-                    start.page1_etag.as_deref(),
-                    continue_from.as_deref(),
+                    run.repo_ref()?,
+                    ListCursor {
+                        updated_after,
+                        page1_etag: start.page1_etag.as_deref(),
+                        continue_from: continue_from.as_deref(),
+                    },
                     &run.options,
                 )
                 .await?;
@@ -488,7 +534,7 @@ impl MirrorWorker {
                 page1_etag.clone_from(&listing.page1_etag);
             }
             if listing.swept_to_end {
-                run.mark_swept(sweep_families::PULL_REQUESTS, page1_etag.clone());
+                run.mark_swept(Family::PullRequests, page1_etag.clone());
             }
             let seen: Vec<&str> = listing
                 .pull_requests
@@ -500,35 +546,28 @@ impl MirrorWorker {
                 return Ok(());
             }
 
+            let mut candidates = Vec::new();
             for pull in &listing.pull_requests {
                 if !swept.insert(pull.number) || is_stale(Some(&pull.updated_at), updated_after) {
                     continue;
                 }
-                let entity_id = pull.number.to_string();
-                if !self
-                    .needs_refinement(entities::PULL_REQUEST, &entity_id, &pull_inputs(pull))
-                    .await?
-                {
-                    continue;
-                }
-                let priority = if pull.state == "open" {
-                    TaskPriority::OPEN_PR
-                } else {
-                    TaskPriority::CLOSED_PR
-                };
-                self.seed(
-                    ctx,
-                    TaskPhase::Refinement,
-                    entities::PULL_REQUEST,
-                    Some(entity_id),
-                    priority,
-                );
+                candidates.push(RefinementCandidate {
+                    entity_id: pull.number.to_string(),
+                    inputs: pull_inputs(pull),
+                    priority: if pull.state == "open" {
+                        TaskPriority::OPEN_PR
+                    } else {
+                        TaskPriority::CLOSED_PR
+                    },
+                });
             }
+            self.seed_refinements(ctx, Entity::PullRequest, candidates)
+                .await?;
 
-            let (pulls, comments, people) = (
+            run.absorb_contributors(std::mem::take(&mut listing.contributors));
+            let (pulls, comments) = (
                 count(&listing.pull_requests),
                 count(&listing.review_comments),
-                count(&listing.contributors),
             );
             let next = listing.next.clone();
             self.writer
@@ -537,7 +576,6 @@ impl MirrorWorker {
             run.tally(|s| {
                 s.pull_requests_synced += pulls;
                 s.review_comments_synced += comments;
-                s.contributors_synced += people;
             });
             match next {
                 Some(next) => continue_from = Some(next),
@@ -550,7 +588,7 @@ impl MirrorWorker {
                 &run.scope,
                 run.tenant_id,
                 repo_id,
-                sweep_families::PULL_REQUESTS,
+                Family::PullRequests,
                 high,
             )
             .await?;
@@ -565,17 +603,18 @@ impl MirrorWorker {
         let run = &self.run;
         let repo_id = run.repo_id()?;
         let number = entity_number(task)?;
-        let detail = self
+        let mut detail = self
             .github
-            .refine_pull_request(&run.owner, &run.name, repo_id, number, &run.options)
+            .refine_pull_request(run.repo_ref()?, number, &run.options)
             .await?;
         let gaps = pull_gaps(&detail);
-        let (reviews, files, commits, threads, people) = (
+        let threads_complete = detail.review_threads_complete;
+        run.absorb_contributors(std::mem::take(&mut detail.contributors));
+        let (reviews, files, commits, threads) = (
             count(&detail.reviews),
             count(&detail.files),
             count(&detail.commits),
             count(&detail.review_threads),
-            count(&detail.contributors),
         );
         self.writer
             .write_pull_detail(&run.scope, run.tenant_id, repo_id, detail)
@@ -585,18 +624,28 @@ impl MirrorWorker {
             s.pull_request_files_synced += files;
             s.pull_request_commits_synced += commits;
             s.review_threads_synced += threads;
-            s.contributors_synced += people;
         });
+
         for gap in &gaps {
             self.report_gap(ctx, number, gap, task.attempt);
         }
-        self.mark_refined(entities::PULL_REQUEST, &number.to_string())
+        if !threads_complete {
+            tracing::warn!(
+                pull = number,
+                "the pull request keeps its unrefined mark: its review threads are \
+                 short, so the next run comes back to it"
+            );
+            return Ok(());
+        }
+        self.mark_refined(Entity::PullRequest, &number.to_string())
             .await
     }
 
     fn report_gap(&self, ctx: &WorkerContext, number: i64, gap: &CountGap, attempt: u32) {
+        let previous_gap = self.run.note_gap(number, &gap.entity_type, gap.size());
         let gap = CountGap {
             repair_attempts: attempt,
+            previous_gap,
             ..gap.clone()
         };
         match gap.outcome() {
@@ -612,10 +661,9 @@ impl MirrorWorker {
                 );
                 self.seed_attempt(
                     ctx,
-                    TaskPhase::Verification,
-                    entities::PULL_REQUEST,
+                    TaskKind::Verify(Entity::PullRequest),
                     Some(number.to_string()),
-                    TaskPriority::NORMAL,
+                    TaskPriority::HIGH,
                     attempt + 1,
                 );
             }
@@ -644,30 +692,25 @@ impl MirrorWorker {
         let repo_id = run.repo_id()?;
         let start = self
             .watermark
-            .start_sweep(
-                &run.scope,
-                repo_id,
-                sweep_families::COMMITS,
-                run.options.force,
-            )
+            .start_sweep(&run.scope, repo_id, Family::Commits, run.options.force)
             .await?;
         let updated_after = start.updated_after;
-        let with_ci = run.options.scope.collection.actions != CollectionMode::None;
+        let with_ci = run.options.scope.collection.actions == CollectionMode::All;
         let mut high = updated_after;
         let mut page1_etag: Option<String> = None;
         let mut swept: HashSet<String> = HashSet::new();
         let mut continue_from: Option<String> = None;
 
         while !ctx.cancel.is_cancelled() {
-            let listing = self
+            let mut listing = self
                 .github
                 .list_commits(
-                    &run.owner,
-                    &run.name,
-                    repo_id,
-                    updated_after,
-                    start.page1_etag.as_deref(),
-                    continue_from.as_deref(),
+                    run.repo_ref()?,
+                    ListCursor {
+                        updated_after,
+                        page1_etag: start.page1_etag.as_deref(),
+                        continue_from: continue_from.as_deref(),
+                    },
                     &run.options,
                 )
                 .await?;
@@ -676,7 +719,7 @@ impl MirrorWorker {
                 page1_etag.clone_from(&listing.page1_etag);
             }
             if listing.swept_to_end {
-                run.mark_swept(sweep_families::COMMITS, page1_etag.clone());
+                run.mark_swept(Family::Commits, page1_etag.clone());
             }
             let seen: Vec<&str> = listing
                 .commits
@@ -688,36 +731,24 @@ impl MirrorWorker {
                 return Ok(());
             }
 
+            let mut candidates = Vec::new();
             for commit in &listing.commits {
                 if !swept.insert(commit.sha.clone())
                     || is_stale(commit.committed_at.as_deref(), updated_after)
                 {
                     continue;
                 }
-                if !self
-                    .needs_refinement(
-                        entities::COMMIT,
-                        &commit.sha,
-                        &commit_inputs(commit, with_ci),
-                    )
-                    .await?
-                {
-                    continue;
-                }
-                self.seed(
-                    ctx,
-                    TaskPhase::Refinement,
-                    entities::COMMIT,
-                    Some(commit.sha.clone()),
-                    TaskPriority::NORMAL,
-                );
+                candidates.push(RefinementCandidate {
+                    entity_id: commit.sha.clone(),
+                    inputs: commit_inputs(commit, with_ci),
+                    priority: TaskPriority::NORMAL,
+                });
             }
+            self.seed_refinements(ctx, Entity::Commit, candidates)
+                .await?;
 
-            let (commits, comments, people) = (
-                count(&listing.commits),
-                count(&listing.commit_comments),
-                count(&listing.contributors),
-            );
+            run.absorb_contributors(std::mem::take(&mut listing.contributors));
+            let (commits, comments) = (count(&listing.commits), count(&listing.commit_comments));
             let next = listing.next.clone();
             self.writer
                 .write_commit_listing(&run.scope, run.tenant_id, repo_id, listing)
@@ -725,7 +756,6 @@ impl MirrorWorker {
             run.tally(|s| {
                 s.commits_synced += commits;
                 s.commit_comments_synced += comments;
-                s.contributors_synced += people;
             });
             match next {
                 Some(next) => continue_from = Some(next),
@@ -734,28 +764,21 @@ impl MirrorWorker {
         }
 
         self.watermark
-            .stage(
-                &run.scope,
-                run.tenant_id,
-                repo_id,
-                sweep_families::COMMITS,
-                high,
-            )
+            .stage(&run.scope, run.tenant_id, repo_id, Family::Commits, high)
             .await?;
         Ok(())
     }
 
     async fn refine_commit(&self, task: &ExtractionTask) -> Result<(), DomainError> {
         let run = &self.run;
-        let repo_id = run.repo_id()?;
         let sha = task
             .entity_id
             .as_deref()
             .ok_or_else(|| DomainError::internal("commit task without a SHA"))?;
-        let with_ci = run.options.scope.collection.actions != CollectionMode::None;
+        let with_ci = run.options.scope.collection.actions == CollectionMode::All;
         let detail = self
             .github
-            .refine_commit(&run.owner, &run.name, repo_id, sha, with_ci, &run.options)
+            .refine_commit(run.repo_ref()?, sha, with_ci, &run.options)
             .await?;
         let (files, statuses, checks) = (
             count(&detail.files),
@@ -770,15 +793,14 @@ impl MirrorWorker {
             s.commit_statuses_synced += statuses;
             s.check_runs_synced += checks;
         });
-        self.mark_refined(entities::COMMIT, sha).await
+        self.mark_refined(Entity::Commit, sha).await
     }
 
     async fn index_metadata(&self) -> Result<(), DomainError> {
         let run = &self.run;
-        let repo_id = run.repo_id()?;
         let listing = self
             .github
-            .list_metadata(&run.owner, &run.name, repo_id, &run.options)
+            .list_metadata(run.repo_ref()?, &run.options)
             .await?;
         run.mark_complete(&listing.complete);
         let (labels, milestones, releases, branches, tags) = (
@@ -801,36 +823,41 @@ impl MirrorWorker {
         Ok(())
     }
 
+    async fn open_pull_heads(&self, mode: CollectionMode) -> Result<HashSet<String>, DomainError> {
+        if mode != CollectionMode::Open {
+            return Ok(HashSet::new());
+        }
+        let run = &self.run;
+        let heads = self
+            .pull_requests
+            .open_head_shas(&run.scope, run.repo_id()?)
+            .await?;
+        Ok(heads.into_iter().collect())
+    }
+
     async fn index_actions(&self, ctx: &WorkerContext) -> Result<(), DomainError> {
         let run = &self.run;
-        let repo_id = run.repo_id()?;
         let listing = self
             .github
-            .list_actions(&run.owner, &run.name, repo_id, &run.options)
+            .list_actions(run.repo_ref()?, &run.options)
             .await?;
 
-        if run.options.scope.collection.actions != CollectionMode::None {
-            for workflow_run in &listing.workflow_runs {
-                let entity_id = workflow_run.id.to_string();
-                if !self
-                    .needs_refinement(
-                        entities::WORKFLOW_RUN,
-                        &entity_id,
-                        &workflow_run_inputs(workflow_run),
-                    )
-                    .await?
-                {
-                    continue;
-                }
-                self.seed(
-                    ctx,
-                    TaskPhase::Refinement,
-                    entities::WORKFLOW_RUN,
-                    Some(entity_id),
-                    TaskPriority::NORMAL,
-                );
-            }
-        }
+        let mode = run.options.scope.collection.actions;
+        let open_heads = self.open_pull_heads(mode).await?;
+        let candidates = listing
+            .workflow_runs
+            .iter()
+            .filter(|workflow_run| {
+                mode == CollectionMode::All || open_heads.contains(&workflow_run.head_sha)
+            })
+            .map(|workflow_run| RefinementCandidate {
+                entity_id: workflow_run.id.to_string(),
+                inputs: workflow_run_inputs(workflow_run),
+                priority: TaskPriority::NORMAL,
+            })
+            .collect();
+        self.seed_refinements(ctx, Entity::WorkflowRun, candidates)
+            .await?;
 
         let (runs, deployments) = (count(&listing.workflow_runs), count(&listing.deployments));
         self.writer
@@ -845,66 +872,49 @@ impl MirrorWorker {
 
     async fn refine_workflow_run(&self, task: &ExtractionTask) -> Result<(), DomainError> {
         let run = &self.run;
-        let repo_id = run.repo_id()?;
         let run_id = entity_number(task)?;
         let jobs = self
             .github
-            .refine_workflow_run(&run.owner, &run.name, repo_id, run_id, &run.options)
+            .refine_workflow_run(run.repo_ref()?, run_id, &run.options)
             .await?;
         let count = count(&jobs);
         self.writer
             .write_workflow_jobs(&run.scope, run.tenant_id, jobs)
             .await?;
         run.tally(|s| s.workflow_jobs_synced += count);
-        self.mark_refined(entities::WORKFLOW_RUN, &run_id.to_string())
+        self.mark_refined(Entity::WorkflowRun, &run_id.to_string())
             .await
     }
 }
 
 #[async_trait]
 impl Worker for MirrorWorker {
-    fn handles(&self, phase: TaskPhase, entity_type: &str) -> bool {
-        match phase {
-            TaskPhase::Discovery => entity_type == REPOSITORY_ENTITY,
-            TaskPhase::Indexing => matches!(
-                entity_type,
-                families::ISSUES
-                    | families::PULL_REQUESTS
-                    | families::COMMITS
-                    | families::METADATA
-                    | families::ACTIONS
-            ),
-            TaskPhase::Refinement => matches!(
-                entity_type,
-                entities::ISSUE
-                    | entities::PULL_REQUEST
-                    | entities::COMMIT
-                    | entities::WORKFLOW_RUN
-            ),
-            TaskPhase::Verification => entity_type == entities::PULL_REQUEST,
-            TaskPhase::ChangeDetection => false,
-        }
+    fn handles(&self, _kind: TaskKind) -> bool {
+        true
     }
 
     async fn execute(&self, ctx: &WorkerContext, task: &ExtractionTask) -> Result<(), DomainError> {
-        match (task.phase, task.entity_type.as_str()) {
-            (TaskPhase::Discovery, _) => self.discover(ctx).await,
-            (TaskPhase::Indexing, families::ISSUES) => self.index_issues(ctx).await,
-            (TaskPhase::Indexing, families::PULL_REQUESTS) => self.index_pull_requests(ctx).await,
-            (TaskPhase::Indexing, families::COMMITS) => self.index_commits(ctx).await,
-            (TaskPhase::Indexing, families::METADATA) => self.index_metadata().await,
-            (TaskPhase::Indexing, families::ACTIONS) => self.index_actions(ctx).await,
-            (TaskPhase::Refinement, entities::ISSUE) => self.refine_issue(task).await,
-            (TaskPhase::Refinement | TaskPhase::Verification, entities::PULL_REQUEST) => {
-                self.refine_pull_request(ctx, task).await
-            }
-            (TaskPhase::Refinement, entities::COMMIT) => self.refine_commit(task).await,
-            (TaskPhase::Refinement, entities::WORKFLOW_RUN) => self.refine_workflow_run(task).await,
-            (phase, other) => Err(DomainError::internal(format!(
-                "no handler for {phase} task of type {other}"
-            ))),
+        match task.kind {
+            TaskKind::Discover => self.discover(ctx).await,
+            TaskKind::Index(Family::Issues) => self.index_issues(ctx).await,
+            TaskKind::Index(Family::PullRequests) => self.index_pull_requests(ctx).await,
+            TaskKind::Index(Family::Commits) => self.index_commits(ctx).await,
+            TaskKind::Index(Family::Metadata) => self.index_metadata().await,
+            TaskKind::Index(Family::Actions) => self.index_actions(ctx).await,
+            TaskKind::Refine(entity) | TaskKind::Verify(entity) => match entity {
+                Entity::Issue => self.refine_issue(task).await,
+                Entity::PullRequest => self.refine_pull_request(ctx, task).await,
+                Entity::Commit => self.refine_commit(task).await,
+                Entity::WorkflowRun => self.refine_workflow_run(task).await,
+            },
         }
     }
+}
+
+struct RefinementCandidate {
+    entity_id: String,
+    inputs: GateInputs,
+    priority: TaskPriority,
 }
 
 fn issue_inputs(issue: &IssueRecord) -> GateInputs {
@@ -985,7 +995,7 @@ fn entity_number(task: &ExtractionTask) -> Result<i64, DomainError> {
         .ok_or_else(|| {
             DomainError::internal(format!(
                 "{} task without a numeric entity id: {:?}",
-                task.entity_type, task.entity_id
+                task.kind, task.entity_id
             ))
         })
 }

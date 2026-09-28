@@ -11,8 +11,8 @@ use authz_resolver_sdk::{
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, FetchedRepository,
-    GithubPort, IssueDetail, IssueDetailWants, IssueListing, Listing, ListingCompleteness,
-    MetadataListing, PullDetail, PullListing,
+    GithubPort, IssueDetail, IssueDetailWants, IssueListing, ListCursor, Listing,
+    ListingCompleteness, MetadataListing, PullDetail, PullListing, RepoRef,
 };
 use github_mirror::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -41,7 +41,7 @@ use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit::{ClientHub, ConfigProvider, GearCtx};
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::{ConnectOpts, DBProvider, Db, connect_db};
-use toolkit_security::{PlatformSecurityContext, SecurityContext, pep_properties};
+use toolkit_security::{AccessScope, PlatformSecurityContext, SecurityContext, pep_properties};
 use uuid::Uuid;
 
 pub type ConcreteService = Service;
@@ -146,17 +146,13 @@ impl GithubPort for FakeGithub {
         Ok(self.fixture()?.repository.clone())
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_issues(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
-        updated_after: Option<chrono::DateTime<chrono::Utc>>,
-        _page1_etag: Option<&str>,
-        _continue_from: Option<&str>,
+        _repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         _options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
+        let ListCursor { updated_after, .. } = cursor;
         let f = self.fixture()?;
         Ok(IssueListing {
             complete: if updated_after.is_some() {
@@ -187,9 +183,7 @@ impl GithubPort for FakeGithub {
 
     async fn refine_issue(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         number: i64,
         wants: IssueDetailWants,
         _options: &FetchOptions,
@@ -220,11 +214,8 @@ impl GithubPort for FakeGithub {
 
     async fn list_pull_requests(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
-        _page1_etag: Option<&str>,
-        _continue_from: Option<&str>,
+        _repo: RepoRef<'_>,
+        _cursor: ListCursor<'_>,
         _options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
         let f = self.fixture()?;
@@ -245,9 +236,7 @@ impl GithubPort for FakeGithub {
 
     async fn refine_pull_request(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         number: i64,
         _options: &FetchOptions,
     ) -> Result<PullDetail, DomainError> {
@@ -284,22 +273,19 @@ impl GithubPort for FakeGithub {
                 .filter(|r| r.pull_number == number)
                 .cloned()
                 .collect(),
+            review_threads_complete: true,
             declared: DeclaredCounts::default(),
             contributors: Vec::new(),
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_commits(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
-        updated_after: Option<chrono::DateTime<chrono::Utc>>,
-        _page1_etag: Option<&str>,
-        _continue_from: Option<&str>,
+        _repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         _options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
+        let ListCursor { updated_after, .. } = cursor;
         let f = self.fixture()?;
         Ok(CommitListing {
             complete: if updated_after.is_some() {
@@ -324,9 +310,7 @@ impl GithubPort for FakeGithub {
 
     async fn refine_commit(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         sha: &str,
         with_ci: bool,
         _options: &FetchOptions,
@@ -369,9 +353,7 @@ impl GithubPort for FakeGithub {
 
     async fn list_metadata(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         _options: &FetchOptions,
     ) -> Result<MetadataListing, DomainError> {
         let f = self.fixture()?;
@@ -396,9 +378,7 @@ impl GithubPort for FakeGithub {
 
     async fn list_actions(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         _options: &FetchOptions,
     ) -> Result<ActionsListing, DomainError> {
         let f = self.fixture()?;
@@ -410,9 +390,7 @@ impl GithubPort for FakeGithub {
 
     async fn refine_workflow_run(
         &self,
-        _owner: &str,
-        _name: &str,
-        _repo_id: i64,
+        _repo: RepoRef<'_>,
         run_id: i64,
         _options: &FetchOptions,
     ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
@@ -427,9 +405,10 @@ impl GithubPort for FakeGithub {
 
     async fn clear_cache(
         &self,
-        _tenant_id: Uuid,
+        _scope: &AccessScope,
         _owner: &str,
         _name: Option<&str>,
+        _repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
         Ok(0)
     }
@@ -478,6 +457,23 @@ pub fn service_with_enforcer(
     github: Arc<dyn GithubPort>,
     policy_enforcer: PolicyEnforcer,
 ) -> Arc<ConcreteService> {
+    service_with_deadline(
+        db,
+        api_base_url,
+        github,
+        policy_enforcer,
+        std::time::Duration::from_mins(5),
+    )
+}
+
+/// The same service with a deadline a test can drive past.
+pub fn service_with_deadline(
+    db: Db,
+    api_base_url: &str,
+    github: Arc<dyn GithubPort>,
+    policy_enforcer: PolicyEnforcer,
+    sync_deadline: std::time::Duration,
+) -> Arc<ConcreteService> {
     let db = Arc::new(DBProvider::new(db));
     Arc::new(Service::new(
         Arc::clone(&db),
@@ -517,8 +513,9 @@ pub fn service_with_enforcer(
         ServiceConfig {
             api_base_url: api_base_url.to_owned(),
             scope: github_mirror::domain::scope::ScopeConfig::default(),
-            max_concurrent_syncs: 1,
-            max_concurrent_tasks: 1,
+            max_concurrent_syncs: std::num::NonZeroUsize::MIN,
+            max_concurrent_tasks: std::num::NonZeroUsize::MIN,
+            sync_deadline,
         },
     ))
 }

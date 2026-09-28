@@ -1,10 +1,11 @@
 use chrono::{Duration, Utc};
 
 use super::{
-    GateInputs, GateReason, REFINEMENT_COMPLETE, REFINEMENT_PENDING, child_counts_hash, entities,
+    GateInputs, GateReason, REFINEMENT_COMPLETE, REFINEMENT_PENDING, child_counts_hash,
     evaluate_refinement_gate, family_ttl, fingerprint,
 };
 use crate::domain::repo::EntityFingerprintRecord;
+use crate::domain::sync::task::Entity;
 
 fn inputs(fp: &str, counts: Option<&str>, terminal: bool) -> GateInputs {
     GateInputs {
@@ -24,7 +25,7 @@ fn stored(
 ) -> EntityFingerprintRecord {
     EntityFingerprintRecord {
         repo_id: 1,
-        family: entities::ISSUE.to_owned(),
+        family: Entity::Issue.as_str().to_owned(),
         entity_id: "11".to_owned(),
         fingerprint: fp.to_owned(),
         updated_at: None,
@@ -61,7 +62,7 @@ fn an_unseen_entity_is_refined() {
     let reason = evaluate_refinement_gate(
         None,
         &inputs("a", None, false),
-        entities::ISSUE,
+        Entity::Issue,
         Utc::now(),
         false,
     );
@@ -74,7 +75,7 @@ fn force_refines_even_an_unchanged_entity() {
     let reason = evaluate_refinement_gate(
         Some(&row),
         &inputs("a", None, false),
-        entities::ISSUE,
+        Entity::Issue,
         Utc::now(),
         true,
     );
@@ -87,7 +88,7 @@ fn an_unchanged_entity_within_its_ttl_is_skipped() {
     let reason = evaluate_refinement_gate(
         Some(&row),
         &inputs("a", None, false),
-        entities::ISSUE,
+        Entity::Issue,
         Utc::now(),
         false,
     );
@@ -100,7 +101,7 @@ fn a_moved_fingerprint_is_refined() {
     let reason = evaluate_refinement_gate(
         Some(&row),
         &inputs("b", None, false),
-        entities::ISSUE,
+        Entity::Issue,
         Utc::now(),
         false,
     );
@@ -118,7 +119,7 @@ fn a_new_child_count_is_refined_even_when_the_parent_is_unchanged() {
     let reason = evaluate_refinement_gate(
         Some(&row),
         &inputs("a", Some("two"), false),
-        entities::ISSUE,
+        Entity::Issue,
         Utc::now(),
         false,
     );
@@ -131,10 +132,32 @@ fn a_refinement_that_never_finished_is_retried() {
     let reason = evaluate_refinement_gate(
         Some(&row),
         &inputs("a", None, false),
-        entities::ISSUE,
+        Entity::Issue,
         Utc::now(),
         false,
     );
+    assert_eq!(reason, Some(GateReason::Incomplete));
+}
+
+/// Both reasons apply at once: the refinement never finished, and the row is
+/// older than an open issue's backstop. The status is the one reported,
+/// because it is the one that says the entity was never fully read.
+#[test]
+fn an_unfinished_refinement_outranks_an_expired_backstop() {
+    let row = stored("a", None, REFINEMENT_PENDING, Some(Duration::hours(5)));
+    assert!(
+        Duration::hours(5) > family_ttl(Entity::Issue, false).expect("an open issue has a ttl"),
+        "the row has to be past the backstop for the two reasons to collide"
+    );
+
+    let reason = evaluate_refinement_gate(
+        Some(&row),
+        &inputs("a", None, false),
+        Entity::Issue,
+        Utc::now(),
+        false,
+    );
+
     assert_eq!(reason, Some(GateReason::Incomplete));
 }
 
@@ -144,7 +167,7 @@ fn an_open_issue_is_refined_again_once_its_backstop_expires() {
     let reason = evaluate_refinement_gate(
         Some(&row),
         &inputs("a", None, false),
-        entities::ISSUE,
+        Entity::Issue,
         Utc::now(),
         false,
     );
@@ -154,19 +177,19 @@ fn an_open_issue_is_refined_again_once_its_backstop_expires() {
 #[test]
 fn a_closed_issue_keeps_a_longer_backstop_than_an_open_one() {
     assert!(
-        family_ttl(entities::ISSUE, true) > family_ttl(entities::ISSUE, false),
+        family_ttl(Entity::Issue, true) > family_ttl(Entity::Issue, false),
         "a settled issue must be refined less often than a live one"
     );
 }
 
 #[test]
 fn a_commit_without_ci_never_expires() {
-    assert_eq!(family_ttl(entities::COMMIT, true), None);
+    assert_eq!(family_ttl(Entity::Commit, true), None);
     let row = stored("a", None, REFINEMENT_COMPLETE, Some(Duration::days(365)));
     let reason = evaluate_refinement_gate(
         Some(&row),
         &inputs("a", None, true),
-        entities::COMMIT,
+        Entity::Commit,
         Utc::now(),
         false,
     );
@@ -182,7 +205,7 @@ fn a_commit_with_ci_is_refreshed_on_its_backstop() {
     let reason = evaluate_refinement_gate(
         Some(&row),
         &inputs("a", None, false),
-        entities::COMMIT,
+        Entity::Commit,
         Utc::now(),
         false,
     );

@@ -22,6 +22,11 @@ pub enum DomainError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    /// The run was told to stop (shutdown or an explicit cancel) before it
+    /// finished; its session ends `interrupted`, not `failed`.
+    #[error("the sync was interrupted before it finished")]
+    Cancelled,
+
     #[error("Internal error: {0}")]
     Internal(String),
 
@@ -36,6 +41,21 @@ impl DomainError {
 
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
+    }
+
+    #[must_use]
+    pub fn public_text(&self) -> String {
+        match self {
+            Self::NotFound | Self::Validation { .. } | Self::Conflict(_) | Self::Cancelled => {
+                self.to_string()
+            }
+            Self::Forbidden(_) => "access forbidden".to_owned(),
+            Self::AccessLost(_) => {
+                "GitHub refused the mirror's credentials for this repository".to_owned()
+            }
+            Self::Internal(msg) => crate::redact::redacted(msg),
+            Self::Database(_) => "a storage error stopped the work".to_owned(),
+        }
     }
 
     #[must_use]
@@ -66,7 +86,11 @@ impl From<authz_resolver_sdk::EnforcerError> for DomainError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
 mod tests {
     use super::*;
 

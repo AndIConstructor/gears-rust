@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
@@ -14,7 +15,7 @@ use github_mirror_sdk::{
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use toolkit_macros::domain_model;
-use toolkit_odata::{ODataQuery, Page, PageInfo};
+use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
@@ -31,30 +32,168 @@ use super::repo::{
     MilestoneRecord, MilestoneRepository, PageWindow, PullRequestCommitRecord,
     PullRequestCommitRepository, PullRequestFileRecord, PullRequestFileRepository,
     PullRequestRecord, PullRequestRepository, ReleaseRecord, ReleaseRepository, RepoRecord,
-    RepoRepository, RepoSyncStatusRecord, RepoSyncStatusRepository, ReviewCommentRecord,
-    ReviewCommentRepository, ReviewRecord, ReviewRepository, ReviewThreadRecord,
-    ReviewThreadRepository, SyncSessionRecord, SyncSessionRepository, SyncWatermarkRepository,
-    SyncWriter, TagRecord, TagRepository, WorkflowJobRecord, WorkflowJobRepository,
-    WorkflowRunRecord, WorkflowRunRepository,
+    RepoRepository, RepoRunStatus, RepoSyncStatusRecord, RepoSyncStatusRepository,
+    ReviewCommentRecord, ReviewCommentRepository, ReviewRecord, ReviewRepository,
+    ReviewThreadRecord, ReviewThreadRepository, SessionStatus, SyncSessionRecord,
+    SyncSessionRepository, SyncWatermarkRepository, SyncWriter, TagRecord, TagRepository,
+    WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
 use super::scope::ScopeConfig;
 use super::sync::{
-    ChangeGate, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskPhase, Worker,
-    sweep_families,
+    ChangeGate, Family, MirrorWorker, RepoPhaseRunner, RunState, SweepWatermark, TaskFailure,
+    TaskKind, Worker,
 };
-use super::validate::{repo_full_name, validate_commit_sha};
+use super::validate::{repo_full_name, validate_commit_sha, validate_owner, validate_repo_path};
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
 /// literal exists in exactly one place.
 pub const GEAR_NAME: &str = crate::gear::GithubMirrorGear::MODULE_NAME;
 
 const DEFAULT_LIST_LIMIT: u64 = 50;
+/// The most rows one keyset page may hold, the same bound `PageWindow` puts on
+/// the offset-addressed listings.
+const MAX_LIST_LIMIT: u64 = PageWindow::MAX_LIMIT;
+
+/// The page size a list request asked for.
+///
+/// # Errors
+/// `Validation` when the caller asks for more than [`MAX_LIST_LIMIT`] rows, or
+/// for none at all, rather than quietly serving a different number.
+fn list_limit(query: &ODataQuery) -> Result<u64, DomainError> {
+    let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
+    if limit == 0 || limit > MAX_LIST_LIMIT {
+        return Err(DomainError::Validation {
+            field: "limit".to_owned(),
+            message: format!("a page holds between 1 and {MAX_LIST_LIMIT} rows"),
+        });
+    }
+    Ok(limit)
+}
+const SESSIONS_ORDER: &str = "-created_at,-id";
+const REPO_STATUS_ORDER: &str = "+repository";
 
 /// The current instant as RFC3339 text.
 ///
 /// Session and run-status rows still store their timestamps as text (their
 /// tables predate the typed columns), so they format here; `extracted_at` and
 /// the contributor window are real timestamps and never pass through this.
+fn cursor_keys<'a>(
+    query: &'a ODataQuery,
+    order: &str,
+    key_count: usize,
+) -> Result<Option<&'a [String]>, DomainError> {
+    let Some(cursor) = query.cursor.as_ref() else {
+        return Ok(None);
+    };
+    if cursor.s != order || cursor.k.len() != key_count || cursor.d != "fwd" {
+        return Err(invalid_cursor());
+    }
+    Ok(Some(cursor.k.as_slice()))
+}
+
+fn invalid_cursor() -> DomainError {
+    DomainError::Validation {
+        field: "cursor".to_owned(),
+        message: "the cursor does not belong to this listing".to_owned(),
+    }
+}
+
+fn encode_cursor(
+    order: &str,
+    direction: SortDir,
+    keys: Vec<String>,
+) -> Result<String, DomainError> {
+    CursorV1 {
+        k: keys,
+        o: direction,
+        s: order.to_owned(),
+        f: None,
+        d: "fwd".to_owned(),
+    }
+    .encode()
+    .map_err(|e| DomainError::Internal(format!("encoding a page cursor failed: {e}")))
+}
+
+fn keyset_page<T>(
+    mut rows: Vec<T>,
+    limit: u64,
+    cursor_after: impl Fn(&T) -> Result<String, DomainError>,
+) -> Result<Page<T>, DomainError> {
+    let page_len = usize::try_from(limit).unwrap_or(usize::MAX);
+    let next_cursor = if rows.len() > page_len {
+        rows.truncate(page_len);
+        rows.last().map(cursor_after).transpose()?
+    } else {
+        None
+    };
+    Ok(Page::new(
+        rows,
+        PageInfo {
+            next_cursor,
+            prev_cursor: None,
+            limit,
+        },
+    ))
+}
+
+struct EnqueueScopes {
+    session: AccessScope,
+    repo_status: AccessScope,
+}
+
+/// The error a run that passed its deadline ends on, once it has been told to
+/// stop and has wound down. Whatever the run itself reported on the way out is
+/// logged rather than served: the deadline is the reason the caller needs.
+fn past_deadline(
+    job: &SyncJob,
+    deadline: std::time::Duration,
+    stopped_with: Option<DomainError>,
+) -> DomainError {
+    let minutes = deadline.as_secs().div_euclid(60);
+    tracing::warn!(
+        session_id = %job.session_id,
+        repository = %format!("{}/{}", job.owner, job.name),
+        deadline_minutes = minutes,
+        stopped_with = ?stopped_with.map(|e| crate::redact::redacted(&e.to_string())),
+        "sync passed its deadline and was stopped"
+    );
+    DomainError::internal(format!(
+        "the sync of {}/{} ran past its deadline of {minutes} minutes and was stopped; the next \
+         sync carries on from what it had already stored",
+        job.owner, job.name
+    ))
+}
+
+/// Whether the process that was running `session` is gone.
+///
+/// The session's own heartbeat is the evidence: a live run re-stamps
+/// `updated_at` every couple of seconds, so a row that has not moved for
+/// [`ABANDONED_AFTER_SECS`] has nobody behind it. A stamp that cannot be read
+/// counts as live, so an unreadable row never costs another process its lock.
+fn abandoned(session: &SyncSessionRecord, now: DateTime<Utc>) -> bool {
+    let last_seen = session
+        .updated_at
+        .as_deref()
+        .or(session.started_at.as_deref())
+        .unwrap_or(&session.created_at);
+    DateTime::parse_from_rfc3339(last_seen)
+        .is_ok_and(|at| (now - at.with_timezone(&Utc)).num_seconds() > ABANDONED_AFTER_SECS)
+}
+
+fn stored_summary_json(session_id: Uuid, summary: &SyncSummary) -> Option<String> {
+    match serde_json::to_string(summary) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "sync summary could not be stored as JSON"
+            );
+            None
+        }
+    }
+}
+
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -200,24 +339,19 @@ pub(crate) const ISSUE_TIMELINE_RESOURCE: ResourceType = ResourceType::from_stat
     &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
 );
 
-/// Session lifecycle vocabulary, written into `gm_sync_sessions.state`.
-/// Session lifecycle vocabulary, written into `gm_sync_sessions.status`.
-///
-/// `IN_PROGRESS`, `COMPLETE` and `FAILED` are DESIGN §3.7's three states.
-/// `QUEUED` and `INTERRUPTED` are additions the background worker needs:
-/// the design assumed a synchronous library call, where neither can occur.
-pub(crate) mod session_states {
-    pub const QUEUED: &str = "queued";
-    pub const IN_PROGRESS: &str = "in_progress";
-    pub const COMPLETE: &str = "complete";
-    pub const FAILED: &str = "failed";
-    pub const INTERRUPTED: &str = "interrupted";
-}
-
 /// Progress once every mirrored table has been written.
 const PROGRESS_STORED: u8 = 95;
 /// How often the run persists its progress while it is working.
 const HEARTBEAT_SECS: u64 = 2;
+
+/// How long a session must go without a heartbeat before start-up treats its
+/// holder as gone.
+///
+/// A running sync re-stamps `updated_at` every [`HEARTBEAT_SECS`], so a row
+/// this far behind belongs to a process that is no longer writing. The margin
+/// is wide enough for a run stalled on a slow write or a rate-limit wait to
+/// keep its lock.
+const ABANDONED_AFTER_SECS: i64 = 300;
 
 /// Most repositories one resume call will re-queue.
 const RESUME_LIMIT: u64 = 500;
@@ -277,7 +411,24 @@ impl SyncProgress {
 /// How many enqueued syncs may wait for the worker before `POST /sync` starts
 /// rejecting. One repository at a time is the current worker concurrency, so
 /// this is the depth of the backlog, not of the parallelism.
-const SYNC_QUEUE_DEPTH: usize = 64;
+///
+/// The same number twice over: the channel holds this many jobs, and the pool
+/// parks this many more once every worker is busy, so a caller first sees the
+/// queue-full error at roughly twice this many outstanding syncs. One constant
+/// so the two halves cannot drift apart.
+pub(crate) const SYNC_QUEUE_DEPTH: usize = 64;
+
+/// What a sync request got: the session to poll, and what that session is
+/// doing right now.
+///
+/// The status is read rather than assumed, because a request that collapsed
+/// into a run already going is handed that run's session, which may have left
+/// `queued` some time ago.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueuedSync {
+    pub session_id: Uuid,
+    pub status: SessionStatus,
+}
 
 /// One unit of background work: sync `owner/name` on behalf of `ctx`, and
 /// record the outcome against the session row created at enqueue time.
@@ -285,7 +436,7 @@ const SYNC_QUEUE_DEPTH: usize = 64;
 /// The caller's [`SecurityContext`] travels with the job because the work
 /// outlives the request that asked for it, and every write it makes is still
 /// tenant-scoped through the same policy enforcer.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SyncJob {
     pub session_id: Uuid,
     pub ctx: SecurityContext,
@@ -294,21 +445,17 @@ pub struct SyncJob {
     /// What this run collects. Resolved at enqueue time from the request, or
     /// from the gear config when the request says nothing.
     pub scope: ScopeConfig,
-    /// Bypass the HTTP cache entirely (PRD §5.2 force mode).
-    ///
-    /// Carried end to end but **not yet honoured**: the gear has no `ETag` or
-    /// `Last-Modified` cache to bypass, so every sync is already a full fetch.
-    /// It starts having an effect when conditional requests land (#4630).
+    /// PRD §5.2 force mode: the GitHub client skips its stored `ETag`s, the
+    /// sweep ignores its watermark and the change gate re-fetches every
+    /// entity, so the whole repository is read again from GitHub.
     pub force: bool,
     /// Oldest closed entity worth collecting, from the request.
     pub since: Option<DateTime<Utc>>,
-}
-
-/// Per-repository run status, the durable half of resume-by-rescan.
-/// PRD §5.2 defines exactly two values.
-pub(crate) mod repo_run_states {
-    pub const IN_PROGRESS: &str = "in_progress";
-    pub const COMPLETE: &str = "complete";
+    #[expect(
+        dead_code,
+        reason = "held for its drop: a job that goes away, run or not, gives its claim back"
+    )]
+    pub(crate) claim: Option<ClaimRelease>,
 }
 
 pub(crate) const REPO_SYNC_STATUS_RESOURCE: ResourceType = ResourceType::from_static(
@@ -338,9 +485,11 @@ pub struct ServiceConfig {
     /// What a sync collects when the request does not say.
     pub scope: ScopeConfig,
     /// How many repositories may sync at the same time.
-    pub max_concurrent_syncs: usize,
+    pub max_concurrent_syncs: NonZeroUsize,
     /// How many tasks one repository's sync runs at the same time.
-    pub max_concurrent_tasks: usize,
+    pub max_concurrent_tasks: NonZeroUsize,
+    /// How long one repository's sync may run before it is stopped.
+    pub sync_deadline: std::time::Duration,
 }
 
 #[domain_model]
@@ -382,11 +531,137 @@ pub struct Service {
     config: ServiceConfig,
     sync_tx: mpsc::Sender<SyncJob>,
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
-    in_flight: Arc<Mutex<HashMap<InFlightKey, Uuid>>>,
+    in_flight: InFlight,
+    /// One gate per repository, so the look, the write and the claim that a
+    /// queue request makes are serialised for that repository alone rather than
+    /// for the whole gear.
+    ///
+    /// A gate lives while a request holds it: the last request to let go
+    /// removes it, so the map holds only repositories a request is deciding
+    /// about right now.
+    claim_gates: gate::ClaimGates,
+    /// The gear's shutdown token, bound when the sync pool starts. Syncs that
+    /// do not come from the pool — the in-process client's — carry it too, so
+    /// a shutdown reaches them as well.
+    shutdown: Arc<OnceLock<CancellationToken>>,
 }
 
 /// One repository of one tenant: what a queued or running sync occupies.
 type InFlightKey = (Uuid, String);
+
+enum PreparedSync {
+    Joined(QueuedSync),
+    Claimed {
+        job: Box<SyncJob>,
+        session: Box<SyncSessionRecord>,
+    },
+}
+
+type InFlight = Arc<std::sync::Mutex<HashMap<InFlightKey, Claim>>>;
+
+pub(crate) struct ClaimRelease {
+    in_flight: InFlight,
+    key: InFlightKey,
+    session_id: Uuid,
+}
+
+impl std::fmt::Debug for ClaimRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimRelease")
+            .field("key", &self.key)
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ClaimRelease {
+    fn drop(&mut self) {
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if in_flight
+            .get(&self.key)
+            .is_some_and(|claim| claim.session_id == self.session_id)
+        {
+            in_flight.remove(&self.key);
+        }
+    }
+}
+
+mod gate {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use tokio::sync::{Mutex, MutexGuard};
+
+    use super::InFlightKey;
+
+    type Gates = Arc<std::sync::Mutex<HashMap<InFlightKey, Arc<Mutex<()>>>>>;
+
+    #[derive(Clone, Default)]
+    pub(super) struct ClaimGates(Gates);
+
+    impl ClaimGates {
+        /// This repository's gate, made on first use.
+        pub(super) fn lease(&self, key: &InFlightKey) -> GateLease {
+            let mut gates = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let gate = Arc::clone(
+                gates
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            );
+            GateLease {
+                gates: Arc::clone(&self.0),
+                key: key.clone(),
+                gate,
+            }
+        }
+    }
+
+    /// What a request holds while it decides whether one repository already has a
+    /// sync in flight.
+    pub(super) struct GateLease {
+        gates: Gates,
+        key: InFlightKey,
+        gate: Arc<Mutex<()>>,
+    }
+
+    impl GateLease {
+        pub(super) async fn lock(&self) -> MutexGuard<'_, ()> {
+            self.gate.lock().await
+        }
+    }
+
+    impl Drop for GateLease {
+        fn drop(&mut self) {
+            let mut gates = self
+                .gates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if Arc::strong_count(&self.gate) == 2 {
+                gates.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// The sync holding a repository, and what it was asked to collect.
+///
+/// The terms travel with the claim because a second request that wants
+/// something else must not be handed this one's session: it would be told a
+/// sync ran for terms it never asked for. `force` is deliberately not part of
+/// them — a forced request and a plain one collect the same things, and the
+/// run in flight is already fetching the repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Claim {
+    session_id: Uuid,
+    scope: ScopeConfig,
+    since: Option<DateTime<Utc>>,
+}
 
 /// Manual `Clone`: every field is an `Arc` (cheap refcount bump) or already
 /// `Clone` (`PolicyEnforcer`, `ServiceConfig`). A `#[derive(Clone)]` would add
@@ -436,12 +711,19 @@ impl Clone for Service {
             sync_tx: self.sync_tx.clone(),
             sync_rx: Arc::clone(&self.sync_rx),
             in_flight: Arc::clone(&self.in_flight),
+            claim_gates: self.claim_gates.clone(),
+            shutdown: Arc::clone(&self.shutdown),
         }
     }
 }
 
 impl Service {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one argument per repository the service owns; the gear wires them \
+                  in one place and a holder struct would only move the same list \
+                  there"
+    )]
     pub fn new(
         db: Arc<DbProvider>,
         repo: Arc<dyn RepoRepository>,
@@ -518,7 +800,9 @@ impl Service {
             config,
             sync_tx,
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
-            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            claim_gates: gate::ClaimGates::default(),
+            shutdown: Arc::new(OnceLock::new()),
         }
     }
 
@@ -2946,15 +3230,6 @@ impl Service {
         self.issue_timeline.upsert(&scope, tenant_id, record).await
     }
 
-    /// Run one sync of `owner/name` and record it as a session: a durable
-    /// `gm_sync_sessions` row that survives the request and is readable via
-    /// [`Self::get_session`]. The sync itself still runs inline — slice 3 of
-    /// gears-rust#4632 moves it to a background task and this method starts
-    /// answering before the work finishes.
-    ///
-    /// # Errors
-    /// Whatever [`Self::sync_repository`] returns; the session row records
-    /// the failure before the error propagates.
     /// Drop cached GitHub responses for one owner or one repository.
     ///
     /// DESIGN §4's `clear_cache(session, scope)`. The mirrored rows are left
@@ -2962,17 +3237,23 @@ impl Service {
     /// rather than revalidating.
     ///
     /// # Errors
-    /// `Forbidden`/`Database` as usual.
+    /// `DomainError::Validation` when `owner`, or `owner/name`, is not a
+    /// usable GitHub path; `Forbidden`/`Database` as usual.
     pub async fn clear_cache(
         &self,
         ctx: &SecurityContext,
         owner: &str,
         name: Option<&str>,
     ) -> Result<u64, DomainError> {
+        match name {
+            Some(name) => validate_repo_path(owner, name)?,
+            None => validate_owner(owner)?,
+        }
         // Clearing a tenant's own cache is a sync-scoped action: it changes
         // nothing anyone can read, only what the next sync will re-fetch.
         let tenant_id = ctx.subject_tenant_id();
-        self.policy_enforcer
+        let scope = self
+            .policy_enforcer
             .access_scope_with(
                 ctx,
                 &SYNC_RESOURCE,
@@ -2982,7 +3263,12 @@ impl Service {
             )
             .await?;
 
-        let removed = self.github.clear_cache(tenant_id, owner, name).await?;
+        let repo_ids = self.cached_repo_ids(ctx, owner, name).await;
+
+        let removed = self
+            .github
+            .clear_cache(&scope, owner, name, &repo_ids)
+            .await?;
         tracing::info!(
             owner,
             repository = name,
@@ -2992,17 +3278,36 @@ impl Service {
         Ok(removed)
     }
 
+    /// Hand the service the token the gear cancels on shutdown. Called once,
+    /// when the sync pool starts.
+    ///
+    /// A second, different token is logged and dropped rather than returned as
+    /// an error: the pool that is already running is cancelled by the first
+    /// one, and swapping it would leave that pool with no way to be stopped.
+    /// The caller has nothing useful to do about it, which is why nothing is
+    /// handed back.
+    pub fn bind_shutdown(&self, token: CancellationToken) {
+        if self.shutdown.set(token).is_err() {
+            tracing::warn!("the shutdown token is already bound; keeping the first one");
+        }
+    }
+
+    /// The shutdown token, or a detached one before the pool has started.
+    #[must_use]
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.get().cloned().unwrap_or_default()
+    }
+
     /// What a sync collects when the request does not narrow it.
     #[must_use]
     pub fn default_scope(&self) -> ScopeConfig {
         self.config.scope
     }
 
-    /// How many repositories the sync worker pool runs at once. Zero reads as
-    /// one: a pool with no workers would accept syncs and never run them.
+    /// How many repositories the sync worker pool runs at once.
     #[must_use]
     pub fn max_concurrent_syncs(&self) -> usize {
-        self.config.max_concurrent_syncs.max(1)
+        self.config.max_concurrent_syncs.get()
     }
 
     /// Scope for writing this tenant's session rows.
@@ -3025,6 +3330,29 @@ impl Service {
     }
 
     /// Scope for this tenant's per-repository run-status rows.
+    /// GitHub's id for a mirrored repository, once Discovery has stored it.
+    /// A repository not yet mirrored, or a lookup the caller may not make,
+    /// simply leaves the run-status row without an id.
+    async fn stored_repo_id(&self, ctx: &SecurityContext, repo_full_name: &str) -> Option<i64> {
+        let scope = self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &REPO_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await
+            .ok()?;
+        self.repo
+            .find_by_full_name(&scope, repo_full_name)
+            .await
+            .ok()?
+            .map(|repo| repo.id)
+    }
+
     async fn repo_status_scope(
         &self,
         ctx: &SecurityContext,
@@ -3050,24 +3378,108 @@ impl Service {
         ctx: &SecurityContext,
         repo_full_name: &str,
         session_id: Uuid,
-        status: &str,
+        status: RepoRunStatus,
+        synced_at: Option<String>,
+    ) -> Result<(), DomainError> {
+        let scope = self.repo_status_scope(ctx, actions::UPSERT).await?;
+        self.mark_repo_status_in(&scope, ctx, repo_full_name, session_id, status, synced_at)
+            .await
+    }
+
+    async fn mark_repo_status_in(
+        &self,
+        scope: &AccessScope,
+        ctx: &SecurityContext,
+        repo_full_name: &str,
+        session_id: Uuid,
+        status: RepoRunStatus,
         synced_at: Option<String>,
     ) -> Result<(), DomainError> {
         let tenant_id = ctx.subject_tenant_id();
-        let scope = self.repo_status_scope(ctx, actions::UPSERT).await?;
 
-        let previous = self.repo_sync_status.find(&scope, repo_full_name).await?;
+        let previous = self.repo_sync_status.find(scope, repo_full_name).await?;
+        let repo_id = match previous.as_ref().and_then(|p| p.repo_id) {
+            Some(id) => Some(id),
+            None => self.stored_repo_id(ctx, repo_full_name).await,
+        };
         let record = RepoSyncStatusRecord {
             repo_full_name: repo_full_name.to_owned(),
-            repo_id: previous.as_ref().and_then(|p| p.repo_id),
-            status: status.to_owned(),
+            repo_id,
+            status,
             last_session_id: Some(session_id),
             last_synced_at: synced_at.or_else(|| previous.and_then(|p| p.last_synced_at)),
         };
         self.repo_sync_status
-            .upsert(&scope, tenant_id, record)
+            .upsert(scope, tenant_id, record)
             .await?;
         Ok(())
+    }
+
+    /// GitHub's ids for the repositories a cache clear covers, so the pages
+    /// cached under `…/repositories/{id}/...` go with the rest.
+    ///
+    /// Best effort by design: reading them needs repository-list rights,
+    /// which a caller holding only the sync right does not have, and the
+    /// clear itself is already authorised by then. Without the ids the owner
+    /// and slug prefixes still clear; only the linked later pages survive,
+    /// and a forced sync ignores the cache anyway.
+    async fn cached_repo_ids(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: Option<&str>,
+    ) -> Vec<i64> {
+        let found = async {
+            let repo_scope = self
+                .policy_enforcer
+                .access_scope_with(
+                    ctx,
+                    &REPO_RESOURCE,
+                    actions::LIST,
+                    None,
+                    &AccessRequest::new().resource_property(
+                        pep_properties::OWNER_TENANT_ID,
+                        ctx.subject_tenant_id(),
+                    ),
+                )
+                .await?;
+            let ids: Vec<i64> = match name {
+                Some(name) => self
+                    .repo
+                    .find_by_full_name(&repo_scope, &format!("{owner}/{name}"))
+                    .await?
+                    .map(|repo| repo.id)
+                    .into_iter()
+                    .collect(),
+                None => self.repo.ids_by_owner(&repo_scope, owner).await?,
+            };
+            Ok::<_, DomainError>(ids)
+        }
+        .await;
+
+        match found {
+            Ok(ids) => ids,
+            Err(e @ DomainError::Forbidden(_)) => {
+                tracing::info!(
+                    owner,
+                    repository = name,
+                    error = %e.public_text(),
+                    "clearing the cache without GitHub's repository ids; the pages linked under \
+                     them stay until they are re-fetched"
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    owner,
+                    repository = name,
+                    error = %e.public_text(),
+                    "could not read GitHub's repository ids for the cache clear; the pages \
+                     linked under them stay until they are re-fetched"
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// The tenant's per-repository run statuses, optionally one status only.
@@ -3078,21 +3490,29 @@ impl Service {
         &self,
         ctx: &SecurityContext,
         query: &ODataQuery,
-        status: Option<&str>,
+        status: Option<RepoRunStatus>,
     ) -> Result<Page<RepoSyncStatusRecord>, DomainError> {
         let scope = self.repo_status_scope(ctx, actions::LIST).await?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let items = self.repo_sync_status.list(&scope, status, limit).await?;
+        let limit = list_limit(query)?;
+        let after = cursor_keys(query, REPO_STATUS_ORDER, 1)?;
+        let rows = self
+            .repo_sync_status
+            .list(
+                &scope,
+                status,
+                after.map(|keys| keys[0].as_str()),
+                limit.saturating_add(1),
+            )
+            .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
-        ))
+        keyset_page(rows, limit, |last| {
+            encode_cursor(
+                REPO_STATUS_ORDER,
+                SortDir::Asc,
+                vec![last.repo_full_name.clone()],
+            )
+        })
     }
 
     /// The repositories a resume should re-run: one named slug, or every
@@ -3107,7 +3527,7 @@ impl Service {
         let Some(slug) = only else {
             return self
                 .repo_sync_status
-                .list(&scope, Some(repo_run_states::IN_PROGRESS), RESUME_LIMIT)
+                .list(&scope, Some(RepoRunStatus::InProgress), None, RESUME_LIMIT)
                 .await;
         };
 
@@ -3115,16 +3535,17 @@ impl Service {
             .repo_sync_status
             .find(&scope, slug)
             .await?
-            .filter(|r| r.status == repo_run_states::IN_PROGRESS)
+            .filter(|r| r.status == RepoRunStatus::InProgress)
             .map_or_else(Vec::new, |r| vec![r]))
     }
 
     /// Re-run every repository this tenant still has marked `in_progress`.
     ///
     /// This is PRD §5.2's resume operation. Resume is a re-run, not a restore:
-    /// nothing about the interrupted run is replayed, and re-running is cheap
-    /// only once the `ETag` cache and change-detection state exist (#4630 and
-    /// #4632 slice 6) — until then it costs a full sync.
+    /// nothing about the interrupted run is replayed. What keeps the re-run
+    /// cheap is the state the previous one left behind — a stored `ETag` lets
+    /// GitHub answer `304` for a page that has not changed, and a stored
+    /// fingerprint keeps an unchanged entity from being fetched again.
     ///
     /// Resume takes no per-run scope: `ALGORITHMS.md` §8 has it resolve scope
     /// from configuration only, so a resumed run collects whatever the gear
@@ -3148,6 +3569,7 @@ impl Service {
         force: bool,
     ) -> Result<Vec<Uuid>, DomainError> {
         let pending = self.repos_awaiting_resume(ctx, only).await?;
+        let scopes = self.enqueue_scopes(ctx).await?;
 
         let mut resumed = Vec::with_capacity(pending.len());
         for repo in pending {
@@ -3158,8 +3580,11 @@ impl Service {
                 );
                 continue;
             };
-            match self.enqueue_sync(ctx, owner, name, None, force, None).await {
-                Ok(session_id) => resumed.push(session_id),
+            match self
+                .enqueue_sync_scoped(ctx, &scopes, owner, name, None, force, None)
+                .await
+            {
+                Ok(queued) => resumed.push(queued.session_id),
                 Err(e) => tracing::warn!(
                     repository = %repo.repo_full_name,
                     error = %e,
@@ -3177,16 +3602,23 @@ impl Service {
     /// happens later, on the gear's background task. Poll
     /// [`Self::get_session`] with the returned id to watch it finish.
     ///
-    /// A repository already queued or running collapses into that run: the
-    /// caller gets its session id back instead of a second session, so a
-    /// double-click, a retry and a resume of the same repository cost one
-    /// sync. `force` does not split the two — the run in flight is already
-    /// fetching the repository.
+    /// A repository already queued or running on the same terms collapses into
+    /// that run: the caller gets its session id back instead of a second
+    /// session, so a double-click, a retry and a resume of the same repository
+    /// cost one sync. `force` does not split the two — the run in flight is
+    /// already fetching the repository. The status that comes back says which
+    /// of the two happened: `queued` for a session this call created, whatever
+    /// the existing session holds for one it joined.
+    ///
+    /// A request that asks for a different scope or a different `since` is
+    /// refused instead, because collapsing it would report a sync of terms it
+    /// never asked for.
     ///
     /// # Errors
+    /// `Conflict` when a sync of this repository is running on other terms,
     /// `Forbidden`/`Database` as usual, or `Internal` when the queue is full
-    /// or the background worker is not running; in both cases the session is
-    /// left behind in `failed` rather than silently dropped.
+    /// or the background worker is not running; in the last case the session
+    /// is left behind in `failed` rather than silently dropped.
     pub async fn enqueue_sync(
         &self,
         ctx: &SecurityContext,
@@ -3195,51 +3627,192 @@ impl Service {
         sync_scope: Option<ScopeConfig>,
         force: bool,
         since: Option<DateTime<Utc>>,
-    ) -> Result<Uuid, DomainError> {
+    ) -> Result<QueuedSync, DomainError> {
+        let scopes = self.enqueue_scopes(ctx).await?;
+        self.enqueue_sync_scoped(ctx, &scopes, owner, name, sync_scope, force, since)
+            .await
+    }
+
+    /// The two write scopes one sync request needs, resolved once so a resume
+    /// of hundreds of repositories asks the policy enforcer once, not per
+    /// repository.
+    async fn enqueue_scopes(&self, ctx: &SecurityContext) -> Result<EnqueueScopes, DomainError> {
+        Ok(EnqueueScopes {
+            session: self.session_scope(ctx, actions::UPSERT).await?,
+            repo_status: self.repo_status_scope(ctx, actions::UPSERT).await?,
+        })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the request's own terms, one per argument; they are what the claim \
+                  is compared on, so hiding them in a struct would make that \
+                  comparison harder to read, not easier"
+    )]
+    async fn enqueue_sync_scoped(
+        &self,
+        ctx: &SecurityContext,
+        scopes: &EnqueueScopes,
+        owner: &str,
+        name: &str,
+        sync_scope: Option<ScopeConfig>,
+        force: bool,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<QueuedSync, DomainError> {
+        let (job, session) = match self
+            .prepare_sync(ctx, scopes, owner, name, sync_scope, force, since)
+            .await?
+        {
+            PreparedSync::Joined(running) => return Ok(running),
+            PreparedSync::Claimed { job, session } => (job, session),
+        };
+        let id = session.id;
+        let key = (ctx.subject_tenant_id(), session.repo_full_name.clone());
+        if let Err(e) = self.sync_tx.try_send(*job) {
+            self.release_in_flight(&key);
+            let reason = format!("sync could not be queued: {e}");
+            self.fail_session(&scopes.session, key.0, *session, reason.clone())
+                .await;
+            return Err(DomainError::internal(reason));
+        }
+
+        Ok(QueuedSync {
+            session_id: id,
+            status: SessionStatus::Queued,
+        })
+    }
+
+    /// Sync `owner/name` on the caller's own task and hand back what it
+    /// collected. It takes the claim, the session row and the repository
+    /// status a queued sync takes, so it shows in `/sessions`, keeps its lock
+    /// alive with a heartbeat and stops at the deadline; only the queue and
+    /// the pool are skipped.
+    ///
+    /// # Errors
+    /// `Conflict` when a sync of this repository is already in flight, the
+    /// sync's own error when it fails, and `Cancelled` when the gear stops it.
+    pub async fn sync_now(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: &str,
+    ) -> Result<SyncSummary, DomainError> {
+        validate_repo_path(owner, name)?;
+        let scopes = self.enqueue_scopes(ctx).await?;
+        let job = match self
+            .prepare_sync(ctx, &scopes, owner, name, None, false, None)
+            .await?
+        {
+            PreparedSync::Joined(running) => {
+                return Err(DomainError::Conflict(format!(
+                    "a sync of {owner}/{name} is already in flight; session {} is the one \
+                     running",
+                    running.session_id
+                )));
+            }
+            PreparedSync::Claimed { job, .. } => job,
+        };
+        self.run_and_record(&job, &self.shutdown_token()).await?
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the request's own terms, one per argument, as in `enqueue_sync_scoped`"
+    )]
+    async fn prepare_sync(
+        &self,
+        ctx: &SecurityContext,
+        scopes: &EnqueueScopes,
+        owner: &str,
+        name: &str,
+        sync_scope: Option<ScopeConfig>,
+        force: bool,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<PreparedSync, DomainError> {
         let sync_scope = sync_scope.unwrap_or(self.config.scope);
         sync_scope.validate()?;
         let tenant_id = ctx.subject_tenant_id();
-        let scope = self.session_scope(ctx, actions::UPSERT).await?;
+        let scope = &scopes.session;
         let key = (tenant_id, format!("{owner}/{name}"));
         let id = Uuid::new_v4();
-        {
-            // Claimed under the lock so two concurrent requests cannot both
-            // decide they are the first.
-            let mut in_flight = self.in_flight.lock().await;
-            if let Some(running) = in_flight.get(&key) {
-                tracing::debug!(
-                    repository = %key.1,
-                    session_id = %running,
-                    "sync already in flight; collapsing into it"
-                );
-                return Ok(*running);
-            }
-            in_flight.insert(key.clone(), id);
-        }
-
-        let mut session = SyncSessionRecord {
+        let now = now_rfc3339();
+        let session = SyncSessionRecord {
             id,
             repo_full_name: format!("{owner}/{name}"),
             repo_id: None,
-            status: session_states::QUEUED.to_owned(),
+            status: SessionStatus::Queued,
             progress_percent: 0,
             error: None,
             summary_json: None,
-            created_at: now_rfc3339(),
+            created_at: now.clone(),
             started_at: None,
             ended_at: None,
+            updated_at: Some(now),
         };
-        self.sync_sessions
-            .upsert(&scope, tenant_id, session.clone())
-            .await?;
-        self.mark_repo_status(
-            ctx,
-            &session.repo_full_name,
-            id,
-            repo_run_states::IN_PROGRESS,
-            None,
-        )
-        .await?;
+        self.release_lock_left_by_a_dead_run(scopes, tenant_id, &key.1)
+            .await;
+
+        let claim = {
+            // Held for this repository only, so two concurrent requests for it
+            // cannot both decide they are the first while a request for
+            // another repository waits on nothing. The row is written before
+            // the claim goes in, so the id a collapsing request is handed
+            // always names a session it can read.
+            let lease = self.claim_gates.lease(&key);
+            let claimed = lease.lock().await;
+
+            let running = self
+                .in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key)
+                .copied();
+            if let Some(running) = running {
+                // Released first: the claim is already copied out, and reading
+                // the running session's status is a database round trip no
+                // other request for this repository needs to wait behind.
+                drop(claimed);
+                return self
+                    .join_or_refuse(scope, &key.1, running, sync_scope, since)
+                    .await
+                    .map(PreparedSync::Joined);
+            }
+            self.sync_sessions
+                .upsert(scope, tenant_id, session.clone())
+                .await?;
+            self.in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    key.clone(),
+                    Claim {
+                        session_id: id,
+                        scope: sync_scope,
+                        since,
+                    },
+                );
+            ClaimRelease {
+                in_flight: Arc::clone(&self.in_flight),
+                key,
+                session_id: id,
+            }
+        };
+        if let Err(e) = self
+            .mark_repo_status_in(
+                &scopes.repo_status,
+                ctx,
+                &session.repo_full_name,
+                id,
+                RepoRunStatus::InProgress,
+                None,
+            )
+            .await
+        {
+            drop(claim);
+            self.fail_session(scope, tenant_id, session, e.public_text())
+                .await;
+            return Err(e);
+        }
 
         let job = SyncJob {
             session_id: id,
@@ -3249,25 +3822,112 @@ impl Service {
             scope: sync_scope,
             force,
             since,
+            claim: Some(claim),
         };
-        if let Err(e) = self.sync_tx.try_send(job) {
-            self.release_in_flight(&key).await;
-            let reason = format!("sync could not be queued: {e}");
-            session_states::FAILED.clone_into(&mut session.status);
-            session.ended_at = Some(now_rfc3339());
-            session.error = Some(reason.clone());
-            self.sync_sessions
-                .upsert(&scope, tenant_id, session)
-                .await?;
-            return Err(DomainError::internal(reason));
+        Ok(PreparedSync::Claimed {
+            job: Box::new(job),
+            session: Box::new(session),
+        })
+    }
+
+    /// Close a queued session out as failed, so a caller polling it is not
+    /// told the work is waiting when nothing will ever run it.
+    ///
+    /// Failing to record that is logged rather than returned: the caller is
+    /// already getting the error that stopped the sync, and the start-up sweep
+    /// closes out whatever a dead process left behind.
+    async fn fail_session(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        mut session: SyncSessionRecord,
+        reason: String,
+    ) {
+        session.status = SessionStatus::Failed;
+        session.progress_percent = 100;
+        session.ended_at = Some(now_rfc3339());
+        session.updated_at.clone_from(&session.ended_at);
+        session.error = Some(reason);
+        if let Err(e) = self.sync_sessions.upsert(scope, tenant_id, session).await {
+            tracing::error!(
+                error = %crate::redact::redacted(&e.to_string()),
+                "a sync that could not be queued could not be marked failed either"
+            );
+        }
+    }
+
+    /// Answer a request for a repository a sync already holds: its session
+    /// when the terms match, a refusal when they do not.
+    ///
+    /// Refused rather than queued behind the run: the repository's lock is
+    /// held for the whole of it, so a second job would take a session, reach
+    /// that lock and end failed. Saying so now lets the caller watch the run
+    /// it was told about and ask again after.
+    ///
+    /// # Errors
+    /// `Conflict` when the terms differ; `Database` when the running
+    /// session's row cannot be read.
+    async fn join_or_refuse(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        running: Claim,
+        sync_scope: ScopeConfig,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<QueuedSync, DomainError> {
+        if running.scope != sync_scope || running.since != since {
+            tracing::debug!(
+                repository = repo_full_name,
+                session_id = %running.session_id,
+                "a sync of this repository is running on other terms"
+            );
+            return Err(DomainError::Conflict(format!(
+                "a sync of {repo_full_name} is already running on different terms; \
+                 session {} is the one in flight",
+                running.session_id
+            )));
         }
 
-        Ok(id)
+        tracing::debug!(
+            repository = repo_full_name,
+            session_id = %running.session_id,
+            "sync already in flight; collapsing into it"
+        );
+        // Read rather than assumed: the row is written before the claim goes
+        // in, so it is there, and a worker may already have moved it on from
+        // `queued`.
+        let status = self
+            .running_status(scope, repo_full_name, running.session_id)
+            .await?;
+        Ok(QueuedSync {
+            session_id: running.session_id,
+            status,
+        })
+    }
+
+    async fn running_status(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        session_id: Uuid,
+    ) -> Result<SessionStatus, DomainError> {
+        let session = self.sync_sessions.find_by_id(scope, session_id).await?;
+        if session.is_none() {
+            tracing::warn!(
+                repository = repo_full_name,
+                session_id = %session_id,
+                "the running sync's session row is missing; reporting it as in progress"
+            );
+        }
+        Ok(session.map_or(SessionStatus::InProgress, |session| session.status))
     }
 
     /// Give up a repository's claim so the next request queues a fresh sync.
-    async fn release_in_flight(&self, key: &InFlightKey) {
-        self.in_flight.lock().await.remove(key);
+    fn release_in_flight(&self, key: &InFlightKey) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
     }
 
     /// Take sole ownership of the job stream. The gear's background task calls
@@ -3289,23 +3949,14 @@ impl Service {
         job: &SyncJob,
         cancel: &CancellationToken,
     ) -> Result<(), DomainError> {
-        let outcome = self.run_sync_job_inner(job, cancel).await;
-        // Released on every path, including the error ones: a claim that
-        // outlived its job would block the repository until restart.
-        self.release_in_flight(&(
-            job.ctx.subject_tenant_id(),
-            format!("{}/{}", job.owner, job.name),
-        ))
-        .await;
-        outcome
+        self.run_and_record(job, cancel).await.map(|_| ())
     }
 
-    /// The body of [`Self::run_sync_job`], minus the in-flight bookkeeping.
-    async fn run_sync_job_inner(
+    async fn run_and_record(
         &self,
         job: &SyncJob,
         cancel: &CancellationToken,
-    ) -> Result<(), DomainError> {
+    ) -> Result<Result<SyncSummary, DomainError>, DomainError> {
         let tenant_id = job.ctx.subject_tenant_id();
         let scope = self.session_scope(&job.ctx, actions::UPSERT).await?;
 
@@ -3314,36 +3965,44 @@ impl Service {
             .find_by_id(&scope, job.session_id)
             .await?
             .ok_or(DomainError::NotFound)?;
-        session_states::IN_PROGRESS.clone_into(&mut session.status);
+        session.status = SessionStatus::InProgress;
         session.started_at = Some(now_rfc3339());
+        session.updated_at.clone_from(&session.started_at);
         self.sync_sessions
             .upsert(&scope, tenant_id, session.clone())
             .await?;
 
         let progress = SyncProgress::new();
-        let outcome = self
-            .sync_with_heartbeat(job, &progress, &session, cancel)
-            .await;
+        let outcome = self.sync_within_deadline(job, &progress, cancel).await;
 
         let completed = outcome.is_ok();
-        match outcome {
+        match &outcome {
             Ok(summary) => {
-                progress.finished();
-                session_states::COMPLETE.clone_into(&mut session.status);
-                session.summary_json = serde_json::to_string(&summary).ok();
+                session.status = SessionStatus::Complete;
+                session.summary_json = stored_summary_json(job.session_id, summary);
             }
             Err(e) => {
-                let ended_as = if cancel.is_cancelled() {
-                    session_states::INTERRUPTED
+                tracing::error!(
+                    session_id = %job.session_id,
+                    repository = %format!("{}/{}", job.owner, job.name),
+                    error = %crate::redact::redacted(&e.to_string()),
+                    "sync run failed"
+                );
+                session.status = if matches!(e, DomainError::Cancelled) {
+                    SessionStatus::Interrupted
                 } else {
-                    session_states::FAILED
+                    SessionStatus::Failed
                 };
-                ended_as.clone_into(&mut session.status);
-                session.error = Some(e.to_string());
+                session.error = Some(e.public_text());
             }
         }
+        // Whatever the outcome: the run is over, and a caller watching the
+        // percentage should not be left waiting at the point a failed run
+        // stopped. What happened is in `status` and `error`.
+        progress.finished();
         session.progress_percent = i32::from(progress.percent());
         session.ended_at = Some(now_rfc3339());
+        session.updated_at.clone_from(&session.ended_at);
         let repo_full_name = session.repo_full_name.clone();
         self.sync_sessions
             .upsert(&scope, tenant_id, session)
@@ -3356,35 +4015,69 @@ impl Service {
                 &job.ctx,
                 &repo_full_name,
                 job.session_id,
-                repo_run_states::COMPLETE,
+                RepoRunStatus::Complete,
                 Some(now_rfc3339()),
             )
             .await?;
         }
 
-        Ok(())
+        Ok(outcome)
+    }
+
+    /// Run the sync, stopping it if it passes the configured deadline.
+    ///
+    /// A run that will not end otherwise ends here: the engine is told to
+    /// stop and then given time to wind down, so the tasks in flight finish
+    /// their writes and the repository's lock is released. The durable state
+    /// keeps what the run reached, so the next sync or resume carries on from
+    /// there rather than starting again.
+    ///
+    /// The token cancelled is this job's own, a child of the pool's, so a
+    /// deadline stops one repository and a shutdown still stops them all.
+    async fn sync_within_deadline(
+        &self,
+        job: &SyncJob,
+        progress: &SyncProgress,
+        cancel: &CancellationToken,
+    ) -> Result<SyncSummary, DomainError> {
+        let job_cancel = cancel.child_token();
+        let deadline = self.config.sync_deadline;
+        let sync = self.sync_with_heartbeat(job, progress, &job_cancel);
+        let mut sync = std::pin::pin!(sync);
+
+        tokio::select! {
+            outcome = &mut sync => outcome,
+            () = tokio::time::sleep(deadline) => {
+                job_cancel.cancel();
+                let stopped_with = sync.await.err();
+                Err(past_deadline(job, deadline, stopped_with))
+            }
+        }
     }
 
     /// Run the sync while a ticker writes its progress to the session row.
     ///
     /// DESIGN §4 has progress "published via a shared atomic" and persisted
     /// "incrementally ... via a heartbeat (also stamping `ended_at`)", so a
-    /// caller polling the session sees the run advance and can compute its
-    /// duration before it ends. A heartbeat that fails to write is logged and
-    /// skipped — losing a progress sample must not fail the sync.
+    /// caller polling the session sees the run advance. Here the beat stamps
+    /// `updated_at` instead, so `ended_at` means what it says, and it writes
+    /// only the two columns it owns rather than a copy of the whole row. A
+    /// heartbeat that fails to write is logged and skipped — losing a progress
+    /// sample must not fail the sync.
     async fn sync_with_heartbeat(
         &self,
         job: &SyncJob,
         progress: &SyncProgress,
-        session: &SyncSessionRecord,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
         let percent = progress.handle();
         let options = FetchOptions {
             tenant_id: job.ctx.subject_tenant_id(),
+            access_scope: AccessScope::default(),
             scope: job.scope,
             force: job.force,
             since: job.since,
+            cancel: cancel.clone(),
         };
         let sync =
             self.sync_repository(&job.ctx, &job.owner, &job.name, &options, progress, cancel);
@@ -3394,10 +4087,11 @@ impl Service {
             tokio::select! {
                 outcome = &mut sync => return outcome,
                 () = tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_SECS)) => {
-                    let mut beat = session.clone();
-                    beat.progress_percent = i32::from(percent.load(Ordering::Relaxed));
-                    beat.ended_at = Some(now_rfc3339());
-                    if let Err(e) = self.save_session_progress(&job.ctx, beat).await {
+                    let progress_percent = i32::from(percent.load(Ordering::Relaxed));
+                    if let Err(e) = self
+                        .save_session_progress(&job.ctx, job.session_id, progress_percent)
+                        .await
+                    {
                         tracing::warn!(
                             session_id = %job.session_id,
                             error = %e,
@@ -3409,20 +4103,26 @@ impl Service {
         }
     }
 
-    /// One heartbeat write, on its own scope.
+    /// One heartbeat write, on its own scope: progress and `updated_at` only.
     async fn save_session_progress(
         &self,
         ctx: &SecurityContext,
-        session: SyncSessionRecord,
+        session_id: Uuid,
+        progress_percent: i32,
     ) -> Result<(), DomainError> {
         let scope = self.session_scope(ctx, actions::UPSERT).await?;
         self.sync_sessions
-            .upsert(&scope, ctx.subject_tenant_id(), session)
-            .await?;
-        Ok(())
+            .record_heartbeat(&scope, session_id, progress_percent, &now_rfc3339())
+            .await
     }
 
     /// Close out sessions left mid-flight by a previous process.
+    ///
+    /// Only `queued` and `in_progress` rows are read. A row already
+    /// `interrupted` needs nothing done to it, and those rows are never
+    /// pruned, so reading them would make every restart walk work it finished
+    /// long ago. What is left is what one process had in flight, which the
+    /// pool width bounds.
     ///
     /// The queue is in-memory, so a `queued` or `in_progress` row that survives a
     /// restart has no worker behind it and never will. Called once at startup,
@@ -3431,49 +4131,52 @@ impl Service {
     ///
     /// # Errors
     /// `Database` when the sweep cannot read or write the session table.
-    pub async fn sweep_interrupted_sessions(&self) -> Result<usize, DomainError> {
-        let scope = AccessScope::allow_all();
-
+    pub async fn sweep_interrupted_sessions(
+        &self,
+        scope: &AccessScope,
+    ) -> Result<usize, DomainError> {
         let stale = self
             .sync_sessions
-            .list_by_statuses(
-                &scope,
-                &[
-                    session_states::QUEUED,
-                    session_states::IN_PROGRESS,
-                    session_states::INTERRUPTED,
-                ],
-            )
+            .list_by_statuses(scope, &[SessionStatus::Queued, SessionStatus::InProgress])
             .await?;
 
+        let now = Utc::now();
         let mut count = 0;
         for (tenant_id, mut session) in stale {
-            self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
-                .await;
-            if session.status == session_states::INTERRUPTED {
-                continue;
+            if abandoned(&session, now) {
+                self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
+                    .await;
             }
             count += 1;
-            session_states::INTERRUPTED.clone_into(&mut session.status);
+            session.status = SessionStatus::Interrupted;
+            session.progress_percent = 100;
             session.ended_at = Some(now_rfc3339());
+            session.updated_at.clone_from(&session.ended_at);
             session.error = Some("the server restarted while this sync was in flight".to_owned());
-            self.sync_sessions
-                .upsert(&scope, tenant_id, session)
-                .await?;
+            self.sync_sessions.upsert(scope, tenant_id, session).await?;
         }
 
         Ok(count)
     }
 
-    /// Drop the per-repo sync lock marker a dead process left for `repo`, if
-    /// one is there. Safe at start-up only: this process holds no sync lock
-    /// yet, and the file backend is used by one process per `SQLite` file.
+    /// Drop the per-repo sync lock marker left for `repo` by a run whose
+    /// process is gone.
+    ///
+    /// Only ever called for a session [`abandoned`] says is dead, because the
+    /// lock itself cannot say who holds it: during a rolling restart the
+    /// marker may belong to the outgoing process, still syncing that
+    /// repository, and taking it would let both sync it at once.
     async fn release_stale_sync_lock(&self, tenant_id: Uuid, repo: &str) {
         let Some((owner, name)) = repo.split_once('/') else {
             return;
         };
         let lock_key = format!("sync/{tenant_id}/{owner}/{name}");
-        match self.db.db().break_stale_lock(GEAR_NAME, &lock_key).await {
+        match self
+            .db
+            .db()
+            .remove_lock_marker_at_startup(GEAR_NAME, &lock_key)
+            .await
+        {
             Ok(true) => tracing::info!(
                 repository = repo,
                 "released the sync lock a dead process left behind"
@@ -3484,6 +4187,53 @@ impl Service {
                 error = %e,
                 "could not release a stale sync lock"
             ),
+        }
+    }
+
+    /// Drop the sync lock marker for `repo_full_name` when the run that took
+    /// it is gone.
+    ///
+    /// The start-up sweep reads only sessions still queued or in progress, so
+    /// a marker whose session an earlier sweep already marked `interrupted`
+    /// has nothing left to clean it, and every later request for that
+    /// repository would answer 409 with nothing running. A new request is the
+    /// next moment anyone asks about that repository, so the check belongs
+    /// here: the run-status row still names the session that took the lock,
+    /// because a request writes its own session into that row only further
+    /// down.
+    ///
+    /// Best effort throughout. A row that is not there, a status that is not
+    /// `in_progress`, or a read that fails leaves the marker alone, and the
+    /// request goes on to take the lock or to answer 409 exactly as before.
+    async fn release_lock_left_by_a_dead_run(
+        &self,
+        scopes: &EnqueueScopes,
+        tenant_id: Uuid,
+        repo_full_name: &str,
+    ) {
+        let Ok(Some(status)) = self
+            .repo_sync_status
+            .find(&scopes.repo_status, repo_full_name)
+            .await
+        else {
+            return;
+        };
+        if status.status != RepoRunStatus::InProgress {
+            return;
+        }
+        let Some(session_id) = status.last_session_id else {
+            return;
+        };
+        let Ok(Some(session)) = self
+            .sync_sessions
+            .find_by_id(&scopes.session, session_id)
+            .await
+        else {
+            return;
+        };
+        if abandoned(&session, Utc::now()) {
+            self.release_stale_sync_lock(tenant_id, repo_full_name)
+                .await;
         }
     }
 
@@ -3535,17 +4285,25 @@ impl Service {
             )
             .await?;
 
-        let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
-        let items = self.sync_sessions.list_recent(&scope, limit).await?;
+        let limit = list_limit(query)?;
+        let after = cursor_keys(query, SESSIONS_ORDER, 2)?
+            .map(|keys| {
+                let id = keys[1].parse::<Uuid>().map_err(|_| invalid_cursor())?;
+                Ok::<_, DomainError>((keys[0].as_str(), id))
+            })
+            .transpose()?;
+        let rows = self
+            .sync_sessions
+            .list_recent(&scope, after, limit.saturating_add(1))
+            .await?;
 
-        Ok(Page::new(
-            items,
-            PageInfo {
-                next_cursor: None,
-                prev_cursor: None,
-                limit,
-            },
-        ))
+        keyset_page(rows, limit, |last| {
+            encode_cursor(
+                SESSIONS_ORDER,
+                SortDir::Desc,
+                vec![last.created_at.clone(), last.id.to_string()],
+            )
+        })
     }
 
     /// Cheap DB reachability probe for the platform's readiness aggregation
@@ -3577,6 +4335,12 @@ impl Service {
         progress: &SyncProgress,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
+        // Checked here and not only in the REST handler: the tests call this
+        // directly, and `owner`/`name` reach a log line below, where a newline
+        // would forge a record of its own.
+        validate_repo_path(owner, name)?;
+        options.scope.validate()?;
+
         let tenant_id = ctx.subject_tenant_id();
 
         let scope = self
@@ -3616,11 +4380,15 @@ impl Service {
 
         let run = Arc::new(RunState::new(
             Uuid::new_v4(),
-            scope,
+            scope.clone(),
             tenant_id,
             owner,
             name,
-            *options,
+            FetchOptions {
+                access_scope: scope,
+                cancel: cancel.clone(),
+                ..options.clone()
+            },
         ));
         let outcome = self.run_phases(&run, progress, cancel).await;
 
@@ -3648,28 +4416,48 @@ impl Service {
             Arc::clone(&self.sync_writer),
             Arc::clone(&self.change_gate),
             Arc::clone(&self.sweep_watermark),
+            Arc::clone(&self.pull_requests),
             Arc::clone(run),
         ));
         let runner = RepoPhaseRunner::new(
             vec![worker],
-            run.session_id,
-            run.tenant_id,
+            run.identity(),
             self.config.max_concurrent_tasks,
             cancel.child_token(),
             progress.handle(),
         );
         let mut report = runner.run().await;
+        let contributors = run.take_contributors();
+        let contributors_synced = if contributors.is_empty() {
+            0
+        } else {
+            self.sync_writer
+                .write_contributors(&run.scope, run.tenant_id, run.repo_id()?, contributors)
+                .await?
+        };
         // Discovery failing is the repository failing: GitHub's own answer
         // (404, 403 ...) is the sync's outcome, not a task statistic.
         if let Some(discovery) = report
             .failures
             .iter()
-            .position(|failure| failure.phase == TaskPhase::Discovery)
+            .position(|failure| failure.kind == Some(TaskKind::Discover))
         {
             return Err(report.failures.swap_remove(discovery).error);
         }
+        if report.cancelled
+            || report
+                .failures
+                .iter()
+                .any(|failure| matches!(failure.error, DomainError::Cancelled))
+        {
+            return Err(DomainError::Cancelled);
+        }
         if !report.failures.is_empty() {
-            let detail: Vec<String> = report.failures.iter().map(ToString::to_string).collect();
+            let detail: Vec<String> = report
+                .failures
+                .iter()
+                .map(TaskFailure::public_text)
+                .collect();
             return Err(DomainError::internal(format!(
                 "{} of {} sync tasks failed: {}",
                 report.tasks_failed(),
@@ -3678,18 +4466,7 @@ impl Service {
             )));
         }
 
-        if report.cancelled {
-            return Err(DomainError::internal(format!(
-                "the sync of {}/{} was interrupted before it finished",
-                run.owner, run.name
-            )));
-        }
-
-        for family in [
-            sweep_families::ISSUES,
-            sweep_families::PULL_REQUESTS,
-            sweep_families::COMMITS,
-        ] {
+        for family in Family::SWEPT {
             if run.is_swept(family) {
                 self.sweep_watermark
                     .promote(
@@ -3717,8 +4494,18 @@ impl Service {
         progress.stored();
 
         let mut summary = run.summary();
+        summary.contributors_synced = contributors_synced;
         summary.stale_rows_deleted = stale_rows_deleted;
         summary.accepted_drift = run.drift();
         Ok(summary)
     }
 }
+
+#[cfg(test)]
+#[path = "service_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod service_tests;

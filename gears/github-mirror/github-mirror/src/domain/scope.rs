@@ -24,7 +24,12 @@ use crate::domain::error::DomainError;
 #[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-#[allow(clippy::struct_excessive_bools)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one flag per object family is the shape of the request; a struct of \
+              named sub-structs would make every caller spell out a path to say \
+              `issues: true`"
+)]
 pub struct SyncScope {
     /// Issues, their comments, events, timeline and reactions.
     pub issues: bool,
@@ -99,12 +104,21 @@ impl SyncScope {
 
     /// # Errors
     /// `Validation` when the scope would collect nothing at all, which is
-    /// always a mistake rather than a cheap sync.
+    /// always a mistake rather than a cheap sync, or asks for `security`,
+    /// which no sync task collects yet, so the request would silently do
+    /// nothing for it.
     pub fn validate(&self) -> Result<(), DomainError> {
         if self.is_empty() {
             return Err(DomainError::Validation {
                 field: "scope".to_owned(),
                 message: "at least one object type must be enabled".to_owned(),
+            });
+        }
+        if self.security {
+            return Err(DomainError::Validation {
+                field: "scope".to_owned(),
+                message: "`security` is not collected yet: no sync task fetches security alerts"
+                    .to_owned(),
             });
         }
         Ok(())
@@ -133,11 +147,13 @@ impl CollectionMode {
     /// Whether to collect for an entity in the given open/closed state.
     #[must_use]
     pub fn includes(self, is_open: bool) -> bool {
-        match self {
-            Self::All => true,
-            Self::Open => is_open,
-            Self::None => false,
+        if self == Self::None {
+            return false;
         }
+        if self == Self::Open && !is_open {
+            return false;
+        }
+        true
     }
 
     /// Parse `all` / `open` / `none`, with the reference's aliases.
@@ -180,6 +196,15 @@ impl Default for CollectionScope {
             reactions: CollectionMode::Open,
             timeline: CollectionMode::None,
         }
+    }
+}
+
+impl CollectionScope {
+    #[must_use]
+    pub fn wants_issue_detail(self, is_open: bool) -> bool {
+        [self.reactions, self.timeline]
+            .iter()
+            .any(|mode| mode.includes(is_open))
     }
 }
 
@@ -255,5 +280,31 @@ mod tests {
         assert_eq!(CollectionScope::default().timeline, CollectionMode::None);
         assert_eq!(CollectionScope::default().actions, CollectionMode::Open);
         assert_eq!(CollectionScope::default().reactions, CollectionMode::Open);
+    }
+
+    #[test]
+    fn an_issue_is_refined_when_either_of_its_scopes_wants_it() {
+        let scope = |reactions, timeline| CollectionScope {
+            actions: CollectionMode::None,
+            reactions,
+            timeline,
+        };
+        let cases = [
+            (CollectionMode::All, CollectionMode::None, true, true),
+            (CollectionMode::All, CollectionMode::None, false, true),
+            (CollectionMode::Open, CollectionMode::None, true, true),
+            (CollectionMode::Open, CollectionMode::None, false, false),
+            (CollectionMode::None, CollectionMode::All, false, true),
+            (CollectionMode::None, CollectionMode::Open, false, false),
+            (CollectionMode::None, CollectionMode::None, true, false),
+            (CollectionMode::None, CollectionMode::None, false, false),
+        ];
+        for (reactions, timeline, open, wanted) in cases {
+            assert_eq!(
+                scope(reactions, timeline).wants_issue_detail(open),
+                wanted,
+                "reactions {reactions:?}, timeline {timeline:?}, open {open}"
+            );
+        }
     }
 }

@@ -230,6 +230,8 @@ gears:
     database:
       server: "sqlite_users"
       file: "github_mirror.db"
+      pool:
+        max_conns: 20
     config:
       api_base_url: "https://api.github.com"
       github_token: "${GITHUB_TOKEN}"
@@ -287,7 +289,9 @@ opentelemetry:
       # be listed here: whatever is recorded reaches the trace collector.
       record_headers: [ "user-agent", "x-forwarded-for" ]
 
-    # Log correlation (future feature)
+    # Add top-level trace_id / span_id to JSON log records so a backend can
+    # link a log line to its span. Off by default: it costs a context lookup
+    # per event.
     logs_correlation:
       inject_trace_ids_into_logs: true
 

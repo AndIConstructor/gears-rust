@@ -8,20 +8,17 @@
 //! being listed; Verification runs strictly last (once it exists, #4632
 //! slice 6 step 5).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use super::queue::TaskQueue;
-use super::task::{ExtractionTask, Lane, NewTask, TaskPhase, TaskPriority};
+use super::task::{ExtractionTask, Lane, NewTask, RunIdentity, TaskKind, TaskPhase, TaskPriority};
 use super::worker::{Worker, WorkerContext, WorkerDispatcher};
 use crate::domain::error::DomainError;
-
-/// The entity type of the single Discovery task every run starts with.
-pub const REPOSITORY_ENTITY: &str = "repository";
 
 /// Pending tasks above which the runner stops claiming until in-flight work
 /// drains: bounds memory growth when Indexing seeds faster than Refinement
@@ -83,19 +80,32 @@ impl RunReport {
 /// One task that did not finish, with the error it stopped on.
 #[derive(Debug)]
 pub struct TaskFailure {
-    pub phase: TaskPhase,
-    pub entity_type: String,
+    pub kind: Option<TaskKind>,
     pub entity_id: Option<String>,
     pub error: DomainError,
 }
 
+impl TaskFailure {
+    fn label(&self) -> String {
+        let mut label = self
+            .kind
+            .map_or_else(|| "task".to_owned(), |kind| kind.to_string());
+        if let Some(id) = &self.entity_id {
+            label.push(' ');
+            label.push_str(id);
+        }
+        label
+    }
+
+    #[must_use]
+    pub fn public_text(&self) -> String {
+        format!("{}: {}", self.label(), self.error.public_text())
+    }
+}
+
 impl std::fmt::Display for TaskFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{} {}", self.phase, self.entity_type)?;
-        if let Some(id) = &self.entity_id {
-            write!(formatter, " {id}")?;
-        }
-        write!(formatter, ": {}", self.error)
+        write!(formatter, "{}: {}", self.label(), self.error)
     }
 }
 
@@ -108,8 +118,7 @@ struct TaskOutcome {
 pub struct RepoPhaseRunner {
     queue: Arc<TaskQueue>,
     dispatcher: Arc<WorkerDispatcher>,
-    session_id: Uuid,
-    tenant_id: Uuid,
+    run: RunIdentity,
     max_concurrent_tasks: usize,
     cancel: CancellationToken,
     progress: Arc<AtomicU8>,
@@ -119,9 +128,8 @@ impl RepoPhaseRunner {
     #[must_use]
     pub fn new(
         workers: Vec<Arc<dyn Worker>>,
-        session_id: Uuid,
-        tenant_id: Uuid,
-        max_concurrent_tasks: usize,
+        run: RunIdentity,
+        max_concurrent_tasks: std::num::NonZeroUsize,
         cancel: CancellationToken,
         progress: Arc<AtomicU8>,
     ) -> Self {
@@ -132,9 +140,8 @@ impl RepoPhaseRunner {
         Self {
             queue: Arc::new(TaskQueue::new()),
             dispatcher: Arc::new(dispatcher),
-            session_id,
-            tenant_id,
-            max_concurrent_tasks: max_concurrent_tasks.max(1),
+            run,
+            max_concurrent_tasks: max_concurrent_tasks.get(),
             cancel,
             progress,
         }
@@ -168,8 +175,9 @@ impl RepoPhaseRunner {
     fn estimate_permille(&self) -> u64 {
         let phase_counts = |phase| {
             (
-                self.queue.count_for_phase(self.session_id, phase),
-                self.queue.remaining_count_for_phase(self.session_id, phase),
+                self.queue.count_for_phase(self.run.session_id, phase),
+                self.queue
+                    .remaining_count_for_phase(self.run.session_id, phase),
             )
         };
 
@@ -198,10 +206,8 @@ impl RepoPhaseRunner {
     /// Seed the Discovery task and drain every phase in order.
     pub async fn run(&self) -> RunReport {
         self.queue.enqueue_task(&NewTask {
-            session_id: self.session_id,
-            tenant_id: self.tenant_id,
-            phase: TaskPhase::Discovery,
-            entity_type: REPOSITORY_ENTITY.to_owned(),
+            run: self.run,
+            kind: TaskKind::Discover,
             entity_id: None,
             priority: TaskPriority::NORMAL,
             attempt: 0,
@@ -231,6 +237,10 @@ impl RepoPhaseRunner {
             cancel: self.cancel.clone(),
         };
         let mut in_flight: JoinSet<TaskOutcome> = JoinSet::new();
+        // What each spawned task is working on. A task that panics or is
+        // aborted comes back as a bare `JoinError`, and this is the only way
+        // left to say which task that was.
+        let mut running: HashMap<tokio::task::Id, ExtractionTask> = HashMap::new();
         let mut next_lane = 0usize;
 
         loop {
@@ -238,35 +248,35 @@ impl RepoPhaseRunner {
                 report.cancelled = true;
                 break;
             }
-            while let Some(outcome) = in_flight.try_join_next() {
-                Self::account(outcome, report);
+            while let Some(outcome) = in_flight.try_join_next_with_id() {
+                self.account(outcome, &mut running, report);
             }
             self.publish_progress();
 
             let saturated = in_flight.len() >= self.max_concurrent_tasks
-                || (self.queue.pending_count(self.session_id) >= BACKPRESSURE_HIGH
+                || (self.queue.pending_count(self.run.session_id) >= BACKPRESSURE_HIGH
                     && !in_flight.is_empty());
             if saturated {
-                if let Some(outcome) = in_flight.join_next().await {
-                    Self::account(outcome, report);
+                if let Some(outcome) = in_flight.join_next_with_id().await {
+                    self.account(outcome, &mut running, report);
                 }
                 continue;
             }
 
             match self.claim_round_robin(phases, &mut next_lane) {
-                Some(task) => self.spawn(task, &ctx, &mut in_flight),
+                Some(task) => self.spawn(task, &ctx, &mut in_flight, &mut running),
                 // Nothing claimable right now: an in-flight Indexing task may
                 // still seed more, so wait for one to finish before deciding
                 // the phase is drained.
-                None => match in_flight.join_next().await {
-                    Some(outcome) => Self::account(outcome, report),
+                None => match in_flight.join_next_with_id().await {
+                    Some(outcome) => self.account(outcome, &mut running, report),
                     None => break,
                 },
             }
         }
 
-        while let Some(outcome) = in_flight.join_next().await {
-            Self::account(outcome, report);
+        while let Some(outcome) = in_flight.join_next_with_id().await {
+            self.account(outcome, &mut running, report);
         }
         self.publish_progress();
     }
@@ -280,9 +290,9 @@ impl RepoPhaseRunner {
     ) -> Option<ExtractionTask> {
         for step in 0..Lane::ALL.len() {
             let lane = Lane::ALL[(*next_lane + step) % Lane::ALL.len()];
-            if let Some(task) = self
-                .queue
-                .claim_next_task_in_lane(self.session_id, phases, lane)
+            if let Some(task) =
+                self.queue
+                    .claim_next_task_in_lane(self.run.session_id, phases, lane)
             {
                 *next_lane = (*next_lane + step + 1) % Lane::ALL.len();
                 return Some(task);
@@ -296,11 +306,13 @@ impl RepoPhaseRunner {
         task: ExtractionTask,
         ctx: &WorkerContext,
         in_flight: &mut JoinSet<TaskOutcome>,
+        running: &mut HashMap<tokio::task::Id, ExtractionTask>,
     ) {
         let queue = Arc::clone(&self.queue);
         let dispatcher = Arc::clone(&self.dispatcher);
         let ctx = ctx.clone();
-        in_flight.spawn(async move {
+        let spawned = task.clone();
+        let handle = in_flight.spawn(async move {
             let mut task = task;
             let error = loop {
                 match dispatcher.dispatch(&ctx, &task).await {
@@ -310,19 +322,18 @@ impl RepoPhaseRunner {
                     }
                     Err(e)
                         if e.is_transient()
-                            && task.attempt < TRANSIENT_RETRIES
+                            && task.retries < TRANSIENT_RETRIES
                             && !ctx.cancel.is_cancelled() =>
                     {
-                        task.attempt += 1;
+                        task.retries += 1;
                         tracing::warn!(
-                            phase = ?task.phase,
-                            entity_type = %task.entity_type,
+                            kind = %task.kind,
                             entity_id = ?task.entity_id,
-                            attempt = task.attempt,
+                            retry = task.retries,
                             error = %e,
                             "sync task hit a transient database error; retrying"
                         );
-                        tokio::time::sleep(TRANSIENT_RETRY_DELAY * task.attempt).await;
+                        tokio::time::sleep(TRANSIENT_RETRY_DELAY * task.retries).await;
                     }
                     Err(e) => {
                         queue.fail_task(task.id);
@@ -332,33 +343,63 @@ impl RepoPhaseRunner {
             };
             TaskOutcome { task, error }
         });
+        running.insert(handle.id(), spawned);
     }
 
-    fn account(joined: Result<TaskOutcome, tokio::task::JoinError>, report: &mut RunReport) {
+    /// Record one finished task, and take it out of the queue if it did not
+    /// take itself out.
+    ///
+    /// A task that panicked or was aborted never reached its own bookkeeping,
+    /// so `running` says which task it was and the queue entry is failed here
+    /// instead of sitting as `Running` for the rest of the run.
+    fn account(
+        &self,
+        joined: Result<(tokio::task::Id, TaskOutcome), tokio::task::JoinError>,
+        running: &mut HashMap<tokio::task::Id, ExtractionTask>,
+        report: &mut RunReport,
+    ) {
         let failure = match joined {
-            Ok(TaskOutcome { error: None, .. }) => {
-                report.tasks_done += 1;
-                return;
+            Ok((id, outcome)) => {
+                running.remove(&id);
+                match outcome {
+                    TaskOutcome { error: None, .. } => {
+                        report.tasks_done += 1;
+                        return;
+                    }
+                    TaskOutcome {
+                        task,
+                        error: Some(error),
+                    } => TaskFailure {
+                        kind: Some(task.kind),
+                        entity_id: task.entity_id,
+                        error,
+                    },
+                }
             }
-            Ok(TaskOutcome {
-                task,
-                error: Some(error),
-            }) => TaskFailure {
-                phase: task.phase,
-                entity_type: task.entity_type,
-                entity_id: task.entity_id,
-                error,
-            },
-            Err(join_error) => TaskFailure {
-                phase: TaskPhase::Refinement,
-                entity_type: "task".to_owned(),
-                entity_id: None,
-                error: DomainError::internal(format!(
-                    "sync task did not finish cleanly: {join_error}"
-                )),
-            },
+            Err(join_error) => {
+                let task = running.remove(&join_error.id());
+                if let Some(task) = &task {
+                    self.queue.fail_task(task.id);
+                }
+                TaskFailure {
+                    kind: task.as_ref().map(|task| task.kind),
+                    entity_id: task.and_then(|task| task.entity_id),
+                    error: DomainError::internal(format!(
+                        "sync task did not finish cleanly: {join_error}"
+                    )),
+                }
+            }
         };
         tracing::warn!(%failure, "sync task failed");
         report.failures.push(failure);
     }
 }
+
+#[cfg(test)]
+#[path = "runner_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod runner_tests;

@@ -37,7 +37,12 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
-        .query_param("limit", false, "Maximum number of repositories to return")
+        .query_param_typed(
+            "limit",
+            false,
+            "Maximum number of repositories to return",
+            "integer",
+        )
         .query_param("cursor", false, "Cursor for pagination")
         .handler(handlers::list_repos)
         .json_response_with_schema::<toolkit_odata::Page<dto::RepoDto>>(
@@ -56,32 +61,64 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .operation_id("github_mirror.v1.sync_repository")
         .summary("Sync a repository from GitHub into the mirror")
         .description(
-            "Queues a sync of the repository and answers immediately with a session id.              The background worker fetches the repository plus the first page of its              entities from GitHub and upserts them into the caller's tenant mirror;              poll the session for the outcome. No pagination, conditional requests, or              rate-limit budgeting yet.",
+            "Queues a sync of the repository and answers immediately with a session id. \
+             The background worker pages through the repository and every object type in \
+             scope, replays the `ETag` it stored last time so GitHub can answer `304` \
+             instead of resending a page, and waits out a rate limit before carrying \
+             on. What it fetches is upserted into the caller's tenant mirror; poll the \
+             session for the outcome. While a sync of the repository is queued or \
+             running, a request on the same terms joins it and one with a different \
+             scope or `since` is refused with `409`.",
         )
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
-        .query_param("force", false, "Bypass the HTTP cache and re-fetch everything")
+        .query_param_typed(
+            "force",
+            false,
+            "Bypass the HTTP cache and re-fetch everything",
+            "boolean",
+        )
         .query_param(
             "include",
             false,
             "Comma-separated object types to collect, e.g. `issues,pull_requests`",
         )
-        .query_param("actions_scope", false, "`all`, `open` or `none` for CI results")
-        .query_param("reactions_scope", false, "`all`, `open` or `none` for reactions")
-        .query_param("timeline_scope", false, "`all`, `open` or `none` for timeline events")
+        .query_param(
+            "actions_scope",
+            false,
+            "`all`, `open` or `none` for CI results",
+        )
+        .query_param(
+            "reactions_scope",
+            false,
+            "`all`, `open` or `none` for reactions",
+        )
+        .query_param(
+            "timeline_scope",
+            false,
+            "`all`, `open` or `none` for timeline events",
+        )
+        .query_param(
+            "since",
+            false,
+            "RFC3339 instant; closed issues and pull requests older than this are not collected",
+        )
         .handler(handlers::sync_repository)
         .json_response_with_schema::<dto::SyncAcceptedDto>(
             openapi,
             StatusCode::ACCEPTED,
-            "Sync queued; the body carries the session id to poll",
+            "Sync queued; the body carries the session id to poll. A repeat call on the \
+             same terms for a repository whose sync is still queued or running answers \
+             with that existing session instead of starting another",
         )
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_404(openapi)
+        .error_409(openapi)
         .error_500(openapi)
         .register(router, openapi);
 
@@ -118,7 +155,7 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .authenticated()
         .require_license_features::<License>([])
         .query_param("repo", false, "Resume only this `owner/name` repository")
-        .query_param("force", false, "Bypass the HTTP cache and re-fetch everything")
+        .query_param_typed("force", false, "Bypass the HTTP cache and re-fetch everything", "boolean")
         .handler(handlers::resume_syncs)
         .json_response_with_schema::<dto::ResumeAcceptedDto>(
             openapi,
@@ -137,10 +174,21 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
-        .query_param("status", false, "Only `in_progress` or only `complete`")
-        .query_param("limit", false, "Maximum number of repositories to return")
+        .query_param_enum(
+            "status",
+            false,
+            "Only `in_progress` or only `complete`",
+            ["in_progress", "complete"],
+        )
+        .query_param_typed(
+            "limit",
+            false,
+            "Maximum number of repositories to return",
+            "integer",
+        )
+        .query_param("cursor", false, "`next_cursor` of the previous page")
         .handler(handlers::list_repo_sync_status)
-        .json_response_with_schema::<dto::RepoSyncStatusDto>(
+        .json_response_with_schema::<toolkit_odata::Page<dto::RepoSyncStatusDto>>(
             openapi,
             StatusCode::OK,
             "Paginated per-repository run statuses",
@@ -165,9 +213,15 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .tag(API_TAG)
         .authenticated()
         .require_license_features::<License>([])
-        .query_param("limit", false, "Maximum number of sessions to return")
+        .query_param_typed(
+            "limit",
+            false,
+            "Maximum number of sessions to return",
+            "integer",
+        )
+        .query_param("cursor", false, "`next_cursor` of the previous page")
         .handler(handlers::list_sync_sessions)
-        .json_response_with_schema::<dto::SyncSessionDto>(
+        .json_response_with_schema::<toolkit_odata::Page<dto::SyncSessionDto>>(
             openapi,
             StatusCode::OK,
             "Paginated list of sync sessions",
@@ -211,7 +265,12 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
         .path_param("sha", "Commit SHA")
-        .query_param("limit", false, "Maximum number of files to return")
+        .query_param_typed(
+            "limit",
+            false,
+            "Maximum number of files to return",
+            "integer",
+        )
         .handler(handlers::list_commit_files)
         .json_response_with_schema::<toolkit_odata::Page<dto::CommitFileDto>>(
             openapi,
@@ -238,7 +297,7 @@ fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) ->
         .path_param("owner", "Repo owner login")
         .path_param("name", "Repo name")
         .path_param("number", "Pull request number")
-        .query_param("limit", false, "Maximum number of threads to return")
+        .query_param_typed("limit", false, "Maximum number of threads to return", "integer")
         .handler(handlers::list_review_threads)
         .json_response_with_schema::<toolkit_odata::Page<dto::ReviewThreadDto>>(
             openapi,

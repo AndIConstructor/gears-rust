@@ -18,7 +18,9 @@ use url::form_urlencoded;
 
 use crate::api::rest::routes::ConcreteService;
 use crate::domain::error::DomainError;
-use crate::domain::repo::{IssueState, ListingDirection, ListingFilter, ListingSort, PageWindow};
+use crate::domain::repo::{
+    IssueState, ListingDirection, ListingFilter, ListingSort, PageWindow, RepoRunStatus,
+};
 use crate::domain::scope::{CollectionMode, ScopeConfig, SyncScope};
 use crate::domain::validate::{validate_commit_sha, validate_repo_path};
 
@@ -416,7 +418,7 @@ pub async fn sync_repository(
     validate_repo_path(&owner, &name)?;
     let scope = query.scope(svc.default_scope())?;
     let since = query.since()?;
-    let session_id = svc
+    let queued = svc
         .enqueue_sync(
             &ctx,
             &owner,
@@ -429,9 +431,9 @@ pub async fn sync_repository(
     Ok((
         StatusCode::ACCEPTED,
         Json(SyncAcceptedDto {
-            session_id: session_id.to_string(),
+            session_id: queued.session_id.to_string(),
             repository: format!("{owner}/{name}"),
-            status: "queued".to_owned(),
+            status: queued.status.into(),
         }),
     ))
 }
@@ -996,9 +998,18 @@ pub async fn list_repo_sync_status(
     OData(query): OData,
     Query(filter): Query<RunStatusQuery>,
 ) -> ApiResult<JsonPage<RepoSyncStatusDto>> {
-    let page: Page<_> = svc
-        .list_repo_sync_status(&ctx, &query, filter.status.as_deref())
-        .await?;
+    let status = filter
+        .status
+        .as_deref()
+        .map(|raw| {
+            raw.parse::<RepoRunStatus>()
+                .map_err(|_| DomainError::Validation {
+                    field: "status".to_owned(),
+                    message: format!("`{raw}` is not one of `in_progress`, `complete`"),
+                })
+        })
+        .transpose()?;
+    let page: Page<_> = svc.list_repo_sync_status(&ctx, &query, status).await?;
     Ok(Json(page.map_items(RepoSyncStatusDto::from)))
 }
 

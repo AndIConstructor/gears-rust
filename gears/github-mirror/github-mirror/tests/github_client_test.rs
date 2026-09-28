@@ -3,14 +3,16 @@
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
     CommitListing, FetchOptions, FetchedRepository, GithubPort, IssueDetailWants, IssueListing,
-    Listing, ListingCompleteness, PullListing,
+    ListCursor, Listing, ListingCompleteness, PullListing, RepoRef,
 };
 use github_mirror::domain::repo::ContributorRecord;
 use github_mirror::domain::scope::{CollectionMode, ScopeConfig};
 use github_mirror::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use github_mirror::infra::github::client::GithubClient;
+use github_mirror::infra::github::compression::MAX_BODY_BYTES;
 use httpmock::MockServer;
 use serde_json::json;
+use toolkit_security::AccessScope;
 
 /// An RFC3339 literal as the instant the mirror stores.
 fn instant(raw: &str) -> chrono::DateTime<chrono::Utc> {
@@ -449,11 +451,14 @@ fn gh_commit_statuses_json() -> serde_json::Value {
 
 /// Fetch options for a test: a fresh tenant, no force, the given scope.
 fn opts(scope: ScopeConfig) -> FetchOptions {
+    let tenant_id = uuid::Uuid::new_v4();
     FetchOptions {
-        tenant_id: uuid::Uuid::new_v4(),
+        tenant_id,
+        access_scope: AccessScope::for_tenant(tenant_id),
         scope,
         force: false,
         since: None,
+        cancel: tokio_util::sync::CancellationToken::new(),
     }
 }
 
@@ -484,12 +489,16 @@ async fn walk_issues(
     loop {
         let page = client
             .list_issues(
-                owner,
-                name,
-                repo_id,
-                updated_after,
-                page1_etag,
-                continue_from.as_deref(),
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                ListCursor {
+                    updated_after,
+                    page1_etag,
+                    continue_from: continue_from.as_deref(),
+                },
                 options,
             )
             .await?;
@@ -510,11 +519,13 @@ async fn walk_issues(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn walk_pulls(
     client: &GithubClient,
     owner: &str,
     name: &str,
     repo_id: i64,
+    updated_after: Option<chrono::DateTime<chrono::Utc>>,
     page1_etag: Option<&str>,
     options: &FetchOptions,
 ) -> Result<PullListing, DomainError> {
@@ -523,11 +534,16 @@ async fn walk_pulls(
     loop {
         let page = client
             .list_pull_requests(
-                owner,
-                name,
-                repo_id,
-                page1_etag,
-                continue_from.as_deref(),
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                ListCursor {
+                    updated_after,
+                    page1_etag,
+                    continue_from: continue_from.as_deref(),
+                },
                 options,
             )
             .await?;
@@ -561,12 +577,16 @@ async fn walk_commits(
     loop {
         let page = client
             .list_commits(
-                owner,
-                name,
-                repo_id,
-                updated_after,
-                page1_etag,
-                continue_from.as_deref(),
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                ListCursor {
+                    updated_after,
+                    page1_etag,
+                    continue_from: continue_from.as_deref(),
+                },
                 options,
             )
             .await?;
@@ -599,10 +619,28 @@ async fn fetch_repository(
     let collection = options.scope.collection;
 
     let issues = walk_issues(client, owner, name, repo_id, None, None, options).await?;
-    let pulls = walk_pulls(client, owner, name, repo_id, None, options).await?;
+    let pulls = walk_pulls(client, owner, name, repo_id, None, None, options).await?;
     let commits = walk_commits(client, owner, name, repo_id, None, None, options).await?;
-    let meta = client.list_metadata(owner, name, repo_id, options).await?;
-    let actions = client.list_actions(owner, name, repo_id, options).await?;
+    let meta = client
+        .list_metadata(
+            RepoRef {
+                owner,
+                name,
+                repo_id,
+            },
+            options,
+        )
+        .await?;
+    let actions = client
+        .list_actions(
+            RepoRef {
+                owner,
+                name,
+                repo_id,
+            },
+            options,
+        )
+        .await?;
 
     let mut complete = ListingCompleteness::none();
     for part in [
@@ -629,7 +667,16 @@ async fn fetch_repository(
             continue;
         }
         let detail = client
-            .refine_issue(owner, name, repo_id, issue.number, wants, options)
+            .refine_issue(
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                issue.number,
+                wants,
+                options,
+            )
             .await?;
         issue_reactions.extend(detail.reactions);
         issue_timeline.extend(detail.timeline);
@@ -640,7 +687,15 @@ async fn fetch_repository(
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for pull in &pulls.pull_requests {
         let detail = client
-            .refine_pull_request(owner, name, repo_id, pull.number, options)
+            .refine_pull_request(
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                pull.number,
+                options,
+            )
             .await?;
         pull_requests.push(detail.pull_request);
         reviews.extend(detail.reviews);
@@ -656,7 +711,16 @@ async fn fetch_repository(
         (Vec::new(), Vec::new(), Vec::new());
     for commit in &commits.commits {
         let detail = client
-            .refine_commit(owner, name, repo_id, &commit.sha, with_ci, options)
+            .refine_commit(
+                RepoRef {
+                    owner,
+                    name,
+                    repo_id,
+                },
+                &commit.sha,
+                with_ci,
+                options,
+            )
             .await?;
         commit_records.push(detail.commit);
         commit_files.extend(detail.files);
@@ -669,7 +733,15 @@ async fn fetch_repository(
         for run in &actions.workflow_runs {
             workflow_jobs.extend(
                 client
-                    .refine_workflow_run(owner, name, repo_id, run.id, options)
+                    .refine_workflow_run(
+                        RepoRef {
+                            owner,
+                            name,
+                            repo_id,
+                        },
+                        run.id,
+                        options,
+                    )
                     .await?,
             );
         }
@@ -1306,7 +1378,7 @@ struct MemCache {
 impl HttpCache for MemCache {
     async fn get(
         &self,
-        _tenant_id: uuid::Uuid,
+        _scope: &AccessScope,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
         Ok(self.entries.lock().unwrap().get(key.as_str()).cloned())
@@ -1314,6 +1386,7 @@ impl HttpCache for MemCache {
 
     async fn put(
         &self,
+        _scope: &AccessScope,
         _tenant_id: uuid::Uuid,
         key: &CacheKey,
         _url: &str,
@@ -1326,7 +1399,11 @@ impl HttpCache for MemCache {
         Ok(())
     }
 
-    async fn clear(&self, _tenant_id: uuid::Uuid, _url_prefix: &str) -> Result<u64, DomainError> {
+    async fn clear(
+        &self,
+        _scope: &AccessScope,
+        _url_prefixes: &[&str],
+    ) -> Result<u64, DomainError> {
         let mut entries = self.entries.lock().unwrap();
         let removed = entries.len() as u64;
         entries.clear();
@@ -1376,9 +1453,11 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
     let tenant = uuid::Uuid::new_v4();
     let options = FetchOptions {
         tenant_id: tenant,
+        access_scope: AccessScope::for_tenant(tenant),
         scope,
         force: false,
         since: None,
+        cancel: tokio_util::sync::CancellationToken::new(),
     };
 
     let fresh = fetch_repository(&client, "rust-lang", "rust", &options)
@@ -1400,7 +1479,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
 
     let forced = FetchOptions {
         force: true,
-        ..options
+        ..options.clone()
     };
     fetch_repository(&client, "rust-lang", "rust", &forced)
         .await
@@ -1584,12 +1663,15 @@ async fn an_unchanged_first_page_stops_the_issue_sweep_before_page_two() {
 
     let skipped = client
         .list_issues(
-            "rust-lang",
-            "rust",
-            42,
-            None,
-            Some("W/\"issues-page-one\""),
-            None,
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            ListCursor {
+                page1_etag: Some("W/\"issues-page-one\""),
+                ..ListCursor::default()
+            },
             &options,
         )
         .await
@@ -1723,7 +1805,7 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
     let client = GithubClient::new(server.base_url(), None).expect("client must build");
     let options = opts(ScopeConfig::default());
 
-    let pulls = walk_pulls(&client, "rust-lang", "rust", 42, None, &options)
+    let pulls = walk_pulls(&client, "rust-lang", "rust", 42, None, None, &options)
         .await
         .expect("the first pull sweep must walk");
     assert_eq!(pulls.page1_etag.as_deref(), Some("W/\"pulls-page-one\""));
@@ -1739,11 +1821,15 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
 
     let pulls_again = client
         .list_pull_requests(
-            "rust-lang",
-            "rust",
-            42,
-            Some("W/\"pulls-page-one\""),
-            None,
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            ListCursor {
+                page1_etag: Some("W/\"pulls-page-one\""),
+                ..ListCursor::default()
+            },
             &options,
         )
         .await
@@ -1758,12 +1844,15 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
     );
     let commits_again = client
         .list_commits(
-            "rust-lang",
-            "rust",
-            42,
-            None,
-            Some("W/\"commits-page-one\""),
-            None,
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            ListCursor {
+                page1_etag: Some("W/\"commits-page-one\""),
+                ..ListCursor::default()
+            },
             &options,
         )
         .await
@@ -1780,6 +1869,19 @@ async fn an_unchanged_first_page_stops_the_pull_and_commit_sweeps_too() {
     commits_second.assert_calls_async(1).await;
 }
 
+/// Wait until `mock` has answered at least `wanted` requests, so what follows
+/// cannot race a request that is still in flight. A mock that never gets there
+/// fails the test rather than hanging.
+async fn wait_for_calls(mock: &httpmock::Mock<'_>, wanted: usize) {
+    for _ in 0..1200 {
+        if mock.calls_async().await >= wanted {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("the mock was called fewer than {wanted} times, so nothing armed the state under test");
+}
+
 #[tokio::test]
 async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
     let server = MockServer::start_async().await;
@@ -1789,7 +1891,7 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
             then.status(403).header("retry-after", "2");
         })
         .await;
-    server
+    let free = server
         .mock_async(|when, then| {
             when.method("GET").path("/repos/acme/free");
             then.status(200).json_body(gh_repo_json());
@@ -1800,36 +1902,553 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
         std::sync::Arc::new(GithubClient::new(server.base_url(), None).expect("client must build"));
     let options = opts(ScopeConfig::default());
 
-    let first = {
+    let limited_request = {
         let client = std::sync::Arc::clone(&client);
+        let options = options.clone();
         tokio::spawn(async move {
             client
                 .fetch_repository_metadata("acme", "limited", &options)
                 .await
         })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    limited.delete_async().await;
+
+    let mut waited = std::time::Duration::ZERO;
+    for attempt in 1..=4 {
+        wait_for_calls(&limited, attempt).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        client
+            .fetch_repository_metadata("acme", "free", &options)
+            .await
+            .expect("the free request must succeed once the cooldown has passed");
+        waited = started.elapsed();
+        if waited >= std::time::Duration::from_millis(400) {
+            break;
+        }
+    }
+
+    assert!(
+        waited >= std::time::Duration::from_millis(400),
+        "a request that had nothing to do with the limit must wait out the cooldown another \
+         request armed, waited {waited:?}"
+    );
+    assert!(
+        limited.calls_async().await >= 2,
+        "the limited request must have retried, which is what proves the cooldown expired"
+    );
+    assert!(free.calls_async().await >= 1);
+
+    limited_request.abort();
+}
+
+/// A revalidated first page must still lead to page two: GitHub sends no
+/// `Link` header on a `304`, so the walk continues from the `next` the cache
+/// stored when the page was fresh.
+#[tokio::test]
+async fn a_304_on_page_one_still_walks_to_page_two() {
+    let server = MockServer::start_async().await;
     server
         .mock_async(|when, then| {
-            when.method("GET").path("/repos/acme/limited");
+            when.method("GET").path("/repos/rust-lang/rust");
             then.status(200).json_body(gh_repo_json());
         })
         .await;
 
-    let started = std::time::Instant::now();
-    client
-        .fetch_repository_metadata("acme", "free", &options)
+    let page_two = format!("{}/repos/rust-lang/rust/labels?page=2", server.base_url());
+    let fresh_page_one = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/labels")
+                .query_param_exists("per_page")
+                .is_true(|req| {
+                    !req.headers()
+                        .iter()
+                        .any(|(k, _)| k.as_str() == "if-none-match")
+                });
+            then.status(200)
+                .header("etag", "W/\"labels-page-one\"")
+                .header("link", format!("<{page_two}>; rel=\"next\""))
+                .json_body(gh_labels_json());
+        })
+        .await;
+    let revalidated_page_one = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/labels")
+                .query_param_exists("per_page")
+                .header("if-none-match", "W/\"labels-page-one\"");
+            then.status(304);
+        })
+        .await;
+    let second = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/labels")
+                .query_param("page", "2");
+            then.status(200).json_body(json!([{
+                "id": 9_001, "name": "from-page-two", "color": "ffffff", "description": null
+            }]));
+        })
+        .await;
+
+    let cache = std::sync::Arc::new(MemCache::default());
+    let client =
+        GithubClient::with_cache(server.base_url(), None, cache).expect("client must build");
+    let mut scope = repo_only_scope();
+    scope.objects.labels = true;
+    let options = opts(scope);
+
+    let first_sync = fetch_repository(&client, "rust-lang", "rust", &options)
         .await
-        .expect("the free request must succeed once the cooldown has passed");
-    let waited = started.elapsed();
+        .expect("the first sync must succeed");
+    fresh_page_one.assert_calls_async(1).await;
+    second.assert_calls_async(1).await;
+    assert!(first_sync.labels.iter().any(|l| l.name == "from-page-two"));
+
+    let second_sync = fetch_repository(&client, "rust-lang", "rust", &options)
+        .await
+        .expect("the second sync must succeed");
+
+    revalidated_page_one.assert_calls_async(1).await;
+    fresh_page_one.assert_calls_async(1).await;
+    second.assert_calls_async(2).await;
+    let names: Vec<&str> = second_sync
+        .labels
+        .iter()
+        .map(|label| label.name.as_str())
+        .collect();
     assert!(
-        waited >= std::time::Duration::from_millis(1500),
-        "a request that had nothing to do with the limit must still wait it out, waited {waited:?}"
+        names.contains(&"from-page-two"),
+        "page one answered 304 and the walk must continue from the stored next page, got {names:?}"
+    );
+    assert_eq!(
+        names.len(),
+        first_sync.labels.len(),
+        "a revalidated listing must not be shorter than the fresh one"
+    );
+}
+
+/// The two bounds a bounded pull sweep carries are not the same bound:
+/// `updated_after` says when to stop turning pages, `since` says which closed
+/// records to keep. Setting them to different instants is the only way to see
+/// that one is not quietly doing the other's job.
+#[tokio::test]
+async fn the_stop_bound_and_the_since_filter_are_applied_separately() {
+    let server = MockServer::start_async().await;
+    let page_two = format!("{}/repos/rust-lang/rust/pulls?page=2", server.base_url());
+    let page_three = format!("{}/repos/rust-lang/rust/pulls?page=3", server.base_url());
+
+    let pull = |id: i64, number: i64, state: &str, updated: &str| {
+        json!({
+            "id": id, "number": number, "title": "a pr", "state": state,
+            "user": { "id": 75, "login": "erin", "type": "User" },
+            "draft": false, "merged_at": null,
+            "head": { "sha": "h1", "ref": "feature" },
+            "base": { "sha": "b1", "ref": "master" },
+            "html_url": "https://github.com/rust-lang/rust/pull/1",
+            "created_at": "2026-08-01T00:00:00Z",
+            "updated_at": updated, "closed_at": null
+        })
+    };
+
+    let first_page_body = json!([
+        pull(1, 101, "closed", "2026-08-25T00:00:00Z"),
+        pull(2, 102, "closed", "2026-08-15T00:00:00Z"),
+        pull(3, 103, "open", "2026-08-12T00:00:00Z"),
+    ]);
+    let second_page_body = json!([
+        pull(4, 104, "open", "2026-08-05T00:00:00Z"),
+        pull(5, 105, "closed", "2026-08-04T00:00:00Z"),
+    ]);
+
+    let first_page = server
+        .mock_async(move |when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls")
+                .query_param("sort", "updated")
+                .query_param("direction", "desc")
+                .query_param_exists("per_page");
+            then.status(200)
+                .header("link", format!("<{page_two}>; rel=\"next\""))
+                .json_body(first_page_body);
+        })
+        .await;
+    let second_page = server
+        .mock_async(move |when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls")
+                .query_param("page", "2");
+            then.status(200)
+                .header("link", format!("<{page_three}>; rel=\"next\""))
+                .json_body(second_page_body);
+        })
+        .await;
+    let third_page = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls")
+                .query_param("page", "3");
+            then.status(200).json_body(json!([]));
+        })
+        .await;
+    let comments = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/pulls/comments");
+            then.status(200).json_body(json!([]));
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let options = FetchOptions {
+        since: Some("2026-08-20T00:00:00Z".parse().expect("since must parse")),
+        ..opts(ScopeConfig::default())
+    };
+    let stop_at: chrono::DateTime<chrono::Utc> = "2026-08-10T00:00:00Z"
+        .parse()
+        .expect("the stop bound must parse");
+
+    let walked = walk_pulls(
+        &client,
+        "rust-lang",
+        "rust",
+        42,
+        Some(stop_at),
+        None,
+        &options,
+    )
+    .await
+    .expect("the bounded sweep must walk");
+
+    let mut numbers: Vec<i64> = walked.pull_requests.iter().map(|p| p.number).collect();
+    numbers.sort_unstable();
+    assert_eq!(
+        numbers,
+        [101, 103, 104],
+        "102 is closed and older than `since`, so the filter drops it even though \
+         the walk went past it; 104 is open, so `since` does not apply to it"
     );
 
-    first
+    first_page.assert_calls_async(1).await;
+    second_page.assert_calls_async(1).await;
+    third_page.assert_calls_async(0).await;
+    comments.assert_calls_async(1).await;
+
+    assert!(
+        !walked.complete.is_complete(Listing::PullRequests),
+        "a bounded walk never saw the whole listing, so reconciliation must not \
+         treat what it stored as the full set"
+    );
+}
+
+/// Review threads are the one part of a pull that only GraphQL serves. A
+/// refusal there must not throw away the detail, reviews, files and commits
+/// that REST already returned, and must not fail the repository's sync.
+#[tokio::test]
+async fn a_refused_graphql_answer_leaves_the_rest_of_the_refinement_standing() {
+    let server = MockServer::start_async().await;
+
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust/pulls/13");
+            then.status(200).json_body(gh_pulls_json()[0].clone());
+        })
+        .await;
+    for tail in ["reviews", "files", "commits"] {
+        let path = format!("/repos/rust-lang/rust/pulls/13/{tail}");
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+    let graphql = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/graphql");
+            then.status(200).json_body(json!({
+                "data": null,
+                "errors": [{ "type": "FORBIDDEN", "message": "no access to this repository" }]
+            }));
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let detail = client
+        .refine_pull_request(
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            13,
+            &opts(ScopeConfig::default()),
+        )
         .await
-        .expect("the limited request task must finish")
-        .expect("the limited request must succeed on its retry");
+        .expect("a refused GraphQL answer must not fail the refinement");
+
+    graphql.assert_calls_async(1).await;
+    assert_eq!(
+        detail.pull_request.number, 13,
+        "the REST detail still stands"
+    );
+    assert!(detail.review_threads.is_empty());
+    assert!(
+        !detail.review_threads_complete,
+        "the pull must be left unrefined so the next run comes back to it"
+    );
+}
+
+#[tokio::test]
+async fn a_partial_graphql_answer_keeps_its_threads_and_marks_them_incomplete() {
+    let server = MockServer::start_async().await;
+
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust/pulls/13");
+            then.status(200).json_body(gh_pulls_json()[0].clone());
+        })
+        .await;
+    for tail in ["reviews", "files", "commits"] {
+        let path = format!("/repos/rust-lang/rust/pulls/13/{tail}");
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+    let graphql = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/graphql");
+            then.status(200).json_body(json!({
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                                "nodes": [
+                                    {
+                                        "id": "PRRT_kept",
+                                        "isResolved": true,
+                                        "isOutdated": false,
+                                        "path": "src/lib.rs",
+                                        "line": 7,
+                                        "resolvedBy": { "login": "octocat" },
+                                        "comments": { "totalCount": 2 }
+                                    },
+                                    null
+                                ]
+                            }
+                        }
+                    }
+                },
+                "errors": [{
+                    "type": "INTERNAL",
+                    "message": "a thread could not be loaded",
+                    "path": ["repository", "pullRequest", "reviewThreads", "nodes", 1]
+                }]
+            }));
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let detail = client
+        .refine_pull_request(
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            13,
+            &opts(ScopeConfig::default()),
+        )
+        .await
+        .expect("a partial GraphQL answer must not fail the refinement");
+
+    graphql.assert_calls_async(1).await;
+    let ids: Vec<&str> = detail
+        .review_threads
+        .iter()
+        .map(|t| t.id.as_str())
+        .collect();
+    assert_eq!(ids, ["PRRT_kept"], "the thread GitHub did send is kept");
+    assert!(
+        !detail.review_threads_complete,
+        "the missing thread leaves the pull unrefined so the next run comes back to it"
+    );
+}
+
+#[tokio::test]
+async fn an_enterprise_base_sends_graphql_to_its_api_graphql_path() {
+    let server = MockServer::start_async().await;
+
+    server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/api/v3/repos/rust-lang/rust/pulls/13");
+            then.status(200).json_body(gh_pulls_json()[0].clone());
+        })
+        .await;
+    for tail in ["reviews", "files", "commits"] {
+        let path = format!("/api/v3/repos/rust-lang/rust/pulls/13/{tail}");
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+    let graphql = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/api/graphql");
+            then.status(200).json_body(gh_review_threads_json());
+        })
+        .await;
+
+    let client = GithubClient::new(format!("{}/api/v3", server.base_url()), None)
+        .expect("client must build");
+    let detail = client
+        .refine_pull_request(
+            RepoRef {
+                owner: "rust-lang",
+                name: "rust",
+                repo_id: 42,
+            },
+            13,
+            &opts(ScopeConfig::default()),
+        )
+        .await
+        .expect("the refinement must succeed against an enterprise base");
+
+    graphql.assert_calls_async(1).await;
+    let ids: Vec<&str> = detail
+        .review_threads
+        .iter()
+        .map(|t| t.id.as_str())
+        .collect();
+    assert_eq!(ids, ["PRRT_thread1"]);
+    assert!(detail.review_threads_complete);
+}
+
+#[tokio::test]
+async fn a_rest_answer_past_the_body_cap_is_refused() {
+    let server = MockServer::start_async().await;
+    let too_big = usize::try_from(MAX_BODY_BYTES).expect("the cap fits in usize") + 1;
+    let repo = server
+        .mock_async(move |when, then| {
+            when.method("GET").path("/repos/acme/huge");
+            then.status(200).body(vec![b' '; too_big]);
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let error = client
+        .fetch_repository_metadata("acme", "huge", &opts(ScopeConfig::default()))
+        .await
+        .expect_err("a body past the cap must be refused");
+
+    repo.assert_calls_async(1).await;
+    assert!(
+        matches!(&error, DomainError::Internal(message) if message.contains("larger than")),
+        "{error:?}"
+    );
+}
+
+/// A `link` header is upstream text, so it decides where the next request
+/// goes. One pointing somewhere else would send the token to that host, and
+/// store whatever it answered as the repository's issues.
+#[tokio::test]
+async fn a_next_link_to_another_host_is_refused() {
+    let server = MockServer::start_async().await;
+    let elsewhere = "https://evil.example.com/repos/rust-lang/rust/issues?page=2";
+
+    let first_page = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust/issues")
+                .query_param("sort", "updated");
+            then.status(200)
+                .header("link", format!("<{elsewhere}>; rel=\"next\""))
+                .json_body(gh_issues_json());
+        })
+        .await;
+    for tail in ["comments", "events"] {
+        let path = format!("/repos/rust-lang/rust/issues/{tail}");
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let walked = walk_issues(
+        &client,
+        "rust-lang",
+        "rust",
+        42,
+        None,
+        None,
+        &opts(ScopeConfig::default()),
+    )
+    .await;
+
+    let error = walked.expect_err("a next link to another host must not be followed");
+    assert!(
+        matches!(error, DomainError::Internal(_)),
+        "expected an internal error, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("refusing to follow a link off"),
+        "the walk must be stopped by the origin check, not by failing to reach \n         the other host: {error}"
+    );
+    first_page.assert_calls_async(1).await;
+}
+
+/// A token sent over plain `http` to another machine is readable by anything
+/// on the way. Loopback is the exception: nothing leaves the host, and local
+/// testing needs it.
+#[test]
+fn a_token_may_not_travel_over_plain_http_to_another_host() {
+    let refused = GithubClient::new(
+        "http://github.internal/api".to_owned(),
+        Some("tok".to_owned()),
+    );
+    let Err(error) = refused else {
+        panic!("http plus a token must be refused");
+    };
+    assert!(
+        error.to_string().contains("cleartext"),
+        "the error must say why: {error}"
+    );
+
+    for (url, token, why) in [
+        (
+            "http://127.0.0.1:8080",
+            Some("tok"),
+            "loopback carries the token nowhere",
+        ),
+        (
+            "http://localhost:8080",
+            Some("tok"),
+            "localhost is loopback too",
+        ),
+        (
+            "http://github.internal/api",
+            None,
+            "without a token there is nothing to leak",
+        ),
+        (
+            "https://github.internal/api",
+            Some("tok"),
+            "https is what the token is for",
+        ),
+    ] {
+        assert!(
+            GithubClient::new(url.to_owned(), token.map(ToOwned::to_owned)).is_ok(),
+            "{url} must be allowed: {why}"
+        );
+    }
 }

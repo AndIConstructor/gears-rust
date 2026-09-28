@@ -6,17 +6,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, FetchOptions, GithubPort, IssueDetail,
-    IssueDetailWants, IssueListing, MetadataListing, PullDetail, PullListing,
+    IssueDetailWants, IssueListing, ListCursor, MetadataListing, PullDetail, PullListing, RepoRef,
 };
-use github_mirror::domain::repo::{PageWindow, RepoRecord, WorkflowJobRecord};
+use github_mirror::domain::repo::{
+    PageWindow, RepoRecord, RepoRunStatus, SessionStatus, WorkflowJobRecord,
+};
 use github_mirror_sdk::SyncSummary;
 use tokio_util::sync::CancellationToken;
 use toolkit_odata::ODataQuery;
-use toolkit_security::SecurityContext;
+use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
 /// The fixture fake, but the first listing call trips `cancel` so the run is
@@ -39,152 +40,96 @@ impl GithubPort for StopsAfterDiscovery {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_issues(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
         self.cancel.cancel();
-        self.inner
-            .list_issues(
-                owner,
-                name,
-                repo_id,
-                updated_after,
-                page1_etag,
-                continue_from,
-                options,
-            )
-            .await
+        self.inner.list_issues(repo, cursor, options).await
     }
 
     async fn refine_issue(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         wants: IssueDetailWants,
         options: &FetchOptions,
     ) -> Result<IssueDetail, DomainError> {
-        self.inner
-            .refine_issue(owner, name, repo_id, number, wants, options)
-            .await
+        self.inner.refine_issue(repo, number, wants, options).await
     }
 
     async fn list_pull_requests(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
-        self.inner
-            .list_pull_requests(owner, name, repo_id, page1_etag, continue_from, options)
-            .await
+        self.inner.list_pull_requests(repo, cursor, options).await
     }
 
     async fn refine_pull_request(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         options: &FetchOptions,
     ) -> Result<PullDetail, DomainError> {
-        self.inner
-            .refine_pull_request(owner, name, repo_id, number, options)
-            .await
+        self.inner.refine_pull_request(repo, number, options).await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_commits(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
-        self.inner
-            .list_commits(
-                owner,
-                name,
-                repo_id,
-                updated_after,
-                page1_etag,
-                continue_from,
-                options,
-            )
-            .await
+        self.inner.list_commits(repo, cursor, options).await
     }
 
     async fn refine_commit(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         sha: &str,
         with_ci: bool,
         options: &FetchOptions,
     ) -> Result<CommitDetail, DomainError> {
-        self.inner
-            .refine_commit(owner, name, repo_id, sha, with_ci, options)
-            .await
+        self.inner.refine_commit(repo, sha, with_ci, options).await
     }
 
     async fn list_metadata(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<MetadataListing, DomainError> {
-        self.inner
-            .list_metadata(owner, name, repo_id, options)
-            .await
+        self.inner.list_metadata(repo, options).await
     }
 
     async fn list_actions(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<ActionsListing, DomainError> {
-        self.inner.list_actions(owner, name, repo_id, options).await
+        self.inner.list_actions(repo, options).await
     }
 
     async fn refine_workflow_run(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         run_id: i64,
         options: &FetchOptions,
     ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
-        self.inner
-            .refine_workflow_run(owner, name, repo_id, run_id, options)
-            .await
+        self.inner.refine_workflow_run(repo, run_id, options).await
     }
 
     async fn clear_cache(
         &self,
-        tenant_id: Uuid,
+        scope: &AccessScope,
         owner: &str,
         name: Option<&str>,
+        repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
-        self.inner.clear_cache(tenant_id, owner, name).await
+        self.inner.clear_cache(scope, owner, name, repo_ids).await
     }
 }
 
@@ -296,7 +241,8 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
         .await
         .expect("sessions must list");
     assert_eq!(
-        sessions.items[0].status, "interrupted",
+        sessions.items[0].status,
+        SessionStatus::Interrupted,
         "an interrupted run must not report success"
     );
 
@@ -305,7 +251,8 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
         .await
         .expect("run statuses must list");
     assert_eq!(
-        statuses.items[0].status, "in_progress",
+        statuses.items[0].status,
+        RepoRunStatus::InProgress,
         "the repository stays in progress, which is what resume looks for"
     );
 
@@ -326,7 +273,7 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
         .list_repo_sync_status(&ctx, &ODataQuery::default(), None)
         .await
         .expect("run statuses must list");
-    assert_eq!(statuses.items[0].status, "complete");
+    assert_eq!(statuses.items[0].status, RepoRunStatus::Complete);
 }
 
 #[tokio::test]
@@ -397,45 +344,27 @@ impl GithubPort for ListingWithEtag {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_issues(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
-        if page1_etag == Some(self.etag) {
+        if cursor.page1_etag == Some(self.etag) {
             return Ok(IssueListing {
                 page1_etag: Some(self.etag.to_owned()),
                 unchanged: true,
                 ..IssueListing::default()
             });
         }
-        let mut listing = self
-            .inner
-            .list_issues(
-                owner,
-                name,
-                repo_id,
-                updated_after,
-                page1_etag,
-                continue_from,
-                options,
-            )
-            .await?;
+        let mut listing = self.inner.list_issues(repo, cursor, options).await?;
         listing.page1_etag = Some(self.etag.to_owned());
         Ok(listing)
     }
 
     async fn refine_issue(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         wants: IssueDetailWants,
         options: &FetchOptions,
@@ -443,118 +372,79 @@ impl GithubPort for ListingWithEtag {
         if self.fail_first_refine.swap(false, Ordering::SeqCst) {
             return Err(DomainError::internal("GitHub answered 502 once"));
         }
-        self.inner
-            .refine_issue(owner, name, repo_id, number, wants, options)
-            .await
+        self.inner.refine_issue(repo, number, wants, options).await
     }
 
     async fn list_pull_requests(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
-        self.inner
-            .list_pull_requests(owner, name, repo_id, page1_etag, continue_from, options)
-            .await
+        self.inner.list_pull_requests(repo, cursor, options).await
     }
 
     async fn refine_pull_request(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         options: &FetchOptions,
     ) -> Result<PullDetail, DomainError> {
-        self.inner
-            .refine_pull_request(owner, name, repo_id, number, options)
-            .await
+        self.inner.refine_pull_request(repo, number, options).await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_commits(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
-        self.inner
-            .list_commits(
-                owner,
-                name,
-                repo_id,
-                updated_after,
-                page1_etag,
-                continue_from,
-                options,
-            )
-            .await
+        self.inner.list_commits(repo, cursor, options).await
     }
 
     async fn refine_commit(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         sha: &str,
         with_ci: bool,
         options: &FetchOptions,
     ) -> Result<CommitDetail, DomainError> {
-        self.inner
-            .refine_commit(owner, name, repo_id, sha, with_ci, options)
-            .await
+        self.inner.refine_commit(repo, sha, with_ci, options).await
     }
 
     async fn list_metadata(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<MetadataListing, DomainError> {
-        self.inner
-            .list_metadata(owner, name, repo_id, options)
-            .await
+        self.inner.list_metadata(repo, options).await
     }
 
     async fn list_actions(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<ActionsListing, DomainError> {
-        self.inner.list_actions(owner, name, repo_id, options).await
+        self.inner.list_actions(repo, options).await
     }
 
     async fn refine_workflow_run(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         run_id: i64,
         options: &FetchOptions,
     ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
-        self.inner
-            .refine_workflow_run(owner, name, repo_id, run_id, options)
-            .await
+        self.inner.refine_workflow_run(repo, run_id, options).await
     }
 
     async fn clear_cache(
         &self,
-        tenant_id: Uuid,
+        scope: &AccessScope,
         owner: &str,
         name: Option<&str>,
+        repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
-        self.inner.clear_cache(tenant_id, owner, name).await
+        self.inner.clear_cache(scope, owner, name, repo_ids).await
     }
 }
 
@@ -581,11 +471,12 @@ async fn a_refinement_left_pending_is_finished_by_the_next_sync_even_when_the_li
         .expect("the first sync must queue");
     assert_eq!(pump.drain(&service).await, 1);
     let failed = service
-        .get_session(&ctx, first)
+        .get_session(&ctx, first.session_id)
         .await
         .expect("the first session must exist");
     assert_eq!(
-        failed.status, "failed",
+        failed.status,
+        SessionStatus::Failed,
         "one refinement failed, so the run did"
     );
 
@@ -595,10 +486,10 @@ async fn a_refinement_left_pending_is_finished_by_the_next_sync_even_when_the_li
         .expect("the second sync must queue");
     assert_eq!(pump.drain(&service).await, 1);
     let finished = service
-        .get_session(&ctx, second)
+        .get_session(&ctx, second.session_id)
         .await
         .expect("the second session must exist");
-    assert_eq!(finished.status, "complete");
+    assert_eq!(finished.status, SessionStatus::Complete);
     let summary: SyncSummary = serde_json::from_str(
         finished
             .summary_json

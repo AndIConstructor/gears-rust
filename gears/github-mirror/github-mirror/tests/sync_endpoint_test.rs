@@ -57,7 +57,7 @@ async fn sync_fills_all_twenty_six_tables_and_reads_serve_them() {
 
     let response = post(
         router.clone(),
-        "/github-mirror/v1/repos/rust-lang/rust/sync?timeline_scope=all",
+        "/github-mirror/v1/repos/rust-lang/rust/sync?timeline_scope=all&actions_scope=all",
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -431,22 +431,26 @@ async fn a_second_sync_of_a_repo_in_flight_reuses_it() {
     let mut pump = common::SyncPump::take(&service).await;
     let router = router_for(service.clone(), ctx);
 
-    let first = body_json(
-        post(
-            router.clone(),
-            "/github-mirror/v1/repos/rust-lang/rust/sync",
-        )
-        .await,
+    let first_response = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
-    let second = body_json(
-        post(
-            router.clone(),
-            "/github-mirror/v1/repos/rust-lang/rust/sync",
-        )
-        .await,
+    assert_eq!(first_response.status(), StatusCode::ACCEPTED);
+    let first = body_json(first_response).await;
+
+    let second_response = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync",
     )
     .await;
+    assert_eq!(
+        second_response.status(),
+        StatusCode::ACCEPTED,
+        "a request that joins a run already going is still accepted, not \
+         answered as though it had returned the work itself"
+    );
+    let second = body_json(second_response).await;
 
     assert_eq!(
         first["session_id"], second["session_id"],
@@ -921,5 +925,171 @@ async fn a_shorter_timeline_does_not_leave_the_previous_tail_behind() {
         events,
         vec!["labeled", "assigned", "closed"],
         "re-syncing a shorter timeline must not keep the old tail"
+    );
+}
+
+#[tokio::test]
+async fn a_run_status_filter_this_build_does_not_know_is_refused() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub { result: None }),
+    );
+    let router = router_for(service, ctx);
+
+    let response = get(
+        router.clone(),
+        "/github-mirror/v1/sync-status?status=in-progress",
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a status this build cannot parse must be refused, not quietly ignored"
+    );
+    let body = body_json(response).await;
+    assert_eq!(
+        body["context"]["field_violations"][0]["field"], "status",
+        "the body must name the parameter at fault: {body}"
+    );
+
+    for accepted in ["in_progress", "complete"] {
+        let response = get(
+            router.clone(),
+            &format!("/github-mirror/v1/sync-status?status={accepted}"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "`{accepted}` is one of the two values the endpoint documents"
+        );
+    }
+}
+
+/// A repeat of a request in flight is handed its session; a request for
+/// something else is not, because that session will never hold what it asked
+/// for. It cannot simply be queued either: the repository's lock is held for
+/// the whole run, so a second job would end failed.
+#[tokio::test]
+async fn a_sync_asking_for_other_terms_is_refused_rather_than_collapsed() {
+    let ctx = common::caller_in(Uuid::new_v4());
+    let db = common::inmem_db().await;
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(common::fetched_repository()),
+        }),
+    );
+    let _pump = common::SyncPump::take(&service).await;
+    let router = router_for(service.clone(), ctx);
+
+    let first = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=issues",
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let first = body_json(first).await;
+
+    let same = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=issues",
+    )
+    .await;
+    assert_eq!(same.status(), StatusCode::ACCEPTED);
+    let same = body_json(same).await;
+    assert_eq!(
+        first["session_id"], same["session_id"],
+        "the same terms must still collapse into the run in flight"
+    );
+
+    let narrower = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=commits",
+    )
+    .await;
+    assert_eq!(
+        narrower.status(),
+        StatusCode::CONFLICT,
+        "a request for other terms must not be answered with a session that \
+         will never hold what it asked for"
+    );
+    let body = body_json(narrower).await.to_string();
+    assert!(
+        body.contains(first["session_id"].as_str().expect("session_id")),
+        "the refusal must name the run the caller can watch: {body}"
+    );
+
+    let since = post(
+        router,
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=issues&since=2026-01-01T00:00:00Z",
+    )
+    .await;
+    assert_eq!(
+        since.status(),
+        StatusCode::CONFLICT,
+        "a different `since` is a different request too"
+    );
+}
+
+#[tokio::test]
+async fn open_actions_scope_fetches_jobs_only_for_runs_on_an_open_pull_head() {
+    let mut result = common::fetched_repository();
+    let mut on_open_head = result.workflow_runs[0].clone();
+    on_open_head.id = 82;
+    on_open_head.head_sha = "h1".to_owned();
+    result.workflow_runs.push(on_open_head);
+    let mut job = result.workflow_jobs[0].clone();
+    job.id = 911;
+    job.run_id = 82;
+    result.workflow_jobs.push(job);
+
+    let service = common::service_with_github(
+        common::inmem_db().await,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(result),
+        }),
+    );
+    let mut pump = common::SyncPump::take(&service).await;
+    let router = router_for(service.clone(), common::caller_in(Uuid::new_v4()));
+
+    let pulls = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=pull_requests",
+    )
+    .await;
+    assert_eq!(pulls.status(), StatusCode::ACCEPTED);
+    assert_eq!(pump.drain(&service).await, 1);
+
+    let actions = post(
+        router.clone(),
+        "/github-mirror/v1/repos/rust-lang/rust/sync?include=github_actions&actions_scope=open",
+    )
+    .await;
+    assert_eq!(actions.status(), StatusCode::ACCEPTED);
+    let session_id = body_json(actions).await["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_owned();
+    assert_eq!(pump.drain(&service).await, 1);
+
+    let session = body_json(
+        get(
+            router.clone(),
+            &format!("/github-mirror/v1/sessions/{session_id}"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(session["status"], "complete", "{session}");
+    assert_eq!(session["summary"]["workflow_runs_synced"], 2);
+    assert_eq!(
+        session["summary"]["workflow_jobs_synced"], 1,
+        "only run 82 sits on the head of open pull 12; run 81 is on c2"
     );
 }

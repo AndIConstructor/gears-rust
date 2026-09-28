@@ -71,6 +71,7 @@ fn pull(declared: DeclaredCounts, commits: usize, files: usize) -> PullDetail {
             })
             .collect(),
         review_threads: Vec::new(),
+        review_threads_complete: true,
         declared,
         contributors: Vec::new(),
     }
@@ -106,14 +107,6 @@ fn the_repair_budget_is_bounded() {
         gap(12, 9, MAX_REPAIR, Some(5)).outcome(),
         GapOutcome::AcceptedDrift
     );
-}
-
-#[test]
-fn advancing_records_the_gap_it_started_from() {
-    let advanced = gap(12, 9, 0, None).advance(11);
-    assert_eq!(advanced.stored, 11);
-    assert_eq!(advanced.repair_attempts, 1);
-    assert_eq!(advanced.previous_gap, Some(3));
 }
 
 #[test]

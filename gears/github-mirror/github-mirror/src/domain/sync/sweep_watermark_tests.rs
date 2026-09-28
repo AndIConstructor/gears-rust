@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 
-use super::{SWEEP_OVERLAP, high_water, stop_threshold};
+use super::{SWEEP_OVERLAP, high_water, is_stale, later_watermark, stop_threshold};
 use crate::domain::repo::SyncWatermarkRecord;
 
 fn stored(last_seen: Option<&str>) -> SyncWatermarkRecord {
@@ -40,6 +40,22 @@ fn the_threshold_steps_back_by_the_overlap() {
     );
 }
 
+/// Neither side can be read, so there is nothing to choose between them: the
+/// stored value stays, and the run does not write a second unreadable stamp
+/// over the first.
+#[test]
+fn two_unreadable_stamps_leave_the_stored_one_alone() {
+    assert_eq!(
+        later_watermark(Some("not a date"), "also not a date".to_owned()),
+        "not a date"
+    );
+    assert_eq!(
+        later_watermark(Some("not a date"), "2026-08-25T10:00:00Z".to_owned()),
+        "2026-08-25T10:00:00Z",
+        "a readable candidate still replaces an unreadable stored value"
+    );
+}
+
 #[test]
 fn an_unparseable_watermark_falls_back_to_a_full_sweep() {
     let row = stored(Some("not a timestamp"));
@@ -72,4 +88,29 @@ fn the_high_water_never_moves_backwards() {
 #[test]
 fn the_overlap_is_wide_enough_for_clock_skew() {
     assert!(SWEEP_OVERLAP >= Duration::minutes(1));
+}
+
+#[test]
+fn an_entity_is_stale_only_when_it_is_older_than_the_bound() {
+    let bound = Some(at("2026-09-01T10:00:00Z"));
+    assert!(is_stale(Some("2026-09-01T09:59:59Z"), bound));
+    assert!(
+        !is_stale(Some("2026-09-01T10:00:00Z"), bound),
+        "equal is kept"
+    );
+    assert!(!is_stale(Some("2026-09-01T10:00:01Z"), bound));
+}
+
+#[test]
+fn a_missing_timestamp_or_an_unbounded_sweep_keeps_the_entity() {
+    let bound = Some(at("2026-09-01T10:00:00Z"));
+    assert!(!is_stale(None, bound), "nothing to compare, so keep it");
+    assert!(
+        !is_stale(Some("2020-01-01T00:00:00Z"), None),
+        "a full sweep has no bound and keeps everything"
+    );
+    assert!(
+        !is_stale(Some("not a timestamp"), bound),
+        "an unreadable timestamp keeps the entity rather than dropping it"
+    );
 }

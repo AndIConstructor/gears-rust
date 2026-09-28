@@ -14,6 +14,7 @@
 
 use async_trait::async_trait;
 use aws_lc_rs::digest::{self, SHA256};
+use toolkit_security::AccessScope;
 
 use crate::domain::error::DomainError;
 
@@ -78,36 +79,45 @@ impl CachedResponse {
 /// drive it in memory.
 #[async_trait]
 pub trait HttpCache: Send + Sync {
-    /// The entry for `key` within `tenant`, if one exists.
+    /// The entry for `key` within `scope`, if one exists.
     ///
     /// # Errors
     /// Storage failures. A cache miss is `Ok(None)`, not an error.
     async fn get(
         &self,
-        tenant_id: uuid::Uuid,
+        scope: &AccessScope,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError>;
 
-    /// Store or replace the entry for `key` within `tenant`.
+    /// Store or replace the entry for `key` as a row of `tenant_id`, which
+    /// `scope` must cover.
     ///
     /// # Errors
     /// Storage failures.
     async fn put(
         &self,
+        scope: &AccessScope,
         tenant_id: uuid::Uuid,
         key: &CacheKey,
         url: &str,
         entry: CachedResponse,
     ) -> Result<(), DomainError>;
 
-    /// Drop every entry whose URL starts with `url_prefix`, returning how many
-    /// went. This is `clear_cache(session, scope)` from DESIGN §4: the prefix
-    /// is how an org or a single repository is named, since the key itself is
-    /// an opaque hash.
+    /// Drop every entry for any resource in `url_prefixes` and everything
+    /// below it: the URL itself, `url_prefix?...` and `url_prefix/...`, so
+    /// clearing `.../repos/acme/widget` leaves `.../repos/acme/widget-fork`
+    /// alone. Returns how many went. This is `clear_cache(session, scope)`
+    /// from DESIGN §4: the prefix is how an org or a single repository is
+    /// named, since the key itself is an opaque hash.
+    ///
+    /// Several prefixes at once because one owner clear covers the owner's
+    /// path and one `.../repositories/{id}` path per repository mirrored under
+    /// it, and an owner with a few hundred repositories should not cost a few
+    /// hundred round trips.
     ///
     /// # Errors
     /// Storage failures.
-    async fn clear(&self, tenant_id: uuid::Uuid, url_prefix: &str) -> Result<u64, DomainError>;
+    async fn clear(&self, scope: &AccessScope, url_prefixes: &[&str]) -> Result<u64, DomainError>;
 }
 
 /// A cache that stores nothing, for callers that do not want one.
@@ -120,7 +130,7 @@ pub struct NoCache;
 impl HttpCache for NoCache {
     async fn get(
         &self,
-        _tenant_id: uuid::Uuid,
+        _scope: &AccessScope,
         _key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
         Ok(None)
@@ -128,6 +138,7 @@ impl HttpCache for NoCache {
 
     async fn put(
         &self,
+        _scope: &AccessScope,
         _tenant_id: uuid::Uuid,
         _key: &CacheKey,
         _url: &str,
@@ -136,7 +147,11 @@ impl HttpCache for NoCache {
         Ok(())
     }
 
-    async fn clear(&self, _tenant_id: uuid::Uuid, _url_prefix: &str) -> Result<u64, DomainError> {
+    async fn clear(
+        &self,
+        _scope: &AccessScope,
+        _url_prefixes: &[&str],
+    ) -> Result<u64, DomainError> {
         Ok(0)
     }
 }

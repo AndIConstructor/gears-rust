@@ -1,15 +1,20 @@
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use toolkit_security::AccessScope;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone as _, Utc};
 use serde::Deserialize;
 use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio_util::sync::CancellationToken;
 
 use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, GithubPort,
-    IssueDetail, IssueDetailWants, IssueListing, Listing, MetadataListing, PullDetail, PullListing,
+    IssueDetail, IssueDetailWants, IssueListing, ListCursor, Listing, MetadataListing, PullDetail,
+    PullListing, RepoRef,
 };
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -20,6 +25,7 @@ use crate::domain::repo::{
     WorkflowRunRecord,
 };
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
+use crate::infra::github::compression::MAX_BODY_BYTES;
 use crate::infra::github::metrics::{GithubRequestMetrics, Outcome};
 use crate::infra::github::pagination::parse_link_next;
 use crate::infra::github::rate_limit::{
@@ -40,6 +46,14 @@ fn within_since(state: &str, updated_at: &str, since: Option<DateTime<Utc>>) -> 
         return true;
     }
     DateTime::parse_from_rfc3339(updated_at).is_ok_and(|at| at.with_timezone(&Utc) >= since)
+}
+
+/// Whether `updated_at` is older than a bound this sweep was given. No
+/// bound means nothing is too old.
+fn older_than(updated_at: &str, bound: Option<DateTime<Utc>>) -> bool {
+    bound.is_some_and(|bound| {
+        DateTime::parse_from_rfc3339(updated_at).is_ok_and(|at| at.with_timezone(&Utc) < bound)
+    })
 }
 
 fn updated_after_param(updated_after: Option<DateTime<Utc>>) -> String {
@@ -96,6 +110,81 @@ const GITHUB_API_VERSION: &str = "2022-11-28";
 /// task gives up. A limit is a wait, not an error, so this is generous: at
 /// [`MAX_RETRY_SLEEP`] a request rides out a whole hourly window.
 const RATE_LIMIT_RETRIES: u32 = 30;
+const UPSTREAM_RETRIES: u32 = 3;
+const UPSTREAM_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn graphql_url(api_base_url: &str) -> String {
+    let base = api_base_url.trim_end_matches('/');
+    if let Some(host) = base.strip_suffix("/api/v3") {
+        return format!("{host}/api/graphql");
+    }
+    format!("{base}/graphql")
+}
+
+/// The error a refused GraphQL query ends on.
+///
+/// Only the count and GitHub's own `type` vocabulary (`NOT_FOUND`,
+/// `RATE_LIMITED`, `FORBIDDEN` and the like) go into the message. The bodies
+/// carry `message` and `path` text written by GitHub about the thing that was
+/// refused, and the error text is stored on the session and served from the
+/// API, where [`crate::redact::redacted`] is a filter for the mirror's own
+/// sentences rather than for an upstream body. The whole answer is logged
+/// instead, where that assumption holds.
+fn graphql_refused(errors: &[serde_json::Value]) -> DomainError {
+    let kinds: Vec<&str> = errors
+        .iter()
+        .map(|error| {
+            error
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unspecified")
+        })
+        .collect();
+    tracing::warn!(
+        count = errors.len(),
+        answer = ?errors,
+        "GitHub refused a GraphQL query"
+    );
+    DomainError::internal(format!(
+        "GitHub refused the GraphQL query: {} error(s), {}",
+        errors.len(),
+        kinds.join(", ")
+    ))
+}
+
+async fn read_capped(mut response: reqwest::Response) -> Result<Vec<u8>, DomainError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?
+    {
+        let size = body.len().saturating_add(chunk.len());
+        if u64::try_from(size).unwrap_or(u64::MAX) > MAX_BODY_BYTES {
+            return Err(DomainError::internal(format!(
+                "GitHub response is larger than {MAX_BODY_BYTES} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Whether the URL points at this machine, where plain `http` carries no token
+/// over a network. Mirrors the same check on the gear config, which catches a
+/// bad deployment; this one catches a direct caller of the constructor.
+fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+fn upstream_backoff(attempt: u32) -> std::time::Duration {
+    UPSTREAM_BACKOFF.saturating_mul(1u32 << attempt.min(8))
+}
 /// Requests in flight a client allows before the gear config says otherwise.
 /// Matches the PRD's "parallelism <= 8" rate-limit threshold.
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 8;
@@ -219,6 +308,7 @@ fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
 pub struct GithubClient {
     http: reqwest::Client,
     api_base_url: String,
+    api_origin: url::Origin,
     token: Option<String>,
     cache: Arc<dyn HttpCache>,
     /// Ceiling on requests in flight, shared by every sync using this client.
@@ -236,8 +326,8 @@ pub struct GithubClient {
 
 impl GithubClient {
     /// # Errors
-    /// Returns `DomainError::Internal` when the underlying HTTP client cannot
-    /// be constructed.
+    /// Whatever [`Self::with_cache`] returns: this is that call with a cache
+    /// that stores nothing.
     pub fn new(api_base_url: String, token: Option<String>) -> Result<Self, DomainError> {
         Self::with_cache(api_base_url, token, Arc::new(NoCache))
     }
@@ -246,7 +336,9 @@ impl GithubClient {
     ///
     /// # Errors
     /// Returns `DomainError::Internal` when the underlying HTTP client cannot
-    /// be constructed.
+    /// be constructed, when `api_base_url` does not parse, when it would carry
+    /// the token over plain `http` to another machine, or when it has no host
+    /// for a `next` link to be compared against.
     pub fn with_cache(
         api_base_url: String,
         token: Option<String>,
@@ -258,6 +350,22 @@ impl GithubClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| DomainError::internal(format!("failed to build HTTP client: {e}")))?;
+        let parsed = url::Url::parse(&api_base_url)
+            .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?;
+        if parsed.scheme() == "http" && token.is_some() && !is_loopback(&parsed) {
+            return Err(DomainError::internal(format!(
+                "the GitHub API base URL {} uses http, which would send the token in cleartext; \
+                 use https, or a loopback host for local testing",
+                redacted_word(&api_base_url)
+            )));
+        }
+        let api_origin = parsed.origin();
+        if matches!(api_origin, url::Origin::Opaque(_)) {
+            return Err(DomainError::internal(format!(
+                "the GitHub API base URL {} has no host to compare a next link against",
+                redacted_word(&api_base_url)
+            )));
+        }
         let controller = Arc::new(RateLimitController::new());
         controller.set_quota_probe(Arc::new(RateLimitProbe {
             http: http.clone(),
@@ -267,6 +375,7 @@ impl GithubClient {
         Ok(Self {
             http,
             api_base_url,
+            api_origin,
             token,
             cache,
             permits: Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS),
@@ -276,23 +385,26 @@ impl GithubClient {
         })
     }
 
-    /// Cap the requests this client keeps in flight at `max` (zero reads as
-    /// one, so the client always makes progress).
+    /// Cap the requests this client keeps in flight at `max`.
     #[must_use]
-    pub fn with_max_concurrent_requests(mut self, max: usize) -> Self {
-        let max = max.max(1);
-        self.permits = Semaphore::new(max);
-        self.max_cap = u32::try_from(max).unwrap_or(u32::MAX);
+    pub fn with_max_concurrent_requests(mut self, max: std::num::NonZeroUsize) -> Self {
+        self.permits = Semaphore::new(max.get());
+        self.max_cap = u32::try_from(max.get()).unwrap_or(u32::MAX);
         self
     }
 
     /// Admission for one outbound request: the token's controller first, then
-    /// a shared permit, both held until the response body has been read.
-    async fn admit(&self) -> Result<(Admission<'_>, SemaphorePermit<'_>), DomainError> {
-        self.controller
-            .admit()
-            .await
-            .map_err(|e| DomainError::internal(format!("GitHub rate limit: {e}")))?;
+    /// a shared permit, both held until the response body has been read. A
+    /// cancelled run gives up the wait instead of holding the shutdown.
+    async fn admit(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<(Admission<'_>, SemaphorePermit<'_>), DomainError> {
+        tokio::select! {
+            admitted = self.controller.admit() => admitted
+                .map_err(|e| DomainError::internal(format!("GitHub rate limit: {e}")))?,
+            () = cancel.cancelled() => return Err(DomainError::Cancelled),
+        }
         let admission = Admission {
             controller: &self.controller,
         };
@@ -304,29 +416,32 @@ impl GithubClient {
         Ok((admission, permit))
     }
 
-    /// Send `request`, timing it; a request that gets no answer at all is
-    /// counted as failed with status 0.
+    /// Send `request`, timing it, and give up as soon as the run is cancelled.
+    /// The inner result is the transport's own, so a caller can still retry a
+    /// network failure; a request that gets no answer at all is counted as
+    /// failed with status 0.
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
         method: &'static str,
-    ) -> Result<(reqwest::Response, Duration), DomainError> {
+        cancel: &CancellationToken,
+    ) -> Result<(reqwest::Result<reqwest::Response>, Duration), DomainError> {
         let started = Instant::now();
-        match request.send().await {
-            Ok(response) => Ok((response, started.elapsed())),
-            Err(e) => {
-                self.metrics.request(
-                    method,
-                    0,
-                    Outcome::Failed,
-                    started.elapsed(),
-                    &RateLimitHeaders::default(),
-                );
-                Err(DomainError::internal(format!(
-                    "GitHub {method} request failed: {e}"
-                )))
-            }
+        let outcome = tokio::select! {
+            outcome = request.send() => outcome,
+            () = cancel.cancelled() => return Err(DomainError::Cancelled),
+        };
+        let took = started.elapsed();
+        if outcome.is_err() {
+            self.metrics.request(
+                method,
+                0,
+                Outcome::Failed,
+                took,
+                &RateLimitHeaders::default(),
+            );
         }
+        Ok((outcome, took))
     }
 
     /// Feed a response's rate-limit headers to the token's controller.
@@ -349,10 +464,19 @@ impl GithubClient {
 
     /// Sleep before retrying a limit that gave the controller nothing to park
     /// on: no `Retry-After` and a budget that is not exhausted.
-    async fn wait_without_guidance(&self, seen: &RateLimitHeaders, attempt: u32) {
+    async fn wait_without_guidance(
+        &self,
+        seen: &RateLimitHeaders,
+        attempt: u32,
+        cancel: &CancellationToken,
+    ) -> Result<(), DomainError> {
         if seen.retry_after_secs.is_none() && seen.remaining.is_none_or(|left| left > 0) {
-            tokio::time::sleep(fallback_delay(attempt)).await;
+            tokio::select! {
+                () = tokio::time::sleep(fallback_delay(attempt)) => {}
+                () = cancel.cancelled() => return Err(DomainError::Cancelled),
+            }
         }
+        Ok(())
     }
 
     /// The stored entry for this request, unless `force` says to ignore it.
@@ -368,7 +492,7 @@ impl GithubClient {
         if options.force {
             return None;
         }
-        match self.cache.get(options.tenant_id, key).await {
+        match self.cache.get(&options.access_scope, key).await {
             Ok(entry) => entry,
             Err(e) => {
                 tracing::warn!(%url, error = %e, "cache read failed; fetching fresh");
@@ -417,22 +541,52 @@ impl GithubClient {
         url: &str,
         options: &FetchOptions,
     ) -> Result<FetchedPage<T>, DomainError> {
+        self.check_origin(url)?;
         let key = CacheKey::compute("GET", url, ACCEPT_JSON);
         let cached = self.cached_entry(options, url, &key).await;
 
         let mut attempt: u32 = 0;
+        let mut upstream_attempt: u32 = 0;
         // `_admission` and `_permit` live until this function returns, so a
         // request counts against both ceilings until its body has been read.
         // A retry gives them up first: a request asleep on a backoff is not
         // in flight.
         let (response, rate_limited, _admission, _permit) = loop {
-            let (admission, permit) = self.admit().await?;
-            let (response, took) = self
-                .send(self.conditional_request(url, cached.as_ref()), "GET")
+            let (admission, permit) = self.admit(&options.cancel).await?;
+            let (outcome, took) = self
+                .send(
+                    self.conditional_request(url, cached.as_ref()),
+                    "GET",
+                    &options.cancel,
+                )
                 .await?;
+            let response = match outcome {
+                Ok(response) => response,
+                Err(e) if upstream_attempt < UPSTREAM_RETRIES => {
+                    drop(permit);
+                    drop(admission);
+                    self.back_off_upstream(url, &e.to_string(), upstream_attempt, &options.cancel)
+                        .await?;
+                    upstream_attempt += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(DomainError::internal(format!("GitHub request failed: {e}")));
+                }
+            };
 
             let status = response.status();
             let seen = self.observe(response.headers(), status).await;
+            if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
+                self.metrics
+                    .request("GET", status.as_u16(), Outcome::Failed, took, &seen);
+                drop(permit);
+                drop(admission);
+                self.back_off_upstream(url, &status.to_string(), upstream_attempt, &options.cancel)
+                    .await?;
+                upstream_attempt += 1;
+                continue;
+            }
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || (status == reqwest::StatusCode::FORBIDDEN && is_rate_limited(&seen));
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
@@ -448,7 +602,8 @@ impl GithubClient {
                 );
                 drop(permit);
                 drop(admission);
-                self.wait_without_guidance(&seen, attempt).await;
+                self.wait_without_guidance(&seen, attempt, &options.cancel)
+                    .await?;
                 attempt += 1;
                 continue;
             }
@@ -486,10 +641,9 @@ impl GithubClient {
         let etag = header_string(response.headers(), "etag");
         let last_modified = header_string(response.headers(), "last-modified");
         let next_page = next_link(response.headers());
+        let body = read_capped(response).await?;
         let entry = CachedResponse {
-            body: response
-                .text()
-                .await
+            body: String::from_utf8(body)
                 .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?,
             etag,
             last_modified,
@@ -547,6 +701,41 @@ impl GithubClient {
 
     fn absolute(&self, path: &str) -> String {
         format!("{}{path}", self.api_base_url.trim_end_matches('/'))
+    }
+
+    async fn back_off_upstream(
+        &self,
+        url: &str,
+        reason: &str,
+        attempt: u32,
+        cancel: &CancellationToken,
+    ) -> Result<(), DomainError> {
+        let delay = upstream_backoff(attempt);
+        tracing::warn!(
+            url = %redacted_word(url),
+            reason,
+            attempt,
+            delay_secs = delay.as_secs(),
+            "GitHub did not answer properly; retrying"
+        );
+        tokio::select! {
+            () = tokio::time::sleep(delay) => Ok(()),
+            () = cancel.cancelled() => Err(DomainError::Cancelled),
+        }
+    }
+
+    fn check_origin(&self, url: &str) -> Result<(), DomainError> {
+        let target = url::Url::parse(url).map_err(|e| {
+            DomainError::internal(format!("GitHub handed back an unusable URL: {e}"))
+        })?;
+        if target.origin() == self.api_origin {
+            return Ok(());
+        }
+        Err(DomainError::internal(format!(
+            "refusing to follow a link off {}: {}",
+            self.api_base_url,
+            redacted_word(url)
+        )))
     }
 
     /// GET `path` and every page after it, concatenated, plus whether the
@@ -611,7 +800,11 @@ impl GithubClient {
         if !entry.is_revalidatable() {
             return;
         }
-        if let Err(e) = self.cache.put(options.tenant_id, key, url, entry).await {
+        if let Err(e) = self
+            .cache
+            .put(&options.access_scope, options.tenant_id, key, url, entry)
+            .await
+        {
             tracing::warn!(%url, error = %e, "cache write failed; the next sync will re-fetch");
         }
     }
@@ -620,14 +813,16 @@ impl GithubClient {
         &self,
         query: &str,
         variables: serde_json::Value,
+        cancel: &CancellationToken,
     ) -> Result<serde_json::Value, DomainError> {
-        let url = format!("{}/graphql", self.api_base_url.trim_end_matches('/'));
+        let url = graphql_url(&self.api_base_url);
 
         let mut attempt: u32 = 0;
+        let mut upstream_attempt: u32 = 0;
         // GraphQL shares the REST ceilings: both spend the same token's
         // budget, though the controller only reads the core budget headers.
         let (response, _admission, _permit) = loop {
-            let (admission, permit) = self.admit().await?;
+            let (admission, permit) = self.admit(cancel).await?;
             let mut request = self
                 .http
                 .post(&url)
@@ -635,10 +830,36 @@ impl GithubClient {
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
-            let (response, took) = self.send(request, "POST").await?;
+            let (outcome, took) = self.send(request, "POST", cancel).await?;
+            let response = match outcome {
+                Ok(response) => response,
+                Err(e) if upstream_attempt < UPSTREAM_RETRIES => {
+                    drop(permit);
+                    drop(admission);
+                    self.back_off_upstream(&url, &e.to_string(), upstream_attempt, cancel)
+                        .await?;
+                    upstream_attempt += 1;
+                    continue;
+                }
+                Err(e) => {
+                    return Err(DomainError::internal(format!(
+                        "GitHub GraphQL request failed: {e}"
+                    )));
+                }
+            };
 
             let status = response.status();
             let seen = self.observe(response.headers(), status).await;
+            if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
+                self.metrics
+                    .request("POST", status.as_u16(), Outcome::Failed, took, &seen);
+                drop(permit);
+                drop(admission);
+                self.back_off_upstream(&url, &status.to_string(), upstream_attempt, cancel)
+                    .await?;
+                upstream_attempt += 1;
+                continue;
+            }
             let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || (status == reqwest::StatusCode::FORBIDDEN && is_rate_limited(&seen));
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
@@ -653,7 +874,7 @@ impl GithubClient {
                 );
                 drop(permit);
                 drop(admission);
-                self.wait_without_guidance(&seen, attempt).await;
+                self.wait_without_guidance(&seen, attempt, cancel).await?;
                 attempt += 1;
                 continue;
             }
@@ -669,23 +890,30 @@ impl GithubClient {
             )));
         }
 
-        let bytes = response.bytes().await.map_err(|e| {
-            DomainError::internal(format!("GitHub GraphQL response read failed: {e}"))
-        })?;
+        let bytes = read_capped(response).await?;
         self.metrics.response_bytes("POST", bytes.len());
-        let body: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| DomainError::internal(format!("GitHub GraphQL decode failed: {e}")))?;
-
-        if let Some(errors) = body.get("errors").and_then(serde_json::Value::as_array)
-            && !errors.is_empty()
-        {
-            return Err(DomainError::internal(format!(
-                "GitHub GraphQL errors: {errors:?}"
-            )));
-        }
-
-        Ok(body)
+        graphql_answer(&bytes)
     }
+}
+
+fn graphql_answer(bytes: &[u8]) -> Result<serde_json::Value, DomainError> {
+    let body: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| DomainError::internal(format!("GitHub GraphQL decode failed: {e}")))?;
+
+    if let Some(errors) = body.get("errors").and_then(serde_json::Value::as_array)
+        && !errors.is_empty()
+    {
+        if body.get("data").is_none_or(serde_json::Value::is_null) {
+            return Err(graphql_refused(errors));
+        }
+        tracing::warn!(
+            count = errors.len(),
+            answer = ?errors,
+            "GitHub answered a GraphQL query in part; keeping the data it sent"
+        );
+    }
+
+    Ok(body)
 }
 
 #[derive(Debug, Deserialize)]
@@ -856,11 +1084,15 @@ fn actor_or_none<'de, D>(deserializer: D) -> Result<Option<GhActor>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
-    value
-        .filter(|actor| actor.get("login").is_some_and(serde_json::Value::is_string))
-        .map(GhActor::deserialize)
-        .transpose()
+    let Some(actor) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if !actor.get("login").is_some_and(serde_json::Value::is_string) {
+        tracing::warn!(%actor, "GitHub sent an actor without a login; recorded as no actor");
+        return Ok(None);
+    }
+    GhActor::deserialize(actor)
+        .map(Some)
         .map_err(serde::de::Error::custom)
 }
 
@@ -1563,35 +1795,29 @@ impl DerivedContributors {
     fn track(&mut self, repo_id: i64, actor: Option<&GhActor>, role: &str, at: Option<&str>) {
         let Some(actor) = actor else { return };
         let Some(user_id) = actor.id else { return };
-
-        let entry = self
-            .by_user
-            .entry(user_id)
-            .or_insert_with(|| ContributorRecord {
-                repo_id,
-                user_id,
-                login: Some(actor.login.clone()),
-                account_type: actor.user_type.clone().unwrap_or_else(|| "User".to_owned()),
-                avatar_url: actor.avatar_url.clone(),
-                html_url: actor.html_url.clone(),
-                roles: Vec::new(),
-                first_seen_at: None,
-                last_seen_at: None,
-            });
-
-        if !entry.roles.iter().any(|r| r == role) {
-            entry.roles.push(role.to_owned());
-        }
         let at = at.and_then(parse_github_timestamp);
-        merge_seen_window(entry, at, at);
+        let sighting = ContributorRecord {
+            repo_id,
+            user_id,
+            login: Some(actor.login.clone()),
+            account_type: actor.user_type.clone().unwrap_or_else(|| "User".to_owned()),
+            avatar_url: actor.avatar_url.clone(),
+            html_url: actor.html_url.clone(),
+            roles: vec![role.to_owned()],
+            first_seen_at: at,
+            last_seen_at: at,
+        };
+        match self.by_user.entry(user_id) {
+            Entry::Vacant(slot) => {
+                slot.insert(sighting);
+            }
+            Entry::Occupied(mut slot) => slot.get_mut().absorb(sighting),
+        }
     }
 
     /// Stable output: by user id, each record's roles sorted.
     fn into_records(self) -> Vec<ContributorRecord> {
         let mut records: Vec<ContributorRecord> = self.by_user.into_values().collect();
-        for record in &mut records {
-            record.roles.sort();
-        }
         records.sort_by_key(|r| r.user_id);
         records
     }
@@ -1661,24 +1887,6 @@ fn parse_github_timestamp(raw: &str) -> Option<DateTime<Utc>> {
         .map(|stamp| stamp.with_timezone(&Utc))
 }
 
-/// Widen a record's first/last-seen window with another observation.
-fn merge_seen_window(
-    record: &mut ContributorRecord,
-    first_seen_at: Option<DateTime<Utc>>,
-    last_seen_at: Option<DateTime<Utc>>,
-) {
-    if let Some(first) = first_seen_at
-        && record.first_seen_at.is_none_or(|held| first < held)
-    {
-        record.first_seen_at = Some(first);
-    }
-    if let Some(last) = last_seen_at
-        && record.last_seen_at.is_none_or(|held| last > held)
-    {
-        record.last_seen_at = Some(last);
-    }
-}
-
 fn workflow_run_record(repo_id: i64, w: GhWorkflowRun) -> WorkflowRunRecord {
     WorkflowRunRecord {
         id: w.id,
@@ -1743,10 +1951,26 @@ fn commit_file_record(repo_id: i64, commit_sha: &str, f: GhPullFile) -> CommitFi
 /// The query text is fixed; `owner`, `name` and the pull number travel as
 /// GraphQL variables so no request value is ever spliced into the query
 /// string itself.
-const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $first: Int!) {      repository(owner: $owner, name: $name) {      pullRequest(number: $number) { reviewThreads(first: $first) {      nodes { id isResolved isOutdated path line resolvedBy { login }      comments(first: 1) { totalCount } } } } } }";
+const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!, $first: Int!, $after: String) {      repository(owner: $owner, name: $name) {      pullRequest(number: $number) { reviewThreads(first: $first, after: $after) {      pageInfo { hasNextPage endCursor }      nodes { id isResolved isOutdated path line resolvedBy { login }      comments(first: 1) { totalCount } } } } } }";
 
-fn review_threads_variables(owner: &str, name: &str, pull_number: i64) -> serde_json::Value {
-    serde_json::json!({ "owner": owner, "name": name, "number": pull_number, "first": FIRST_PAGE_SIZE })
+/// A pull request with more review threads than one page holds is common on a
+/// busy repository, and the walk stops at [`REVIEW_THREAD_PAGES`] pages so a
+/// cursor GitHub never ends cannot keep one refinement going for ever.
+const REVIEW_THREAD_PAGES: usize = 20;
+
+fn review_threads_variables(
+    owner: &str,
+    name: &str,
+    pull_number: i64,
+    after: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "owner": owner,
+        "name": name,
+        "number": pull_number,
+        "first": FIRST_PAGE_SIZE,
+        "after": after,
+    })
 }
 
 fn review_thread_record(
@@ -1984,14 +2208,20 @@ impl GithubPort for GithubClient {
     /// so they belong to [`Self::refine_issue`].
     async fn list_issues(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<IssueListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
+        let ListCursor {
+            updated_after,
+            page1_etag,
+            continue_from,
+        } = cursor;
         if !options.scope.objects.issues {
             return Ok(IssueListing::default());
         }
@@ -2075,13 +2305,16 @@ impl GithubPort for GithubClient {
 
     async fn refine_issue(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         wants: IssueDetailWants,
         options: &FetchOptions,
     ) -> Result<IssueDetail, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let mut detail = IssueDetail {
             issue_number: number,
             ..IssueDetail::default()
@@ -2122,13 +2355,20 @@ impl GithubPort for GithubClient {
 
     async fn list_pull_requests(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<PullListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
+        let ListCursor {
+            updated_after,
+            page1_etag,
+            continue_from,
+        } = cursor;
         if !options.scope.objects.pull_requests {
             return Ok(PullListing::default());
         }
@@ -2142,13 +2382,14 @@ impl GithubPort for GithubClient {
             Stage {
                 tail: "/pulls/comments",
                 first: self.absolute(&format!(
-                    "/repos/{owner}/{name}/pulls/comments?per_page={FIRST_PAGE_SIZE}"
+                    "/repos/{owner}/{name}/pulls/comments?sort=updated&direction=desc&per_page={FIRST_PAGE_SIZE}{}",
+                    updated_after_param(updated_after)
                 )),
             },
         ];
         let url = continue_from.map_or_else(|| stages[0].first.clone(), str::to_owned);
         let stage = stage_of(&stages, &url)?;
-        let bounded = options.since.is_some();
+        let bounded = updated_after.is_some() || options.since.is_some();
 
         let mut listing = PullListing::default();
         if stage == 0 {
@@ -2162,16 +2403,28 @@ impl GithubPort for GithubClient {
                 }
             }
             listing.contributors = derive_pull_people(repo_id, &page.parsed, &[]).into_records();
-            listing.pull_requests = page
+            let records: Vec<PullRequestRecord> = page
                 .parsed
                 .into_iter()
                 .map(|p| pull_request_record(repo_id, p))
+                .collect();
+            // Pulls come newest-updated first and GitHub's endpoint takes no
+            // `since`, so the bound is applied here: once a whole page sits
+            // below the watermark, every later page does too and the walk
+            // moves on to the next stage.
+            let past_the_bound = !records.is_empty()
+                && records
+                    .iter()
+                    .all(|p| older_than(&p.updated_at, updated_after));
+            listing.pull_requests = records
+                .into_iter()
                 .filter(|p| within_since(&p.state, &p.updated_at, options.since))
                 .collect();
+            let next_page = if past_the_bound { None } else { page.next };
             listing
                 .complete
-                .set(Listing::PullRequests, page.next.is_none() && !bounded);
-            listing.next = continue_after(&stages, stage, page.next);
+                .set(Listing::PullRequests, next_page.is_none() && !bounded);
+            listing.next = continue_after(&stages, stage, next_page);
         } else {
             let page: FetchedPage<Vec<GhReviewComment>> = self.get_page(&url, options).await?;
             listing.contributors = derive_pull_people(repo_id, &[], &page.parsed).into_records();
@@ -2194,12 +2447,15 @@ impl GithubPort for GithubClient {
     /// review threads.
     async fn refine_pull_request(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         number: i64,
         options: &FetchOptions,
     ) -> Result<PullDetail, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let pull: GhPullRequest = self
             .get_json(&format!("/repos/{owner}/{name}/pulls/{number}"), options)
             .await?;
@@ -2260,36 +2516,71 @@ impl GithubPort for GithubClient {
             .map(|c| pull_request_commit_record(repo_id, number, c))
             .collect();
 
-        // A GraphQL failure must not veto the REST data already fetched for
-        // this pull: review threads are one supplementary dataset among many,
-        // so a failure is logged and the threads are left empty.
-        let review_threads = match self
-            .post_graphql(
-                REVIEW_THREADS_QUERY,
-                review_threads_variables(owner, name, number),
-            )
-            .await
-        {
-            Ok(threads) => threads["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-                .as_array()
-                .map(|nodes| {
+        let mut review_threads = Vec::new();
+        let mut after: Option<String> = None;
+        let mut more_to_come = false;
+        let mut threads_complete = true;
+        for page_number in 0..REVIEW_THREAD_PAGES {
+            // Not fatal: everything above came from REST and is already in
+            // hand, and threads are the only part of a pull that GraphQL
+            // alone serves. A token without GraphQL rights would otherwise
+            // fail every pull, and with it every sync of the repository.
+            // `post_graphql` has already logged what GitHub refused.
+            let answer = match self
+                .post_graphql(
+                    REVIEW_THREADS_QUERY,
+                    review_threads_variables(owner, name, number, after.as_deref()),
+                    &options.cancel,
+                )
+                .await
+            {
+                Ok(answer) => answer,
+                Err(DomainError::Cancelled) => return Err(DomainError::Cancelled),
+                Err(e) => {
+                    tracing::warn!(
+                        repository = %format!("{owner}/{name}"),
+                        pull = number,
+                        error = %e.public_text(),
+                        "could not read the pull request's review threads; the rest of \
+                         the refinement stands and the next run tries again"
+                    );
+                    threads_complete = false;
+                    break;
+                }
+            };
+            let partial = answer
+                .get("errors")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|errors| !errors.is_empty());
+            if partial {
+                threads_complete = false;
+            }
+            let page = &answer["data"]["repository"]["pullRequest"]["reviewThreads"];
+            if let Some(nodes) = page["nodes"].as_array() {
+                review_threads.extend(
                     nodes
                         .iter()
-                        .filter_map(|n| review_thread_record(repo_id, number, n))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Err(e) => {
-                tracing::warn!(
-                    owner,
-                    name,
-                    pull_number = number,
-                    error = %e,
-                    "review threads (GraphQL) failed for this pull request; sync continues without them"
+                        .filter_map(|node| review_thread_record(repo_id, number, node)),
                 );
-                Vec::new()
             }
-        };
+            if !page["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false) {
+                break;
+            }
+            match page["pageInfo"]["endCursor"].as_str() {
+                Some(cursor) => after = Some(cursor.to_owned()),
+                None => break,
+            }
+            more_to_come = page_number + 1 == REVIEW_THREAD_PAGES;
+        }
+        if more_to_come {
+            tracing::warn!(
+                repository = %format!("{owner}/{name}"),
+                pull = number,
+                pages = REVIEW_THREAD_PAGES,
+                stored = review_threads.len(),
+                "the review-thread walk stopped at its page bound; later threads are missing"
+            );
+        }
 
         Ok(PullDetail {
             pull_request,
@@ -2297,22 +2588,28 @@ impl GithubPort for GithubClient {
             files,
             commits,
             review_threads,
+            review_threads_complete: threads_complete,
             declared,
             contributors: reviewers.into_records(),
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn list_commits(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
-        updated_after: Option<DateTime<Utc>>,
-        page1_etag: Option<&str>,
-        continue_from: Option<&str>,
+        repo: RepoRef<'_>,
+        cursor: ListCursor<'_>,
         options: &FetchOptions,
     ) -> Result<CommitListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
+        let ListCursor {
+            updated_after,
+            page1_etag,
+            continue_from,
+        } = cursor;
         if !options.scope.objects.commits {
             return Ok(CommitListing::default());
         }
@@ -2374,13 +2671,16 @@ impl GithubPort for GithubClient {
     /// when CI is in scope — its statuses and check runs.
     async fn refine_commit(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         sha: &str,
         with_ci: bool,
         options: &FetchOptions,
     ) -> Result<CommitDetail, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let detail: GhCommitDetail = self
             .get_json(&format!("/repos/{owner}/{name}/commits/{sha}"), options)
             .await?;
@@ -2436,11 +2736,14 @@ impl GithubPort for GithubClient {
     /// The cheap single-page list endpoints, each behind its own flag.
     async fn list_metadata(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<MetadataListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let mut listing = MetadataListing::default();
 
         if options.scope.objects.labels {
@@ -2519,11 +2822,14 @@ impl GithubPort for GithubClient {
     /// [`Self::refine_workflow_run`].
     async fn list_actions(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         options: &FetchOptions,
     ) -> Result<ActionsListing, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         if !options.scope.objects.github_actions {
             return Ok(ActionsListing::default());
         }
@@ -2556,12 +2862,15 @@ impl GithubPort for GithubClient {
 
     async fn refine_workflow_run(
         &self,
-        owner: &str,
-        name: &str,
-        repo_id: i64,
+        repo: RepoRef<'_>,
         run_id: i64,
         options: &FetchOptions,
     ) -> Result<Vec<WorkflowJobRecord>, DomainError> {
+        let RepoRef {
+            owner,
+            name,
+            repo_id,
+        } = repo;
         let jobs = self
             .get_json_all_wrapped(
                 &format!(
@@ -2579,15 +2888,32 @@ impl GithubPort for GithubClient {
 
     async fn clear_cache(
         &self,
-        tenant_id: uuid::Uuid,
+        scope: &AccessScope,
         owner: &str,
         name: Option<&str>,
+        repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
         let base = self.api_base_url.trim_end_matches('/');
         let prefix = match name {
             Some(name) => format!("{base}/repos/{owner}/{name}"),
-            None => format!("{base}/repos/{owner}/"),
+            None => format!("{base}/repos/{owner}"),
         };
-        self.cache.clear(tenant_id, &prefix).await
+        let mut prefixes = vec![prefix];
+        prefixes.extend(
+            repo_ids
+                .iter()
+                .map(|id| format!("{base}/repositories/{id}")),
+        );
+        let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+
+        self.cache.clear(scope, &prefixes).await
     }
 }
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod client_tests;

@@ -22,10 +22,12 @@ use github_mirror_sdk::{
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 use sea_orm::prelude::DateTimeUtc;
-use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order};
+use sea_orm::sea_query::{Expr, LikeExpr};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order, QuerySelect};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
-    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
+    DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureInsertManyExt,
+    SecureOnConflict, SecureUpdateExt, validate_tenant_in_scope,
 };
 use toolkit_db::{DBProvider, DbError};
 use toolkit_odata::{ODataQuery, Page, SortDir};
@@ -49,9 +51,9 @@ use crate::domain::repo::{
     WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
 use crate::domain::repo::{
-    EntityFingerprintRecord, EntityFingerprintRepository, RepoSyncStatusRecord,
-    RepoSyncStatusRepository, SyncSessionRecord, SyncSessionRepository, SyncWatermarkRecord,
-    SyncWatermarkRepository,
+    EntityFingerprintRecord, EntityFingerprintRepository, RepoRunStatus, RepoSyncStatusRecord,
+    RepoSyncStatusRepository, SessionStatus, SyncSessionRecord, SyncSessionRepository,
+    SyncWatermarkRecord, SyncWatermarkRepository,
 };
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use crate::infra::github::compression::{Compression, content_hash};
@@ -213,6 +215,36 @@ impl RepoRepository for SeaOrmRepoRepository {
     ) -> Result<Option<Repo>, DomainError> {
         let conn = self.db.conn()?;
         repo_find_by_full_name_in(&conn, scope, full_name).await
+    }
+
+    async fn ids_by_owner(
+        &self,
+        scope: &AccessScope,
+        owner: &str,
+    ) -> Result<Vec<i64>, DomainError> {
+        #[derive(sea_orm::FromQueryResult)]
+        struct RepoId {
+            id: i64,
+        }
+
+        let conn = self.db.conn()?;
+        // Only the column the caller wants: a repository row carries its
+        // description and URLs, and an owner-wide cache clear reads every row
+        // the owner has.
+        let rows: Vec<RepoId> = RepoEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(repositories::Column::Owner.eq(owner)))
+            .project_all(&conn, |select| {
+                select
+                    .select_only()
+                    .column(repositories::Column::Id)
+                    .into_model::<RepoId>()
+            })
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(rows.into_iter().map(|row| row.id).collect())
     }
 }
 
@@ -421,6 +453,37 @@ impl PullRequestRepository for SeaOrmPullRequestRepository {
     ) -> Result<Option<PullRequest>, DomainError> {
         let conn = self.db.conn()?;
         pull_request_find_by_number_in(&conn, scope, repo_id, number).await
+    }
+
+    async fn open_head_shas(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<Vec<String>, DomainError> {
+        #[derive(sea_orm::FromQueryResult)]
+        struct HeadSha {
+            head_sha: Option<String>,
+        }
+
+        let conn = self.db.conn()?;
+        let rows: Vec<HeadSha> = PullRequestEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(pull_requests::Column::RepoId.eq(repo_id))
+                    .add(pull_requests::Column::State.eq("open")),
+            )
+            .project_all(&conn, |select| {
+                select
+                    .select_only()
+                    .column(pull_requests::Column::HeadSha)
+                    .into_model::<HeadSha>()
+            })
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(rows.into_iter().filter_map(|row| row.head_sha).collect())
     }
 }
 
@@ -2668,6 +2731,86 @@ async fn review_comment_list_by_pull_in<C: DBRunner>(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
+async fn review_delete_by_pull_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    pull_number: i64,
+) -> Result<u64, DomainError> {
+    let result = ReviewEntity::delete_many()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(reviews::Column::RepoId.eq(repo_id))
+                .add(reviews::Column::PullNumber.eq(pull_number)),
+        )
+        .exec(conn)
+        .await
+        .map_err(map_scope_error)?;
+    Ok(result.rows_affected)
+}
+
+async fn review_thread_delete_by_pull_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    pull_number: i64,
+) -> Result<u64, DomainError> {
+    let result = ReviewThreadEntity::delete_many()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(review_threads::Column::RepoId.eq(repo_id))
+                .add(review_threads::Column::PullNumber.eq(pull_number)),
+        )
+        .exec(conn)
+        .await
+        .map_err(map_scope_error)?;
+    Ok(result.rows_affected)
+}
+
+async fn pull_request_file_delete_by_pull_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    pull_number: i64,
+) -> Result<u64, DomainError> {
+    let result = PullRequestFileEntity::delete_many()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(pull_request_files::Column::RepoId.eq(repo_id))
+                .add(pull_request_files::Column::PullNumber.eq(pull_number)),
+        )
+        .exec(conn)
+        .await
+        .map_err(map_scope_error)?;
+    Ok(result.rows_affected)
+}
+
+async fn pull_request_commit_delete_by_pull_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    pull_number: i64,
+) -> Result<u64, DomainError> {
+    let result = PullRequestCommitEntity::delete_many()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(pull_request_commits::Column::RepoId.eq(repo_id))
+                .add(pull_request_commits::Column::PullNumber.eq(pull_number)),
+        )
+        .exec(conn)
+        .await
+        .map_err(map_scope_error)?;
+    Ok(result.rows_affected)
+}
+
 async fn review_upsert_in<C: DBRunner>(
     conn: &C,
     scope: &AccessScope,
@@ -3170,6 +3313,32 @@ async fn contributor_list_by_repo_in<C: DBRunner>(
         .order_by(contributors::Column::UserId, Order::Asc)
         .limit(window.limit())
         .offset(window.offset())
+        .all(conn)
+        .await
+        .map_err(map_scope_error)?;
+
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+/// The stored rows for the people a write is about, so a merge reads what it
+/// is going to overwrite rather than a fixed first page of the table.
+async fn contributor_list_by_ids_in<C: DBRunner>(
+    conn: &C,
+    scope: &AccessScope,
+    repo_id: i64,
+    user_ids: &[i64],
+) -> Result<Vec<Contributor>, DomainError> {
+    if user_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = ContributorEntity::find()
+        .secure()
+        .scope_with(scope)
+        .filter(
+            sea_orm::Condition::all()
+                .add(contributors::Column::RepoId.eq(repo_id))
+                .add(contributors::Column::UserId.is_in(user_ids.iter().copied())),
+        )
         .all(conn)
         .await
         .map_err(map_scope_error)?;
@@ -4297,15 +4466,10 @@ async fn issue_timeline_list_by_issue_in<C: DBRunner>(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
-/// How many stored contributors one merge reads back. A repository with more
-/// distinct people than this loses nothing already written — the merge simply
-/// cannot widen the rows it did not see.
-const CONTRIBUTOR_MERGE_LIMIT: u64 = 10_000;
-
-/// The earlier of two optional instants, ignoring a missing one.
-fn earliest(a: Option<DateTimeUtc>, b: Option<DateTimeUtc>) -> Option<DateTimeUtc> {
-    [a, b].into_iter().flatten().min()
-}
+/// How many user ids one merge asks about at a time. The read is by id, so a
+/// repository of any size is merged in full; the chunk only keeps the `IN`
+/// list to a size every engine accepts.
+const CONTRIBUTOR_MERGE_CHUNK: usize = 500;
 
 /// One mirrored table's upsert pass: writes every fetched record and reports
 /// how many rows it wrote.
@@ -4330,33 +4494,37 @@ async fn merge_known_contributors<C: DBRunner>(
         return Ok(derived);
     }
 
-    let known = contributor_list_by_repo_in(
-        conn,
-        scope,
-        repo_id,
-        PageWindow::first(CONTRIBUTOR_MERGE_LIMIT),
-    )
-    .await?;
-    let known: std::collections::HashMap<i64, Contributor> =
-        known.into_iter().map(|c| (c.user_id, c)).collect();
+    let wanted: Vec<i64> = derived.iter().map(|record| record.user_id).collect();
+    let mut known: std::collections::HashMap<i64, Contributor> =
+        std::collections::HashMap::with_capacity(wanted.len());
+    for chunk in wanted.chunks(CONTRIBUTOR_MERGE_CHUNK) {
+        let rows = contributor_list_by_ids_in(conn, scope, repo_id, chunk).await?;
+        known.extend(rows.into_iter().map(|row| (row.user_id, row)));
+    }
 
     Ok(derived
         .into_iter()
         .map(|mut record| {
-            let Some(stored) = known.get(&record.user_id) else {
-                return record;
-            };
-            for role in &stored.roles {
-                if !record.roles.iter().any(|held| held == role) {
-                    record.roles.push(role.clone());
-                }
+            if let Some(stored) = known.remove(&record.user_id) {
+                record.absorb(stored_contributor_record(stored));
             }
-            record.roles.sort();
-            record.first_seen_at = earliest(record.first_seen_at, stored.first_seen_at);
-            record.last_seen_at = record.last_seen_at.max(stored.last_seen_at);
             record
         })
         .collect())
+}
+
+fn stored_contributor_record(stored: Contributor) -> ContributorRecord {
+    ContributorRecord {
+        repo_id: stored.repo_id,
+        user_id: stored.user_id,
+        login: stored.login,
+        account_type: stored.account_type,
+        avatar_url: stored.avatar_url,
+        html_url: stored.html_url,
+        roles: stored.roles,
+        first_seen_at: stored.first_seen_at,
+        last_seen_at: stored.last_seen_at,
+    }
 }
 
 async fn reconcile_stale<C: DBRunner>(
@@ -4391,8 +4559,8 @@ async fn reconcile_stale<C: DBRunner>(
     Ok(deleted)
 }
 
-/// Writes one sync task's result — a listing, one entity's detail, or the
-/// deletion pass — as a single transaction, so a task lands whole or not at
+/// Writes one sync task's result - a listing, one entity's detail, or the
+/// deletion pass - as a single transaction, so a task lands whole or not at
 /// all.
 pub struct SeaOrmSyncWriter {
     db: Arc<DbProvider>,
@@ -4432,6 +4600,33 @@ impl SyncWriter for SeaOrmSyncWriter {
                 Box::pin(async move { repo_upsert_in(tx, &scope, tenant_id, repository).await })
             })
             .await
+    }
+
+    async fn write_contributors(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        contributors: Vec<ContributorRecord>,
+    ) -> Result<u64, DomainError> {
+        let written = u64::try_from(contributors.len()).unwrap_or(u64::MAX);
+        // The merge read runs on its own connection, before the transaction:
+        // a transaction that reads first and writes later has to upgrade its
+        // lock, and on `SQLite` that upgrade fails at once if another writer
+        // (the session heartbeat) committed in between.
+        let conn = self.db.conn()?;
+        let merged = merge_known_contributors(&conn, scope, repo_id, contributors).await?;
+        let scope = scope.clone();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    sync_table!(tx, &scope, tenant_id, contributor_upsert_in, merged);
+                    Ok::<(), DomainError>(())
+                })
+            })
+            .await?;
+        Ok(written)
     }
 
     async fn write_issue_listing(
@@ -4544,6 +4739,17 @@ impl SyncWriter for SeaOrmSyncWriter {
             .db()
             .transaction_ref_mapped(move |tx| {
                 Box::pin(async move {
+                    let pull_number = detail.pull_request.number;
+                    // A later refinement of the same pull is the whole truth
+                    // about its children: a file, commit, review or thread
+                    // GitHub no longer reports is gone, not merely unchanged.
+                    review_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+                    if detail.review_threads_complete {
+                        review_thread_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+                    }
+                    pull_request_file_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+                    pull_request_commit_delete_by_pull_in(tx, &scope, repo_id, pull_number).await?;
+
                     pull_request_upsert_in(tx, &scope, tenant_id, detail.pull_request).await?;
                     sync_table!(tx, &scope, tenant_id, review_upsert_in, detail.reviews);
                     sync_table!(
@@ -4777,15 +4983,14 @@ impl SeaOrmHttpCache {
 impl HttpCache for SeaOrmHttpCache {
     async fn get(
         &self,
-        tenant_id: Uuid,
+        scope: &AccessScope,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
-        let scope = AccessScope::for_tenant(tenant_id);
         let conn = self.db.conn()?;
 
         let row = HttpCacheEntity::find()
             .secure()
-            .scope_with(&scope)
+            .scope_with(scope)
             .filter(sea_orm::Condition::all().add(http_cache::Column::CacheKey.eq(key.as_str())))
             .one(&conn)
             .await
@@ -4807,12 +5012,12 @@ impl HttpCache for SeaOrmHttpCache {
 
     async fn put(
         &self,
+        scope: &AccessScope,
         tenant_id: Uuid,
         key: &CacheKey,
         url: &str,
         entry: CachedResponse,
     ) -> Result<(), DomainError> {
-        let scope = AccessScope::for_tenant(tenant_id);
         let conn = self.db.conn()?;
 
         let plain = entry.body.as_bytes();
@@ -4852,7 +5057,7 @@ impl HttpCache for SeaOrmHttpCache {
 
         HttpCacheEntity::insert(model())
             .secure()
-            .scope_with_model(&scope, &model())
+            .scope_with_model(scope, &model())
             .map_err(map_scope_error)?
             .on_conflict(on_conflict)
             .exec(&conn)
@@ -4862,14 +5067,34 @@ impl HttpCache for SeaOrmHttpCache {
         Ok(())
     }
 
-    async fn clear(&self, tenant_id: Uuid, url_prefix: &str) -> Result<u64, DomainError> {
-        let scope = AccessScope::for_tenant(tenant_id);
+    async fn clear(&self, scope: &AccessScope, url_prefixes: &[&str]) -> Result<u64, DomainError> {
+        // Guarded because an empty `Condition::any()` matches every row, and
+        // a clear with nothing to clear must delete nothing.
+        if url_prefixes.is_empty() {
+            return Ok(0);
+        }
+
         let conn = self.db.conn()?;
+        let mut matching = sea_orm::Condition::any();
+        for url_prefix in url_prefixes {
+            let escaped = url_prefix
+                .replace('!', "!!")
+                .replace('%', "!%")
+                .replace('_', "!_");
+            let below = |boundary: char| {
+                http_cache::Column::Url
+                    .like(LikeExpr::new(format!("{escaped}{boundary}%")).escape('!'))
+            };
+            matching = matching
+                .add(http_cache::Column::Url.eq(*url_prefix))
+                .add(below('/'))
+                .add(below('?'));
+        }
 
         let result = HttpCacheEntity::delete_many()
             .secure()
-            .scope_with(&scope)
-            .filter(sea_orm::Condition::all().add(http_cache::Column::Url.starts_with(url_prefix)))
+            .scope_with(scope)
+            .filter(matching)
             .exec(&conn)
             .await
             .map_err(map_scope_error)?;
@@ -4889,6 +5114,12 @@ impl SeaOrmRepoSyncStatusRepository {
     }
 }
 
+fn parse_stored<T: std::str::FromStr>(kind: &str, raw: &str) -> Result<T, DomainError> {
+    raw.parse().map_err(|_| {
+        DomainError::internal(format!("stored {kind} {raw:?} is not one this build knows"))
+    })
+}
+
 fn repo_sync_status_active_model(
     tenant_id: Uuid,
     r: &RepoSyncStatusRecord,
@@ -4897,21 +5128,23 @@ fn repo_sync_status_active_model(
         tenant_id: ActiveValue::Set(tenant_id),
         repo_full_name: ActiveValue::Set(r.repo_full_name.clone()),
         repo_id: ActiveValue::Set(r.repo_id),
-        status: ActiveValue::Set(r.status.clone()),
+        status: ActiveValue::Set(r.status.as_str().to_owned()),
         last_session_id: ActiveValue::Set(r.last_session_id),
         last_synced_at: ActiveValue::Set(r.last_synced_at.clone()),
     }
 }
 
-impl From<repo_sync_status::Model> for RepoSyncStatusRecord {
-    fn from(m: repo_sync_status::Model) -> Self {
-        Self {
+impl TryFrom<repo_sync_status::Model> for RepoSyncStatusRecord {
+    type Error = DomainError;
+
+    fn try_from(m: repo_sync_status::Model) -> Result<Self, DomainError> {
+        Ok(Self {
             repo_full_name: m.repo_full_name,
             repo_id: m.repo_id,
-            status: m.status,
+            status: parse_stored("repository run status", &m.status)?,
             last_session_id: m.last_session_id,
             last_synced_at: m.last_synced_at,
-        }
+        })
     }
 }
 
@@ -4965,19 +5198,23 @@ impl RepoSyncStatusRepository for SeaOrmRepoSyncStatusRepository {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(row.map(Into::into))
+        row.map(TryInto::try_into).transpose()
     }
 
     async fn list(
         &self,
         scope: &AccessScope,
-        status: Option<&str>,
+        status: Option<RepoRunStatus>,
+        after: Option<&str>,
         limit: u64,
     ) -> Result<Vec<RepoSyncStatusRecord>, DomainError> {
         let conn = self.db.conn()?;
         let mut condition = sea_orm::Condition::all();
         if let Some(status) = status {
-            condition = condition.add(repo_sync_status::Column::Status.eq(status));
+            condition = condition.add(repo_sync_status::Column::Status.eq(status.as_str()));
+        }
+        if let Some(after) = after {
+            condition = condition.add(repo_sync_status::Column::RepoFullName.gt(after));
         }
 
         let rows = RepoSyncStatusEntity::find()
@@ -4990,7 +5227,7 @@ impl RepoSyncStatusRepository for SeaOrmRepoSyncStatusRepository {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 }
 
@@ -5011,30 +5248,34 @@ fn sync_session_active_model(tenant_id: Uuid, r: &SyncSessionRecord) -> sync_ses
         id: ActiveValue::Set(r.id),
         repo_full_name: ActiveValue::Set(r.repo_full_name.clone()),
         repo_id: ActiveValue::Set(r.repo_id),
-        status: ActiveValue::Set(r.status.clone()),
+        status: ActiveValue::Set(r.status.as_str().to_owned()),
         progress_percent: ActiveValue::Set(r.progress_percent),
         error: ActiveValue::Set(r.error.clone()),
         summary_json: ActiveValue::Set(r.summary_json.clone()),
         created_at: ActiveValue::Set(r.created_at.clone()),
         started_at: ActiveValue::Set(r.started_at.clone()),
         ended_at: ActiveValue::Set(r.ended_at.clone()),
+        updated_at: ActiveValue::Set(r.updated_at.clone()),
     }
 }
 
-impl From<sync_sessions::Model> for SyncSessionRecord {
-    fn from(m: sync_sessions::Model) -> Self {
-        Self {
+impl TryFrom<sync_sessions::Model> for SyncSessionRecord {
+    type Error = DomainError;
+
+    fn try_from(m: sync_sessions::Model) -> Result<Self, DomainError> {
+        Ok(Self {
             id: m.id,
             repo_full_name: m.repo_full_name,
             repo_id: m.repo_id,
-            status: m.status,
+            status: parse_stored("sync session status", &m.status)?,
             progress_percent: m.progress_percent,
             error: m.error,
             summary_json: m.summary_json,
             created_at: m.created_at,
             started_at: m.started_at,
             ended_at: m.ended_at,
-        }
+            updated_at: m.updated_at,
+        })
     }
 }
 
@@ -5090,34 +5331,81 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(row.map(Into::into))
+        row.map(TryInto::try_into).transpose()
+    }
+
+    async fn record_heartbeat(
+        &self,
+        scope: &AccessScope,
+        id: Uuid,
+        progress_percent: i32,
+        updated_at: &str,
+    ) -> Result<(), DomainError> {
+        let conn = self.db.conn()?;
+        let result = SyncSessionEntity::update_many()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(sync_sessions::Column::Id.eq(id)))
+            .col_expr(
+                sync_sessions::Column::ProgressPercent,
+                Expr::value(progress_percent),
+            )
+            .col_expr(sync_sessions::Column::UpdatedAt, Expr::value(updated_at))
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        // A heartbeat that writes no row is what the liveness check reads as a
+        // dead process, so it has to be said out loud rather than passed off as
+        // a write: the row is gone, or this scope cannot see it.
+        if result.rows_affected == 0 {
+            return Err(DomainError::internal(format!(
+                "the heartbeat for sync session {id} matched no row"
+            )));
+        }
+        Ok(())
     }
 
     async fn list_recent(
         &self,
         scope: &AccessScope,
+        after: Option<(&str, Uuid)>,
         limit: u64,
     ) -> Result<Vec<SyncSessionRecord>, DomainError> {
         let conn = self.db.conn()?;
+        let mut condition = sea_orm::Condition::all();
+        if let Some((created_at, id)) = after {
+            condition = condition.add(
+                sea_orm::Condition::any()
+                    .add(sync_sessions::Column::CreatedAt.lt(created_at))
+                    .add(
+                        sea_orm::Condition::all()
+                            .add(sync_sessions::Column::CreatedAt.eq(created_at))
+                            .add(sync_sessions::Column::Id.lt(id)),
+                    ),
+            );
+        }
         let rows = SyncSessionEntity::find()
             .secure()
             .scope_with(scope)
+            .filter(condition)
             .order_by(sync_sessions::Column::CreatedAt, Order::Desc)
+            .order_by(sync_sessions::Column::Id, Order::Desc)
             .limit(limit)
             .all(&conn)
             .await
             .map_err(map_scope_error)?;
 
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     async fn list_by_statuses(
         &self,
         scope: &AccessScope,
-        statuses: &[&str],
+        statuses: &[SessionStatus],
     ) -> Result<Vec<(Uuid, SyncSessionRecord)>, DomainError> {
         let conn = self.db.conn()?;
-        let wanted: Vec<String> = statuses.iter().map(|s| (*s).to_owned()).collect();
+        let wanted: Vec<String> = statuses.iter().map(|s| s.as_str().to_owned()).collect();
         let rows = SyncSessionEntity::find()
             .secure()
             .scope_with(scope)
@@ -5126,7 +5414,9 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             .await
             .map_err(map_scope_error)?;
 
-        Ok(rows.into_iter().map(|m| (m.tenant_id, m.into())).collect())
+        rows.into_iter()
+            .map(|m| Ok((m.tenant_id, m.try_into()?)))
+            .collect()
     }
 }
 
@@ -5271,6 +5561,8 @@ impl From<entity_fingerprints::Model> for EntityFingerprintRecord {
     }
 }
 
+const FINGERPRINT_UPSERT_CHUNK: usize = 500;
+
 #[async_trait]
 impl EntityFingerprintRepository for SeaOrmEntityFingerprintRepository {
     async fn upsert(
@@ -5306,6 +5598,80 @@ impl EntityFingerprintRepository for SeaOrmEntityFingerprintRepository {
             .map_err(map_scope_error)?;
 
         Ok(record)
+    }
+
+    async fn find_many(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+        entity_ids: &[String],
+    ) -> Result<Vec<EntityFingerprintRecord>, DomainError> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.conn()?;
+        let rows = EntityFingerprintEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(entity_fingerprints::Column::RepoId.eq(repo_id))
+                    .add(entity_fingerprints::Column::Family.eq(family))
+                    .add(
+                        entity_fingerprints::Column::EntityId
+                            .is_in(entity_ids.iter().map(String::as_str)),
+                    ),
+            )
+            .all(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn upsert_many(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        records: Vec<EntityFingerprintRecord>,
+    ) -> Result<(), DomainError> {
+        // A batch insert cannot be checked row by row the way the single-row
+        // upsert is, so the tenant is checked once here instead. Every row
+        // below is built from this one `tenant_id`, which makes the two checks
+        // equivalent, and without it a scope that does not cover the tenant
+        // would write anyway.
+        validate_tenant_in_scope(tenant_id, scope).map_err(map_scope_error)?;
+
+        let conn = self.db.conn()?;
+        for chunk in records.chunks(FINGERPRINT_UPSERT_CHUNK) {
+            let on_conflict = SecureOnConflict::<EntityFingerprintEntity>::columns([
+                entity_fingerprints::Column::TenantId,
+                entity_fingerprints::Column::RepoId,
+                entity_fingerprints::Column::Family,
+                entity_fingerprints::Column::EntityId,
+            ])
+            .update_columns([
+                entity_fingerprints::Column::Fingerprint,
+                entity_fingerprints::Column::UpdatedAt,
+                entity_fingerprints::Column::NodeId,
+                entity_fingerprints::Column::ChildCountsHash,
+                entity_fingerprints::Column::LastRefinedAt,
+                entity_fingerprints::Column::RefinementStatus,
+            ])
+            .map_err(map_scope_error)?;
+            let models = chunk
+                .iter()
+                .map(|record| entity_fingerprint_active_model(tenant_id, record));
+            EntityFingerprintEntity::insert_many(models)
+                .secure()
+                .scope_unchecked(scope)
+                .map_err(map_scope_error)?
+                .on_conflict(on_conflict)
+                .exec(&conn)
+                .await
+                .map_err(map_scope_error)?;
+        }
+        Ok(())
     }
 
     async fn find(

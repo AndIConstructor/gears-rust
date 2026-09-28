@@ -66,6 +66,13 @@ pub trait RepoRepository: Send + Sync {
         scope: &AccessScope,
         full_name: &str,
     ) -> Result<Option<Repo>, DomainError>;
+
+    /// GitHub's ids for every mirrored repository of `owner`.
+    ///
+    /// Filtered in the query rather than by the caller, so an owner is not
+    /// missed because the tenant has more repositories than one page holds.
+    async fn ids_by_owner(&self, scope: &AccessScope, owner: &str)
+    -> Result<Vec<i64>, DomainError>;
 }
 
 /// Write-side record for a mirrored issue (pull requests included).
@@ -470,6 +477,11 @@ pub trait PullRequestRepository: Send + Sync {
         repo_id: i64,
         number: i64,
     ) -> Result<Option<PullRequest>, DomainError>;
+    async fn open_head_shas(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<Vec<String>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
@@ -867,6 +879,88 @@ pub struct ContributorRecord {
     /// When this person was first and last seen in mirrored data.
     pub first_seen_at: Option<DateTime<Utc>>,
     pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+impl ContributorRecord {
+    /// Take in another view of the same person: roles union, the widest
+    /// observation window, and the profile of whichever view saw them last.
+    ///
+    /// Which side is newer is read from `last_seen_at` rather than assumed,
+    /// because callers point both ways: a listing folds a fresh sighting into
+    /// what it has, while the storage merge folds the stored row into a fresh
+    /// record. A newer view that carries no avatar or profile URL leaves the
+    /// one already held, so a sighting that knew only a login does not blank
+    /// what an earlier one learned.
+    pub fn absorb(&mut self, other: Self) {
+        let theirs_is_newer = match (self.last_seen_at, other.last_seen_at) {
+            (Some(mine), Some(theirs)) => theirs > mine,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+
+        for role in other.roles {
+            if !self.roles.contains(&role) {
+                self.roles.push(role);
+            }
+        }
+        self.roles.sort();
+        self.first_seen_at = match (self.first_seen_at, other.first_seen_at) {
+            (Some(mine), Some(theirs)) => Some(mine.min(theirs)),
+            (mine, theirs) => mine.or(theirs),
+        };
+        self.last_seen_at = self.last_seen_at.max(other.last_seen_at);
+
+        if theirs_is_newer {
+            self.account_type = other.account_type;
+            if other.login.is_some() {
+                self.login = other.login;
+            }
+            if other.avatar_url.is_some() {
+                self.avatar_url = other.avatar_url;
+            }
+            if other.html_url.is_some() {
+                self.html_url = other.html_url;
+            }
+            return;
+        }
+        self.login = self.login.take().or(other.login);
+        self.avatar_url = self.avatar_url.take().or(other.avatar_url);
+        self.html_url = self.html_url.take().or(other.html_url);
+    }
+}
+
+#[cfg(test)]
+mod contributor_record_tests {
+    use chrono::{Duration, Utc};
+
+    use super::ContributorRecord;
+
+    fn sighting(profile: Option<&str>, seen_hours_ago: i64) -> ContributorRecord {
+        let seen = Utc::now() - Duration::hours(seen_hours_ago);
+        ContributorRecord {
+            repo_id: 42,
+            user_id: 7,
+            login: Some("alice".to_owned()),
+            account_type: "User".to_owned(),
+            avatar_url: profile.map(|_| "https://avatars.example/alice".to_owned()),
+            html_url: profile.map(str::to_owned),
+            roles: vec!["author".to_owned()],
+            first_seen_at: Some(seen),
+            last_seen_at: Some(seen),
+        }
+    }
+
+    #[test]
+    fn a_newer_record_without_urls_keeps_the_stored_ones() {
+        let mut fresh = sighting(None, 0);
+        fresh.absorb(sighting(Some("https://github.com/alice"), 48));
+
+        assert_eq!(
+            fresh.avatar_url.as_deref(),
+            Some("https://avatars.example/alice")
+        );
+        assert_eq!(fresh.html_url.as_deref(), Some("https://github.com/alice"));
+    }
 }
 
 #[async_trait]
@@ -1415,11 +1509,28 @@ pub trait IssueTimelineRepository: Send + Sync {
 /// dies leaves `in_progress` here, and the resume operation re-runs every
 /// repository still marked so (PRD §5.2).
 #[domain_model]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum RepoRunStatus {
+    InProgress,
+    Complete,
+}
+
+impl RepoRunStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
+
+#[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoSyncStatusRecord {
     pub repo_full_name: String,
     pub repo_id: Option<i64>,
-    pub status: String,
+    pub status: RepoRunStatus,
     pub last_session_id: Option<Uuid>,
     pub last_synced_at: Option<String>,
 }
@@ -1439,12 +1550,13 @@ pub trait RepoSyncStatusRepository: Send + Sync {
         repo_full_name: &str,
     ) -> Result<Option<RepoSyncStatusRecord>, DomainError>;
 
-    /// Every repository the scope can see, newest slug order, optionally
-    /// narrowed to one status.
+    /// Every repository the scope can see in slug order, optionally narrowed
+    /// to one status, starting after the slug `after` when a page continues.
     async fn list(
         &self,
         scope: &AccessScope,
-        status: Option<&str>,
+        status: Option<RepoRunStatus>,
+        after: Option<&str>,
         limit: u64,
     ) -> Result<Vec<RepoSyncStatusRecord>, DomainError>;
 }
@@ -1454,21 +1566,44 @@ pub trait RepoSyncStatusRepository: Send + Sync {
 ///
 /// `status` holds one of `queued`, `in_progress`, `complete`, `failed`,
 /// `interrupted`; the sync engine owns the transitions (gears-rust#4632).
-/// The middle three come from DESIGN §3.7's `sync_sessions` table; the
-/// other two are additions the background worker needs.
+/// The last four are the reference DESIGN §3.7 `extraction_sessions` states,
+/// with its `running` and `completed` spelled `in_progress` and `complete` to
+/// match the per-repository run status; `queued` is the one addition, for a
+/// job waiting on the background worker.
+#[domain_model]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum SessionStatus {
+    Queued,
+    InProgress,
+    Complete,
+    Failed,
+    Interrupted,
+}
+
+impl SessionStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
+
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncSessionRecord {
     pub id: Uuid,
     pub repo_full_name: String,
     pub repo_id: Option<i64>,
-    pub status: String,
+    pub status: SessionStatus,
     pub progress_percent: i32,
     pub error: Option<String>,
     pub summary_json: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[async_trait]
@@ -1486,9 +1621,22 @@ pub trait SyncSessionRepository: Send + Sync {
         id: Uuid,
     ) -> Result<Option<SyncSessionRecord>, DomainError>;
 
+    /// The heartbeat's write: `progress_percent` and `updated_at` only, so a
+    /// tick never overwrites the rest of the row with a stale copy.
+    async fn record_heartbeat(
+        &self,
+        scope: &AccessScope,
+        id: Uuid,
+        progress_percent: i32,
+        updated_at: &str,
+    ) -> Result<(), DomainError>;
+
+    /// Sessions newest first, `created_at` then `id` descending, starting
+    /// after the `(created_at, id)` pair in `after` when a page continues.
     async fn list_recent(
         &self,
         scope: &AccessScope,
+        after: Option<(&str, Uuid)>,
         limit: u64,
     ) -> Result<Vec<SyncSessionRecord>, DomainError>;
 
@@ -1500,7 +1648,7 @@ pub trait SyncSessionRepository: Send + Sync {
     async fn list_by_statuses(
         &self,
         scope: &AccessScope,
-        statuses: &[&str],
+        statuses: &[SessionStatus],
     ) -> Result<Vec<(Uuid, SyncSessionRecord)>, DomainError>;
 }
 
@@ -1564,6 +1712,24 @@ pub trait EntityFingerprintRepository: Send + Sync {
         family: &str,
         entity_id: &str,
     ) -> Result<Option<EntityFingerprintRecord>, DomainError>;
+
+    /// The stored fingerprints of `family` for `entity_ids`, in no particular
+    /// order: one read for a whole listing page.
+    async fn find_many(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+        entity_ids: &[String],
+    ) -> Result<Vec<EntityFingerprintRecord>, DomainError>;
+
+    /// A whole page of fingerprints in one statement per chunk.
+    async fn upsert_many(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        records: Vec<EntityFingerprintRecord>,
+    ) -> Result<(), DomainError>;
 }
 
 /// The storage side of one sync, one method per task.
@@ -1649,6 +1815,19 @@ pub trait SyncWriter: Send + Sync {
         tenant_id: Uuid,
         jobs: Vec<WorkflowJobRecord>,
     ) -> Result<(), DomainError>;
+
+    /// Merge the people one run met into `gm_contributors`, unioning roles
+    /// with what earlier runs stored; returns how many rows were written.
+    ///
+    /// # Errors
+    /// Storage failures.
+    async fn write_contributors(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        contributors: Vec<ContributorRecord>,
+    ) -> Result<u64, DomainError>;
 
     /// Hard-delete rows of every complete listing that this sync did not
     /// touch (`extracted_at` before `watermark`); returns how many went.

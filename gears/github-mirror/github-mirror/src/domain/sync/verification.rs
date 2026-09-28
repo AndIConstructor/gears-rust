@@ -35,17 +35,6 @@ impl CountGap {
         }
         GapOutcome::Repair
     }
-
-    #[must_use]
-    pub fn advance(&self, stored: u64) -> Self {
-        Self {
-            entity_type: self.entity_type.clone(),
-            expected: self.expected,
-            stored,
-            repair_attempts: self.repair_attempts + 1,
-            previous_gap: Some(self.size()),
-        }
-    }
 }
 
 #[must_use]
@@ -72,5 +61,9 @@ pub fn pull_gaps(detail: &PullDetail) -> Vec<CountGap> {
 
 #[cfg(test)]
 #[path = "verification_tests.rs"]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
 mod verification_tests;
