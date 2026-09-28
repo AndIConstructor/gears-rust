@@ -3,20 +3,13 @@
 import pytest
 
 from .helpers import (
+    RECEIPT,
     assert_operation,
     delete_batch_and_poll,
     delete_one_and_poll,
     read_entity,
     read_tombstone,
-    submit_and_poll,
 )
-
-
-RECEIPT = {
-    "operation_id": "<operation_id>",
-    "status": "<status>",
-    "replayed": False,
-}
 
 
 def completed(items):
@@ -51,22 +44,6 @@ def refused(gts_id, reason):
         "resource_version": None,
         "error": {"reason": reason, "message": "<message>"},
     }
-
-
-@pytest.fixture
-def given_registered(registry_http, registry_api_path):
-    """Register prerequisites, failing loudly if the setup itself did not commit."""
-
-    async def register(*items):
-        operation = await submit_and_poll(
-            registry_http, registry_api_path, list(items), RECEIPT
-        )
-        assert all(item["status"] == "succeeded" for item in operation["items"]), (
-            f"the scenario's precondition did not register: {operation}"
-        )
-        return operation
-
-    return register
 
 
 @pytest.mark.smoke
@@ -178,10 +155,26 @@ async def test_a_live_dependant_outside_the_batch_blocks_the_deletion(
     operation = await delete_one_and_poll(
         registry_http, registry_api_path, schema["gts_id"], 1, RECEIPT
     )
+    # The refusal says how many dependants block it, never which ones: the
+    # caller may not be entitled to read them.
     assert_operation(
         operation,
-        completed([refused(schema["gts_id"], "has_registered_dependents")]),
+        completed(
+            [
+                {
+                    "gts_id": schema["gts_id"],
+                    "status": "failed",
+                    "resource_version": None,
+                    "error": {
+                        "reason": "has_registered_dependents",
+                        "message": f"'{schema['gts_id']}' has 1 live direct registered "
+                        "dependants; delete or revise them first",
+                    },
+                },
+            ]
+        ),
         ordered=True,
+        exact_messages=True,
     )
 
     after = await read_entity(registry_http, registry_api_path, schema["gts_id"])

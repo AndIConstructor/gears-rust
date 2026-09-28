@@ -1292,7 +1292,7 @@ impl EntityLookupDto {
     }
 }
 
-/// The results of one batch read, in request order.
+/// One answer per distinct key in a batch read. Result order is not contractual.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct EntityLookupsDto {

@@ -9,6 +9,8 @@ import uuid
 import httpx
 import pytest
 
+from .helpers import RECEIPT, assert_operation, submit_and_poll
+
 
 SCENARIO_TESTS = pytest.StashKey[dict[str, list[str]]]()
 
@@ -82,9 +84,53 @@ def discovery_fixture():
 
 
 @pytest.fixture
+def neighbour_discovery_fixture():
+    """The same trees in a second namespace, which a target pattern must exclude."""
+    return _topic_loader("discovery")
+
+
+@pytest.fixture
 def reading_fixture():
     """Load authored documents and expected artifacts for read scenarios."""
     return _topic_loader("reading")
+
+
+@pytest.fixture
+def given_registered(registry_http, registry_api_path):
+    """Register prerequisites and prove that every one of them committed.
+
+    The whole operation is compared, so a missing outcome fails the setup
+    instead of leaving an exclusion test with nothing to exclude.
+    """
+
+    async def register(*items):
+        operation = await submit_and_poll(
+            registry_http, registry_api_path, list(items), RECEIPT
+        )
+        assert_operation(
+            operation,
+            {
+                "operation_id": "<operation_id>",
+                "kind": "registration",
+                "dry_run": False,
+                "status": "completed",
+                "created_at": "<created_at>",
+                "started_at": "<started_at>",
+                "completed_at": "<completed_at>",
+                "items": [
+                    {
+                        "gts_id": item["gts_id"],
+                        "status": "succeeded",
+                        "resource_version": 1,
+                        "error": None,
+                    }
+                    for item in items
+                ],
+            },
+        )
+        return operation
+
+    return register
 
 
 def pytest_configure(config):

@@ -29,7 +29,7 @@ Valid root Type Schema fixtures use the GTS §4.4.1 closed-envelope pattern: the
 1. Submit and complete the schema operation.
 2. Submit and complete the Instance under a new key.
 
-**Then:** the Instance succeeds at version 1 and reads back with its exact content; schema-only artifacts are `null`.
+**Then:** the Instance succeeds at version 1 and reads back with its exact content; schema-only artifacts are absent, not `null`.
 
 ### TR-REG-003 — Register an Instance before its schema in one batch
 
