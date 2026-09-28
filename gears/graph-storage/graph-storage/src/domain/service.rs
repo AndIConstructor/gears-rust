@@ -238,12 +238,25 @@ impl GraphServices {
                 }
             }
             let ancestor_refs: Vec<&serde_json::Value> = ancestor_values.iter().collect();
-            ontology::analyze(
+            if let Err(error) = ontology::analyze(
                 &registration.type_id,
                 &registration.schema,
                 &ancestor_refs,
                 usize::from(self.config.ontology_max_chain_depth),
-            )?;
+            ) {
+                // Stored byte-identical by an earlier build: the store
+                // converges it (`infra/store/types.rs`, the same exception),
+                // so it is not refused here first.
+                let stored = self
+                    .store
+                    .get_type(&store_ctx, &registration.type_id)
+                    .await
+                    .ok();
+                if stored.is_some_and(|record| record.schema == registration.schema) {
+                    continue;
+                }
+                return Err(error);
+            }
         }
 
         Ok(self

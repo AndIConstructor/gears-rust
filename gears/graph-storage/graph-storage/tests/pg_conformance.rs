@@ -25,6 +25,7 @@
 //! `--test-threads` (see the `test-graph-storage-pg` target).
 
 mod conformance;
+mod support;
 
 use std::sync::Arc;
 
@@ -1037,6 +1038,126 @@ async fn the_hop_and_the_filtered_listing_have_an_index_to_use() {
         "a listing reads one type in key order, without a sort:\n{}",
         listing.join("\n")
     );
+}
+
+/// A type an earlier build stored, and this build's analysis refuses,
+/// converges when it is offered again byte-identical.
+///
+/// The shape is the one Studio met after the upgrade (2026-09-28): its edge
+/// types were registered with `x-gts-traits: {"full_text_search": []}`, which
+/// the edge base no longer admits. Re-registering the unchanged schema -- what
+/// a producer sends on every run -- was refused, and the changed schema that
+/// this build accepts is a different schema, `409` without
+/// `on_existing: update`. The stored row is written here by operator
+/// surgery, because no current build writes it; a *changed* schema that is
+/// still invalid is refused as before.
+#[tokio::test]
+async fn a_stored_type_this_build_would_refuse_converges_when_offered_unchanged() {
+    use sea_orm::ConnectionTrait as _;
+    let Some(stand) = stand(HopStrategy::Pgq).await else {
+        return;
+    };
+    let tenant = tenant_on(&stand).await;
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = conformance::ctx(tenant, &scope, None);
+    let batch = conformance::ontology_batch();
+    stand
+        .store
+        .register_types(&ctx, batch.clone())
+        .await
+        .expect("ontology registers");
+
+    let mut legacy = batch
+        .iter()
+        .find(|r| r.type_id == conformance::LINK)
+        .expect("the batch carries the link type")
+        .schema
+        .clone();
+    legacy["x-gts-traits"] = serde_json::json!({ "full_text_search": [] });
+
+    let raw = sea_orm::Database::connect(&stand.dsn)
+        .await
+        .expect("a plain connection for operator surgery");
+    raw.execute_raw(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DatabaseBackend::Postgres,
+        "UPDATE gts_type SET type_schema = $1 WHERE tenant_id = $2 AND gts_type_id = $3",
+        [
+            legacy.clone().into(),
+            tenant.into(),
+            conformance::LINK.to_owned().into(),
+        ],
+    ))
+    .await
+    .expect("the stored schema is the one an earlier build wrote");
+
+    let registered = stand
+        .store
+        .register_types_with(
+            &ctx,
+            vec![graph_storage_sdk::models::TypeRegistration {
+                type_id: conformance::LINK.to_owned(),
+                schema: legacy.clone(),
+            }],
+            graph_storage_sdk::models::TypeRegistrationOptions::default(),
+        )
+        .await
+        .expect("the unchanged stored schema converges");
+    assert_eq!(
+        registered.first().map(|r| r.outcome),
+        Some(graph_storage_sdk::models::TypeOutcome::Unchanged)
+    );
+
+    let legacy_schema = legacy.clone();
+    let mut changed = legacy;
+    changed["description"] = serde_json::json!("changed, and still refused");
+    stand
+        .store
+        .register_types(
+            &ctx,
+            vec![graph_storage_sdk::models::TypeRegistration {
+                type_id: conformance::LINK.to_owned(),
+                schema: changed,
+            }],
+        )
+        .await
+        .expect_err("a changed schema is analyzed, and this one is refused");
+
+    // The service analyzes before the store does, so it holds the same
+    // exception: the path REST and the in-process client take.
+    let harness = support::Harness::configured_over_store(
+        Arc::clone(&stand.store) as Arc<dyn GraphStoreV1>,
+        Arc::new(graph_storage::infra::fake_store::FakeGraphStore::new()),
+        Arc::new(support::AllowInOwnTenant),
+        GraphStorageConfig::default(),
+    );
+    let service_ctx = harness.ctx();
+    harness
+        .services
+        .register_types(&service_ctx, conformance::ontology_batch())
+        .await
+        .expect("the ontology registers through the service");
+    raw.execute_raw(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DatabaseBackend::Postgres,
+        "UPDATE gts_type SET type_schema = $1 WHERE tenant_id = $2 AND gts_type_id = $3",
+        [
+            legacy_schema.clone().into(),
+            harness.tenant.into(),
+            conformance::LINK.to_owned().into(),
+        ],
+    ))
+    .await
+    .expect("the service tenant holds the earlier build's schema too");
+    harness
+        .services
+        .register_types(
+            &service_ctx,
+            vec![graph_storage_sdk::models::TypeRegistration {
+                type_id: conformance::LINK.to_owned(),
+                schema: legacy_schema,
+            }],
+        )
+        .await
+        .expect("the service converges the unchanged stored schema too");
 }
 
 /// Admission refuses a NUL before any statement; this is the net under it. A

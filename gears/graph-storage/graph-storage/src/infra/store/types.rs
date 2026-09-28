@@ -331,13 +331,51 @@ async fn register_in_tx(
         let ancestors = ancestor_definitions(scope, tx, &registration.type_id, &in_batch).await?;
         let ancestor_refs: Vec<&serde_json::Value> =
             ancestors.iter().map(|(_, schema)| schema).collect();
-        let descriptor = ontology::analyze(
+        let descriptor = match ontology::analyze(
             &registration.type_id,
             &registration.schema,
             &ancestor_refs,
             max_chain_depth,
-        )
-        .map_err(|error| invalid_candidate(&registration.type_id, error.to_string()))?;
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                // A schema this build refuses but an earlier build stored,
+                // offered again byte-identical, converges as it always did.
+                // Analysis only tightens between releases (the traits a base
+                // admits, the chain ceiling), and refusing the unchanged
+                // re-registration a producer sends on every run would fail
+                // each of those runs after an upgrade -- while the changed
+                // schema that would satisfy this build is a different schema,
+                // `409` without `on_existing: update`, which the in-process
+                // client cannot send. What the stored type already does keeps
+                // working; a *changed* schema is analyzed as before.
+                let stored = gts_type::Entity::find()
+                    .secure()
+                    .scope_with(scope)
+                    .filter(
+                        Condition::all()
+                            .add(gts_type::Column::GtsTypeId.eq(registration.type_id.clone())),
+                    )
+                    .one(tx)
+                    .await
+                    .map_err(map_scope_err)?;
+                if let Some(model) = stored
+                    && model.type_schema == registration.schema
+                    && options.migration_for(&registration.type_id).is_none()
+                {
+                    in_batch.insert(registration.type_id.clone(), model.type_schema.clone());
+                    let type_id = registration.type_id.clone();
+                    out.push(RegisteredType {
+                        record: to_record(model)?,
+                        outcome: TypeOutcome::Unchanged,
+                        basis: None,
+                        change: Some(unchanged_type_change(&type_id, Vec::new())),
+                    });
+                    continue;
+                }
+                return Err(invalid_candidate(&registration.type_id, error.to_string()));
+            }
+        };
         // The schema must compile against its resolved chain *here*, not at
         // the first ingest. A `$ref` to something nobody registered passes
         // every identifier-based check -- the chain comes from the type id,

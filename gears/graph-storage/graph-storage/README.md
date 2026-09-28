@@ -103,8 +103,11 @@ Each is the shipped behaviour, with the contract that fixes it.
   narrows what the level accepts (a value that was any type must now match the
   declaration), so the same edit is backward-incompatible and `update` refuses
   it; close the leaf's payload, restating inherited properties, to make it
-  compatible. Registering one type at a time is a valid fallback, not a
-  workaround.
+  compatible. A type an earlier build stored converges when it is offered
+  again byte-identical, even where this build's analysis would refuse it (an
+  upgrade does not fail the producer's unchanged run); a changed schema is
+  analyzed by this build. Registering one type at a time is a valid fallback,
+  not a workaround.
 - **`expected_version` is the one conditional write.** A stored version is 1 or
   more and advances on every update; `Some(n)` requires exactly `n` and is a
   conflict otherwise, including when no node is stored under the key.
