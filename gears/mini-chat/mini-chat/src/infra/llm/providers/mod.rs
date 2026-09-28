@@ -85,3 +85,37 @@ pub fn upstream_headers_for_kind(kind: ProviderKind) -> Option<oagw_sdk::Headers
         | ProviderKind::VllmResponses => None,
     }
 }
+
+/// Request fields `extra_body` must not overwrite: the model and input, the
+/// output and tool-call caps derived from the quota, the tools the turn was
+/// granted, and the caller identity.
+const RESERVED_BODY_KEYS: &[&str] = &[
+    "model",
+    "input",
+    "messages",
+    "instructions",
+    "stream",
+    "max_output_tokens",
+    "max_completion_tokens",
+    "max_tokens",
+    "max_tool_calls",
+    "tools",
+    "user",
+    "metadata",
+];
+
+/// Merge the model policy's `extra_body` object into the top level of a
+/// request body. Reserved keys are skipped (with a warning), so a catalog
+/// entry cannot lift quota-derived caps or change the model or identity.
+pub(super) fn merge_extra_body(body: &mut serde_json::Value, extra: &serde_json::Value) {
+    let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) else {
+        return;
+    };
+    for (k, v) in extra_obj {
+        if RESERVED_BODY_KEYS.contains(&k.as_str()) {
+            tracing::warn!(key = %k, "extra_body key ignored: the request sets it");
+            continue;
+        }
+        body_obj.insert(k.clone(), v.clone());
+    }
+}

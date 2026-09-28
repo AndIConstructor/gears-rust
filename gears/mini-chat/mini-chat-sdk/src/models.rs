@@ -159,9 +159,12 @@ pub struct ModelApiParams {
     pub stop: Vec<String>,
     /// Provider-specific extra body parameters (e.g. vLLM `top_k`,
     /// `chat_template_kwargs`). Must be a JSON object; its keys are merged
-    /// into the top level of the request body (overwriting typed fields) by
-    /// the Responses, Chat Completions and vLLM adapters. The Anthropic
-    /// adapter ignores it. A non-object value is ignored.
+    /// into the top level of the request body (overwriting typed sampling
+    /// fields) by the Responses, Chat Completions and vLLM adapters. Keys the
+    /// request itself controls (`model`, `input`, `messages`, `instructions`,
+    /// `stream`, the output and tool-call caps, `tools`, `user`, `metadata`)
+    /// are ignored with a warning. The Anthropic adapter ignores the field.
+    /// A non-object value is ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
     /// Reasoning effort for o-series models (low/medium/high).

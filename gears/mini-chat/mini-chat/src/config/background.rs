@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// Upper bound of the `scan_interval_secs` of the periodic workers. A larger
+/// value makes the worker scan once at startup and then practically never.
+pub const MAX_SCAN_INTERVAL_SECS: u64 = 3600;
+
 /// Orphan watchdog — detects and finalizes turns abandoned by crashed pods.
 ///
 /// Requires leader election (exactly one active instance per environment).
@@ -41,8 +45,11 @@ impl OrphanWatchdogConfig {
                 self.timeout_secs
             ));
         }
-        if self.scan_interval_secs == 0 {
-            return Err("orphan_watchdog.scan_interval_secs must be > 0".to_owned());
+        if !(1..=MAX_SCAN_INTERVAL_SECS).contains(&self.scan_interval_secs) {
+            return Err(format!(
+                "orphan_watchdog.scan_interval_secs must be 1-{MAX_SCAN_INTERVAL_SECS}, got {}",
+                self.scan_interval_secs
+            ));
         }
         Ok(())
     }
@@ -95,8 +102,11 @@ impl UploadReaperConfig {
                 self.stale_after_secs
             ));
         }
-        if self.scan_interval_secs == 0 {
-            return Err("upload_reaper.scan_interval_secs must be > 0".to_owned());
+        if !(1..=MAX_SCAN_INTERVAL_SECS).contains(&self.scan_interval_secs) {
+            return Err(format!(
+                "upload_reaper.scan_interval_secs must be 1-{MAX_SCAN_INTERVAL_SECS}, got {}",
+                self.scan_interval_secs
+            ));
         }
         Ok(())
     }
@@ -166,7 +176,7 @@ impl Default for ThreadSummaryWorkerConfig {
 impl ThreadSummaryWorkerConfig {
     /// Bounds of `claim_timeout_secs`. The upper bound keeps a hung summary
     /// call from holding the outbox partition lease indefinitely.
-    pub const MIN_CLAIM_TIMEOUT_SECS: u64 = 5;
+    pub const MIN_CLAIM_TIMEOUT_SECS: u64 = 30;
     pub const MAX_CLAIM_TIMEOUT_SECS: u64 = 3600;
 
     pub fn validate(&self) -> Result<(), String> {
@@ -348,11 +358,11 @@ mod tests {
             claim_timeout_secs: secs,
             ..ThreadSummaryWorkerConfig::default()
         };
-        for secs in [4, 3601] {
+        for secs in [29, 3601] {
             let err = with(secs).validate().unwrap_err();
             assert!(err.contains("claim_timeout_secs"), "{err}");
         }
-        for secs in [5, 3600] {
+        for secs in [30, 3600] {
             with(secs).validate().unwrap();
         }
     }

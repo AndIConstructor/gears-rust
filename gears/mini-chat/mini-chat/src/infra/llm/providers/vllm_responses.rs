@@ -330,12 +330,8 @@ fn build_request_body<M>(request: &LlmRequest<M>, stream: bool) -> serde_json::V
         }
         // `extra_body` carries vLLM-specific kwargs (e.g. `top_k`,
         // `chat_template_kwargs`); merged at the top level.
-        if let Some(ref extra) = p.extra_body
-            && let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object())
-        {
-            for (k, v) in extra_obj {
-                body_obj.insert(k.clone(), v.clone());
-            }
+        if let Some(ref extra) = p.extra_body {
+            super::merge_extra_body(&mut body, extra);
         }
     }
 

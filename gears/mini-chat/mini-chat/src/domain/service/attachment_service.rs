@@ -246,7 +246,7 @@ struct BackgroundIndexing<AR: AttachmentRepository + 'static> {
     db: Arc<DbProvider>,
     attachment_repo: Arc<AR>,
     vector_store: Arc<dyn VectorStoreProvider>,
-    file_storage: Arc<dyn FileStorageProvider>,
+    outbox_enqueuer: Arc<dyn OutboxEnqueuer>,
     ctx: SecurityContext,
     scope: AccessScope,
     attachment_id: Uuid,
@@ -255,12 +255,16 @@ struct BackgroundIndexing<AR: AttachmentRepository + 'static> {
     provider_file_id: String,
     /// [`BACKGROUND_INDEXING_TIMEOUT`]; shorter in tests.
     timeout: std::time::Duration,
+    /// Cancelled on gear stop. The row stays `uploaded`; the upload reaper
+    /// finishes it once `updated_at` goes stale.
+    shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl<AR: AttachmentRepository + 'static> BackgroundIndexing<AR> {
     /// Keep polling after the upload request returned `uploaded`.
     /// `completed` → `ready`; `failed` or [`BACKGROUND_INDEXING_TIMEOUT`] →
-    /// `failed` / `indexing_failed` and the provider file is deleted.
+    /// `failed` / `indexing_failed` with the provider file handed to the
+    /// attachment cleanup.
     async fn run(self) {
         match self.wait().await {
             None => {}
@@ -274,6 +278,16 @@ impl<AR: AttachmentRepository + 'static> BackgroundIndexing<AR> {
     /// refreshes `updated_at` so the upload reaper leaves the row alone.
     /// `None` when the row is gone or no longer `uploaded`.
     async fn wait(&self) -> Option<IndexingWait> {
+        tokio::select! {
+            outcome = self.wait_until_settled() => outcome,
+            () = self.shutdown.cancelled() => {
+                tracing::info!(attachment_id = %self.attachment_id, "background indexing: stopped on shutdown");
+                None
+            }
+        }
+    }
+
+    async fn wait_until_settled(&self) -> Option<IndexingWait> {
         let overall = tokio::time::Instant::now() + self.timeout;
         loop {
             if !self.heartbeat().await {
@@ -355,40 +369,75 @@ impl<AR: AttachmentRepository + 'static> BackgroundIndexing<AR> {
         }
     }
 
-    async fn delete_provider_file(&self) {
-        if let Err(e) = self
-            .file_storage
-            .delete_file(self.ctx.clone(), &self.provider_id, &self.provider_file_id)
-            .await
-        {
-            tracing::warn!(provider_file_id = %self.provider_file_id, error = %e, "background indexing: file delete failed");
-        }
-    }
-
+    /// Mark the attachment `failed` / `indexing_failed` and hand its provider
+    /// file to the attachment cleanup, in one transaction: the outbox handler
+    /// deletes the file with retries, so a failed delete does not leave it
+    /// behind. A row that changed meanwhile (deleted, owned by chat cleanup)
+    /// is left to whoever changed it.
     async fn mark_failed(&self, reason: &str) {
-        use crate::domain::repos::SetFailedParams;
-        tracing::warn!(attachment_id = %self.attachment_id, reason = %reason, "background indexing: failed");
-        let result = match self.db.conn() {
+        // Provider text: redact provider ids, and log with Debug so control
+        // characters are escaped on the text console too.
+        let reason = crate::infra::llm::sanitize_provider_message(reason);
+        tracing::warn!(attachment_id = %self.attachment_id, reason = ?reason, "background indexing: failed");
+        let row = match self.db.conn() {
             Ok(conn) => {
                 self.attachment_repo
-                    .cas_set_failed(
-                        &conn,
-                        &self.scope,
-                        SetFailedParams {
-                            id: self.attachment_id,
-                            error_code: "indexing_failed".to_owned(),
-                            from_status: "uploaded".to_owned(),
-                        },
-                    )
+                    .get(&conn, &self.scope, self.attachment_id)
                     .await
             }
             Err(e) => Err(DomainError::from(e)),
         };
+        let row = match row {
+            Ok(Some(row)) => row,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::error!(attachment_id = %self.attachment_id, error = %e, "background indexing: load row failed");
+                return;
+            }
+        };
+        let event = crate::domain::repos::AttachmentCleanupEvent {
+            event_type: "attachment_indexing_failed".to_owned(),
+            tenant_id: row.tenant_id,
+            chat_id: row.chat_id,
+            attachment_id: row.id,
+            provider_file_id: Some(self.provider_file_id.clone()),
+            vector_store_id: None,
+            storage_backend: row.storage_backend.clone(),
+            attachment_kind: row.attachment_kind.to_string(),
+            deleted_at: time::OffsetDateTime::now_utc(),
+            secondary_ref: None,
+        };
+        self.fail_with_cleanup(event).await;
+    }
+
+    /// One transaction: CAS the row to `failed` and enqueue its cleanup.
+    async fn fail_with_cleanup(&self, event: crate::domain::repos::AttachmentCleanupEvent) {
+        let repo = Arc::clone(&self.attachment_repo);
+        let outbox = Arc::clone(&self.outbox_enqueuer);
+        let scope = self.scope.clone();
+        let id = self.attachment_id;
+        let result = self
+            .db
+            .transaction(move |tx| {
+                Box::pin(async move {
+                    let affected = repo
+                        .cas_fail_uploaded_for_cleanup(tx, &scope, id, "indexing_failed")
+                        .await
+                        .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
+                    if affected == 0 {
+                        return Ok(None);
+                    }
+                    let wake = outbox
+                        .enqueue_attachment_cleanup(tx, event)
+                        .await
+                        .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
+                    Ok(Some(wake))
+                })
+            })
+            .await;
         match result {
-            // Only the winner of the CAS deletes the file; a row deleted
-            // meanwhile is cleaned up by the attachment cleanup.
-            Ok(1) => self.delete_provider_file().await,
-            Ok(_) => {}
+            Ok(Some(wake)) => wake.fire(),
+            Ok(None) => {}
             Err(e) => {
                 tracing::error!(attachment_id = %self.attachment_id, error = %e, "background indexing: set failed failed");
             }
@@ -426,6 +475,9 @@ pub struct AttachmentService<
     indexing_deadline: std::time::Duration,
     /// Limit of the background indexing wait ([`BACKGROUND_INDEXING_TIMEOUT`]).
     background_indexing_timeout: std::time::Duration,
+    /// Stops background indexing waits on gear stop
+    /// ([`Self::stop_background_tasks`]).
+    background_shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl<
@@ -470,6 +522,7 @@ impl<
             anthropic_files_client,
             indexing_deadline: UPLOAD_INDEXING_DEADLINE,
             background_indexing_timeout: BACKGROUND_INDEXING_TIMEOUT,
+            background_shutdown: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -477,6 +530,12 @@ impl<
     pub(crate) fn with_indexing_deadline(mut self, deadline: std::time::Duration) -> Self {
         self.indexing_deadline = deadline;
         self
+    }
+
+    /// Stop the background indexing waits (gear stop). Rows they leave
+    /// `uploaded` are finished by the upload reaper.
+    pub(crate) fn stop_background_tasks(&self) {
+        self.background_shutdown.cancel();
     }
 
     #[cfg(test)]
@@ -1692,7 +1751,7 @@ impl<
                             db: Arc::clone(&self.db),
                             attachment_repo: Arc::clone(&self.attachment_repo),
                             vector_store: Arc::clone(&self.vector_store),
-                            file_storage: Arc::clone(&self.file_storage),
+                            outbox_enqueuer: Arc::clone(&self.outbox_enqueuer),
                             ctx: ctx.clone(),
                             scope: scope.clone(),
                             attachment_id,
@@ -1700,6 +1759,7 @@ impl<
                             vector_store_id: vs_id.clone(),
                             provider_file_id: provider_file_id.clone(),
                             timeout: self.background_indexing_timeout,
+                            shutdown: self.background_shutdown.child_token(),
                         }
                         .run(),
                     );
@@ -1724,7 +1784,7 @@ impl<
                         Ok(IndexingWait::Failed(reason)) => {
                             tracing::warn!(
                                 attachment_id = %attachment_id,
-                                reason = %reason,
+                                reason = ?crate::infra::llm::sanitize_provider_message(&reason),
                                 "vector store indexing failed"
                             );
                             DomainError::from(FileStorageError::Rejected {

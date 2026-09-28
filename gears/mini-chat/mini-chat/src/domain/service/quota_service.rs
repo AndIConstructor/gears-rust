@@ -454,11 +454,20 @@ pub async fn verify_reserve_within_limits<QR: QuotaUsageRepository, C: DBRunner>
         return Ok(());
     }
     let scope = AccessScope::for_tenant(computed.tenant_id);
-    // Plain read of the user's rows (the sums below filter by bucket and
-    // period): the increments above already hold the rows this request
-    // reserved; locking other rows could deadlock with a concurrent preflight.
+    // Plain read of the user's rows of the checked periods (the sums below
+    // filter by bucket): the increments above already hold the rows this
+    // request reserved; locking other rows could deadlock with a concurrent
+    // preflight.
+    let (period_types, period_starts): (Vec<_>, Vec<_>) = computed.periods.iter().cloned().unzip();
     let rows = repo
-        .find_bucket_rows(runner, &scope, computed.tenant_id, computed.user_id)
+        .find_bucket_rows_for_periods(
+            runner,
+            &scope,
+            computed.tenant_id,
+            computed.user_id,
+            &period_types,
+            &period_starts,
+        )
         .await
         .map_err(to_db)?;
     let within = computed.buckets.iter().all(|bucket| {

@@ -204,7 +204,42 @@ impl crate::domain::repos::AttachmentRepository for AttachmentRepository {
                 Condition::all()
                     .add(Column::Id.eq(id))
                     .add(Column::Status.eq(AttachmentStatus::Uploaded))
-                    .add(Column::DeletedAt.is_null()),
+                    .add(Column::DeletedAt.is_null())
+                    // Chat deletion marks its attachments for cleanup
+                    // without setting `deleted_at`; stop on those too.
+                    .add(Column::CleanupStatus.is_null()),
+            )
+            .secure()
+            .scope_with(scope)
+            .exec(runner)
+            .await
+            .map_err(db_err)?;
+        Ok(result.rows_affected)
+    }
+
+    async fn cas_fail_uploaded_for_cleanup<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        id: Uuid,
+        error_code: &str,
+    ) -> Result<u64, DomainError> {
+        let now = OffsetDateTime::now_utc();
+        let result = Entity::update_many()
+            .col_expr(Column::Status, Expr::value(AttachmentStatus::Failed))
+            .col_expr(Column::ErrorCode, Expr::value(Some(error_code.to_owned())))
+            .col_expr(Column::UpdatedAt, Expr::value(now))
+            .col_expr(
+                Column::CleanupStatus,
+                Expr::value(Some(CleanupStatus::Pending)),
+            )
+            .col_expr(Column::CleanupUpdatedAt, Expr::value(Some(now)))
+            .filter(
+                Condition::all()
+                    .add(Column::Id.eq(id))
+                    .add(Column::Status.eq(AttachmentStatus::Uploaded))
+                    .add(Column::DeletedAt.is_null())
+                    .add(Column::CleanupStatus.is_null()),
             )
             .secure()
             .scope_with(scope)
@@ -237,7 +272,10 @@ impl crate::domain::repos::AttachmentRepository for AttachmentRepository {
             Condition::all()
                 .add(Column::Id.eq(params.id))
                 .add(Column::Status.eq(AttachmentStatus::Uploaded))
-                .add(Column::DeletedAt.is_null()),
+                .add(Column::DeletedAt.is_null())
+                // A row of a deleted chat (cleanup pending) never becomes
+                // `ready`; the caller treats 0 rows as a concurrent delete.
+                .add(Column::CleanupStatus.is_null()),
         );
         let result = query
             .secure()

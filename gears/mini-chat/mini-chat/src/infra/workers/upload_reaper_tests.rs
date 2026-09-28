@@ -156,6 +156,10 @@ fn config_rejects_stale_window_below_gateway_timeout() {
     cfg.stale_after_secs = 300;
     cfg.scan_interval_secs = 0;
     assert!(cfg.validate().is_err());
+    cfg.scan_interval_secs = crate::config::background::MAX_SCAN_INTERVAL_SECS + 1;
+    assert!(cfg.validate().is_err());
+    cfg.scan_interval_secs = crate::config::background::MAX_SCAN_INTERVAL_SECS;
+    cfg.validate().unwrap();
 }
 
 /// A row whose chat was deleted already has `cleanup_status` set by chat

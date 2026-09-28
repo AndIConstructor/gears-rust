@@ -568,12 +568,8 @@ fn build_request_body<M>(request: &LlmRequest<M>, stream: bool) -> serde_json::V
         }
         // `extra_body` is merged at the top level; policy author's escape
         // hatch for fields not covered by `ModelApiParams`.
-        if let Some(ref extra) = p.extra_body
-            && let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object())
-        {
-            for (k, v) in extra_obj {
-                body_obj.insert(k.clone(), v.clone());
-            }
+        if let Some(ref extra) = p.extra_body {
+            super::merge_extra_body(&mut body, extra);
         }
     }
 
@@ -1429,12 +1425,13 @@ mod tests {
     fn api_params_sampling_sent_only_when_set() {
         let set = llm_request("gpt-4o")
             .message(LlmMessage::user("Hi"))
-            .api_params(sampling(Some(0.3), None, Some(0.1)))
+            .api_params(sampling(Some(0.3), None, Some(0.0)))
             .build_streaming();
         let body = build_request_body(&set, true);
         assert_eq!(body["temperature"], 0.3);
-        assert_eq!(body["frequency_penalty"], 0.1);
-        assert_eq!(body["presence_penalty"], 0.1);
+        // A set zero is sent, not treated as unset.
+        assert_eq!(body["frequency_penalty"], 0.0);
+        assert_eq!(body["presence_penalty"], 0.0);
         assert!(body.get("top_p").is_none(), "{body}");
 
         let unset = llm_request("gpt-4o")

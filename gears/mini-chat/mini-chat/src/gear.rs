@@ -729,6 +729,9 @@ impl RunnableCapability for MiniChatGear {
     }
 
     async fn stop(&self, cancel: CancellationToken) -> anyhow::Result<()> {
+        if let Some(services) = self.service.get() {
+            services.attachments.stop_background_tasks();
+        }
         if let Some(worker_cancel) = self
             .worker_cancel
             .lock()

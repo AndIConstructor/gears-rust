@@ -128,8 +128,8 @@ pub enum MessageRoleDto {
 }
 
 impl MessageRoleDto {
-    /// Map the stored role (`user` / `assistant` / `system`, enforced by a
-    /// DB check constraint).
+    /// Map the stored role (`user` / `assistant` / `system`, enforced by the
+    /// `MessageRole` entity enum).
     fn from_db(role: &str) -> Self {
         match role {
             "assistant" => Self::Assistant,
@@ -495,6 +495,11 @@ mod tests {
         for kind in ["document", "image"] {
             assert_eq!(wire(AttachmentKindDto::from_db(kind)), kind);
         }
+        // Values the DB constraints and entity enums rule out map to the
+        // documented fallbacks.
+        assert_eq!(wire(MessageRoleDto::from_db("bogus")), "user");
+        assert_eq!(wire(AttachmentStatusDto::from_db("bogus")), "failed");
+        assert_eq!(wire(AttachmentKindDto::from_db("bogus")), "document");
     }
 
     #[test]

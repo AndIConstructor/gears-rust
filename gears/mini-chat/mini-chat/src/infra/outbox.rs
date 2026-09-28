@@ -469,7 +469,10 @@ impl toolkit_db::outbox::LeasedMessageHandler for AuditEventHandler {
         let plugin = match self.audit_gateway.get_plugin().await {
             Ok(Some(p)) => p,
             Ok(None) => {
-                // No audit plugin registered - audit is optional; ack and advance.
+                // No audit plugin registered - audit is optional; ack and
+                // advance, counted so operators can alert on dropped events.
+                self.metrics
+                    .record_audit_emit(metric_labels::result::DROPPED);
                 return toolkit_db::outbox::MessageResult::Ok;
             }
             Err(e) => {
@@ -992,9 +995,10 @@ mod tests {
 
     #[tokio::test]
     async fn audit_handler_success_when_no_plugin_configured() {
+        let metrics = Arc::new(crate::domain::service::test_helpers::TestMetrics::new());
         let handler = AuditEventHandler {
             audit_gateway: AuditGateway::noop(),
-            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+            metrics: Arc::clone(&metrics) as _,
         };
         let payload = make_audit_envelope_payload();
         let msg = make_outbox_message(payload);
@@ -1003,6 +1007,8 @@ mod tests {
             matches!(result, MessageResult::Ok),
             "expected Ok when no plugin configured"
         );
+        // The drop is counted (result = dropped), not silent.
+        assert_eq!(metrics.audit_emit.load(Ordering::Relaxed), 1);
     }
 
     // ── AuditEventHandler: instance resolved, client missing → Retry ──

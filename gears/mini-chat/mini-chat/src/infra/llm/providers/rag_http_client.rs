@@ -273,7 +273,8 @@ fn check_status(
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct VectorStoreFileObject {
     /// `in_progress`, `completed`, `failed` or `cancelled`. Treated as
-    /// `completed` when absent.
+    /// `in_progress` when absent, so polling goes on and a status that never
+    /// arrives ends as `failed` at the wait limit.
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
@@ -291,8 +292,8 @@ impl VectorStoreFileObject {
     pub fn into_status(self) -> crate::domain::ports::VectorStoreFileStatus {
         use crate::domain::ports::VectorStoreFileStatus;
         match self.status.as_deref() {
-            None | Some("completed") => VectorStoreFileStatus::Completed,
-            Some("in_progress") => VectorStoreFileStatus::InProgress,
+            Some("completed") => VectorStoreFileStatus::Completed,
+            None | Some("in_progress") => VectorStoreFileStatus::InProgress,
             Some(other) => VectorStoreFileStatus::Failed {
                 message: self
                     .last_error
@@ -510,5 +511,38 @@ mod tests {
             matches!(err, FileStorageError::Unavailable { .. }),
             "500 should map to Unavailable, got {err:?}"
         );
+    }
+
+    /// Status mapping of a vector store file: a missing status keeps polling
+    /// (the wait limit ends it), an unknown one is a failure.
+    #[test]
+    fn vector_store_file_status_mapping() {
+        use crate::domain::ports::VectorStoreFileStatus;
+        let status = |v: serde_json::Value| {
+            serde_json::from_value::<VectorStoreFileObject>(v)
+                .unwrap()
+                .into_status()
+        };
+        assert!(matches!(
+            status(serde_json::json!({})),
+            VectorStoreFileStatus::InProgress
+        ));
+        assert!(matches!(
+            status(serde_json::json!({"status": "in_progress"})),
+            VectorStoreFileStatus::InProgress
+        ));
+        assert!(matches!(
+            status(serde_json::json!({"status": "completed"})),
+            VectorStoreFileStatus::Completed
+        ));
+        match status(serde_json::json!({"status": "failed", "last_error": {"message": "bad file"}}))
+        {
+            VectorStoreFileStatus::Failed { message } => assert_eq!(message, "bad file"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(matches!(
+            status(serde_json::json!({"status": "cancelled"})),
+            VectorStoreFileStatus::Failed { .. }
+        ));
     }
 }

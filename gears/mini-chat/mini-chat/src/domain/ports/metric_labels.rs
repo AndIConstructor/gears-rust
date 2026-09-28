@@ -45,6 +45,9 @@ pub mod result {
     pub const RETRY: &str = "retry";
     /// Audit emit permanent failure — dead-lettered by the outbox.
     pub const REJECT: &str = "reject";
+    /// Audit event acknowledged without delivery: no audit plugin is
+    /// registered.
+    pub const DROPPED: &str = "dropped";
 }
 
 /// Quota preflight decision labels (`decision` label).

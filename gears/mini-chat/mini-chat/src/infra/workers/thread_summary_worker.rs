@@ -287,6 +287,24 @@ impl ThreadSummaryHandler {
         let mut ptl_retries = 0u32;
         let content_limit = self.deps.config.message_content_limit;
 
+        // Fit the prompt into the model's input budget before the first
+        // call; the context-length retry below stays as the fallback.
+        let dropped = fit_summary_prompt(
+            &resolved_model,
+            &system_prompt,
+            existing_summary,
+            &mut messages_for_prompt,
+            content_limit,
+        );
+        if dropped > 0 {
+            warn!(
+                chat_id = %payload.chat_id,
+                dropped,
+                remaining = messages_for_prompt.len(),
+                "thread summary: prompt over the model's input budget, dropped oldest messages"
+            );
+        }
+
         #[allow(clippy::expect_used)]
         let security_ctx = toolkit_security::SecurityContext::builder()
             .subject_tenant_id(payload.tenant_id)
@@ -635,6 +653,49 @@ async fn frontier_message_is_live(
         .await
         .map_err(|e| toolkit_db::DbError::Other(anyhow::anyhow!("{e}")))?;
     Ok(row.is_some())
+}
+
+/// Input token budget of a summary request: the context window minus the
+/// output reserve, capped by `max_input_tokens` when set. `None` when the
+/// catalog gives no context window.
+fn summary_input_budget(model: &crate::domain::models::ResolvedModel) -> Option<u64> {
+    if model.context_window == 0 {
+        return None;
+    }
+    let mut budget =
+        u64::from(model.context_window).saturating_sub(u64::from(model.max_output_tokens));
+    if model.max_input_tokens > 0 {
+        budget = budget.min(u64::from(model.max_input_tokens));
+    }
+    Some(budget)
+}
+
+/// Drop the oldest messages until the estimated prompt (system prompt plus
+/// user prompt, `bytes_per_token_conservative` bytes per token) fits the
+/// input budget. Keeps at least two messages. Returns how many were dropped.
+fn fit_summary_prompt(
+    model: &crate::domain::models::ResolvedModel,
+    system_prompt: &str,
+    existing_summary: Option<&str>,
+    messages: &mut Vec<crate::infra::db::entity::message::Model>,
+    message_content_limit: usize,
+) -> usize {
+    let Some(budget) = summary_input_budget(model) else {
+        return 0;
+    };
+    let bpt = u64::from(model.bytes_per_token_conservative.max(1));
+    let estimate = |msgs: &[crate::infra::db::entity::message::Model]| {
+        let bytes = system_prompt.len()
+            + build_summary_prompt(existing_summary, msgs, message_content_limit).len();
+        (bytes as u64).div_ceil(bpt)
+    };
+    let mut dropped = 0;
+    while messages.len() > 2 && estimate(messages) > budget {
+        let step = messages.len().div_ceil(5).min(messages.len() - 2);
+        messages.drain(..step);
+        dropped += step;
+    }
+    dropped
 }
 
 /// Build the user-message prompt for summary generation.
@@ -1563,6 +1624,86 @@ mod tests {
             raw_detail: None,
         };
         assert!(!is_context_length_error(&e3));
+    }
+
+    fn summary_model(
+        context_window: u32,
+        max_output: u32,
+        max_input: u32,
+    ) -> crate::domain::models::ResolvedModel {
+        crate::domain::models::ResolvedModel {
+            model_id: "m".to_owned(),
+            provider_model_id: "m".to_owned(),
+            provider_id: "openai".to_owned(),
+            display_name: "m".to_owned(),
+            tier: "standard".to_owned(),
+            multiplier_display: "1x".to_owned(),
+            description: None,
+            multimodal_capabilities: vec![],
+            context_window,
+            max_file_size_mb: 25,
+            system_prompt: String::new(),
+            tool_support: mini_chat_sdk::ModelToolSupport {
+                web_search: false,
+                file_search: false,
+                image_generation: false,
+                code_interpreter: false,
+                mcp: false,
+            },
+            thread_summary_prompt: String::new(),
+            max_output_tokens: max_output,
+            max_input_tokens: max_input,
+            bytes_per_token_conservative: 4,
+        }
+    }
+
+    #[test]
+    fn summary_input_budget_uses_window_and_input_cap() {
+        assert_eq!(
+            summary_input_budget(&summary_model(10_000, 1_000, 0)),
+            Some(9_000)
+        );
+        assert_eq!(
+            summary_input_budget(&summary_model(10_000, 1_000, 2_000)),
+            Some(2_000)
+        );
+        assert_eq!(summary_input_budget(&summary_model(0, 1_000, 0)), None);
+    }
+
+    /// Oldest messages are dropped until the estimate fits; at least two stay.
+    #[test]
+    fn fit_summary_prompt_drops_oldest_until_it_fits() {
+        let big = "x".repeat(4_000); // ~1000 tokens at 4 bytes/token
+        let mut msgs: Vec<_> = (0..10)
+            .map(|i| test_message(MessageRole::User, &format!("{i}:{big}")))
+            .collect();
+        // Budget 3_000 tokens: about three messages fit.
+        let model = summary_model(4_000, 1_000, 0);
+        let dropped = fit_summary_prompt(&model, "sys", None, &mut msgs, 0);
+        assert!(dropped > 0);
+        assert_eq!(msgs.len(), 10 - dropped);
+        assert!(msgs.len() >= 2);
+        assert!(
+            msgs[0].content.starts_with(&format!("{dropped}:")),
+            "oldest dropped first"
+        );
+        let bytes = 3 + build_summary_prompt(None, &msgs, 0).len();
+        assert!((bytes as u64).div_ceil(4) <= 3_000);
+
+        // Within budget: nothing dropped.
+        let mut small = vec![
+            test_message(MessageRole::User, "hi"),
+            test_message(MessageRole::Assistant, "ok"),
+        ];
+        assert_eq!(fit_summary_prompt(&model, "sys", None, &mut small, 0), 0);
+
+        // Never below two messages, even when two do not fit.
+        let tiny = summary_model(600, 100, 0);
+        let mut two_plus: Vec<_> = (0..4)
+            .map(|_| test_message(MessageRole::User, &big))
+            .collect();
+        fit_summary_prompt(&tiny, "sys", None, &mut two_plus, 0);
+        assert_eq!(two_plus.len(), 2);
     }
 
     fn test_message(role: MessageRole, content: &str) -> crate::infra::db::entity::message::Model {

@@ -2566,6 +2566,8 @@ mod tests {
             },
             thread_summary_prompt: String::new(),
             max_output_tokens: 16_384,
+            max_input_tokens: 0,
+            bytes_per_token_conservative: 4,
         }
     }
 
@@ -4552,6 +4554,8 @@ mod tests {
                     },
                     thread_summary_prompt: String::new(),
                     max_output_tokens: 16_384,
+                    max_input_tokens: 0,
+                    bytes_per_token_conservative: 4,
                 },
                 false,
                 Vec::new(),
@@ -4719,6 +4723,8 @@ mod tests {
                     },
                     thread_summary_prompt: String::new(),
                     max_output_tokens: 16_384,
+                    max_input_tokens: 0,
+                    bytes_per_token_conservative: 4,
                 },
                 false,
                 Vec::new(),
@@ -4845,6 +4851,8 @@ mod tests {
                     },
                     thread_summary_prompt: String::new(),
                     max_output_tokens: 16_384,
+                    max_input_tokens: 0,
+                    bytes_per_token_conservative: 4,
                 },
                 false,
                 Vec::new(),
