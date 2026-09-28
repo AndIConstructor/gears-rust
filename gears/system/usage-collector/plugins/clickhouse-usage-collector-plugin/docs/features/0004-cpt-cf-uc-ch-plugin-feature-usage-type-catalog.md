@@ -39,11 +39,11 @@
 
 ### 1.1 Overview
 
-Own the sole store for the `usage_type_catalog` table. `create_usage_type` pre-checks then inserts with no coordination primitive between the two statements; `get`/`list` resolve versions in SQL; `delete_usage_type` probes for references, removes the catalog row with `ALTER TABLE … DELETE`, then sweeps any record that landed in between — narrowing, not closing, the orphaning window.
+Own the sole store for the `usage_type_catalog` table. `create_usage_type` pre-checks then inserts as two independent statements; `get`/`list` resolve versions in SQL; `delete_usage_type` probes for references, removes the catalog row with `ALTER TABLE … DELETE`, then sweeps any record that landed in between — narrowing, not closing, the orphaning window.
 
 ### 1.2 Purpose
 
-This feature owns the create-idempotency absorb, the catalog point-read and keyset list, and the delete-side half of referential integrity. ClickHouse has no native FK and this plugin has no mutual-exclusion primitive, so a delete cannot be ordered against concurrent `create_usage_record(s)` calls referencing the same `gts_id`. The delete therefore pairs a capped pre-delete reference probe with a post-delete orphan sweep and removes the catalog row between them, so that Feature 2's insert-time check — the create-side half — starts refusing new records for the `gts_id` and bounds the window the probe cannot close. The residual is accepted and documented, not eliminated.
+This feature owns the create-idempotency absorb, the catalog point-read and keyset list, and the delete-side half of referential integrity. ClickHouse has no native FK, so a delete cannot be ordered against concurrent `create_usage_record(s)` calls referencing the same `gts_id`. The delete therefore pairs a capped pre-delete reference probe with a post-delete orphan sweep and removes the catalog row between them, so that Feature 2's insert-time check — the create-side half — starts refusing new records for the `gts_id` and bounds the window the probe cannot close. The residual is accepted and documented, not eliminated.
 
 **Requirements**: `cpt-cf-uc-ch-plugin-fr-referential-integrity` (the delete-side half; the create-side half is owned by Feature 2)
 
@@ -162,7 +162,7 @@ Nothing serializes two concurrent creates for the same `gts_id`. Both may pass t
 
 - [ ] `p2` - **ID**: `cpt-cf-uc-ch-plugin-algo-catalog-delete-fk`
 
-`delete_usage_type` emulates `ON DELETE RESTRICT` with a probe rather than a constraint, because ClickHouse has neither a foreign key nor (in this plugin) a mutual-exclusion primitive to make the probe authoritative.
+`delete_usage_type` emulates `ON DELETE RESTRICT` with a probe rather than a constraint, because ClickHouse has no foreign key to make the probe authoritative.
 
 **Step order is the whole design.** The catalog row is removed *before* the orphan sweep. From that moment the record store's insert-time catalog existence check (Feature 2) refuses new records for the `gts_id` on its own, so the sweep has only the probe→delete window's own arrivals to clean up. Sweeping first would leave a strictly wider window, since new records could keep arriving until the catalog row went away.
 
@@ -195,7 +195,7 @@ The mutation is a heavyweight `ALTER TABLE … DELETE`, not a lightweight `DELET
 
 - [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-dod-catalog-create-type`
 
-The system **MUST** implement `create_usage_type` as: version-resolved pre-existence check → identical-payload silent absorb, different-payload `UsageTypeAlreadyExists`, or absent → `INSERT` with `version = current_epoch_μs()` + notify the background catalog-size refresh worker. No coordination primitive is taken; concurrent same-`gts_id` creates converge last-writer-wins via `ReplacingMergeTree(version)`.
+The system **MUST** implement `create_usage_type` as: version-resolved pre-existence check → identical-payload silent absorb, different-payload `UsageTypeAlreadyExists`, or absent → `INSERT` with `version = current_epoch_μs()` + notify the background catalog-size refresh worker. Concurrent same-`gts_id` creates converge last-writer-wins via `ReplacingMergeTree(version)`.
 
 **Implements**: `cpt-cf-uc-ch-plugin-algo-catalog-create-idempotency`, `cpt-cf-uc-ch-plugin-flow-catalog-create-type`
 

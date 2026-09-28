@@ -43,7 +43,7 @@ Provide the backend write plane over `usage_records`. Inserts (single and batch)
 
 ### 1.2 Purpose
 
-Record Persistence owns the full lifecycle write path: referential-integrity check (create side), dedup resolution, compensation persistence, and depth-1 deactivation cascade — all without any ACID transaction and without any coordination primitive. Every status transition is a new versioned row; no `UPDATE` or `ALTER TABLE ... DELETE` is ever issued on the request path.
+Record Persistence owns the full lifecycle write path: referential-integrity check (create side), dedup resolution, compensation persistence, and depth-1 deactivation cascade — all without any ACID transaction. Every status transition is a new versioned row; no `UPDATE` or `ALTER TABLE ... DELETE` is ever issued on the request path.
 
 **Requirements**: `cpt-cf-uc-ch-plugin-fr-idempotent-dedup`, `cpt-cf-uc-ch-plugin-fr-deactivation`, `cpt-cf-uc-ch-plugin-nfr-ingestion-throughput`, `cpt-cf-uc-ch-plugin-fr-referential-integrity` (create-side half)
 
@@ -168,7 +168,7 @@ Record Persistence owns the full lifecycle write path: referential-integrity che
 
 - [ ] `p2` - **ID**: `cpt-cf-uc-ch-plugin-algo-record-persistence-ingest-dedup`
 
-The create-side referential-integrity half of `cpt-cf-uc-ch-plugin-fr-referential-integrity`: a catalog-existence check immediately before the dedup check and `INSERT`. This plugin has no mutual-exclusion primitive (DESIGN.md §3.5), so the check and the `INSERT` are **not** ordered against a concurrent `delete_usage_type` for the same `gts_id`. The reference plugin's native `FOREIGN KEY … ON DELETE RESTRICT` admits no such window; this plugin narrows it instead of closing it: the delete side (Feature 4) sweeps the records that land inside its own probe→delete window, and the residual — a check that passed before the delete followed by an `INSERT` that commits after the sweep — is accepted and documented in PRD.md §5.
+The create-side referential-integrity half of `cpt-cf-uc-ch-plugin-fr-referential-integrity`: a catalog-existence check immediately before the dedup check and `INSERT`. The check and the `INSERT` are **not** ordered against a concurrent `delete_usage_type` for the same `gts_id` (DESIGN.md §3.8). The reference plugin's native `FOREIGN KEY … ON DELETE RESTRICT` admits no such window; this plugin narrows it instead of closing it: the delete side (Feature 4) sweeps the records that land inside its own probe→delete window, and the residual — a check that passed before the delete followed by an `INSERT` that commits after the sweep — is accepted and documented in PRD.md §5.
 
 This check is nonetheless what *bounds* that window rather than leaving it open-ended: from the moment the delete has removed the catalog row, every subsequent insert for the `gts_id` is refused here. The `ReplacingMergeTree(version)` convergence backstop is a defense-in-depth layer for duplicate creates, not a referential-integrity mechanism.
 
@@ -203,7 +203,7 @@ Every `usage_records` status transition is a new versioned row — never an `UPD
 
 - [x] `p1` - **ID**: `cpt-cf-uc-ch-plugin-dod-record-persistence-create-single`
 
-The system **MUST** implement `create_usage_record` as: run the catalog-existence check, run the dedup lookup on the canonical `(tenant_id, gts_id, created_at, idempotency_key)` tuple against `usage_records` (emitted in sorting-key order, `gts_id` first), and on a new record issue one `INSERT` with `status='active'` and a monotonic `version`, carrying an `insert_deduplication_token`. On absorb, return the stored record without inserting. On conflict, return `IdempotencyConflict`. The three statements are independent — no coordination primitive orders them against a concurrent create for the same dedup key, and the resulting window is stated in DESIGN.md §3.6.
+The system **MUST** implement `create_usage_record` as: run the catalog-existence check, run the dedup lookup on the canonical `(tenant_id, gts_id, created_at, idempotency_key)` tuple against `usage_records` (emitted in sorting-key order, `gts_id` first), and on a new record issue one `INSERT` with `status='active'` and a monotonic `version`, carrying an `insert_deduplication_token`. On absorb, return the stored record without inserting. On conflict, return `IdempotencyConflict`. The three statements are independent and are not ordered against a concurrent create for the same dedup key; the resulting window is stated in DESIGN.md §3.6.
 
 **Implements**: `cpt-cf-uc-ch-plugin-algo-record-persistence-ingest-dedup`, `cpt-cf-uc-ch-plugin-flow-record-persistence-create-single`
 
