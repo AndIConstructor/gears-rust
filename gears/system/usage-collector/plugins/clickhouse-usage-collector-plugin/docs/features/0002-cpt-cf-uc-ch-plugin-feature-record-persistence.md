@@ -93,7 +93,7 @@ Record Persistence owns the full lifecycle write path: referential-integrity che
 
 **Steps**:
 
-1. [ ] - `p1` - Compute the deterministic record `id` (ADR-0013/ADR-0014 4-tuple: `tenant_id`, `gts_id`, `idempotency_key`, `created_at`) - `inst-ch-rec-create-1`
+1. [ ] - `p1` - Compute the deterministic record `id` (`derive_usage_record_id`, `../../../../usage-collector-sdk/src/id.rs`, 4-tuple: `tenant_id`, `gts_id`, `idempotency_key`, `created_at`) - `inst-ch-rec-create-1`
 2. [ ] - `p1` - Plugin-owned referential-integrity check: `SELECT gts_id FROM usage_type_catalog WHERE gts_id = ? LIMIT 1` (existence is version-invariant, so no resolution is needed) — absent → **RETURN** `UsageTypeNotFound` - `inst-ch-rec-create-3`
 3. [ ] - `p1` - Dedup point-lookup: `SELECT ... FROM usage_records WHERE tenant_id=? AND gts_id=? AND created_at=? AND idempotency_key=? ORDER BY id ASC, version DESC LIMIT 1 BY id` - `inst-ch-rec-create-4`
 4. [ ] - `p1` - **IF** not found — proceed to insert - `inst-ch-rec-create-5`
@@ -168,7 +168,7 @@ Record Persistence owns the full lifecycle write path: referential-integrity che
 
 - [ ] `p2` - **ID**: `cpt-cf-uc-ch-plugin-algo-record-persistence-ingest-dedup`
 
-The create-side referential-integrity half of `cpt-cf-uc-ch-plugin-fr-referential-integrity`: a catalog-existence check immediately before the dedup check and `INSERT`. This plugin has no mutual-exclusion primitive (DESIGN.md §3.5), so the check and the `INSERT` are **not** ordered against a concurrent `delete_usage_type` for the same `gts_id`. `plugin-spi.md` Method 9's "MUST NOT admit a window" is therefore not satisfied without qualification; the delete side (Feature 4) sweeps the records that land inside its own probe→delete window, and the residual — a check that passed before the delete followed by an `INSERT` that commits after the sweep — is accepted and documented in PRD.md §5.
+The create-side referential-integrity half of `cpt-cf-uc-ch-plugin-fr-referential-integrity`: a catalog-existence check immediately before the dedup check and `INSERT`. This plugin has no mutual-exclusion primitive (DESIGN.md §3.5), so the check and the `INSERT` are **not** ordered against a concurrent `delete_usage_type` for the same `gts_id`. The reference plugin's native `FOREIGN KEY … ON DELETE RESTRICT` admits no such window; this plugin narrows it instead of closing it: the delete side (Feature 4) sweeps the records that land inside its own probe→delete window, and the residual — a check that passed before the delete followed by an `INSERT` that commits after the sweep — is accepted and documented in PRD.md §5.
 
 This check is nonetheless what *bounds* that window rather than leaving it open-ended: from the moment the delete has removed the catalog row, every subsequent insert for the `gts_id` is refused here. The `ReplacingMergeTree(version)` convergence backstop is a defense-in-depth layer for duplicate creates, not a referential-integrity mechanism.
 
@@ -182,7 +182,7 @@ The batch MUST be resolved with exactly three ClickHouse statements — one cata
 
 - [ ] `p2` - **ID**: `cpt-cf-uc-ch-plugin-algo-record-persistence-deactivation-cascade`
 
-Every `usage_records` status transition is a new versioned row — never an `UPDATE` or `ALTER TABLE ... DELETE`. The deactivation cascade composes one marker row per affected `id` (target + depth-1 active compensations), each with a `version` strictly greater than the row it supersedes, and issues them as a single multi-row `INSERT`. A version-resolving reader observes either the pre-cascade state or the fully-flipped state — never a partial cascade. There is no late-compensation race: the gateway rejects a compensation against a record being deactivated before dispatching it to the plugin (`plugin-spi.md` Method 5 caller-side concurrency rule).
+Every `usage_records` status transition is a new versioned row — never an `UPDATE` or `ALTER TABLE ... DELETE`. The deactivation cascade composes one marker row per affected `id` (target + depth-1 active compensations), each with a `version` strictly greater than the row it supersedes, and issues them as a single multi-row `INSERT`. A version-resolving reader observes either the pre-cascade state or the fully-flipped state — never a partial cascade. There is no late-compensation race: per the gateway's caller-side rule, a compensation whose target is not active is rejected before the plugin is called (`verify_l1_corrects_id`, `../../../../usage-collector/src/domain/validation.rs`).
 
 ## 4. States (CDSL)
 
