@@ -19,7 +19,7 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use percent_encoding::percent_decode_str;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
 use crate::config::{ClickHousePluginConfig, is_plaintext_url};
@@ -46,7 +46,7 @@ struct ParsedEndpoint {
     /// `Client::with_url`.
     base_url: String,
     user: Option<String>,
-    password: Option<String>,
+    password: Option<SecretString>,
     database: Option<String>,
 }
 
@@ -70,7 +70,9 @@ fn parse_endpoint(database_url: &str) -> Result<ParsedEndpoint, url::ParseError>
     let mut url = Url::parse(database_url)?;
 
     let user = (!url.username().is_empty()).then(|| decode_userinfo(url.username()));
-    let password = url.password().map(decode_userinfo);
+    let password = url
+        .password()
+        .map(|p| SecretString::from(decode_userinfo(p)));
     let database = {
         let path = url.path().trim_matches('/');
         (!path.is_empty()).then(|| path.to_owned())
@@ -267,7 +269,7 @@ pub fn build_client(cfg: &ClickHousePluginConfig) -> anyhow::Result<clickhouse::
         client = client.with_user(user);
     }
     if let Some(password) = endpoint.password {
-        client = client.with_password(password);
+        client = client.with_password(password.expose_secret());
     }
     if let Some(database) = endpoint.database {
         client = client.with_database(database);

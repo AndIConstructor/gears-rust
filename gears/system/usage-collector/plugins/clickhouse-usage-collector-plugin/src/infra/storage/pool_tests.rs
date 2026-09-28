@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use secrecy::ExposeSecret;
+
 use super::{
     DEFAULT_RETENTION_SECS, MIGRATION_SQL, parse_endpoint, parse_ttl_seconds, split_sql_statements,
     strip_line_comments,
@@ -178,7 +180,10 @@ fn parse_endpoint_splits_user_password_and_database() {
     let endpoint = parse_endpoint("http://chuser:s3cret@ch:8123/usage").unwrap();
     assert_eq!(endpoint.base_url, "http://ch:8123/");
     assert_eq!(endpoint.user.as_deref(), Some("chuser"));
-    assert_eq!(endpoint.password.as_deref(), Some("s3cret"));
+    assert_eq!(
+        endpoint.password.as_ref().map(ExposeSecret::expose_secret),
+        Some("s3cret")
+    );
     assert_eq!(endpoint.database.as_deref(), Some("usage"));
 }
 
@@ -205,7 +210,7 @@ fn parse_endpoint_with_no_userinfo_or_path_yields_none() {
     let endpoint = parse_endpoint("http://localhost:8123").unwrap();
     assert_eq!(endpoint.base_url, "http://localhost:8123/");
     assert_eq!(endpoint.user, None);
-    assert_eq!(endpoint.password, None);
+    assert!(endpoint.password.is_none());
     assert_eq!(endpoint.database, None);
 }
 
@@ -219,7 +224,7 @@ fn parse_endpoint_trims_leading_and_trailing_slashes_from_database() {
 fn parse_endpoint_user_without_password_has_no_password() {
     let endpoint = parse_endpoint("http://chuser@localhost:8123/").unwrap();
     assert_eq!(endpoint.user.as_deref(), Some("chuser"));
-    assert_eq!(endpoint.password, None);
+    assert!(endpoint.password.is_none());
 }
 
 #[test]
@@ -228,7 +233,10 @@ fn parse_endpoint_percent_decodes_userinfo_with_reserved_chars() {
     // be restored to literal credentials for `with_user` / `with_password`.
     let endpoint = parse_endpoint("http://u%3Aser:p%40ss%2Fword@ch:8123/usage").unwrap();
     assert_eq!(endpoint.user.as_deref(), Some("u:ser"));
-    assert_eq!(endpoint.password.as_deref(), Some("p@ss/word"));
+    assert_eq!(
+        endpoint.password.as_ref().map(ExposeSecret::expose_secret),
+        Some("p@ss/word")
+    );
     assert_eq!(endpoint.database.as_deref(), Some("usage"));
 }
 
@@ -997,7 +1005,7 @@ mod integration {
                 bootstrap = bootstrap.with_user(user);
             }
             if let Some(password) = &endpoint.password {
-                bootstrap = bootstrap.with_password(password);
+                bootstrap = bootstrap.with_password(password.expose_secret());
             }
             bootstrap
                 .query(&format!("CREATE DATABASE IF NOT EXISTS `{db}`"))
