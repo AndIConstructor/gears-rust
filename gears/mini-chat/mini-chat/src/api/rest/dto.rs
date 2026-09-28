@@ -134,7 +134,14 @@ impl MessageRoleDto {
         match role {
             "assistant" => Self::Assistant,
             "system" => Self::System,
-            _ => Self::User,
+            "user" => Self::User,
+            other => {
+                tracing::warn!(
+                    role = other,
+                    "unexpected stored message role; reported as user"
+                );
+                Self::User
+            }
         }
     }
 }
@@ -219,7 +226,14 @@ impl AttachmentStatusDto {
             "pending" => Self::Pending,
             "uploaded" => Self::Uploaded,
             "ready" => Self::Ready,
-            _ => Self::Failed,
+            "failed" => Self::Failed,
+            other => {
+                tracing::warn!(
+                    status = other,
+                    "unexpected stored attachment status; reported as failed"
+                );
+                Self::Failed
+            }
         }
     }
 }

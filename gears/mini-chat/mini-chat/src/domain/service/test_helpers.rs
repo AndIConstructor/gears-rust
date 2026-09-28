@@ -1304,6 +1304,10 @@ pub struct TestMetrics {
     pub turn_mutation: AtomicU64,
     pub turn_mutation_latency_ms: AtomicU64,
     pub audit_emit: AtomicU64,
+    /// `result` label of every `record_audit_emit` call, in order.
+    pub audit_emit_results: Mutex<Vec<String>>,
+    /// `result` label of every `record_background_indexing` call, in order.
+    pub background_indexing: Mutex<Vec<String>>,
     pub finalization_latency_ms: AtomicU64,
     pub quota_commit: AtomicU64,
     pub quota_overshoot: AtomicU64,
@@ -1322,6 +1326,8 @@ impl TestMetrics {
             turn_mutation: AtomicU64::new(0),
             turn_mutation_latency_ms: AtomicU64::new(0),
             audit_emit: AtomicU64::new(0),
+            audit_emit_results: Mutex::new(Vec::new()),
+            background_indexing: Mutex::new(Vec::new()),
             finalization_latency_ms: AtomicU64::new(0),
             quota_commit: AtomicU64::new(0),
             quota_overshoot: AtomicU64::new(0),
@@ -1352,8 +1358,12 @@ impl crate::domain::ports::MiniChatMetricsPort for TestMetrics {
         self.turn_mutation_latency_ms
             .fetch_add(1, Ordering::Relaxed);
     }
-    fn record_audit_emit(&self, _: &str) {
+    fn record_audit_emit(&self, result: &str) {
         self.audit_emit.fetch_add(1, Ordering::Relaxed);
+        self.audit_emit_results
+            .lock()
+            .unwrap()
+            .push(result.to_owned());
     }
     fn record_finalization_latency_ms(&self, _: f64) {
         self.finalization_latency_ms.fetch_add(1, Ordering::Relaxed);
@@ -1403,6 +1413,12 @@ impl crate::domain::ports::MiniChatMetricsPort for TestMetrics {
     fn record_orphan_finalized(&self, _: &str) {}
     fn record_orphan_scan_duration_seconds(&self, _: f64) {}
     fn record_upload_abandoned(&self, _: &str) {}
+    fn record_background_indexing(&self, result: &str) {
+        self.background_indexing
+            .lock()
+            .unwrap()
+            .push(result.to_owned());
+    }
     fn record_upload_reaper_scan_duration_seconds(&self, _: f64) {}
     fn record_thread_summary_trigger(&self, result: &str) {
         self.thread_summary_trigger

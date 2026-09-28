@@ -255,11 +255,13 @@ impl ProviderEntry {
             .or(self.auth_config.as_ref())
     }
 
-    /// Validate provider entry at startup.
+    /// Validate provider entry at startup (after env expansion).
     pub fn validate(&self, provider_id: &str) -> Result<(), String> {
         if self.host.trim().is_empty() {
             return Err(format!("provider '{provider_id}': host must not be empty"));
         }
+        check_host_chars(&self.host)
+            .map_err(|c| format!("provider '{provider_id}': host contains '{c}'"))?;
         if self.port == Some(0) {
             return Err(format!("provider '{provider_id}': port must not be 0"));
         }
@@ -274,6 +276,16 @@ impl ProviderEntry {
                 "provider '{provider_id}': storage_kind is 'azure' but api_version is not set"
             ));
         }
+        // Sent unencoded as `?api-version={}`.
+        if let Some(v) = &self.api_version
+            && let Some(c) = v
+                .chars()
+                .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-')))
+        {
+            return Err(format!(
+                "provider '{provider_id}': api_version contains '{c}' (allowed: letters, digits, '.', '-')"
+            ));
+        }
         for (tid, tenant_override) in &self.tenant_overrides {
             if let Some(h) = &tenant_override.host
                 && h.trim().is_empty()
@@ -281,6 +293,11 @@ impl ProviderEntry {
                 return Err(format!(
                     "provider '{provider_id}': tenant override '{tid}' host must not be empty"
                 ));
+            }
+            if let Some(h) = &tenant_override.host {
+                check_host_chars(h).map_err(|c| {
+                    format!("provider '{provider_id}': tenant override '{tid}' host contains '{c}'")
+                })?;
             }
 
             // A tenant override must carry a host or an upstream_alias — that is
@@ -299,6 +316,19 @@ impl ProviderEntry {
             }
         }
         Ok(())
+    }
+}
+
+/// The host becomes an OAGW upstream and the alias in `/{alias}/...`, so
+/// path, query and userinfo characters would change the proxied request.
+/// Allows hostnames, IPv4 and bracketed IPv6. Returns the first bad char.
+fn check_host_chars(host: &str) -> Result<(), char> {
+    match host
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')))
+    {
+        Some(c) => Err(c),
+        None => Ok(()),
     }
 }
 
@@ -1227,6 +1257,65 @@ mod tests {
     }
 
     #[test]
+    fn provider_host_and_api_version_characters() {
+        fn entry(host: &str) -> ProviderEntry {
+            ProviderEntry {
+                kind: ProviderKind::OpenAiResponses,
+                upstream_alias: None,
+                host: host.to_owned(),
+                port: None,
+                use_http: false,
+                api_path: default_api_path(),
+                auth_plugin_type: None,
+                auth_config: None,
+                storage_backend: None,
+                storage_kind: StorageKind::OpenAi,
+                api_version: None,
+                rag_provider: None,
+                tenant_overrides: HashMap::new(),
+            }
+        }
+        fn with_tenant_host(host: &str) -> ProviderEntry {
+            let mut e = entry("api.example.com");
+            e.tenant_overrides.insert(
+                "t".to_owned(),
+                ProviderTenantOverride {
+                    host: Some(host.to_owned()),
+                    upstream_alias: None,
+                    auth_plugin_type: None,
+                    auth_config: None,
+                },
+            );
+            e
+        }
+        fn with_api_version(v: &str) -> ProviderEntry {
+            let mut e = entry("api.example.com");
+            e.api_version = Some(v.to_owned());
+            e
+        }
+
+        for host in ["my-host.example.com", "127.0.0.1", "[::1]", "mock_llm"] {
+            entry(host).validate("p").unwrap();
+            with_tenant_host(host).validate("p").unwrap();
+        }
+        for (host, bad) in [("api.example.com/v1", '/'), ("api.example.com?x=1", '?')] {
+            let err = entry(host).validate("p").unwrap_err();
+            assert_eq!(err, format!("provider 'p': host contains '{bad}'"));
+            let err = with_tenant_host(host).validate("p").unwrap_err();
+            assert_eq!(
+                err,
+                format!("provider 'p': tenant override 't' host contains '{bad}'")
+            );
+        }
+
+        with_api_version("2024-10-21").validate("p").unwrap();
+        let err = with_api_version("2024-10-21&x=1")
+            .validate("p")
+            .unwrap_err();
+        assert!(err.contains("api_version contains '&'"), "{err}");
+    }
+
+    #[test]
     fn azure_storage_requires_api_version() {
         let entry = |api_version: Option<&str>| ProviderEntry {
             kind: ProviderKind::OpenAiResponses,
@@ -1293,6 +1382,8 @@ mod tests {
             .validate(valid.minimal_generation_floor - 1)
             .unwrap_err();
         assert!(err.contains("minimal_generation_floor"), "{err}");
+        // A floor equal to the output cap is accepted.
+        valid.validate(valid.minimal_generation_floor).unwrap();
         // Deprecated fields are not validated, only reported.
         let deprecated = EstimationBudgets {
             bytes_per_token_conservative: 0,

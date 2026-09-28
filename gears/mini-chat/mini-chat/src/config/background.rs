@@ -92,7 +92,7 @@ impl Default for UploadReaperConfig {
 }
 
 impl UploadReaperConfig {
-    const MIN_STALE_AFTER_SECS: u64 = 60;
+    pub(crate) const MIN_STALE_AFTER_SECS: u64 = 60;
 
     pub fn validate(&self) -> Result<(), String> {
         if !(Self::MIN_STALE_AFTER_SECS..=86_400).contains(&self.stale_after_secs) {
@@ -134,7 +134,7 @@ pub struct ThreadSummaryWorkerConfig {
     #[serde(default = "default_ts_reconcile_interval")]
     pub reconcile_interval_secs: u64,
     /// Outbox lease for one summary task: the handler is cancelled and the
-    /// task redelivered after this. Must be 5-3600s. Default: 300s.
+    /// task redelivered after this. Must be 30-3600s. Default: 300s.
     #[serde(default = "default_ts_claim_timeout")]
     pub claim_timeout_secs: u64,
     /// Attempts per task before it is dead-lettered. Default: 3.
@@ -348,6 +348,21 @@ mod tests {
             assert!(err.contains("timeout_secs"), "{err}");
         }
         for secs in [90, 3600] {
+            with(secs).validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn orphan_watchdog_scan_interval_bounds() {
+        let with = |secs| OrphanWatchdogConfig {
+            scan_interval_secs: secs,
+            ..OrphanWatchdogConfig::default()
+        };
+        for secs in [0, MAX_SCAN_INTERVAL_SECS + 1] {
+            let err = with(secs).validate().unwrap_err();
+            assert!(err.contains("scan_interval_secs"), "{err}");
+        }
+        for secs in [1, MAX_SCAN_INTERVAL_SECS] {
             with(secs).validate().unwrap();
         }
     }

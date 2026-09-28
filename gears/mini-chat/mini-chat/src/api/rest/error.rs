@@ -797,6 +797,20 @@ mod tests {
     }
 
     #[test]
+    fn images_disabled_emits_precondition_violation() {
+        let p: Problem = DomainError::ImagesDisabled.into_test_problem();
+        assert_eq!(p.status, Some(400));
+        assert_eq!(p.problem_type, FAILED_PRECONDITION_TYPE);
+        let v = p
+            .context
+            .get("violations")
+            .and_then(|v| v.as_array())
+            .expect("violations must be present");
+        assert_eq!(v[0]["subject"], "images");
+        assert_eq!(v[0]["type"], "FEATURE_DISABLED");
+    }
+
+    #[test]
     fn invalid_model_emits_field_violation() {
         let p: Problem = DomainError::InvalidModel {
             model: "gpt-fake".into(),

@@ -434,9 +434,15 @@ impl toolkit_db::outbox::LeasedMessageHandler for UsageEventHandler {
 ///   warning once and the event is dropped; the next delivery looks again)
 /// - Plugin resolution error, or an instance registered in types-registry
 ///   whose client is not in `ClientHub` → `Retry` (plugin may not be ready yet)
+/// - A `Retry` on the last of [`AUDIT_MAX_ATTEMPTS`] attempts → `Reject`
+///   (dead-letter), so a misconfigured plugin does not block the partition
 ///
 /// Every outcome is counted in `mini_chat_audit_emit_total{result}`; a
 /// "plugin not configured" drop as `result = dropped`.
+/// Delivery attempts per audit event before it is dead-lettered. With the
+/// outbox backoff capped at 30 s this is about an hour of retries.
+pub const AUDIT_MAX_ATTEMPTS: u32 = 120;
+
 pub struct AuditEventHandler {
     pub(crate) audit_gateway: Arc<AuditGateway>,
     pub(crate) metrics: Arc<dyn MiniChatMetricsPort>,
@@ -476,9 +482,14 @@ impl toolkit_db::outbox::LeasedMessageHandler for AuditEventHandler {
                 return toolkit_db::outbox::MessageResult::Ok;
             }
             Err(e) => {
-                warn!(error = %e, "audit plugin resolution failed - will retry");
-                self.metrics.record_audit_emit(metric_labels::result::RETRY);
-                return toolkit_db::outbox::MessageResult::Retry;
+                warn!(
+                    partition_id = msg.partition_id,
+                    seq = msg.seq,
+                    attempts = msg.attempts,
+                    error = %e,
+                    "audit plugin resolution failed - will retry"
+                );
+                return self.retry_or_dead_letter(msg, "audit plugin resolution failed");
             }
         };
 
@@ -519,11 +530,11 @@ impl toolkit_db::outbox::LeasedMessageHandler for AuditEventHandler {
                 warn!(
                     partition_id = msg.partition_id,
                     seq = msg.seq,
+                    attempts = msg.attempts,
                     error = %e,
                     "audit emit transient failure - will retry"
                 );
-                self.metrics.record_audit_emit(metric_labels::result::RETRY);
-                toolkit_db::outbox::MessageResult::Retry
+                self.retry_or_dead_letter(msg, "audit emit transient failure")
             }
             Err(e) => {
                 tracing::error!(
@@ -537,6 +548,33 @@ impl toolkit_db::outbox::LeasedMessageHandler for AuditEventHandler {
                 toolkit_db::outbox::MessageResult::Reject(e.to_string())
             }
         }
+    }
+}
+
+impl AuditEventHandler {
+    /// `Retry`, or `Reject` once this is the last of [`AUDIT_MAX_ATTEMPTS`]:
+    /// an audit event that keeps failing must not block its partition.
+    fn retry_or_dead_letter(
+        &self,
+        msg: &toolkit_db::outbox::OutboxMessage,
+        what: &str,
+    ) -> toolkit_db::outbox::MessageResult {
+        let this_attempt = u32::try_from(msg.attempts).unwrap_or(0).saturating_add(1);
+        if this_attempt >= AUDIT_MAX_ATTEMPTS {
+            tracing::error!(
+                partition_id = msg.partition_id,
+                seq = msg.seq,
+                attempts = this_attempt,
+                "{what}: max attempts reached - dead-lettering"
+            );
+            self.metrics
+                .record_audit_emit(metric_labels::result::REJECT);
+            return toolkit_db::outbox::MessageResult::Reject(format!(
+                "{what}: max attempts ({AUDIT_MAX_ATTEMPTS}) reached"
+            ));
+        }
+        self.metrics.record_audit_emit(metric_labels::result::RETRY);
+        toolkit_db::outbox::MessageResult::Retry
     }
 }
 
@@ -969,7 +1007,10 @@ mod tests {
             "expected Reject for corrupt payload"
         );
         assert_eq!(plugin.calls(), 0);
-        assert_eq!(metrics.audit_emit.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *metrics.audit_emit_results.lock().unwrap(),
+            [metric_labels::result::REJECT]
+        );
     }
 
     // A corrupt payload is rejected before the plugin is resolved: a missing
@@ -1008,7 +1049,10 @@ mod tests {
             "expected Ok when no plugin configured"
         );
         // The drop is counted (result = dropped), not silent.
-        assert_eq!(metrics.audit_emit.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *metrics.audit_emit_results.lock().unwrap(),
+            [metric_labels::result::DROPPED]
+        );
     }
 
     // ── AuditEventHandler: instance resolved, client missing → Retry ──
@@ -1029,7 +1073,55 @@ mod tests {
             matches!(result, MessageResult::Retry),
             "expected Retry when the plugin client is not in ClientHub"
         );
-        assert_eq!(metrics.audit_emit.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *metrics.audit_emit_results.lock().unwrap(),
+            [metric_labels::result::RETRY]
+        );
+    }
+
+    // ── AuditEventHandler: retries are bounded ──
+
+    // A plugin that never becomes available must not block the partition:
+    // the last attempt dead-letters instead of retrying.
+    #[tokio::test]
+    async fn audit_handler_dead_letters_on_last_attempt() {
+        let metrics = Arc::new(crate::domain::service::test_helpers::TestMetrics::new());
+        let handler = AuditEventHandler {
+            audit_gateway: AuditGateway::with_lookup(
+                Arc::new(toolkit::client_hub::ClientHub::new()),
+                || Some("test.audit.plugin.v1~test._.missing.v1".to_owned()),
+            ),
+            metrics: Arc::clone(&metrics) as _,
+        };
+        let mut msg = make_outbox_message(make_audit_envelope_payload());
+        msg.attempts = i16::try_from(AUDIT_MAX_ATTEMPTS - 2).unwrap();
+        assert!(matches!(
+            LeasedMessageHandler::handle(&handler, &msg).await,
+            MessageResult::Retry
+        ));
+        msg.attempts += 1;
+        assert!(matches!(
+            LeasedMessageHandler::handle(&handler, &msg).await,
+            MessageResult::Reject(_)
+        ));
+
+        let plugin = MockAuditPlugin::transient("network blip");
+        let handler = AuditEventHandler {
+            audit_gateway: AuditGateway::from_plugin(plugin.clone()),
+            metrics: Arc::clone(&metrics) as _,
+        };
+        assert!(matches!(
+            LeasedMessageHandler::handle(&handler, &msg).await,
+            MessageResult::Reject(_)
+        ));
+        assert_eq!(
+            *metrics.audit_emit_results.lock().unwrap(),
+            [
+                metric_labels::result::RETRY,
+                metric_labels::result::REJECT,
+                metric_labels::result::REJECT
+            ]
+        );
     }
 
     // ── AuditEventHandler: plugin registered after a no-plugin delivery ──

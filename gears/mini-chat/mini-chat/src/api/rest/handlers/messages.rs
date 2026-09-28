@@ -49,6 +49,39 @@ pub(crate) async fn stream_message(
     Path(chat_id): Path<uuid::Uuid>,
     extract::Json(body): extract::Json<StreamMessageRequest>,
 ) -> Response {
+    run_to_completion(async move { start_stream(&svc, ctx, chat_id, body).await }).await
+}
+
+/// Run a stream setup to its response in its own task. A client that
+/// disconnects drops the handler future; without the task, a drop after the
+/// turn (or the retry/edit mutation) commits would leave the new turn
+/// `running`, with its reserve booked, until the orphan watchdog. With it the
+/// setup finishes, the unsent response drops its `SseRelay`, and that
+/// cancels the stream, which finalizes the turn as cancelled.
+pub(crate) async fn run_to_completion(
+    fut: impl std::future::Future<Output = Response> + Send + 'static,
+) -> Response {
+    match tokio::spawn(fut.instrument(tracing::Span::current())).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::error!(error = ?e, "stream setup task failed");
+            CanonicalError::internal("stream setup failed")
+                .create()
+                .into_response()
+        }
+    }
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "sequential early returns with logging; tracing macros add most of the score"
+)]
+async fn start_stream(
+    svc: &AppServices,
+    ctx: SecurityContext,
+    chat_id: uuid::Uuid,
+    body: StreamMessageRequest,
+) -> Response {
     // ── Pre-stream validation ──────────────────────────────────────────
     if body.content.trim().is_empty() {
         return MiniChatChatError::invalid_argument()
@@ -118,7 +151,7 @@ pub(crate) async fn stream_message(
     {
         Ok(handle) => handle,
         Err(StreamError::Replay { turn }) => {
-            return replay_response(&svc, tenant_id, &selected_model, &turn, ping_secs).await;
+            return replay_response(svc, tenant_id, &selected_model, &turn, ping_secs).await;
         }
         Err(e) => return CanonicalError::from(e).into_response(),
     };

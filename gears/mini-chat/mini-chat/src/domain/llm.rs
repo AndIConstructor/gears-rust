@@ -225,7 +225,7 @@ pub struct AttachmentRef {
 
 /// Lifecycle phase of a tool invocation within a stream.
 #[domain_model]
-#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolPhase {
     Start,

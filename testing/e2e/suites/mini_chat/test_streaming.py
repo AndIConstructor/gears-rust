@@ -316,6 +316,13 @@ class TestStreamInvalidAttachments:
         att_id = _upload_ready(chat_id, "dup.txt", b"one document", "text/plain")
         self._assert_rejected(chat_id, [att_id, att_id], mock_provider)
 
+    def test_too_many_attachment_ids_rejected(self, chat, mock_provider):
+        """More IDs than a valid message can reference (default
+        rag.max_documents_per_chat 50 + rag.max_images_per_message 4 = 54)
+        are rejected before any attachment query."""
+        ids = [str(uuid.uuid4()) for _ in range(55)]
+        self._assert_rejected(chat["id"], ids, mock_provider)
+
     def test_deleted_attachment_rejected(self, chat, mock_provider):
         """An attachment removed by DELETE /attachments/{id}."""
         chat_id = chat["id"]

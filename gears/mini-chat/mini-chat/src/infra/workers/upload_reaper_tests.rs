@@ -8,7 +8,7 @@ use toolkit_db::secure::{SecureEntityExt, SecureUpdateExt};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
-use super::{UploadReaperDeps, scan_and_reap};
+use super::{ScanOutcome, UploadReaperDeps, scan_and_reap};
 use crate::config::UploadReaperConfig;
 use crate::domain::service::test_helpers::{
     InsertTestAttachmentParams, RecordingOutboxEnqueuer, inmem_db, insert_chat_for_user,
@@ -78,7 +78,7 @@ async fn stale_uploaded_row_is_failed_and_cleanup_enqueued() {
     };
 
     let result = scan_and_reap(&deps, &config(), &CancellationToken::new()).await;
-    assert_eq!(result, Ok(false));
+    assert_eq!(result, ScanOutcome::Done);
 
     let row = load(&db, id).await;
     assert_eq!(row.status, AttachmentStatus::Failed);
@@ -115,9 +115,10 @@ async fn stale_pending_row_without_file_is_failed_without_cleanup() {
         metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
     };
 
-    scan_and_reap(&deps, &config(), &CancellationToken::new())
-        .await
-        .unwrap();
+    assert_eq!(
+        scan_and_reap(&deps, &config(), &CancellationToken::new()).await,
+        ScanOutcome::Done
+    );
 
     let row = load(&db, id).await;
     assert_eq!(row.status, AttachmentStatus::Failed);
@@ -138,9 +139,10 @@ async fn recent_and_finished_rows_are_left_alone() {
         metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
     };
 
-    scan_and_reap(&deps, &config(), &CancellationToken::new())
-        .await
-        .unwrap();
+    assert_eq!(
+        scan_and_reap(&deps, &config(), &CancellationToken::new()).await,
+        ScanOutcome::Done
+    );
 
     assert_eq!(load(&db, recent).await.status, AttachmentStatus::Uploaded);
     assert_eq!(load(&db, ready).await.status, AttachmentStatus::Ready);
@@ -160,6 +162,103 @@ fn config_rejects_stale_window_below_gateway_timeout() {
     assert!(cfg.validate().is_err());
     cfg.scan_interval_secs = crate::config::background::MAX_SCAN_INTERVAL_SECS;
     cfg.validate().unwrap();
+}
+
+#[test]
+fn config_stale_after_bounds() {
+    let with = |secs| UploadReaperConfig {
+        stale_after_secs: secs,
+        ..config()
+    };
+    for secs in [59, 86_401] {
+        let err = with(secs).validate().unwrap_err();
+        assert!(err.contains("stale_after_secs"), "{err}");
+    }
+    for secs in [60, 86_400] {
+        with(secs).validate().unwrap();
+    }
+}
+
+/// A row refreshed between the scan and the CAS (the background indexing
+/// heartbeat) is no longer stale and is not abandoned.
+#[tokio::test]
+async fn cas_abandon_upload_skips_row_touched_after_scan() {
+    use crate::domain::repos::AttachmentRepository as _;
+    let repo = crate::infra::db::repo::attachment_repo::AttachmentRepository;
+    let db = mock_db_provider(inmem_db().await);
+    let (id, _) = seed(&db, AttachmentStatus::Uploaded, Some("file-touched"), 600).await;
+    let tenant_id = load(&db, id).await.tenant_id;
+    let conn = db.conn().unwrap();
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::seconds(300);
+
+    let stale = repo.find_stale_uploads(&conn, cutoff, 10).await.unwrap();
+    assert_eq!(stale.iter().map(|r| r.id).collect::<Vec<_>>(), [id]);
+
+    let touched = repo
+        .touch_uploaded(&conn, &AccessScope::for_tenant(tenant_id), id)
+        .await
+        .unwrap();
+    assert_eq!(touched, 1);
+
+    let affected = repo
+        .cas_abandon_upload(
+            &conn,
+            tenant_id,
+            id,
+            AttachmentStatus::Uploaded,
+            cutoff,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(affected, 0);
+    let row = load(&db, id).await;
+    assert_eq!(row.status, AttachmentStatus::Uploaded);
+    assert!(row.error_code.is_none(), "{:?}", row.error_code);
+    assert_eq!(row.cleanup_status, None);
+}
+
+/// The CAS is scoped to the given tenant: another tenant id matches nothing.
+#[tokio::test]
+async fn cas_abandon_upload_with_wrong_tenant_affects_nothing() {
+    let repo = crate::infra::db::repo::attachment_repo::AttachmentRepository;
+    let db = mock_db_provider(inmem_db().await);
+    let (id, _) = seed(&db, AttachmentStatus::Uploaded, Some("file-tenant"), 600).await;
+    let tenant_id = load(&db, id).await.tenant_id;
+    let conn = db.conn().unwrap();
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::seconds(300);
+
+    let affected = repo
+        .cas_abandon_upload(
+            &conn,
+            Uuid::new_v4(),
+            id,
+            AttachmentStatus::Uploaded,
+            cutoff,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(affected, 0);
+    assert_eq!(load(&db, id).await.status, AttachmentStatus::Uploaded);
+
+    // The row's own tenant does match.
+    let affected = repo
+        .cas_abandon_upload(
+            &conn,
+            tenant_id,
+            id,
+            AttachmentStatus::Uploaded,
+            cutoff,
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(affected, 1);
+    let row = load(&db, id).await;
+    assert_eq!(row.status, AttachmentStatus::Failed);
+    assert_eq!(row.error_code.as_deref(), Some("upload_abandoned"));
+    assert_eq!(row.cleanup_status, Some(CleanupStatus::Pending));
 }
 
 /// A row whose chat was deleted already has `cleanup_status` set by chat
@@ -187,9 +286,10 @@ async fn row_owned_by_chat_cleanup_is_left_alone() {
         metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
     };
 
-    scan_and_reap(&deps, &config(), &CancellationToken::new())
-        .await
-        .unwrap();
+    assert_eq!(
+        scan_and_reap(&deps, &config(), &CancellationToken::new()).await,
+        ScanOutcome::Done
+    );
 
     let row = load(&db, id).await;
     assert_eq!(row.status, AttachmentStatus::Uploaded);

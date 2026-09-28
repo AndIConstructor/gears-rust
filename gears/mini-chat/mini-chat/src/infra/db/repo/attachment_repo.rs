@@ -64,10 +64,12 @@ impl AttachmentRepository {
     /// CAS `from` → `failed` with `error_code = upload_abandoned`, only while
     /// the row is still stale. With `schedule_cleanup` the row also gets
     /// `cleanup_status = pending`, so the attachment cleanup handler can mark
-    /// it done after deleting the provider file. Returns rows affected.
+    /// it done after deleting the provider file. Scoped to the row's tenant.
+    /// Returns rows affected.
     pub async fn cas_abandon_upload<C: DBRunner>(
         &self,
         runner: &C,
+        tenant_id: Uuid,
         id: Uuid,
         from: AttachmentStatus,
         cutoff: OffsetDateTime,
@@ -99,7 +101,7 @@ impl AttachmentRepository {
                     .add(Column::UpdatedAt.lt(cutoff)),
             )
             .secure()
-            .scope_with(&AccessScope::allow_all())
+            .scope_with(&AccessScope::for_tenant(tenant_id))
             .exec(runner)
             .await
             .map_err(db_err)?;

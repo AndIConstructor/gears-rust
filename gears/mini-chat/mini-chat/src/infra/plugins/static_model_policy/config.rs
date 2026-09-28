@@ -32,9 +32,8 @@ pub struct StaticMiniChatPolicyPluginConfig {
     pub default_premium_limits: TierLimits,
 }
 
-/// Operator-facing mirror of [`KillSwitches`] that rejects unknown keys.
-/// The SDK type itself stays lenient, because it is also read from policy
-/// plugins that may add fields.
+/// Operator-facing mirror of [`KillSwitches`]: every field may be omitted
+/// (a missing one is `false`), and an unknown key is a config error.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -64,10 +63,18 @@ where
 
 impl StaticMiniChatPolicyPluginConfig {
     /// Every catalog entry must price usage: both credit multipliers in
-    /// `1..=MAX_MULT` (a zero multiplier would make usage free).
+    /// `1..=MAX_MULT` (a zero multiplier would make usage free). Its
+    /// `bytes_per_token_conservative` must be > 0: the estimator would clamp
+    /// a zero to 1 and overestimate every request about fourfold.
     pub fn validate(&self) -> Result<(), String> {
         use crate::domain::service::credit_arithmetic::MAX_MULT;
         for entry in &self.model_catalog {
+            if entry.estimation_budgets.bytes_per_token_conservative == 0 {
+                return Err(format!(
+                    "model '{}': estimation_budgets.bytes_per_token_conservative must be > 0",
+                    entry.id
+                ));
+            }
             for (name, value) in [
                 (
                     "input_tokens_credit_multiplier_micro",

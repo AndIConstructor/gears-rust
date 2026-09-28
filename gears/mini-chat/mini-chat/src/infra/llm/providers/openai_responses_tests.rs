@@ -958,14 +958,14 @@ fn parse_response_failed_top_level_error_fallback() {
     assert_eq!(error.message, "internal failure");
 }
 
+/// No known error shape: the raw payload becomes the message, as for the
+/// `error` event, so the cause is not lost.
 #[test]
-fn parse_response_failed_without_error_is_empty() {
-    let error = parse_error(
-        "response.failed",
-        r#"{"response":{"id":"resp_1","status":"failed","error":null}}"#,
-    );
+fn parse_response_failed_without_error_keeps_payload() {
+    let data = r#"{"response":{"id":"resp_1","status":"failed","error":null}}"#;
+    let error = parse_error("response.failed", data);
     assert_eq!(error.code, "");
-    assert_eq!(error.message, "");
+    assert_eq!(error.message, data);
 }
 
 #[test]
@@ -1353,6 +1353,21 @@ fn translate_unknown_is_skip() {
     };
     let translated = translate_provider_event(&event, "");
     assert!(matches!(translated, TranslatedEvent::Skip));
+}
+
+#[test]
+fn char_slice_counts_characters_and_rejects_bad_ranges() {
+    assert_eq!(char_slice("h\u{e9}llo", 1, 3).as_deref(), Some("\u{e9}l"));
+    assert_eq!(
+        char_slice("h\u{e9}llo", 0, 5).as_deref(),
+        Some("h\u{e9}llo")
+    );
+    // Empty or reversed range.
+    assert_eq!(char_slice("h\u{e9}llo", 2, 2), None);
+    assert_eq!(char_slice("h\u{e9}llo", 3, 1), None);
+    // End past the text.
+    assert_eq!(char_slice("h\u{e9}llo", 3, 6), None);
+    assert_eq!(char_slice("h\u{e9}llo", 5, 6), None);
 }
 
 #[test]
@@ -1789,25 +1804,22 @@ async fn stream_code_interpreter_start_then_done_with_output() {
         .unwrap();
 
     let sse: Vec<ClientSseEvent> = stream.map(Result::unwrap).collect().await;
-    let tools: Vec<(String, serde_json::Value)> = sse
+    let tools: Vec<(ToolPhase, serde_json::Value)> = sse
         .iter()
         .filter_map(|e| match e {
             ClientSseEvent::Tool {
                 phase,
                 name: "code_interpreter",
                 details,
-            } => Some((format!("{phase:?}"), details.clone())),
+            } => Some((*phase, details.clone())),
             _ => None,
         })
         .collect();
     assert_eq!(
         tools,
         vec![
-            ("Start".to_owned(), serde_json::json!({})),
-            (
-                "Done".to_owned(),
-                serde_json::json!({"output": "Total: 42"})
-            ),
+            (ToolPhase::Start, serde_json::json!({})),
+            (ToolPhase::Done, serde_json::json!({"output": "Total: 42"})),
         ]
     );
 }
@@ -2159,6 +2171,8 @@ fn extra_body_does_not_override_reserved_keys() {
                 "max_tool_calls": 50,
                 "model": "other-model",
                 "user": "someone-else",
+                "store": true,
+                "include": [],
                 "seed": 7
             })),
             ..test_api_params()
@@ -2171,5 +2185,7 @@ fn extra_body_does_not_override_reserved_keys() {
     assert_eq!(body["max_tool_calls"], 2);
     assert_eq!(body["model"], "gpt-4o");
     assert!(body.get("user").is_none(), "{body}");
+    assert_eq!(body["store"], false);
+    assert!(body.get("include").is_none(), "{body}");
     assert_eq!(body["seed"], 7);
 }

@@ -59,6 +59,10 @@ fn turn_tx_error(e: toolkit_db::DbError) -> StreamError {
                             message,
                         }
                     }
+                    // Deleted after the pre-checks (`require_live_chat`).
+                    Ok(DomainError::ChatNotFound { id }) => {
+                        StreamError::ChatNotFound { chat_id: id }
+                    }
                     Ok(domain_err) => StreamError::TurnCreationFailed { source: domain_err },
                     Err(err) => StreamError::TurnCreationFailed {
                         source: DomainError::from(toolkit_db::DbError::Other(err)),
@@ -356,6 +360,24 @@ impl<
             .await
             .map_err(|e| StreamError::TurnCreationFailed { source: e })?
             .ok_or(StreamError::ChatNotFound { chat_id })?;
+
+        // ── attachment_ids length (before any query that takes the list) ──
+        // A valid message references at most every document of the chat plus
+        // `max_images_per_message` images; duplicates are rejected later.
+        let max_attachment_ids = usize::try_from(self.rag_config.max_documents_per_chat)
+            .unwrap_or(usize::MAX)
+            .saturating_add(
+                usize::try_from(self.rag_config.max_images_per_message).unwrap_or(usize::MAX),
+            );
+        if attachment_ids.len() > max_attachment_ids {
+            return Err(StreamError::InvalidAttachment {
+                code: "invalid_attachment".to_owned(),
+                message: format!(
+                    "Too many attachment IDs: {} (at most {max_attachment_ids})",
+                    attachment_ids.len()
+                ),
+            });
+        }
 
         let scope = chat_scope.tenant_only();
 
@@ -1372,7 +1394,7 @@ impl<
             tracing::info!(
                 chat_id = %chat_id,
                 ready_doc_count,
-                "file_search disabled by kill switch during mutation -- {ready_doc_count} ready documents skipped"
+                "file_search disabled during mutation (kill switch or model without file_search support) -- {ready_doc_count} ready documents skipped"
             );
         }
 
@@ -1717,6 +1739,18 @@ fn require_live_chat(
 mod tests {
     use super::types::{StreamTerminal, normalize_error};
     use super::*;
+
+    /// A chat deleted between the pre-checks and the turn transaction is
+    /// `ChatNotFound`, not a turn creation failure.
+    #[test]
+    fn turn_tx_error_maps_deleted_chat_to_chat_not_found() {
+        let chat_id = Uuid::new_v4();
+        let err = require_live_chat(Ok(false), chat_id).unwrap_err();
+        match turn_tx_error(err) {
+            StreamError::ChatNotFound { chat_id: id } => assert_eq!(id, chat_id),
+            other => panic!("expected ChatNotFound, got {other:?}"),
+        }
+    }
     use crate::domain::llm::{ToolPhase, Usage};
     use crate::domain::repos::CasTerminalParams;
     use crate::infra::db::repo::attachment_repo::AttachmentRepository as OrmAttachmentRepo;
@@ -5682,6 +5716,46 @@ mod tests {
         );
     }
 
+    /// More attachment IDs than documents per chat plus images per message
+    /// are rejected before any attachment query; the bound itself passes
+    /// the length check.
+    #[tokio::test]
+    async fn send_message_too_many_attachment_ids() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["hi"]));
+        let svc = build_stream_service(db.clone(), provider);
+        let max = usize::try_from(
+            svc.rag_config.max_documents_per_chat + svc.rag_config.max_images_per_message,
+        )
+        .unwrap();
+
+        // Unknown ids: had the list reached the lookup, it would be "not found".
+        let ids: Vec<Uuid> = (0..=max).map(|_| Uuid::new_v4()).collect();
+        let err =
+            run_stream_expect_invalid_attachment(&svc, tenant_id, user_id, chat_id, ids).await;
+        assert!(
+            matches!(
+                err,
+                StreamError::InvalidAttachment { ref message, .. }
+                    if message.starts_with("Too many attachment IDs")
+            ),
+            "expected 'Too many attachment IDs', got: {err:?}"
+        );
+
+        let ids: Vec<Uuid> = (0..max).map(|_| Uuid::new_v4()).collect();
+        let err =
+            run_stream_expect_invalid_attachment(&svc, tenant_id, user_id, chat_id, ids).await;
+        assert!(
+            matches!(err, StreamError::InvalidAttachment { ref message, .. } if message.contains("not found")),
+            "expected 'not found' at the bound, got: {err:?}"
+        );
+    }
+
     // ── P5-H: SendMessage with Attachments (positive) ──
 
     /// P5-H1: Valid `attachment_ids` → `message_attachments` persisted, stream completes.
@@ -6499,6 +6573,7 @@ mod tests {
         fn record_orphan_finalized(&self, _: &str) {}
         fn record_orphan_scan_duration_seconds(&self, _: f64) {}
         fn record_upload_abandoned(&self, _: &str) {}
+        fn record_background_indexing(&self, _: &str) {}
         fn record_upload_reaper_scan_duration_seconds(&self, _: f64) {}
         fn record_code_interpreter_calls(&self, _: &str, _: u32) {}
         fn record_cleanup_completed(&self, _: &str) {}
@@ -8029,24 +8104,35 @@ mod tests {
         use authz_resolver_sdk::EnforcerError;
         use authz_resolver_sdk::pep::ConstraintCompileError;
 
+        // (error, source is AuthzUnavailable rather than Forbidden)
         let errors = [
-            EnforcerError::Denied { deny_reason: None },
-            EnforcerError::EvaluationFailed(
-                toolkit_canonical_errors::CanonicalError::service_unavailable()
-                    .with_detail("authz-resolver unreachable")
-                    .create(),
-            ),
-            EnforcerError::CompileFailed(ConstraintCompileError::ConstraintsRequiredButAbsent),
-        ];
-        for e in errors {
-            let label = format!("{e:?}");
-            assert!(
-                matches!(
-                    StreamError::from(e),
-                    StreamError::AuthorizationFailed { .. }
+            (EnforcerError::Denied { deny_reason: None }, false),
+            (
+                EnforcerError::EvaluationFailed(
+                    toolkit_canonical_errors::CanonicalError::service_unavailable()
+                        .with_detail("authz-resolver unreachable")
+                        .create(),
                 ),
-                "{label} must map to AuthorizationFailed"
-            );
+                true,
+            ),
+            (
+                EnforcerError::CompileFailed(ConstraintCompileError::ConstraintsRequiredButAbsent),
+                false,
+            ),
+        ];
+        for (e, unavailable) in errors {
+            let label = format!("{e:?}");
+            match StreamError::from(e) {
+                StreamError::AuthorizationFailed { source } if unavailable => assert!(
+                    matches!(source, DomainError::AuthzUnavailable),
+                    "{label}: source must be AuthzUnavailable, got {source:?}"
+                ),
+                StreamError::AuthorizationFailed { source } => assert!(
+                    matches!(source, DomainError::Forbidden),
+                    "{label}: source must be Forbidden, got {source:?}"
+                ),
+                other => panic!("{label} must map to AuthorizationFailed, got {other:?}"),
+            }
         }
     }
 }

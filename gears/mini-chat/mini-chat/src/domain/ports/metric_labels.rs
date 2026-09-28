@@ -86,6 +86,20 @@ pub mod upload_result {
     pub const CONCURRENCY_LIMIT: &str = "concurrency_limit";
 }
 
+/// Background indexing result labels (`result` label of
+/// `attachment_background_indexing`).
+pub mod background_indexing_result {
+    /// Indexing completed and the row is `ready`.
+    pub const READY: &str = "ready";
+    /// The provider reported `failed`/`cancelled`, or a status read failed
+    /// with a non-transient error.
+    pub const FAILED: &str = "failed";
+    /// Indexing did not finish within the background timeout.
+    pub const TIMEOUT: &str = "timeout";
+    /// Indexing completed but the row could not be set `ready`.
+    pub const SET_READY_FAILED: &str = "set_ready_failed";
+}
+
 /// Cleanup resource type labels (`resource_type` label).
 pub mod resource_type {
     pub const FILE: &str = "file";

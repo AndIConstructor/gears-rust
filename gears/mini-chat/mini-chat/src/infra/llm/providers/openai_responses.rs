@@ -498,10 +498,18 @@ impl FromServerEvent for ProviderEvent {
                     }
                 })?;
                 let (error, usage) = data.into_error_and_usage();
-                Ok(ProviderEvent::ResponseFailed {
-                    error: error.unwrap_or_default(),
-                    usage,
-                })
+                // No known error shape: keep the raw payload as the message,
+                // as the `error` event does.
+                let error = error.unwrap_or_else(|| {
+                    let sanitized_data =
+                        crate::infra::llm::sanitize_provider_message(&event.data);
+                    tracing::warn!(data = %sanitized_data, "response.failed without an error object");
+                    ProviderErrorPayload {
+                        code: String::new(),
+                        message: event.data.clone(),
+                    }
+                });
+                Ok(ProviderEvent::ResponseFailed { error, usage })
             }
 
             "response.incomplete" => {

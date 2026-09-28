@@ -89,7 +89,9 @@ fn should_trigger_summary(
         return false;
     }
     let estimated_input = i64::try_from(assembled_context_tokens).unwrap_or(i64::MAX);
-    // Same input budget as context assembly: min(max_input_tokens, ctx - out).
+    // Context assembly's budget, min(max_input_tokens, ctx - out), but before
+    // the tool surcharges and the fixed overhead are subtracted (see DESIGN,
+    // thread summary trigger).
     let mut effective_budget = i64::from(context_window) - i64::from(max_output_tokens_applied);
     if max_input_tokens > 0 {
         effective_budget = effective_budget.min(i64::from(max_input_tokens));
@@ -1546,6 +1548,108 @@ mod tests {
             *metrics.thread_summary_trigger.lock().unwrap(),
             ["scheduled"]
         );
+    }
+
+    /// Truncated first turn of a chat: the trigger is evaluated, but there
+    /// is no earlier message to summarize, so the outcome is `not_needed`.
+    #[tokio::test]
+    async fn summary_trigger_not_needed_without_earlier_message() {
+        use crate::domain::service::test_helpers::TestMetrics;
+
+        let db = mock_db_provider(inmem_db().await);
+        let metrics = Arc::new(TestMetrics::new());
+        let (svc, _outbox) =
+            build_finalization_service_with_metrics(Arc::clone(&db), Arc::clone(&metrics) as _);
+        let (tenant_id, chat_id, user_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (turn_id, request_id) = (Uuid::new_v4(), Uuid::new_v4());
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+        let mut input = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Completed,
+        );
+        input.messages_truncated = true;
+
+        let outcome = svc.finalize_turn_cas(input).await.unwrap();
+        assert_eq!(outcome.summary_trigger, Some("not_needed"));
+        assert_eq!(
+            *metrics.thread_summary_trigger.lock().unwrap(),
+            ["not_needed"]
+        );
+    }
+
+    /// The usage and audit events carry the input's requester type.
+    #[tokio::test]
+    async fn system_requester_type_propagates_to_usage_and_audit_events() {
+        let db = mock_db_provider(inmem_db().await);
+        let (svc, outbox) = build_finalization_service(Arc::clone(&db));
+        let (tenant_id, chat_id, user_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (turn_id, request_id) = (Uuid::new_v4(), Uuid::new_v4());
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+        let mut input = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Completed,
+        );
+        input.requester_type = mini_chat_sdk::RequesterType::System;
+
+        svc.finalize_turn_cas(input).await.unwrap();
+
+        let usage_events = outbox.usage_events.lock().unwrap();
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0].requester_type, "system");
+        drop(usage_events);
+        match &outbox.audit_events()[..] {
+            [AuditEnvelope::Turn(evt)] => {
+                assert_eq!(evt.requester_type, mini_chat_sdk::RequesterType::System);
+            }
+            other => panic!("expected one Turn event, got: {other:?}"),
+        }
+    }
+
+    /// Orphan finalization also takes the requester type from its input.
+    #[tokio::test]
+    async fn finalize_orphan_system_requester_type_in_usage_event() {
+        let db = mock_db_provider(inmem_db().await);
+        let (svc, outbox) = build_finalization_service(Arc::clone(&db));
+        let (tenant_id, chat_id, user_id) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (turn_id, request_id) = (Uuid::new_v4(), Uuid::new_v4());
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+        let conn = db.conn().unwrap();
+        backdate_turn_progress(&conn, turn_id).await;
+
+        let input = crate::domain::model::finalization::OrphanFinalizationInput {
+            turn_id,
+            tenant_id,
+            chat_id,
+            request_id,
+            user_id: Some(user_id),
+            requester_type: mini_chat_sdk::RequesterType::System,
+            effective_model: Some("gpt-5.2".to_owned()),
+            reserve_tokens: Some(100),
+            max_output_tokens_applied: Some(4096),
+            reserved_credits_micro: Some(1000),
+            policy_version_applied: Some(1),
+            minimal_generation_floor_applied: Some(10),
+            started_at: time::OffsetDateTime::now_utc(),
+            web_search_completed_count: 0,
+            code_interpreter_completed_count: 0,
+            file_search_completed_count: 0,
+        };
+        assert!(svc.finalize_orphan_turn(input, 60).await.unwrap());
+
+        let usage_events = outbox.usage_events.lock().unwrap();
+        assert_eq!(usage_events.len(), 1);
+        assert_eq!(usage_events[0].requester_type, "system");
     }
 
     #[tokio::test]

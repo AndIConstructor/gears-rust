@@ -1420,6 +1420,26 @@ mod tests {
         }
     }
 
+    /// `extra_body` cannot turn off the usage report that settlement reads.
+    #[test]
+    fn extra_body_does_not_override_stream_options() {
+        let request = llm_request("gpt-4o")
+            .message(LlmMessage::user("Hi"))
+            .api_params(mini_chat_sdk::ModelApiParams {
+                extra_body: Some(serde_json::json!({
+                    "stream_options": {"include_usage": false},
+                    "tool_choice": "none",
+                    "seed": 7
+                })),
+                ..sampling(None, None, None)
+            })
+            .build_streaming();
+        let body = build_request_body(&request, true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        assert_eq!(body["seed"], 7);
+    }
+
     /// Each sampling parameter is sent only when the model config sets it.
     #[test]
     fn api_params_sampling_sent_only_when_set() {

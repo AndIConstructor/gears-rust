@@ -1610,3 +1610,132 @@ fn list_order_always_ends_with_id() {
     let q = crate::infra::db::repo::with_id_tiebreaker(&by_title, default, SortDir::Desc);
     assert_eq!(fields(&q), ["+title", "-updated_at", "-id"]);
 }
+
+/// Walks every page of `list_page` with the given limit, following
+/// `next_cursor`, and returns the ids in page order.
+async fn page_all_chats(db: &Db, limit: u64) -> Vec<Uuid> {
+    use crate::domain::repos::ChatRepository as _;
+    use crate::infra::db::repo::chat_repo::ChatRepository;
+    use toolkit_odata::{CursorV1, ODataQuery};
+
+    let repo = ChatRepository::new(limit_cfg());
+    let conn = db.conn().unwrap();
+    let mut ids = Vec::new();
+    let mut query = ODataQuery::new().with_limit(limit);
+    for _ in 0..20 {
+        let page = repo.list_page(&conn, &scope(), &query).await.unwrap();
+        ids.extend(page.items.iter().map(|c| c.id));
+        let Some(next) = page.page_info.next_cursor else {
+            return ids;
+        };
+        query = ODataQuery::new()
+            .with_limit(limit)
+            .with_cursor(CursorV1::decode(&next).unwrap());
+    }
+    panic!("pagination did not terminate");
+}
+
+/// Chats tied on `updated_at` are paged in `id` order, each exactly once.
+#[tokio::test]
+async fn chat_pages_with_tied_updated_at_return_every_row_once() {
+    use crate::infra::db::entity::chat::{ActiveModel, Entity as ChatEntity};
+    use sea_orm::Set;
+    use toolkit_db::secure::secure_insert;
+
+    let db = test_db().await;
+    let tenant_id = Uuid::new_v4();
+    let ts = time::macros::datetime!(2026-01-01 00:00:00 UTC);
+    let mut expected: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+    let conn = db.conn().unwrap();
+    for id in &expected {
+        let am = ActiveModel {
+            id: Set(*id),
+            tenant_id: Set(tenant_id),
+            user_id: Set(Uuid::new_v4()),
+            model: Set("gpt-5.2".to_owned()),
+            title: Set(Some("same".to_owned())),
+            is_temporary: Set(false),
+            created_at: Set(ts),
+            updated_at: Set(ts),
+            deleted_at: Set(None),
+        };
+        secure_insert::<ChatEntity>(am, &scope(), &conn)
+            .await
+            .expect("insert chat");
+    }
+    // Default order: updated_at desc, then id desc.
+    expected.sort_unstable_by(|a, b| b.cmp(a));
+
+    for limit in [1, 2] {
+        assert_eq!(page_all_chats(&db, limit).await, expected, "limit {limit}");
+    }
+}
+
+/// Messages tied on `created_at` are paged in `id` order, each exactly once.
+#[tokio::test]
+async fn message_pages_with_tied_created_at_return_every_row_once() {
+    use crate::infra::db::entity::message::{ActiveModel, Entity as MessageEntity};
+    use sea_orm::Set;
+    use toolkit_db::secure::secure_insert;
+    use toolkit_odata::{CursorV1, ODataQuery};
+
+    let db = test_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    insert_chat(&db, tenant_id, chat_id).await;
+    let ts = time::macros::datetime!(2026-01-01 00:00:00 UTC);
+    let conn = db.conn().unwrap();
+    let mut expected: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+    for id in &expected {
+        let am = ActiveModel {
+            id: Set(*id),
+            tenant_id: Set(tenant_id),
+            chat_id: Set(chat_id),
+            request_id: Set(Some(Uuid::new_v4())),
+            role: Set(MessageRole::User),
+            content: Set("same".to_owned()),
+            content_type: Set("text".to_owned()),
+            token_estimate: Set(0),
+            provider_response_id: Set(None),
+            request_kind: Set(Some("chat".to_owned())),
+            features_used: Set(serde_json::json!([])),
+            input_tokens: Set(0),
+            output_tokens: Set(0),
+            cache_read_input_tokens: Set(0),
+            cache_write_input_tokens: Set(0),
+            reasoning_tokens: Set(0),
+            model: Set(None),
+            is_compressed: Set(false),
+            created_at: Set(ts),
+            deleted_at: Set(None),
+        };
+        secure_insert::<MessageEntity>(am, &scope(), &conn)
+            .await
+            .expect("insert message");
+    }
+    // Default order: created_at asc, then id asc.
+    expected.sort_unstable();
+
+    let repo = MessageRepository::new(limit_cfg());
+    for limit in [1, 2] {
+        let mut ids = Vec::new();
+        let mut query = ODataQuery::new().with_limit(limit);
+        let mut pages = 0;
+        loop {
+            let page = repo
+                .list_by_chat(&conn, &scope(), chat_id, &query)
+                .await
+                .unwrap();
+            ids.extend(page.items.iter().map(|m| m.id));
+            let Some(next) = page.page_info.next_cursor else {
+                break;
+            };
+            pages += 1;
+            assert!(pages < 20, "pagination did not terminate");
+            query = ODataQuery::new()
+                .with_limit(limit)
+                .with_cursor(CursorV1::decode(&next).unwrap());
+        }
+        assert_eq!(ids, expected, "limit {limit}");
+    }
+}

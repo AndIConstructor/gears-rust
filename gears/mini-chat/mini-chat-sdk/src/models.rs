@@ -21,11 +21,11 @@ pub struct PolicySnapshot {
     pub kill_switches: KillSwitches,
 }
 
-/// Tenant-level kill switches from the policy snapshot. A missing field
-/// defaults to `false`, so a partial object is valid.
+/// Tenant-level kill switches from the policy snapshot. Every field is
+/// required when deserializing: a missing or renamed key is an error, not a
+/// silent `false` that would turn the switch off.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
 pub struct KillSwitches {
     pub disable_premium_tier: bool,
     pub force_standard_tier: bool,
@@ -350,6 +350,20 @@ mod tests {
         assert!(!ks.disable_file_search);
         assert!(!ks.disable_images);
         assert!(!ks.disable_code_interpreter);
+    }
+
+    #[test]
+    fn kill_switches_missing_field_is_an_error() {
+        let err = serde_json::from_value::<KillSwitches>(serde_json::json!({
+            "disable_premium_tier": false,
+            "force_standard_tier": false,
+            "disable_web_search": false,
+            "disable_file_search": false,
+            "disable_image": true,
+            "disable_code_interpreter": false,
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("disable_images"), "{err}");
     }
 
     // ── EstimationBudgets::default spec values ──

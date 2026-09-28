@@ -88,18 +88,28 @@ pub fn upstream_headers_for_kind(kind: ProviderKind) -> Option<oagw_sdk::Headers
 
 /// Request fields `extra_body` must not overwrite: the model and input, the
 /// output and tool-call caps derived from the quota, the tools the turn was
-/// granted, and the caller identity.
+/// granted and how they are chosen, the usage report that settlement reads
+/// (`stream_options`), the requested tool outputs (`include`), provider-side
+/// storage (`store`, `previous_response_id`), and the caller identity.
+/// Sampling knobs (`stop`, `reasoning`, `reasoning_effort`, ...) are not
+/// reserved: they are catalog settings like `extra_body` itself.
 const RESERVED_BODY_KEYS: &[&str] = &[
     "model",
     "input",
     "messages",
     "instructions",
+    "system",
     "stream",
+    "stream_options",
     "max_output_tokens",
     "max_completion_tokens",
     "max_tokens",
     "max_tool_calls",
     "tools",
+    "tool_choice",
+    "include",
+    "store",
+    "previous_response_id",
     "user",
     "metadata",
 ];

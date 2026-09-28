@@ -3787,3 +3787,403 @@ async fn test_upload_indexing_survives_transient_status_error() {
     );
     assert_eq!(oagw.captured_requests.lock().unwrap().len(), 5);
 }
+
+/// Vector store whose status reads fail with `InvalidResponse`, or hang
+/// when `invalid_response` is `None`. Counts status reads.
+struct StatusReadProvider {
+    invalid_response: Option<String>,
+    reads: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl crate::domain::ports::VectorStoreProvider for StatusReadProvider {
+    async fn create_vector_store(
+        &self,
+        _ctx: toolkit_security::SecurityContext,
+        _provider_id: &str,
+    ) -> Result<String, crate::domain::ports::FileStorageError> {
+        Ok("vs-unused".to_owned())
+    }
+
+    async fn add_file_to_vector_store(
+        &self,
+        _ctx: toolkit_security::SecurityContext,
+        _provider_id: &str,
+        _params: crate::domain::ports::AddFileToVectorStoreParams,
+    ) -> Result<crate::domain::ports::VectorStoreFileStatus, crate::domain::ports::FileStorageError>
+    {
+        Ok(crate::domain::ports::VectorStoreFileStatus::InProgress)
+    }
+
+    async fn get_vector_store_file_status(
+        &self,
+        _ctx: toolkit_security::SecurityContext,
+        _provider_id: &str,
+        _vector_store_id: &str,
+        _provider_file_id: &str,
+    ) -> Result<crate::domain::ports::VectorStoreFileStatus, crate::domain::ports::FileStorageError>
+    {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(message) = &self.invalid_response {
+            return Err(crate::domain::ports::FileStorageError::InvalidResponse {
+                message: message.clone(),
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        Ok(crate::domain::ports::VectorStoreFileStatus::Completed)
+    }
+
+    async fn delete_vector_store(
+        &self,
+        _ctx: toolkit_security::SecurityContext,
+        _provider_id: &str,
+        _vector_store_id: &str,
+    ) -> Result<(), crate::domain::ports::FileStorageError> {
+        Ok(())
+    }
+}
+
+/// A status read error that is not transient ends the wait as `Failed`
+/// without being kept as the last transient error.
+#[tokio::test]
+async fn wait_for_indexing_fails_on_non_transient_read_error() {
+    let provider = StatusReadProvider {
+        invalid_response: Some("bad json".to_owned()),
+        reads: std::sync::atomic::AtomicU32::new(0),
+    };
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    let mut last_error = None;
+    let outcome = super::wait_for_indexing(
+        &provider,
+        &ctx,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(1),
+        ("openai", "vs-1", "file-1"),
+        crate::domain::ports::VectorStoreFileStatus::InProgress,
+        &mut last_error,
+    )
+    .await;
+    assert!(
+        matches!(&outcome, super::IndexingWait::Failed(m) if m.contains("bad json")),
+        "{outcome:?}"
+    );
+    assert_eq!(provider.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(last_error.is_none(), "{last_error:?}");
+}
+
+/// A status read still running at the deadline is cut off by `timeout_at`
+/// and the wait answers `Pending`.
+#[tokio::test]
+async fn wait_for_indexing_cuts_off_a_read_at_the_deadline() {
+    let provider = StatusReadProvider {
+        invalid_response: None,
+        reads: std::sync::atomic::AtomicU32::new(0),
+    };
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    let started = tokio::time::Instant::now();
+    let outcome = super::wait_for_indexing(
+        &provider,
+        &ctx,
+        started + std::time::Duration::from_millis(400),
+        std::time::Duration::from_secs(1),
+        ("openai", "vs-1", "file-1"),
+        crate::domain::ports::VectorStoreFileStatus::InProgress,
+        &mut None,
+    )
+    .await;
+    assert_eq!(outcome, super::IndexingWait::Pending);
+    assert_eq!(
+        provider.reads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the hanging read was started once"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the read must not run to completion"
+    );
+}
+
+/// A non-transient status read error during the upload marks the
+/// attachment `failed` / `indexing_failed`.
+#[tokio::test]
+async fn test_upload_indexing_non_transient_status_error_marks_failed() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    let oagw = MockOagwGateway::with_responses(vec![
+        Ok(file_upload_response("file-idx-010")),
+        Ok(vector_store_create_response("vs-idx-010")),
+        Ok(vector_store_file_response("in_progress")),
+        // Not a vector store file object: InvalidResponse, not transient.
+        Ok(serde_json::json!("garbage")),
+        // Best-effort delete of the provider file.
+        Ok(serde_json::json!({ "id": "file-idx-010", "deleted": true })),
+    ]);
+    let svc = build_service(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+    );
+
+    let err = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await
+    .expect_err("status read error fails the upload");
+    assert!(
+        matches!(&err, crate::domain::error::DomainError::ProviderError { code, .. } if code == "indexing_failed"),
+        "expected indexing_failed, got {err:?}"
+    );
+
+    let row = only_attachment_row(&db_prov).await;
+    assert_eq!(
+        row.status,
+        crate::infra::db::entity::attachment::AttachmentStatus::Failed
+    );
+    assert_eq!(row.error_code.as_deref(), Some("indexing_failed"));
+    // Exactly one status read: the error is not retried.
+    let requests = oagw.captured_requests.lock().unwrap();
+    let status_reads = requests
+        .iter()
+        .filter(|r| {
+            r.uri
+                .contains("/v1/vector_stores/vs-idx-010/files/file-idx-010")
+        })
+        .count();
+    assert_eq!(
+        status_reads,
+        1,
+        "{:?}",
+        requests.iter().map(|r| &r.uri).collect::<Vec<_>>()
+    );
+}
+
+/// Poll `metrics.background_indexing` until it has an entry.
+async fn wait_for_background_metric(
+    metrics: &crate::domain::service::test_helpers::TestMetrics,
+) -> Vec<String> {
+    for _ in 0..60 {
+        let recorded = metrics.background_indexing.lock().unwrap().clone();
+        if !recorded.is_empty() {
+            return recorded;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    metrics.background_indexing.lock().unwrap().clone()
+}
+
+/// Tracing subscriber that keeps the fields of every event as text.
+#[derive(Default)]
+struct EventCapture {
+    events: std::sync::Mutex<Vec<String>>,
+}
+
+impl tracing::Subscriber for EventCapture {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            // Field values reach the visitor only as `dyn Debug`.
+            #[allow(clippy::use_debug)]
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write as _;
+                write!(self.0, "{}={value:?} ", field.name()).unwrap();
+            }
+        }
+        let mut fields = Fields(String::new());
+        event.record(&mut fields);
+        self.events.lock().unwrap().push(fields.0);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Background path: a transient status read error followed by the timeout
+/// fails the row with a reason naming the read error, and records
+/// `timeout` once.
+#[tokio::test]
+async fn test_background_indexing_timeout_names_last_read_error() {
+    let capture = Arc::new(EventCapture::default());
+    let _guard = tracing::subscriber::set_default(Arc::clone(&capture));
+
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    let mut responses = vec![
+        Ok(file_upload_response("file-idx-011")),
+        Ok(vector_store_create_response("vs-idx-011")),
+        Ok(vector_store_file_response("in_progress")),
+        Err(CanonicalError::service_unavailable().create()),
+    ];
+    responses.extend((0..40).map(|_| Ok(vector_store_file_response("in_progress"))));
+    let oagw = MockOagwGateway::with_responses(responses);
+    let metrics = Arc::new(crate::domain::service::test_helpers::TestMetrics::new());
+    let svc = build_service_with_metrics(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+        Arc::clone(&metrics) as _,
+        mock_model_resolver(),
+    )
+    .with_indexing_deadline(std::time::Duration::ZERO)
+    .with_background_indexing_timeout(std::time::Duration::from_millis(600));
+
+    test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await
+    .expect("upload returns while indexing continues");
+
+    let row = wait_for_row(&db_prov, |r| {
+        r.status == crate::infra::db::entity::attachment::AttachmentStatus::Failed
+    })
+    .await;
+    assert_eq!(row.error_code.as_deref(), Some("indexing_failed"));
+    assert_eq!(wait_for_background_metric(&metrics).await, ["timeout"]);
+
+    let events = capture.events.lock().unwrap();
+    let failed = events
+        .iter()
+        .find(|e| e.contains("background indexing: failed"))
+        .unwrap_or_else(|| panic!("no failure event in {events:?}"));
+    assert!(
+        failed.contains("indexing not finished in time; last status read error:"),
+        "{failed}"
+    );
+}
+
+/// A background wait that sees `completed` records `ready`.
+#[tokio::test]
+async fn test_background_indexing_ready_records_metric() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    let oagw = MockOagwGateway::with_responses(vec![
+        Ok(file_upload_response("file-idx-012")),
+        Ok(vector_store_create_response("vs-idx-012")),
+        Ok(vector_store_file_response("in_progress")),
+        Ok(vector_store_file_response("completed")),
+    ]);
+    let metrics = Arc::new(crate::domain::service::test_helpers::TestMetrics::new());
+    let svc = build_service_with_metrics(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(NoopOutboxEnqueuer),
+        RagConfig::default(),
+        Arc::clone(&metrics) as _,
+        mock_model_resolver(),
+    )
+    .with_indexing_deadline(std::time::Duration::ZERO);
+
+    test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await
+    .expect("upload returns while indexing continues");
+
+    let row = wait_for_row(&db_prov, |r| {
+        r.status == crate::infra::db::entity::attachment::AttachmentStatus::Ready
+    })
+    .await;
+    assert_eq!(
+        row.status,
+        crate::infra::db::entity::attachment::AttachmentStatus::Ready
+    );
+    assert_eq!(wait_for_background_metric(&metrics).await, ["ready"]);
+}
+
+/// A background wait that sees a provider `failed` status records `failed`.
+#[tokio::test]
+async fn test_background_indexing_provider_failure_records_metric() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    let oagw = MockOagwGateway::with_responses(vec![
+        Ok(file_upload_response("file-idx-013")),
+        Ok(vector_store_create_response("vs-idx-013")),
+        Ok(vector_store_file_response("in_progress")),
+        Ok(serde_json::json!({
+            "id": "vsf-abc123",
+            "status": "failed",
+            "last_error": { "code": "server_error", "message": "indexing error" }
+        })),
+    ]);
+    let metrics = Arc::new(crate::domain::service::test_helpers::TestMetrics::new());
+    let svc = build_service_with_metrics(
+        db,
+        Arc::clone(&oagw) as _,
+        Arc::new(RecordingOutboxEnqueuer::new()),
+        RagConfig::default(),
+        Arc::clone(&metrics) as _,
+        mock_model_resolver(),
+    )
+    .with_indexing_deadline(std::time::Duration::ZERO);
+
+    test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await
+    .expect("upload returns while indexing continues");
+
+    let row = wait_for_row(&db_prov, |r| {
+        r.status == crate::infra::db::entity::attachment::AttachmentStatus::Failed
+    })
+    .await;
+    assert_eq!(row.error_code.as_deref(), Some("indexing_failed"));
+    assert_eq!(wait_for_background_metric(&metrics).await, ["failed"]);
+}

@@ -580,7 +580,10 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                 entry.input_tokens_credit_multiplier_micro,
                 entry.output_tokens_credit_multiplier_micro,
             )
-            .unwrap_or(i64::MAX)
+            .unwrap_or_else(|e| {
+                tracing::warn!(model = %entry.id, error = %e, "cascade candidate reserve not computable; candidate unavailable");
+                i64::MAX
+            })
         };
 
         // 5. Compute period boundaries
@@ -794,10 +797,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                     tool_support: eff_entry.general_config.tool_support.clone(),
                                     api_params: eff_entry.general_config.api_params.clone(),
                                     web_search_context_size: eff_entry.web_search_context_size,
-                                    vision_input: eff_entry
-                                        .multimodal_capabilities
-                                        .iter()
-                                        .any(|c| c == "VISION_INPUT"),
+                                    vision_input: supports_vision(eff_entry),
                                 },
                                 CascadeDecision::Downgrade {
                                     downgrade_from,
@@ -825,10 +825,7 @@ impl<QR: QuotaUsageRepository + 'static> QuotaService<QR> {
                                     tool_support: eff_entry.general_config.tool_support.clone(),
                                     api_params: eff_entry.general_config.api_params.clone(),
                                     web_search_context_size: eff_entry.web_search_context_size,
-                                    vision_input: eff_entry
-                                        .multimodal_capabilities
-                                        .iter()
-                                        .any(|c| c == "VISION_INPUT"),
+                                    vision_input: supports_vision(eff_entry),
                                 },
                                 CascadeDecision::Reject => unreachable!(),
                             };
@@ -1230,6 +1227,14 @@ fn catalog_budgets(entry: &ModelCatalogEntry, floor: u32) -> EstimationBudgets {
         code_interpreter_surcharge_tokens: b.code_interpreter_surcharge_tokens,
         minimal_generation_floor: floor,
     }
+}
+
+/// Whether a catalog entry accepts image input (`VISION_INPUT` capability).
+fn supports_vision(entry: &ModelCatalogEntry) -> bool {
+    entry
+        .multimodal_capabilities
+        .iter()
+        .any(|c| c == "VISION_INPUT")
 }
 
 #[cfg(test)]
@@ -1978,6 +1983,70 @@ mod tests {
             standard_reserve_tokens(true, true, true).await,
             without_tools
         );
+    }
+
+    /// Reserve of a `gpt-5-mini` turn whose models support every tool,
+    /// after `setup` adjusts the snapshot and the input.
+    async fn reserve_tokens_with(
+        setup: impl FnOnce(&mut PolicySnapshot, &mut PreflightInput),
+    ) -> i64 {
+        let db = mock_db_provider(inmem_db().await);
+        let mut snapshot = default_snapshot();
+        for entry in &mut snapshot.model_catalog {
+            let ts = &mut entry.general_config.tool_support;
+            ts.file_search = true;
+            ts.web_search = true;
+            ts.code_interpreter = true;
+        }
+        let mut input = preflight_input("gpt-5-mini");
+        setup(&mut snapshot, &mut input);
+        let svc = make_test_service(Arc::clone(&db), snapshot, 1.10);
+        match svc.preflight_reserve(input).await.unwrap() {
+            PreflightDecision::Allow { reserve_tokens, .. } => reserve_tokens,
+            other => panic!("expected Allow, got {other:?}"),
+        }
+    }
+
+    // The web_search surcharge is reserved only when the model supports it.
+    #[tokio::test]
+    async fn preflight_web_search_surcharge_follows_tool_support() {
+        let without = reserve_tokens_with(|_, _| {}).await;
+        let with = reserve_tokens_with(|_, input| input.web_search_enabled = true).await;
+        assert!(with > without, "surcharge applies when web_search is sent");
+        let unsupported = reserve_tokens_with(|snapshot, input| {
+            input.web_search_enabled = true;
+            for entry in &mut snapshot.model_catalog {
+                entry.general_config.tool_support.web_search = false;
+            }
+        })
+        .await;
+        assert_eq!(unsupported, without);
+    }
+
+    // The code_interpreter surcharge is reserved only when the model
+    // supports it and the kill switch is off.
+    #[tokio::test]
+    async fn preflight_code_interpreter_surcharge_follows_tool_gating() {
+        let without = reserve_tokens_with(|_, _| {}).await;
+        let with = reserve_tokens_with(|_, input| input.code_interpreter_enabled = true).await;
+        assert!(
+            with > without,
+            "surcharge applies when code_interpreter is sent"
+        );
+        let unsupported = reserve_tokens_with(|snapshot, input| {
+            input.code_interpreter_enabled = true;
+            for entry in &mut snapshot.model_catalog {
+                entry.general_config.tool_support.code_interpreter = false;
+            }
+        })
+        .await;
+        assert_eq!(unsupported, without);
+        let killed = reserve_tokens_with(|snapshot, input| {
+            input.code_interpreter_enabled = true;
+            snapshot.kill_switches.disable_code_interpreter = true;
+        })
+        .await;
+        assert_eq!(killed, without);
     }
 
     #[tokio::test]

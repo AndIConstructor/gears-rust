@@ -76,7 +76,7 @@ pub async fn run(
                                 deps.metrics.record_upload_reaper_scan_duration_seconds(
                                     scan_start.elapsed().as_secs_f64(),
                                 );
-                                if result == Ok(true) {
+                                if result == ScanOutcome::Cancelled {
                                     return Ok(());
                                 }
                             }
@@ -92,39 +92,56 @@ pub async fn run(
         .await
 }
 
-/// Run one scan. Returns `Ok(false)` when done, `Ok(true)` when shutdown was
-/// requested mid-scan, `Err(())` when the scan failed (already logged).
+/// Result of one scan.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScanOutcome {
+    Done,
+    /// Shutdown was requested mid-scan.
+    Cancelled,
+    /// The scan query failed (already logged); the next tick retries.
+    Failed,
+}
+
+/// Run one scan.
 #[tracing::instrument(name = "worker", skip_all, fields(worker = "upload_reaper"))]
 pub async fn scan_and_reap(
     deps: &UploadReaperDeps,
     config: &UploadReaperConfig,
     cancel: &CancellationToken,
-) -> Result<bool, ()> {
+) -> ScanOutcome {
     let cutoff =
         OffsetDateTime::now_utc() - time::Duration::seconds(config.stale_after_secs.cast_signed());
-    let conn = deps.db.conn().map_err(|e| {
-        error!(error = %e, "upload_reaper: failed to get DB connection");
-    })?;
-    let stale = AttachmentRepository
+    let conn = match deps.db.conn() {
+        Ok(conn) => conn,
+        Err(e) => {
+            error!(error = %e, "upload_reaper: failed to get DB connection");
+            return ScanOutcome::Failed;
+        }
+    };
+    let stale = match AttachmentRepository
         .find_stale_uploads(&conn, cutoff, BATCH_LIMIT)
         .await
-        .map_err(|e| {
+    {
+        Ok(stale) => stale,
+        Err(e) => {
             error!(error = %e, "upload_reaper: scan query failed");
-        })?;
+            return ScanOutcome::Failed;
+        }
+    };
     if stale.is_empty() {
         debug!("upload_reaper: scan completed, no stale uploads");
-        return Ok(false);
+        return ScanOutcome::Done;
     }
     info!(count = stale.len(), "upload_reaper: stale uploads found");
 
     for row in stale {
         if cancel.is_cancelled() {
             info!("upload_reaper: shutting down mid-scan");
-            return Ok(true);
+            return ScanOutcome::Cancelled;
         }
         reap_one(deps, row, cutoff).await;
     }
-    Ok(false)
+    ScanOutcome::Done
 }
 
 #[allow(
@@ -133,6 +150,7 @@ pub async fn scan_and_reap(
 )]
 async fn reap_one(deps: &UploadReaperDeps, row: AttachmentModel, cutoff: OffsetDateTime) {
     let attachment_id = row.id;
+    let secondary_file_id = row.secondary_file_id.clone();
     let from_status = row.status.clone();
     let from_label = from_status.to_string();
     let outbox_enqueuer = Arc::clone(&deps.outbox_enqueuer);
@@ -146,7 +164,7 @@ async fn reap_one(deps: &UploadReaperDeps, row: AttachmentModel, cutoff: OffsetD
             Box::pin(async move {
                 let has_file = row.provider_file_id.is_some();
                 let affected = AttachmentRepository
-                    .cas_abandon_upload(tx, row.id, from_status, cutoff, has_file)
+                    .cas_abandon_upload(tx, row.tenant_id, row.id, from_status, cutoff, has_file)
                     .await
                     .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
                 if affected == 0 {
@@ -185,6 +203,11 @@ async fn reap_one(deps: &UploadReaperDeps, row: AttachmentModel, cutoff: OffsetD
             wake.fire();
             deps.metrics.record_upload_abandoned(&from_label);
             info!(%attachment_id, from_status = %from_label, "upload_reaper: marked abandoned upload failed");
+            if let Some(secondary_file_id) = secondary_file_id {
+                // Not deleted here (see `secondary_ref` above): name it so the
+                // leftover copy can be found and removed.
+                warn!(%attachment_id, secondary_file_id, "upload_reaper: secondary provider copy is not deleted");
+            }
         }
         Ok(None) => {
             debug!(%attachment_id, "upload_reaper: row no longer stale");

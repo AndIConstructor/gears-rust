@@ -651,7 +651,7 @@ async fn frontier_message_is_live(
         .scope_with(scope)
         .one(tx)
         .await
-        .map_err(|e| toolkit_db::DbError::Other(anyhow::anyhow!("{e}")))?;
+        .map_err(|e| toolkit_db::DbError::Other(anyhow::Error::new(e)))?;
     Ok(row.is_some())
 }
 

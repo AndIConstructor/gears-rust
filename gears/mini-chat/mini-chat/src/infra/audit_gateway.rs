@@ -301,4 +301,143 @@ mod tests {
         );
         assert!(gateway.get_plugin().await.unwrap().is_some());
     }
+
+    /// Types-registry that lists no instances and counts `list_instances` calls.
+    #[derive(Default)]
+    struct EmptyRegistry {
+        list_calls: AtomicU32,
+    }
+
+    fn unused() -> toolkit_canonical_errors::CanonicalError {
+        toolkit_canonical_errors::CanonicalError::internal("not used by AuditGateway").create()
+    }
+
+    #[async_trait]
+    impl TypesRegistryClient for EmptyRegistry {
+        async fn register(
+            &self,
+            _: Vec<serde_json::Value>,
+        ) -> Result<Vec<types_registry_sdk::RegisterResult>, toolkit_canonical_errors::CanonicalError>
+        {
+            Err(unused())
+        }
+        async fn register_type_schemas(
+            &self,
+            _: Vec<serde_json::Value>,
+        ) -> Result<Vec<types_registry_sdk::RegisterResult>, toolkit_canonical_errors::CanonicalError>
+        {
+            Err(unused())
+        }
+        async fn get_type_schema(
+            &self,
+            _: &str,
+        ) -> Result<types_registry_sdk::GtsTypeSchema, toolkit_canonical_errors::CanonicalError>
+        {
+            Err(unused())
+        }
+        async fn get_type_schema_by_uuid(
+            &self,
+            _: uuid::Uuid,
+        ) -> Result<types_registry_sdk::GtsTypeSchema, toolkit_canonical_errors::CanonicalError>
+        {
+            Err(unused())
+        }
+        async fn get_type_schemas(
+            &self,
+            _: Vec<String>,
+        ) -> std::collections::HashMap<
+            String,
+            Result<types_registry_sdk::GtsTypeSchema, toolkit_canonical_errors::CanonicalError>,
+        > {
+            std::collections::HashMap::new()
+        }
+        async fn get_type_schemas_by_uuid(
+            &self,
+            _: Vec<uuid::Uuid>,
+        ) -> std::collections::HashMap<
+            uuid::Uuid,
+            Result<types_registry_sdk::GtsTypeSchema, toolkit_canonical_errors::CanonicalError>,
+        > {
+            std::collections::HashMap::new()
+        }
+        async fn list_type_schemas(
+            &self,
+            _: types_registry_sdk::TypeSchemaQuery,
+        ) -> Result<Vec<types_registry_sdk::GtsTypeSchema>, toolkit_canonical_errors::CanonicalError>
+        {
+            Err(unused())
+        }
+        async fn register_instances(
+            &self,
+            _: Vec<serde_json::Value>,
+        ) -> Result<Vec<types_registry_sdk::RegisterResult>, toolkit_canonical_errors::CanonicalError>
+        {
+            Err(unused())
+        }
+        async fn get_instance(
+            &self,
+            _: &str,
+        ) -> Result<types_registry_sdk::GtsInstance, toolkit_canonical_errors::CanonicalError>
+        {
+            Err(unused())
+        }
+        async fn get_instance_by_uuid(
+            &self,
+            _: uuid::Uuid,
+        ) -> Result<types_registry_sdk::GtsInstance, toolkit_canonical_errors::CanonicalError>
+        {
+            Err(unused())
+        }
+        async fn get_instances(
+            &self,
+            _: Vec<String>,
+        ) -> std::collections::HashMap<
+            String,
+            Result<types_registry_sdk::GtsInstance, toolkit_canonical_errors::CanonicalError>,
+        > {
+            std::collections::HashMap::new()
+        }
+        async fn get_instances_by_uuid(
+            &self,
+            _: Vec<uuid::Uuid>,
+        ) -> std::collections::HashMap<
+            uuid::Uuid,
+            Result<types_registry_sdk::GtsInstance, toolkit_canonical_errors::CanonicalError>,
+        > {
+            std::collections::HashMap::new()
+        }
+        async fn list_instances(
+            &self,
+            _: InstanceQuery,
+        ) -> Result<Vec<types_registry_sdk::GtsInstance>, toolkit_canonical_errors::CanonicalError>
+        {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_without_instances_yields_no_plugin_and_is_not_cached() {
+        let hub = Arc::new(ClientHub::new());
+        let registry = Arc::new(EmptyRegistry::default());
+        hub.register::<dyn TypesRegistryClient>(
+            Arc::clone(&registry) as Arc<dyn TypesRegistryClient>
+        );
+        let gateway = AuditGateway::new(hub, "acme".to_owned());
+
+        // PluginNotFound maps to Ok(None), not an error.
+        assert!(gateway.get_plugin().await.unwrap().is_none());
+        assert!(gateway.get_plugin().await.unwrap().is_none());
+        assert_eq!(
+            registry.list_calls.load(Ordering::SeqCst),
+            2,
+            "no-plugin must be re-resolved"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_missing_from_hub_is_an_error() {
+        let gateway = AuditGateway::new(Arc::new(ClientHub::new()), "acme".to_owned());
+        assert!(gateway.get_plugin().await.is_err());
+    }
 }

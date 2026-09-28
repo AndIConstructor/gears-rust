@@ -197,6 +197,7 @@ pub struct MiniChatMetricsMeter {
 
     // ── P1: Upload Reaper ───────────────────────────────────────────────
     upload_abandoned: Counter<u64>,
+    background_indexing: Counter<u64>,
     upload_reaper_scan_duration: Histogram<f64>,
 
     // ── P1: Thread Summary Health ───────────────────────────────────────
@@ -611,6 +612,12 @@ impl MiniChatMetricsMeter {
                     "Attachments stuck in pending/uploaded marked failed by the upload reaper",
                 )
                 .build(),
+            background_indexing: meter
+                .u64_counter(format!("{prefix}_attachment_background_indexing"))
+                .with_description(
+                    "Outcome of background indexing for documents returned as uploaded",
+                )
+                .build(),
             upload_reaper_scan_duration: meter
                 .f64_histogram(format!("{prefix}_upload_reaper_scan_duration_seconds"))
                 .with_description("Upload reaper scan execution duration")
@@ -900,6 +907,11 @@ impl MiniChatMetricsPort for MiniChatMetricsMeter {
 
     fn record_upload_reaper_scan_duration_seconds(&self, seconds: f64) {
         self.upload_reaper_scan_duration.record(seconds, &[]);
+    }
+
+    fn record_background_indexing(&self, result: &str) {
+        self.background_indexing
+            .add(1, &[KeyValue::new("result", result.to_owned())]);
     }
 
     // ── P1: Thread Summary Health ────────────────────────────────────

@@ -24,7 +24,8 @@ pub struct EstimationResult {
 /// Pure function — no I/O. Uses the estimation budgets from `ConfigMap`.
 pub fn estimate_tokens(input: &EstimationInput, budgets: &EstimationBudgets) -> EstimationResult {
     // Step 1: text tokens from byte count
-    // Catalog values are not validated at startup; guard against a zero ratio.
+    // The bundled static plugin rejects a zero ratio; other policy plugins may
+    // not, so guard against it here.
     let bpt = u64::from(budgets.bytes_per_token_conservative.max(1));
     let base_text_tokens = if input.utf8_bytes == 0 {
         u64::from(budgets.fixed_overhead_tokens)

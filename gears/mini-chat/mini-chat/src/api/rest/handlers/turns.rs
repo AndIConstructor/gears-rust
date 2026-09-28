@@ -11,7 +11,7 @@ use toolkit::api::rest::extract::Path;
 use toolkit_security::SecurityContext;
 use tracing::{Instrument, info, warn};
 
-use super::messages::SseRelay;
+use super::messages::{SseRelay, run_to_completion};
 use crate::api::rest::dto::{EditTurnRequest, TurnStatusResponse, TurnStatusState};
 use crate::api::rest::error::MiniChatChatError;
 use crate::domain::stream_events::StreamEvent;
@@ -83,7 +83,10 @@ pub(crate) async fn retry_turn(
     Extension(svc): Extension<Arc<AppServices>>,
     Path((chat_id, request_id)): Path<(uuid::Uuid, uuid::Uuid)>,
 ) -> Response {
-    start_mutation_stream(&svc, ctx, chat_id, request_id, None).await
+    run_to_completion(
+        async move { start_mutation_stream(&svc, ctx, chat_id, request_id, None).await },
+    )
+    .await
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -105,7 +108,10 @@ pub(crate) async fn edit_turn(
             .into_response();
     }
 
-    start_mutation_stream(&svc, ctx, chat_id, request_id, Some(body.content)).await
+    run_to_completion(async move {
+        start_mutation_stream(&svc, ctx, chat_id, request_id, Some(body.content)).await
+    })
+    .await
 }
 
 // ════════════════════════════════════════════════════════════════════════════

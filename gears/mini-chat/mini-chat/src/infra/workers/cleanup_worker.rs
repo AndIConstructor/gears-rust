@@ -627,12 +627,13 @@ impl LeasedMessageHandler for ChatCleanupHandler {
                         metric_labels::resource_type::VECTOR_STORE,
                         metric_labels::cleanup_retry_reason::VECTOR_STORE_DELETE_FAILED,
                     );
-                    return bound_vector_store_retry(
-                        msg.attempts,
-                        self.max_attempts,
-                        chat_id,
-                        vs_id,
-                    );
+                    let result =
+                        bound_vector_store_retry(msg.attempts, self.max_attempts, chat_id, vs_id);
+                    if matches!(result, MessageResult::Reject(_)) {
+                        self.metrics
+                            .record_cleanup_failed(metric_labels::resource_type::VECTOR_STORE);
+                    }
+                    return result;
                 }
 
                 info!(chat_id = %chat_id, vector_store_id = vs_id, "chat cleanup: vector store deleted on provider");
@@ -1285,5 +1286,158 @@ mod tests {
             .await
             .expect("load vector store row");
         assert!(remaining.is_some(), "chat_vector_stores row must stay");
+    }
+
+    /// Vector store provider that records every delete call.
+    #[derive(Default)]
+    struct RecordingVectorStoreDelete {
+        deleted: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl crate::domain::ports::VectorStoreProvider for RecordingVectorStoreDelete {
+        async fn create_vector_store(
+            &self,
+            _ctx: SecurityContext,
+            _provider_id: &str,
+        ) -> Result<String, crate::domain::ports::FileStorageError> {
+            Ok("vs-unused".to_owned())
+        }
+
+        async fn add_file_to_vector_store(
+            &self,
+            _ctx: SecurityContext,
+            _provider_id: &str,
+            _params: crate::domain::ports::AddFileToVectorStoreParams,
+        ) -> Result<
+            crate::domain::ports::VectorStoreFileStatus,
+            crate::domain::ports::FileStorageError,
+        > {
+            Ok(crate::domain::ports::VectorStoreFileStatus::Completed)
+        }
+
+        async fn get_vector_store_file_status(
+            &self,
+            _ctx: toolkit_security::SecurityContext,
+            _provider_id: &str,
+            _vector_store_id: &str,
+            _provider_file_id: &str,
+        ) -> Result<
+            crate::domain::ports::VectorStoreFileStatus,
+            crate::domain::ports::FileStorageError,
+        > {
+            Ok(crate::domain::ports::VectorStoreFileStatus::Completed)
+        }
+
+        async fn delete_vector_store(
+            &self,
+            _ctx: SecurityContext,
+            _provider_id: &str,
+            vector_store_id: &str,
+        ) -> Result<(), crate::domain::ports::FileStorageError> {
+            self.deleted
+                .lock()
+                .unwrap()
+                .push(vector_store_id.to_owned());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_cleanup_ignores_vector_store_row_of_other_tenant() {
+        use crate::domain::repos::{InsertVectorStoreParams, VectorStoreRepository as _};
+        use crate::domain::service::test_helpers::{NoopFileStorage, inmem_db};
+
+        let db = inmem_db().await;
+        let db_provider = crate::domain::service::test_helpers::mock_db_provider(db.clone());
+        let (chat_id, tenant_a) = seed_deleted_chat(&db_provider).await;
+        let tenant_b = uuid::Uuid::new_v4();
+
+        let vs_repo = crate::infra::db::repo::vector_store_repo::VectorStoreRepository;
+        let scope = toolkit_security::AccessScope::allow_all();
+        let conn = db_provider.conn().unwrap();
+        let row_a = vs_repo
+            .insert(
+                &conn,
+                &scope,
+                InsertVectorStoreParams {
+                    id: uuid::Uuid::new_v4(),
+                    tenant_id: tenant_a,
+                    chat_id,
+                    provider: "openai".to_owned(),
+                },
+            )
+            .await
+            .expect("insert tenant-A vector store row");
+        vs_repo
+            .cas_set_vector_store_id(&conn, &scope, row_a.id, "vs-tenant-a")
+            .await
+            .expect("set vector store id");
+        // Same chat_id, different tenant.
+        let row_b = vs_repo
+            .insert(
+                &conn,
+                &scope,
+                InsertVectorStoreParams {
+                    id: uuid::Uuid::new_v4(),
+                    tenant_id: tenant_b,
+                    chat_id,
+                    provider: "openai".to_owned(),
+                },
+            )
+            .await
+            .expect("insert tenant-B vector store row");
+        vs_repo
+            .cas_set_vector_store_id(&conn, &scope, row_b.id, "vs-tenant-b")
+            .await
+            .expect("set vector store id");
+
+        let vs_provider = Arc::new(RecordingVectorStoreDelete::default());
+        let handler = ChatCleanupHandler::new(
+            Arc::new(NoopFileStorage),
+            Arc::clone(&vs_provider) as Arc<dyn crate::domain::ports::VectorStoreProvider>,
+            Arc::clone(&db_provider),
+            crate::infra::db::repo::chat_repo::ChatRepository::new(toolkit_db::odata::LimitCfg {
+                default: 20,
+                max: 100,
+            }),
+            3,
+            Arc::new(crate::domain::ports::metrics::NoopMetrics),
+            None,
+        );
+
+        let result = handler
+            .handle(&make_chat_cleanup_payload(chat_id, tenant_a))
+            .await;
+        assert!(
+            matches!(result, MessageResult::Ok),
+            "expected Ok, got {result:?}"
+        );
+
+        assert_eq!(
+            *vs_provider.deleted.lock().unwrap(),
+            vec!["vs-tenant-a".to_owned()],
+            "only the tenant-A vector store is deleted at the provider"
+        );
+        let row_a_left = vs_repo
+            .find_by_chat(
+                &conn,
+                &toolkit_security::AccessScope::for_tenant(tenant_a),
+                chat_id,
+            )
+            .await
+            .expect("load tenant-A vector store row");
+        assert!(row_a_left.is_none(), "tenant-A row must be removed");
+        let remaining = vs_repo
+            .find_by_chat(
+                &conn,
+                &toolkit_security::AccessScope::for_tenant(tenant_b),
+                chat_id,
+            )
+            .await
+            .expect("load tenant-B vector store row");
+        let remaining = remaining.expect("tenant-B chat_vector_stores row must stay");
+        assert_eq!(remaining.id, row_b.id);
+        assert_eq!(remaining.vector_store_id.as_deref(), Some("vs-tenant-b"));
     }
 }
