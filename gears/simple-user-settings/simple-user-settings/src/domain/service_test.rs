@@ -13,14 +13,20 @@ mod tests {
         constraints::{Constraint, InPredicate, Predicate},
         models::{EvaluationRequest, EvaluationResponse, EvaluationResponseContext},
     };
-    use simple_user_settings_sdk::models::{SimpleUserSettingsPatch, SimpleUserSettingsUpdate};
+    use simple_user_settings_sdk::models::{
+        NamedSetting, SimpleUserSettings, SimpleUserSettingsPatch, SimpleUserSettingsUpdate,
+    };
     use toolkit::api::canonical_prelude::CanonicalError;
     use toolkit_db::migration_runner::run_migrations_for_testing;
+    use toolkit_db::secure::{
+        DBRunner, TxIsolationLevel, transaction_id_for_testing, transaction_isolation_for_testing,
+    };
     use toolkit_db::{ConnectOpts, DBProvider, Db, connect_db};
-    use toolkit_security::{PlatformSecurityContext, SecurityContext, pep_properties};
+    use toolkit_security::{AccessScope, PlatformSecurityContext, SecurityContext, pep_properties};
     use uuid::Uuid;
 
     use crate::domain::error::DomainError;
+    use crate::domain::repo::SettingsRepository;
     use crate::domain::service::{Service, ServiceConfig};
     use crate::infra::storage::migrations::Migrator;
     use crate::infra::storage::sea_orm_repo::SeaOrmSettingsRepository;
@@ -658,7 +664,7 @@ mod tests {
         assert_eq!(
             service.get_named_setting(&ctx, "c").await.expect("read"),
             None,
-            "the refused key was taken back out, not kept"
+            "the refused key was never written"
         );
 
         service
@@ -674,6 +680,225 @@ mod tests {
             .put_named_setting(&ctx, "c", one)
             .await
             .expect("room again after a delete");
+    }
+
+    type RecordedCall = (&'static str, Option<u64>, Option<Option<TxIsolationLevel>>);
+
+    /// The real repository, recording for each quota-relevant call the
+    /// transaction it ran in. On `SQLite` every transaction is serializable
+    /// whatever it is asked for, and the races the quota must survive need
+    /// interleavings a test cannot schedule, so what is pinned is the service's
+    /// own choice: one transaction, opened `SERIALIZABLE`, around the check
+    /// and the write. Downgrading or splitting it changes no result here.
+    struct RecordingRepo {
+        inner: SeaOrmSettingsRepository,
+        calls: std::sync::Mutex<Vec<RecordedCall>>,
+    }
+
+    impl RecordingRepo {
+        fn new() -> Self {
+            Self {
+                inner: SeaOrmSettingsRepository::new(),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn record(&self, call: &'static str) {
+            self.calls.lock().expect("calls").push((
+                call,
+                transaction_id_for_testing(),
+                transaction_isolation_for_testing(),
+            ));
+        }
+
+        fn take(&self) -> Vec<RecordedCall> {
+            std::mem::take(&mut *self.calls.lock().expect("calls"))
+        }
+    }
+
+    #[async_trait]
+    impl SettingsRepository for RecordingRepo {
+        async fn find_by_user<C: DBRunner>(
+            &self,
+            conn: &C,
+            scope: &AccessScope,
+        ) -> Result<Option<SimpleUserSettings>, DomainError> {
+            self.inner.find_by_user(conn, scope).await
+        }
+
+        async fn upsert_full<C: DBRunner>(
+            &self,
+            conn: &C,
+            scope: &AccessScope,
+            user_id: Uuid,
+            tenant_id: Uuid,
+            theme: Option<String>,
+            language: Option<String>,
+        ) -> Result<SimpleUserSettings, DomainError> {
+            self.inner
+                .upsert_full(conn, scope, user_id, tenant_id, theme, language)
+                .await
+        }
+
+        async fn upsert_patch<C: DBRunner>(
+            &self,
+            conn: &C,
+            scope: &AccessScope,
+            user_id: Uuid,
+            tenant_id: Uuid,
+            patch: SimpleUserSettingsPatch,
+        ) -> Result<SimpleUserSettings, DomainError> {
+            self.inner
+                .upsert_patch(conn, scope, user_id, tenant_id, patch)
+                .await
+        }
+
+        async fn list_named<C: DBRunner>(
+            &self,
+            conn: &C,
+            scope: &AccessScope,
+            tenant_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<Vec<NamedSetting>, DomainError> {
+            self.inner.list_named(conn, scope, tenant_id, user_id).await
+        }
+
+        async fn find_named<C: DBRunner>(
+            &self,
+            conn: &C,
+            scope: &AccessScope,
+            tenant_id: Uuid,
+            user_id: Uuid,
+            key: &str,
+        ) -> Result<Option<NamedSetting>, DomainError> {
+            self.record("find");
+            self.inner
+                .find_named(conn, scope, tenant_id, user_id, key)
+                .await
+        }
+
+        async fn count_named<C: DBRunner>(
+            &self,
+            conn: &C,
+            scope: &AccessScope,
+            tenant_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<u64, DomainError> {
+            self.record("count");
+            self.inner
+                .count_named(conn, scope, tenant_id, user_id)
+                .await
+        }
+
+        async fn upsert_named<C: DBRunner>(
+            &self,
+            conn: &C,
+            scope: &AccessScope,
+            user_id: Uuid,
+            tenant_id: Uuid,
+            setting: NamedSetting,
+        ) -> Result<NamedSetting, DomainError> {
+            self.record("upsert");
+            self.inner
+                .upsert_named(conn, scope, user_id, tenant_id, setting)
+                .await
+        }
+
+        async fn delete_named<C: DBRunner>(
+            &self,
+            conn: &C,
+            scope: &AccessScope,
+            tenant_id: Uuid,
+            user_id: Uuid,
+            key: &str,
+        ) -> Result<bool, DomainError> {
+            self.record("delete");
+            self.inner
+                .delete_named(conn, scope, tenant_id, user_id, key)
+                .await
+        }
+
+        async fn delete_all_named<C: DBRunner>(
+            &self,
+            conn: &C,
+            scope: &AccessScope,
+            tenant_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<u64, DomainError> {
+            self.inner
+                .delete_all_named(conn, scope, tenant_id, user_id)
+                .await
+        }
+    }
+
+    /// The names of `calls`, after asserting they all ran in one transaction
+    /// and that it was opened `SERIALIZABLE`.
+    fn in_one_serializable_transaction(calls: &[RecordedCall]) -> Vec<&'static str> {
+        let first_tx = calls.first().and_then(|(_, tx, _)| *tx);
+        assert!(first_tx.is_some(), "outside a transaction: {calls:?}");
+        for (call, tx, isolation) in calls {
+            assert_eq!(
+                *tx, first_tx,
+                "{call} ran in another transaction: {calls:?}"
+            );
+            assert_eq!(
+                *isolation,
+                Some(Some(TxIsolationLevel::Serializable)),
+                "{call} was not in a SERIALIZABLE transaction"
+            );
+        }
+        calls.iter().map(|(call, _, _)| *call).collect()
+    }
+
+    /// The quota check and the write are one serializable transaction, so a
+    /// concurrent delete cannot turn a replacement into an unchecked insert,
+    /// and a refused key is never written: there is no compensating delete
+    /// that could remove another request's write.
+    #[tokio::test]
+    async fn the_named_quota_check_and_the_write_are_one_serializable_transaction() {
+        let repo = Arc::new(RecordingRepo::new());
+        let db: Arc<DBProvider<toolkit_db::DbError>> = Arc::new(DBProvider::new(inmem_db().await));
+        let authz: Arc<dyn AuthZResolverApi> = Arc::new(MockAuthZResolver);
+        let service = Service::new(
+            db,
+            Arc::clone(&repo),
+            PolicyEnforcer::new(authz),
+            ServiceConfig {
+                named_settings_per_user: 1,
+                ..ServiceConfig::default()
+            },
+        );
+        let ctx = create_test_context();
+
+        service
+            .put_named_setting(&ctx, "a", serde_json::json!(1))
+            .await
+            .expect("a new key below the bound");
+        assert_eq!(
+            in_one_serializable_transaction(&repo.take()),
+            ["find", "count", "upsert"]
+        );
+
+        service
+            .put_named_setting(&ctx, "a", serde_json::json!(2))
+            .await
+            .expect("a replacement at the bound");
+        assert_eq!(
+            in_one_serializable_transaction(&repo.take()),
+            ["find", "upsert"],
+            "a replacement is not counted"
+        );
+
+        let err = service
+            .put_named_setting(&ctx, "b", serde_json::json!(1))
+            .await
+            .expect_err("a new key over the bound");
+        assert!(matches!(&err, DomainError::LimitReached(_)), "{err:?}");
+        assert_eq!(
+            in_one_serializable_transaction(&repo.take()),
+            ["find", "count"],
+            "refused before writing, and nothing deleted"
+        );
     }
 
     #[tokio::test]

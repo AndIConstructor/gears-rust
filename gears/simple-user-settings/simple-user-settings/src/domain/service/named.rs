@@ -4,8 +4,12 @@
 //! the fixed fields, so a policy that governs a user's settings governs these
 //! too without learning a new resource type.
 
+use std::sync::Arc;
+
 use authz_resolver_sdk::pep::AccessRequest;
 use simple_user_settings_sdk::models::NamedSetting;
+use toolkit_db::DbError;
+use toolkit_db::secure::TxConfig;
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
@@ -32,6 +36,15 @@ fn validate_key(key: &str) -> Result<(), DomainError> {
             SettingsFields::KEY,
             format!("must be 1-{MAX_KEY_LEN} characters from A-Z a-z 0-9 . _ - :"),
         ))
+    }
+}
+
+/// The driver error inside `e`, if any: what tells a transaction that lost a
+/// serialization conflict, and should be retried, from one that failed.
+fn sea_error(e: &DomainError) -> Option<&sea_orm::DbErr> {
+    match e {
+        DomainError::Database(DbError::Sea(db_err)) => Some(db_err),
+        _ => None,
     }
 }
 
@@ -65,17 +78,20 @@ impl<R: SettingsRepository> Service<R> {
     /// Create or replace one named setting.
     ///
     /// The count bound applies to new keys only, so replacing a setting at the
-    /// bound still works. It is checked once, after the write: a new key that
-    /// took the caller over the bound is taken back out and refused. One check
-    /// at that point holds under concurrency, where a check before the write
-    /// could not. Racing writes at the bound may both be refused, but never
-    /// both kept.
+    /// bound still works. Whether the key is new, how many the caller holds and
+    /// the write itself run in one `SERIALIZABLE` transaction, so a concurrent
+    /// write or delete cannot change the answer between the check and the
+    /// write. A new key over the bound is refused before anything is written;
+    /// a transaction that loses a conflict is retried from the start.
     pub async fn put_named_setting(
         &self,
         ctx: &SecurityContext,
         key: &str,
         value: serde_json::Value,
-    ) -> Result<NamedSetting, DomainError> {
+    ) -> Result<NamedSetting, DomainError>
+    where
+        R: 'static,
+    {
         validate_key(key)?;
         let size = serde_json::to_string(&value)
             .map_err(|e| DomainError::internal(format!("named setting value: {e}")))?
@@ -91,49 +107,37 @@ impl<R: SettingsRepository> Service<R> {
         }
 
         let (scope, user_id, tenant_id) = self.named_scope(ctx, actions::UPDATE).await?;
-        let conn = self.db.conn().map_err(DomainError::from)?;
-
         let limit = self.config.named_settings_per_user;
-        let over = |held: u64| usize::try_from(held).map_or(true, |held| held > limit);
-        let too_many = || {
-            DomainError::LimitReached(format!(
-                "at most {limit} named settings per user; delete one first"
-            ))
+        let setting = NamedSetting {
+            key: key.to_owned(),
+            value,
         };
 
-        let is_new = self
-            .repo
-            .find_named(&conn, &scope, tenant_id, user_id, key)
-            .await?
-            .is_none();
-
-        let stored = self
-            .repo
-            .upsert_named(
-                &conn,
-                &scope,
-                user_id,
-                tenant_id,
-                NamedSetting {
-                    key: key.to_owned(),
-                    value,
-                },
-            )
-            .await?;
-
-        if is_new
-            && over(
-                self.repo
-                    .count_named(&conn, &scope, tenant_id, user_id)
-                    .await?,
-            )
-        {
-            self.repo
-                .delete_named(&conn, &scope, tenant_id, user_id, key)
-                .await?;
-            return Err(too_many());
-        }
-        Ok(stored)
+        let repo = Arc::clone(&self.repo);
+        self.db
+            .db()
+            .transaction_with_retry(TxConfig::serializable(), sea_error, move |tx| {
+                let repo = Arc::clone(&repo);
+                let scope = scope.clone();
+                let setting = setting.clone();
+                Box::pin(async move {
+                    let is_new = repo
+                        .find_named(tx, &scope, tenant_id, user_id, &setting.key)
+                        .await?
+                        .is_none();
+                    if is_new {
+                        let held = repo.count_named(tx, &scope, tenant_id, user_id).await?;
+                        if usize::try_from(held).map_or(true, |held| held >= limit) {
+                            return Err(DomainError::LimitReached(format!(
+                                "at most {limit} named settings per user; delete one first"
+                            )));
+                        }
+                    }
+                    repo.upsert_named(tx, &scope, user_id, tenant_id, setting)
+                        .await
+                })
+            })
+            .await
     }
 
     /// Forget one named setting; `true` if it existed.

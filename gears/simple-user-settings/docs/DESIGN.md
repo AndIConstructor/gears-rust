@@ -134,9 +134,14 @@ reads need `get`, writes and deletes need `update`.
   connection) can repeat the same request. The gear itself does not retry. Its
   database calls are bounded by the connection pool's acquire timeout
   (toolkit-db configuration), and a failure surfaces as `500`.
-- **Count bound under concurrency.** The per-user key count is checked once, after
-  a new key is written, and the write is taken back if it went over. Racing writes
-  of new keys at the bound may both be refused; they are never both kept.
+- **Count bound under concurrency.** Whether a key is new, the caller's key count
+  and the write run in one `SERIALIZABLE` transaction, retried when it loses a
+  conflict (toolkit-db's `transaction_with_retry`). A new key over the bound is
+  refused before anything is written, so there is no compensating delete that
+  could remove another request's write, and a concurrent delete cannot turn a
+  replacement into an unchecked insert. Racing writes at the bound are ordered:
+  one is kept and the other is refused, not both kept. If contention outlasts
+  the retries, the request fails with `500` and is safe to repeat.
 - **A corrupt row.** A row whose stored value no longer parses (only possible
   through an out-of-band edit or a bug) is left out of the list and logged at
   error level with its key, while a direct read of that key reports it as an

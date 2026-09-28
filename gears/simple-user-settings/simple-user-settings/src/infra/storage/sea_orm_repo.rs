@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait, Order};
 use simple_user_settings_sdk::models::{NamedSetting, SimpleUserSettings, SimpleUserSettingsPatch};
+use toolkit_db::DbError;
 use toolkit_db::secure::{
     DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt, SecureOnConflict,
 };
@@ -61,7 +62,9 @@ fn map_scope_error(e: ScopeError) -> DomainError {
     match e {
         ScopeError::Denied(msg) => DomainError::forbidden(msg),
         ScopeError::Invalid(msg) => DomainError::internal(format!("scope invalid: {msg}")),
-        ScopeError::Db(e) => DomainError::internal(format!("database error: {e}")),
+        // Kept as the driver error rather than flattened to text, so a
+        // transaction can tell a serialization conflict it should retry.
+        ScopeError::Db(e) => DomainError::Database(DbError::Sea(e)),
         ScopeError::TenantNotInScope { tenant_id } => {
             DomainError::forbidden(format!("tenant {tenant_id} not in scope"))
         }
