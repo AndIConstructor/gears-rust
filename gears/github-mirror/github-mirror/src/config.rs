@@ -111,8 +111,8 @@ impl GithubMirrorConfig {
     /// the gear at startup instead of producing garbage requests later.
     ///
     /// # Errors
-    /// `Validation` when the value does not parse as a URL or its scheme is
-    /// not `http`/`https`.
+    /// `Validation` when the value does not parse as a URL, its scheme is
+    /// not `http`/`https`, or it carries a query or a fragment.
     pub fn resolved_api_base_url(&self) -> Result<String, crate::domain::error::DomainError> {
         let parsed = url::Url::parse(&self.api_base_url).map_err(|e| {
             crate::domain::error::DomainError::Validation {
@@ -127,6 +127,15 @@ impl GithubMirrorConfig {
                     "`{}` must use http or https, not `{}`",
                     self.api_base_url,
                     parsed.scheme()
+                ),
+            });
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(crate::domain::error::DomainError::Validation {
+                field: "api_base_url".to_owned(),
+                message: format!(
+                    "`{}` must not carry a query or a fragment: every request path is appended to it",
+                    self.api_base_url
                 ),
             });
         }

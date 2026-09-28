@@ -539,7 +539,7 @@ pub struct Service {
     /// A gate lives while a request holds it: the last request to let go
     /// removes it, so the map holds only repositories a request is deciding
     /// about right now.
-    claim_gates: Arc<std::sync::Mutex<HashMap<InFlightKey, ClaimGate>>>,
+    claim_gates: gate::ClaimGates,
     /// The gear's shutdown token, bound when the sync pool starts. Syncs that
     /// do not come from the pool — the in-process client's — carry it too, so
     /// a shutdown reaches them as well.
@@ -589,20 +589,62 @@ impl Drop for ClaimRelease {
     }
 }
 
-struct GateLease {
-    gates: Arc<std::sync::Mutex<HashMap<InFlightKey, ClaimGate>>>,
-    key: InFlightKey,
-    gate: ClaimGate,
-}
+mod gate {
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
-impl Drop for GateLease {
-    fn drop(&mut self) {
-        let mut gates = self
-            .gates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if Arc::strong_count(&self.gate) == 2 {
-            gates.remove(&self.key);
+    use tokio::sync::{Mutex, MutexGuard};
+
+    use super::InFlightKey;
+
+    type Gates = Arc<std::sync::Mutex<HashMap<InFlightKey, Arc<Mutex<()>>>>>;
+
+    #[derive(Clone, Default)]
+    pub(super) struct ClaimGates(Gates);
+
+    impl ClaimGates {
+        /// This repository's gate, made on first use.
+        pub(super) fn lease(&self, key: &InFlightKey) -> GateLease {
+            let mut gates = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let gate = Arc::clone(
+                gates
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            );
+            GateLease {
+                gates: Arc::clone(&self.0),
+                key: key.clone(),
+                gate,
+            }
+        }
+    }
+
+    /// What a request holds while it decides whether one repository already has a
+    /// sync in flight.
+    pub(super) struct GateLease {
+        gates: Gates,
+        key: InFlightKey,
+        gate: Arc<Mutex<()>>,
+    }
+
+    impl GateLease {
+        pub(super) async fn lock(&self) -> MutexGuard<'_, ()> {
+            self.gate.lock().await
+        }
+    }
+
+    impl Drop for GateLease {
+        fn drop(&mut self) {
+            let mut gates = self
+                .gates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if Arc::strong_count(&self.gate) == 2 {
+                gates.remove(&self.key);
+            }
         }
     }
 }
@@ -620,10 +662,6 @@ struct Claim {
     scope: ScopeConfig,
     since: Option<DateTime<Utc>>,
 }
-
-/// What a request holds while it decides whether one repository already has a
-/// sync in flight.
-type ClaimGate = Arc<Mutex<()>>;
 
 /// Manual `Clone`: every field is an `Arc` (cheap refcount bump) or already
 /// `Clone` (`PolicyEnforcer`, `ServiceConfig`). A `#[derive(Clone)]` would add
@@ -673,7 +711,7 @@ impl Clone for Service {
             sync_tx: self.sync_tx.clone(),
             sync_rx: Arc::clone(&self.sync_rx),
             in_flight: Arc::clone(&self.in_flight),
-            claim_gates: Arc::clone(&self.claim_gates),
+            claim_gates: self.claim_gates.clone(),
             shutdown: Arc::clone(&self.shutdown),
         }
     }
@@ -763,7 +801,7 @@ impl Service {
             sync_tx,
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            claim_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            claim_gates: gate::ClaimGates::default(),
             shutdown: Arc::new(OnceLock::new()),
         }
     }
@@ -3720,8 +3758,8 @@ impl Service {
             // another repository waits on nothing. The row is written before
             // the claim goes in, so the id a collapsing request is handed
             // always names a session it can read.
-            let lease = self.claim_gate(&key);
-            let claimed = lease.gate.lock().await;
+            let lease = self.claim_gates.lease(&key);
+            let claimed = lease.lock().await;
 
             let running = self
                 .in_flight
@@ -3806,6 +3844,7 @@ impl Service {
         reason: String,
     ) {
         session.status = SessionStatus::Failed;
+        session.progress_percent = 100;
         session.ended_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.ended_at);
         session.error = Some(reason);
@@ -3881,24 +3920,6 @@ impl Service {
             );
         }
         Ok(session.map_or(SessionStatus::InProgress, |session| session.status))
-    }
-
-    /// This repository's gate, made on first use.
-    fn claim_gate(&self, key: &InFlightKey) -> GateLease {
-        let mut gates = self
-            .claim_gates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let gate = Arc::clone(
-            gates
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        );
-        GateLease {
-            gates: Arc::clone(&self.claim_gates),
-            key: key.clone(),
-            gate,
-        }
     }
 
     /// Give up a repository's claim so the next request queues a fresh sync.
@@ -4128,6 +4149,7 @@ impl Service {
             }
             count += 1;
             session.status = SessionStatus::Interrupted;
+            session.progress_percent = 100;
             session.ended_at = Some(now_rfc3339());
             session.updated_at.clone_from(&session.ended_at);
             session.error = Some("the server restarted while this sync was in flight".to_owned());
