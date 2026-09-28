@@ -2,7 +2,7 @@ use axum::Router;
 use toolkit::api::OpenApiRegistry;
 use toolkit::api::operation_builder::OperationBuilder;
 
-use super::AiChatLicense;
+use super::{AiChatLicense, retry_after_header};
 use crate::api::rest::{dto, handlers};
 
 const API_TAG: &str = "Mini Chat Turns";
@@ -32,6 +32,8 @@ pub(super) fn register_turn_routes(
         .error_403(openapi)
         .error_404(openapi)
         .error_500(openapi)
+        .error_503(openapi)
+        .response_header(retry_after_header())
         .register(router, openapi);
 
     // POST {prefix}/v1/chats/{id}/turns/{request_id}/retry
@@ -63,6 +65,8 @@ pub(super) fn register_turn_routes(
     .error_409(openapi)
     .error_429(openapi)
     .error_500(openapi)
+    .error_503(openapi)
+    .response_header(retry_after_header())
     .register(router, openapi);
 
     // PATCH {prefix}/v1/chats/{id}/turns/{request_id}
@@ -87,6 +91,8 @@ pub(super) fn register_turn_routes(
         .error_409(openapi)
         .error_429(openapi)
         .error_500(openapi)
+        .error_503(openapi)
+        .response_header(retry_after_header())
         .error_422(openapi)
         .register(router, openapi);
 
@@ -107,6 +113,8 @@ pub(super) fn register_turn_routes(
         .error_404(openapi)
         .error_409(openapi)
         .error_500(openapi)
+        .error_503(openapi)
+        .response_header(retry_after_header())
         .register(router, openapi);
 
     router

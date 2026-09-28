@@ -55,6 +55,12 @@ pub enum DomainError {
     #[error("Access denied")]
     Forbidden,
 
+    /// The authorization decision point could not be evaluated (PDP down or
+    /// failing). Still fail closed (no access), but reported as 503 so
+    /// clients and monitoring can tell an outage from a denial.
+    #[error("Authorization service unavailable")]
+    AuthzUnavailable,
+
     #[error("Message not found: {id}")]
     MessageNotFound { id: Uuid },
 
@@ -239,10 +245,11 @@ impl From<authz_resolver_sdk::EnforcerError> for DomainError {
                 tracing::warn!(error = %err, "AuthZ constraint compile failed - access denied");
                 Self::Forbidden
             }
-            // Fail closed: an unreachable or failing PDP denies access.
+            // Fail closed, but as 503: the PDP could not decide, which is
+            // not a denial.
             authz_resolver_sdk::EnforcerError::EvaluationFailed(ref err) => {
-                tracing::error!(error = %err, "AuthZ evaluation failed - access denied");
-                Self::Forbidden
+                tracing::error!(error = %err, "AuthZ evaluation failed - request refused");
+                Self::AuthzUnavailable
             }
         }
     }
@@ -273,12 +280,15 @@ mod tests {
     use super::DomainError;
 
     #[test]
-    fn pdp_evaluation_failure_denies_access() {
+    fn pdp_evaluation_failure_is_authz_unavailable() {
         let e = authz_resolver_sdk::EnforcerError::EvaluationFailed(
             toolkit_canonical_errors::CanonicalError::service_unavailable()
                 .with_detail("authz-resolver unreachable")
                 .create(),
         );
-        assert!(matches!(DomainError::from(e), DomainError::Forbidden));
+        assert!(matches!(
+            DomainError::from(e),
+            DomainError::AuthzUnavailable
+        ));
     }
 }

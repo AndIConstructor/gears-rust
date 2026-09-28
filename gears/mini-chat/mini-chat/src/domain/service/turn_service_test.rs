@@ -1205,13 +1205,16 @@ async fn edit_preserves_web_search_enabled() {
 }
 
 #[test]
-fn enforcer_evaluation_failure_maps_to_forbidden() {
+fn enforcer_evaluation_failure_maps_to_authz_unavailable() {
     let e = authz_resolver_sdk::EnforcerError::EvaluationFailed(
         toolkit_canonical_errors::CanonicalError::service_unavailable()
             .with_detail("authz-resolver unreachable")
             .create(),
     );
-    assert!(matches!(MutationError::from(e), MutationError::Forbidden));
+    assert!(matches!(
+        MutationError::from(e),
+        MutationError::AuthzUnavailable
+    ));
 }
 
 // The handler authorizes a retry once: `preview_mutation` asks the PDP and

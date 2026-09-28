@@ -32,13 +32,24 @@ use super::{DbProvider, actions, resources};
 #[domain_model]
 #[derive(Debug)]
 pub enum MutationError {
-    ChatNotFound { chat_id: Uuid },
-    TurnNotFound { chat_id: Uuid, request_id: Uuid },
+    ChatNotFound {
+        chat_id: Uuid,
+    },
+    TurnNotFound {
+        chat_id: Uuid,
+        request_id: Uuid,
+    },
     Forbidden,
-    InvalidTurnState { state: TurnState },
+    /// The PDP could not be evaluated (see `DomainError::AuthzUnavailable`).
+    AuthzUnavailable,
+    InvalidTurnState {
+        state: TurnState,
+    },
     NotLatestTurn,
     GenerationInProgress,
-    Internal { message: String },
+    Internal {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for MutationError {
@@ -52,6 +63,7 @@ impl std::fmt::Display for MutationError {
                 write!(f, "Turn {request_id} not found in chat {chat_id}")
             }
             Self::Forbidden => write!(f, "Access denied"),
+            Self::AuthzUnavailable => write!(f, "Authorization service unavailable"),
             Self::InvalidTurnState { state } => {
                 let label = match state {
                     TurnState::Running => "running",
@@ -88,10 +100,10 @@ impl From<EnforcerError> for MutationError {
                 tracing::warn!(error = %err, "AuthZ constraint compile failed - access denied");
                 Self::Forbidden
             }
-            // Fail closed: an unreachable or failing PDP denies access.
+            // Fail closed, but as 503: the PDP could not decide.
             EnforcerError::EvaluationFailed(ref err) => {
-                tracing::error!(error = %err, "AuthZ evaluation failed - access denied");
-                Self::Forbidden
+                tracing::error!(error = %err, "AuthZ evaluation failed - request refused");
+                Self::AuthzUnavailable
             }
         }
     }

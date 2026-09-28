@@ -1246,7 +1246,8 @@ The mapping is implemented in `api/rest/error.rs`:
 | Retry/edit/delete of a non-terminal turn | `failed_precondition` | 400 | `violations[{subject: turn_state, type: STATE}]` |
 | Reaction (`PUT` or `DELETE`) on a non-assistant message | `failed_precondition` | 400 | `violations[{subject: reaction_target, type: STATE}]` |
 | Missing, invalid or expired bearer token | `unauthenticated` | 401 | `context.reason`: `MISSING_BEARER` / `AUTHN_FAILED` (api-gateway) |
-| AuthZ denied, or the PDP failed (fail-closed) | `permission_denied` | 403 | `AUTHZ_DENIED` |
+| AuthZ denied (fail-closed) | `permission_denied` | 403 | `AUTHZ_DENIED` |
+| The PDP could not evaluate the request (unreachable, timeout, evaluation error); access is still refused (fail-closed) | `service_unavailable` | 503 + `Retry-After` | `Retry-After: 5` (`context.retry_after_seconds = 5`); generic detail, the cause is only logged |
 | Retry, edit or delete of a turn whose `requester_user_id` is not the caller | `permission_denied` | 403 | `AUTHZ_DENIED` (`MutationError::Forbidden`) |
 | Tenant lacks the required license feature (platform base license feature `CORE_GLOBAL_BASE_LICENSE_FEATURE`; `ai_chat` is the target, ADR-0008) | `permission_denied` | 403 | `LICENSE_FEATURE_REQUIRED` (api-gateway license middleware) |
 | Another turn is running in the chat (stream, including the insert race) | `aborted` | 409 | `context.reason = turn_already_running`; `detail = "Another turn is running in this chat"` |
@@ -1422,7 +1423,7 @@ Idempotent for assistant messages: returns `204` whether or not a reaction exist
 - The mini-chat gear never calls an LLM or RAG provider directly; all external calls go through OAGW
 - `SecurityContext` (user_id, tenant_id) propagated through all in-process calls
 - `license_manager` runs as middleware before the gear is invoked
-- The domain service calls `authz_resolver` (via PolicyEnforcer) before every database query; on PDP denial, compile failure or PDP evaluation failure, fail-closed (403)
+- The domain service calls `authz_resolver` (via PolicyEnforcer) before every database query; on PDP denial or compile failure, fail-closed (403); on PDP evaluation failure, fail-closed as a retryable 503 with `Retry-After`
 - Audit events are enqueued to the `mini-chat.audit` outbox queue in the finalization or mutation transaction and delivered to the audit plugin by `AuditEventHandler`; mini-chat stores audit data only as outbox rows until delivery
 
 ### 3.5 External Dependencies
@@ -1490,9 +1491,12 @@ sequenceDiagram
     CS->>AuthZ: Evaluate(subject, action: "send_message", resource: {type: chat, id: chat_id})
     AuthZ-->>CS: decision + constraints
 
-    alt PDP denied / compile failure / PDP evaluation failure
+    alt PDP denied / compile failure
         CS-->>AG: 403 permission_denied (JSON; no SSE stream is opened)
         AG-->>UI: 403
+    else PDP evaluation failure (unreachable, timeout, error)
+        CS-->>AG: 503 service_unavailable + Retry-After (JSON; no SSE stream is opened)
+        AG-->>UI: 503
     end
 
     CS->>DB: Load chat (with constraints in WHERE + owner check)
@@ -1543,7 +1547,7 @@ sequenceDiagram
     CS-->>UI: done (only after committed completed) or error
 ```
 
-**Description**: Full lifecycle of a user message - from authorization through streaming LLM response to persistence and optional thread compression. Authorization is evaluated before any database access. The PEP sends an evaluation request to the AuthZ Resolver with the chat's resource type and ID; the returned constraints are applied to the DB query's WHERE clause. A PDP denial, a constraint compile failure or a PDP evaluation failure returns 403 (fail-closed). A missing or foreign chat returns 404 because the scoped query returns 0 rows. Context assembly and provider resolution run before the reserve transaction, so a failure in either step returns a JSON error and leaves no running turn or reserve. Audit events are delivered asynchronously from the `mini-chat.audit` outbox queue to the audit plugin.
+**Description**: Full lifecycle of a user message - from authorization through streaming LLM response to persistence and optional thread compression. Authorization is evaluated before any database access. The PEP sends an evaluation request to the AuthZ Resolver with the chat's resource type and ID; the returned constraints are applied to the DB query's WHERE clause. A PDP denial or a constraint compile failure returns 403; a PDP evaluation failure returns 503 with `Retry-After` (both fail closed). A missing or foreign chat returns 404 because the scoped query returns 0 rows. Context assembly and provider resolution run before the reserve transaction, so a failure in either step returns a JSON error and leaves no running turn or reserve. Audit events are delivered asynchronously from the `mini-chat.audit` outbox queue to the audit plugin.
 
 **Retry / edit variant** (`POST /turns/{request_id}/retry`, `PATCH /turns/{request_id}`, `api/rest/handlers/turns.rs`): the order differs so that a rejection never destroys the previous answer:
 
@@ -2776,7 +2780,7 @@ Mini Chat follows the platform's fail-closed rules (see [Authorization Design - 
 |-----------|------------|
 | `decision: false` (`EnforcerError::Denied`), with or without `resource.id` | 403 `permission_denied`, `AUTHZ_DENIED` (do not expose `deny_reason.details`) |
 | Constraint compile failure (`EnforcerError::CompileFailed`) | 403 `permission_denied` |
-| PDP unreachable / timeout / evaluation failure (`EnforcerError::EvaluationFailed`) | 403 `permission_denied` (fail-closed) |
+| PDP unreachable / timeout / evaluation failure (`EnforcerError::EvaluationFailed`) | 503 `service_unavailable` with `Retry-After: 5` (still fail-closed: no access). Kept apart from 403 so clients and monitoring can tell a PDP outage from a denial; the cause is logged at `error` |
 | Scoped query returns 0 rows (missing, soft-deleted or foreign resource) | 404 Not Found |
 | `decision: true` + no constraints + `require_constraints: true` | 403 Forbidden |
 | Unknown predicate type in constraints | Treat constraint as false; if all constraints false -> 403 |
@@ -2854,7 +2858,8 @@ A turn is a user-message + assistant-response pair identified by `request_id` in
 | Target `request_id` is not the most recent non-deleted turn (including an already deleted turn) | 409 | `aborted`, `NOT_LATEST_TURN` |
 | Concurrent retry/edit lost the insert race on the one-running-turn-per-chat index (rule 7) | 409 | `aborted`, `GENERATION_IN_PROGRESS` |
 | Target turn is still `running` (checked before the latest-turn check) | 400 | `failed_precondition`, `turn_state` / `STATE` |
-| PDP denied, or PDP failure (fail closed) | 403 | `permission_denied`, `AUTHZ_DENIED`. A turn in another user's chat is not visible: 404 |
+| PDP denied (fail closed) | 403 | `permission_denied`, `AUTHZ_DENIED`. A turn in another user's chat is not visible: 404 |
+| PDP failure (fail closed) | 503 | `service_unavailable`, `Retry-After: 5` |
 | Chat or turn does not exist or not accessible | 404 | `not_found` |
 | Preflight rejection (quota, kill switch, image guards) | 429 / 400 | as for `messages:stream` |
 

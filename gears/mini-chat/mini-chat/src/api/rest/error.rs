@@ -94,6 +94,8 @@ impl From<DomainError> for CanonicalError {
                 .with_reason("AUTHZ_DENIED")
                 .create(),
 
+            DomainError::AuthzUnavailable => authz_unavailable(),
+
             DomainError::Conflict { code, message } => {
                 // `message` can carry driver constraint text or backend
                 // names; it goes to the log, never to the client.
@@ -201,6 +203,18 @@ impl From<DomainError> for CanonicalError {
 }
 
 /// Client-facing detail for a `DomainError::Conflict` code.
+/// Seconds a client should wait before retrying after a PDP outage.
+const AUTHZ_RETRY_AFTER_SECS: u64 = 5;
+
+/// 503 for a PDP that could not evaluate the request: access is still
+/// refused (fail closed), but the client sees a retryable outage, not a
+/// denial. The detail is generic; the cause is only logged.
+fn authz_unavailable() -> CanonicalError {
+    CanonicalError::service_unavailable()
+        .with_retry_after_seconds(AUTHZ_RETRY_AFTER_SECS)
+        .create()
+}
+
 fn conflict_detail(code: &str) -> &'static str {
     match code {
         "provider_mismatch" => "chat vector store belongs to another provider",
@@ -242,6 +256,8 @@ impl From<MutationError> for CanonicalError {
             MutationError::Forbidden => MiniChatTurnError::permission_denied()
                 .with_reason("AUTHZ_DENIED")
                 .create(),
+
+            MutationError::AuthzUnavailable => authz_unavailable(),
 
             MutationError::InvalidTurnState { state } => MiniChatTurnError::failed_precondition()
                 .with_precondition_violation(
@@ -298,8 +314,11 @@ impl From<StreamError> for CanonicalError {
                 CanonicalError::from(source)
             }
 
-            // The source `DomainError::Forbidden` carries no extra detail
-            // worth preserving; map straight to the canonical AuthZ denial.
+            // A PDP outage is 503; every other enforcer failure is the
+            // canonical AuthZ denial (the source carries no extra detail).
+            StreamError::AuthorizationFailed {
+                source: DomainError::AuthzUnavailable,
+            } => authz_unavailable(),
             StreamError::AuthorizationFailed { .. } => MiniChatChatError::permission_denied()
                 .with_reason("AUTHZ_DENIED")
                 .create(),
@@ -645,6 +664,31 @@ mod tests {
         assert_eq!(p.status, Some(403));
         assert_eq!(p.problem_type, PERMISSION_DENIED_TYPE);
         assert_eq!(p.context["reason"], "AUTHZ_DENIED");
+    }
+
+    /// A PDP outage is a retryable 503, not a 403 denial, on every error
+    /// path that carries it.
+    #[test]
+    fn authz_unavailable_is_503_with_retry_after() {
+        let problems = [
+            DomainError::AuthzUnavailable.into_test_problem(),
+            crate::domain::service::MutationError::AuthzUnavailable.into_test_problem(),
+            crate::domain::service::StreamError::AuthorizationFailed {
+                source: DomainError::AuthzUnavailable,
+            }
+            .into_test_problem(),
+        ];
+        for p in problems {
+            assert_eq!(p.status, Some(503), "{p:?}");
+            assert_eq!(p.problem_type, SERVICE_UNAVAILABLE_TYPE);
+            assert_eq!(p.context["retry_after_seconds"].as_u64(), Some(5));
+        }
+        // A policy denial through the stream path stays 403.
+        let p = crate::domain::service::StreamError::AuthorizationFailed {
+            source: DomainError::Forbidden,
+        }
+        .into_test_problem();
+        assert_eq!(p.status, Some(403));
     }
 
     #[test]

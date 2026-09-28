@@ -62,6 +62,8 @@ pub(super) fn register_attachment_routes(
     .error_403(openapi)
     .error_404(openapi)
     .error_500(openapi)
+    .error_503(openapi)
+    .response_header(retry_after_header())
     .register(router, openapi);
 
     // DELETE {prefix}/v1/chats/{id}/attachments/{attachment_id}
@@ -83,6 +85,8 @@ pub(super) fn register_attachment_routes(
     .error_403(openapi)
     .error_404(openapi)
     .error_500(openapi)
+    .error_503(openapi)
+    .response_header(retry_after_header())
     .register(router, openapi);
 
     router

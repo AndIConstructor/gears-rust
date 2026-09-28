@@ -5,7 +5,7 @@ use toolkit::api::operation_builder::{
     ThrottlingSpec,
 };
 
-use super::AiChatLicense;
+use super::{AiChatLicense, retry_after_header};
 use crate::api::rest::{dto, handlers};
 use crate::infra::db::odata_mapper::ChatCursorField;
 
@@ -53,6 +53,8 @@ pub(super) fn register_chat_routes(
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
+        .error_503(openapi)
+        .response_header(retry_after_header())
         .error_422(openapi)
         .register(router, openapi);
 
@@ -82,6 +84,8 @@ pub(super) fn register_chat_routes(
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
+        .error_503(openapi)
+        .response_header(retry_after_header())
         .register(router, openapi);
 
     // GET {prefix}/v1/chats/{id}
@@ -103,6 +107,8 @@ pub(super) fn register_chat_routes(
         .error_403(openapi)
         .error_404(openapi)
         .error_500(openapi)
+        .error_503(openapi)
+        .response_header(retry_after_header())
         .register(router, openapi);
 
     // PATCH {prefix}/v1/chats/{id}
@@ -125,6 +131,8 @@ pub(super) fn register_chat_routes(
         .error_403(openapi)
         .error_404(openapi)
         .error_500(openapi)
+        .error_503(openapi)
+        .response_header(retry_after_header())
         .error_422(openapi)
         .register(router, openapi);
 
@@ -143,6 +151,8 @@ pub(super) fn register_chat_routes(
         .error_403(openapi)
         .error_404(openapi)
         .error_500(openapi)
+        .error_503(openapi)
+        .response_header(retry_after_header())
         .register(router, openapi);
 
     router

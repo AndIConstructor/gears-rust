@@ -1,6 +1,7 @@
 """Tests for message listing with OData query options and field presence."""
 
 import httpx
+import pytest
 from uuid import uuid4
 
 from .conftest import API_PREFIX, RESOURCE_ODATA, assert_problem, expect_done, stream_message
@@ -147,16 +148,28 @@ class TestMessages:
         resp = httpx.get(f"{API_PREFIX}/chats/{chat['id']}/messages", params={"cursor": "not-a-cursor"})
         assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_CURSOR")
 
-    def test_cursor_with_other_filter_400(self, server):
-        """A cursor issued for one `$filter` is rejected under another."""
+    @pytest.mark.parametrize(
+        "first_filter,next_filter",
+        [("role ne 'system'", "role eq 'user'"), ("role ne 'system'", None)],
+        ids=["other_filter", "filter_dropped"],
+    )
+    def test_cursor_with_other_filter_400(self, server, first_filter, next_filter):
+        """A cursor is bound to the `$filter` it was issued for: another or a
+        missing filter on the continuation is rejected."""
         chat_id = _create_chat_with_messages(1)
         url = f"{API_PREFIX}/chats/{chat_id}/messages"
-        first = httpx.get(url, params={"limit": 1, "$filter": "role ne 'system'"})
+        params = {"limit": 1}
+        if first_filter is not None:
+            params["$filter"] = first_filter
+        first = httpx.get(url, params=params)
         assert first.status_code == 200, first.text
         cursor = first.json()["page_info"].get("next_cursor")
         assert cursor, first.json()
 
-        resp = httpx.get(url, params={"limit": 1, "cursor": cursor, "$filter": "role eq 'user'"})
+        params = {"limit": 1, "cursor": cursor}
+        if next_filter is not None:
+            params["$filter"] = next_filter
+        resp = httpx.get(url, params=params)
         assert_problem(
             resp, 400, "invalid_argument",
             field_reason="FILTER_MISMATCH", resource_type=RESOURCE_ODATA,

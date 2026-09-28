@@ -190,24 +190,32 @@ class TestListChats:
         resp = httpx.get(f"{API_PREFIX}/chats", params={"cursor": "not-a-cursor"})
         assert_problem(resp, 400, "invalid_argument", field_reason="INVALID_CURSOR")
 
-    def test_list_chats_cursor_with_other_filter_400(self, server):
-        """A cursor issued for one `$filter` is rejected under another."""
+    @pytest.mark.parametrize(
+        "first_filtered,next_filter",
+        [(True, "contains(title, 'other')"), (True, None)],
+        ids=["other_filter", "filter_dropped"],
+    )
+    def test_list_chats_cursor_with_other_filter_400(self, server, first_filtered, next_filter):
+        """A cursor is bound to the `$filter` it was issued for: continuing it
+        under another filter or without the filter is rejected. The cursor
+        carries only the filter hash, so the server cannot restore a dropped
+        filter."""
         tag = f"fm-{uuid.uuid4().hex}"
         for _ in range(2):
             r = httpx.post(f"{API_PREFIX}/chats", json={"title": f"{tag} chat"})
             assert r.status_code == 201, r.text
-        first = httpx.get(
-            f"{API_PREFIX}/chats",
-            params={"limit": 1, "$filter": f"contains(title, '{tag}')"},
-        )
+        params = {"limit": 1}
+        if first_filtered:
+            params["$filter"] = f"contains(title, '{tag}')"
+        first = httpx.get(f"{API_PREFIX}/chats", params=params)
         assert first.status_code == 200, first.text
         cursor = first.json()["page_info"].get("next_cursor")
         assert cursor, first.json()
 
-        resp = httpx.get(
-            f"{API_PREFIX}/chats",
-            params={"limit": 1, "cursor": cursor, "$filter": "contains(title, 'other')"},
-        )
+        params = {"limit": 1, "cursor": cursor}
+        if next_filter is not None:
+            params["$filter"] = next_filter
+        resp = httpx.get(f"{API_PREFIX}/chats", params=params)
         assert_problem(
             resp, 400, "invalid_argument",
             field_reason="FILTER_MISMATCH", resource_type=RESOURCE_ODATA,

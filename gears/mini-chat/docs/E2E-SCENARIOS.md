@@ -135,7 +135,7 @@ toggled per test.
 | 02-23 | Create with Schema-Invalid Body (`model: 123`) → 422 `invalid_argument` | test_chat_crud.py | TestCreateChat::test_create_chat_schema_invalid_is_422 |
 | 02-24 | Create with Malformed JSON → 400 `invalid_argument` | test_chat_crud.py | TestCreateChat::test_create_chat_malformed_json_is_400 |
 | 02-25 | List Chats — Unknown `$orderby` Field → 400 `invalid_argument` (`INVALID_ORDERBY_FIELD`) | test_chat_crud.py | TestListChats::test_list_chats_unknown_orderby_field_400 |
-| 02-26 | List Chats — Cursor Reused with Another `$filter` → 400 `invalid_argument` (`FILTER_MISMATCH`) | test_chat_crud.py | TestListChats::test_list_chats_cursor_with_other_filter_400 |
+| 02-26 | List Chats — Cursor Continued with Another or Without Its `$filter` → 400 `invalid_argument` (`FILTER_MISMATCH`); the cursor carries only the filter hash | test_chat_crud.py | TestListChats::test_list_chats_cursor_with_other_filter_400 |
 | 02-27 | List Chats — `limit=0` → 400 `invalid_argument` (`INVALID_LIMIT`) | test_chat_crud.py | TestListChats::test_list_chats_zero_limit_400 |
 | 02-28 | List Chats — `cursor` with `$orderby` → 400 `invalid_argument` (`ORDER_WITH_CURSOR`) | test_chat_crud.py | TestListChats::test_list_chats_orderby_with_cursor_400 |
 | 02-29 | Create Chat → 201 with `Location: /mini-chat/v1/chats/{id}` (the path the gear router sees, without the api-gateway `prefix_path`) | test_chat_crud.py | TestCreateChat::test_create_chat_location_header |
@@ -165,7 +165,7 @@ toggled per test.
 | 03-12 | Messages Ordered Chronologically (two completed turns: content and request_id in order) | test_multi_turn.py | TestMultiTurn::test_messages_ordered_chronologically |
 | 03-13 | Unknown `$orderby` Field → 400 `invalid_argument` (`INVALID_ORDERBY_FIELD`) | test_messages.py | TestMessages::test_unknown_orderby_field_400 |
 | 03-14 | Malformed Cursor → 400 `invalid_argument` (`INVALID_CURSOR`) | test_messages.py | TestMessages::test_malformed_cursor_400 |
-| 03-15 | Cursor Reused with Another `$filter` → 400 `invalid_argument` (`FILTER_MISMATCH`) | test_messages.py | TestMessages::test_cursor_with_other_filter_400 |
+| 03-15 | Cursor Continued with Another or Without Its `$filter` → 400 `invalid_argument` (`FILTER_MISMATCH`) | test_messages.py | TestMessages::test_cursor_with_other_filter_400 |
 | 03-16 | `limit=0` → 400 `invalid_argument` (`INVALID_LIMIT`) | test_messages.py | TestMessages::test_zero_limit_400 |
 | 03-17 | `cursor` with `$orderby` → 400 `invalid_argument` (`ORDER_WITH_CURSOR`) | test_messages.py | TestMessages::test_orderby_with_cursor_400 |
 | 03-18 | `limit` Above 100 → Clamped to 100 (`page_info.limit` 100), not 400 | test_messages.py | TestMessages::test_limit_above_100_is_clamped |
@@ -567,8 +567,8 @@ vector store reports it indexed (`completed`).
 
 | ID    | Scenario                                   | Test File         | Covered by                                                 |
 |-------|--------------------------------------------|-------------------|------------------------------------------------------------|
-| 20-01 | PEP Before Every Operation                 | —                 | unit tests: gears/mini-chat/mini-chat/src/domain/service/chat_service_test.rs (`chat_model_for_send_is_authorized_by_send_message_only`), gears/mini-chat/mini-chat/src/domain/service/turn_service_test.rs (`retry_via_preview_asks_the_pdp_once`, `enforcer_evaluation_failure_maps_to_forbidden`), gears/mini-chat/mini-chat/src/domain/service/model_service_test.rs (`list_models_denied_returns_forbidden`, `get_model_denied_returns_forbidden`); GAP for the other operations: no test checks that each one calls the PEP. Not E2E: the rig's static PDP allows every request, so a missing PEP call is not observable; the 401s of test_isolation.py TestAuthentication come from api-gateway authentication, not the PEP |
-| 20-02 | PDP Unreachable → 403 Fail-Closed          | —                 | unit tests: gears/mini-chat/mini-chat/src/domain/error.rs (`pdp_evaluation_failure_denies_access`) |
+| 20-01 | PEP Before Every Operation                 | —                 | unit tests: gears/mini-chat/mini-chat/src/domain/service/chat_service_test.rs (`chat_model_for_send_is_authorized_by_send_message_only`), gears/mini-chat/mini-chat/src/domain/service/turn_service_test.rs (`retry_via_preview_asks_the_pdp_once`, `enforcer_evaluation_failure_maps_to_authz_unavailable`), gears/mini-chat/mini-chat/src/domain/service/model_service_test.rs (`list_models_denied_returns_forbidden`, `get_model_denied_returns_forbidden`); GAP for the other operations: no test checks that each one calls the PEP. Not E2E: the rig's static PDP allows every request, so a missing PEP call is not observable; the 401s of test_isolation.py TestAuthentication come from api-gateway authentication, not the PEP |
+| 20-02 | PDP Unreachable → 503 + Retry-After (Fail-Closed); the static authz plugin of the rig cannot fail, so unit-tested only | —                 | unit tests: gears/mini-chat/mini-chat/src/domain/error.rs (`pdp_evaluation_failure_is_authz_unavailable`), gears/mini-chat/mini-chat/src/api/rest/error.rs (`authz_unavailable_is_503_with_retry_after`) |
 | 20-03 | Foreign Resource → 404 `not_found`, Provider Not Called | test_isolation.py | TestIsolation::test_foreign_resource_is_404, TestIsolation::test_foreign_resource_not_sent_to_provider |
 | 20-04 | Chat List Scoped to the Caller: another user's chat is not listed | test_isolation.py | TestIsolation::test_foreign_chat_not_listed |
 | 20-05 | Missing Token → 401 `unauthenticated` (`MISSING_BEARER`), `WWW-Authenticate: Bearer realm="api"` | test_isolation.py | TestAuthentication::test_missing_token_is_401 |

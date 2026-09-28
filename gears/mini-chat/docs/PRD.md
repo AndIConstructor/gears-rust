@@ -820,7 +820,7 @@ Authorization follows the platform PDP/PEP fail-closed rules; see DESIGN.md (Aut
 
 - [ ] `p1` - **ID**: `cpt-cf-mini-chat-nfr-authz-alignment`
 
-Authorization MUST follow the platform PDP/PEP model, including query-level constraints compiled to SQL by the PEP and fail-closed behavior on PDP errors or unreachability. Status codes: 404 for a resource hidden by the constraints, 403 for a PDP deny, and 403 for a PDP failure (fail closed; not 500).
+Authorization MUST follow the platform PDP/PEP model, including query-level constraints compiled to SQL by the PEP and fail-closed behavior on PDP errors or unreachability. Status codes: 404 for a resource hidden by the constraints, 403 for a PDP deny, and 503 with `Retry-After` for a PDP failure (still fail closed: no access; a retryable outage, distinguishable from a denial; not 500).
 
 **Threshold**: Zero unauthorized reads/writes; fail-closed on 100% of PDP failures
 **Rationale**: Chat content is sensitive and access must be enforced consistently at the query layer.
@@ -1181,7 +1181,8 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Retry/edit/delete of a non-terminal turn | `failed_precondition` | 400 | `violations[{subject: turn_state, type: STATE}]` |
 | Reaction (`PUT` or `DELETE`) on a non-assistant message | `failed_precondition` | 400 | `violations[{subject: reaction_target, type: STATE}]` |
 | Missing, invalid or expired bearer token | `unauthenticated` | 401 | `context.reason`: `MISSING_BEARER` / `AUTHN_FAILED` (api-gateway) |
-| AuthZ denied, or the PDP failed (fail-closed) | `permission_denied` | 403 | `AUTHZ_DENIED` |
+| AuthZ denied (fail-closed) | `permission_denied` | 403 | `AUTHZ_DENIED` |
+| The PDP could not evaluate the request (unreachable, timeout, evaluation error); access is still refused (fail-closed) | `service_unavailable` | 503 + `Retry-After` | `Retry-After: 5` (`context.retry_after_seconds = 5`); generic detail, the cause is only logged |
 | Retry, edit or delete of a turn whose `requester_user_id` is not the caller | `permission_denied` | 403 | `AUTHZ_DENIED` (`MutationError::Forbidden`) |
 | Tenant lacks the required license feature (platform base license feature `CORE_GLOBAL_BASE_LICENSE_FEATURE`; `ai_chat` is the target, ADR-0008) | `permission_denied` | 403 | `LICENSE_FEATURE_REQUIRED` (api-gateway license middleware) |
 | Another turn is running in the chat (stream, including the insert race) | `aborted` | 409 | `context.reason = turn_already_running`; `detail = "Another turn is running in this chat"` |
@@ -1604,7 +1605,7 @@ Provider identifiers (`provider_file_id`, `provider_response_id`, `vector_store_
 - [ ] Chat deletion emits an audit event (not implemented — [ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md))
 - [ ] Upload returns `201` with `status: ready`, or `status: uploaded` when document indexing is still running at the request deadline and the attachment becomes `ready` or `failed` in the background; a failed upload returns an HTTP error and the row is visible with `status: failed`
 - [ ] `GET /v1/chats` lists the chat with the most recent message, retry or edit first
-- [ ] A PDP failure returns 403, not 500; another user's chat returns 404
+- [ ] A PDP failure returns 503 with `Retry-After`, not 403 or 500; another user's chat returns 404
 - [ ] (not implemented — [ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)) Administrators can assign MCP servers to user roles via `POST /v1/admin/roles/{role}/mcp-servers` and revoke via `DELETE /v1/admin/roles/{role}/mcp-servers/{sid}`; only enabled servers visible to the tenant can be assigned
 - [ ] (not implemented — [ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)) When the user's role(s) grant access to MCP servers and the effective model supports MCP (`tool_support.mcp = true`), the LLM request includes MCP tools as `LlmTool::Function` definitions
 - [ ] (not implemented — [ADR-0006](./ADR/0006-cpt-cf-mini-chat-adr-mcp-deferred.md)) Audit envelope snapshots the full effective server list per turn (not just calls made) for compliance reviews
