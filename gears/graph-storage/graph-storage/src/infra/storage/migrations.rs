@@ -16,6 +16,7 @@ pub mod m0005_payload_index;
 pub mod m0006_type_revision;
 pub mod m0007_source_namespace_owner;
 pub mod m0008_edge_scope_owner;
+pub mod m0009_read_path_indexes;
 
 /// Text-search configuration used for both the GIN index expression and every
 /// lexical query. One constant, so predicate and index cannot drift apart —
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0006_type_revision::Migration),
             Box::new(m0007_source_namespace_owner::Migration),
             Box::new(m0008_edge_scope_owner::Migration),
+            Box::new(m0009_read_path_indexes::Migration),
         ]
     }
 }

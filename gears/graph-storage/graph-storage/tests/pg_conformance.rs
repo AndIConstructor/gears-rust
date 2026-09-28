@@ -934,6 +934,111 @@ async fn colliding_node_keys_stay_inside_their_tenants() {
 
 // --- what only a real PostgreSQL 19 can show --------------------------------
 
+/// The plans of the two hot read paths can reach an index (m0009).
+///
+/// `enable_seqscan = off` makes the question "is there an index this
+/// statement *can* use" rather than "is one cheaper here": with only the
+/// partial edge indexes the `GRAPH_TABLE` hop has none that constrains the
+/// frontier (`deleted_at` is outside the edge element's `PROPERTIES`, so the
+/// pattern cannot state the partial predicate), and a listing of one type has
+/// none that yields that type in key order -- the shape a payload filter
+/// needs at a middling selectivity, where the planner otherwise walks the
+/// whole tenant in key order (measured on the Studio stand; the choice itself
+/// needs volume to reproduce, the missing index does not). The assertion is
+/// on the index condition, not an index name, so a planner's choice between
+/// equivalent indexes does not decide it.
+#[tokio::test]
+async fn the_hop_and_the_filtered_listing_have_an_index_to_use() {
+    use sea_orm::{ConnectionTrait as _, TransactionTrait as _};
+    let Some(stand) = stand(HopStrategy::Pgq).await else {
+        return;
+    };
+    let tenant = tenant_on(&stand).await;
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = conformance::ctx(tenant, &scope, None);
+    stand
+        .store
+        .register_types(&ctx, conformance::ontology_batch())
+        .await
+        .expect("ontology registers");
+    let nodes = (0..400)
+        .map(|i| conformance::node(&format!("n{i}"), "n"))
+        .collect();
+    let edges = (0..400)
+        .map(|i| conformance::edge(&format!("n{i}"), &format!("n{}", (i * 7 + 1) % 400)))
+        .collect();
+    conformance::ingest_batch(stand.store.as_ref(), &ctx, conformance::batch(nodes, edges))
+        .await
+        .expect("the graph is seeded");
+
+    let raw = sea_orm::Database::connect(&stand.dsn)
+        .await
+        .expect("a plain connection to read plans");
+    raw.execute_unprepared("ANALYZE node; ANALYZE edge")
+        .await
+        .expect("statistics are fresh");
+    let tx = raw.begin().await.expect("one session for the setting");
+    tx.execute_unprepared("SET LOCAL enable_seqscan = off")
+        .await
+        .expect("the planner setting applies");
+    let statement =
+        |sql: String| sea_orm::Statement::from_string(sea_orm::DatabaseBackend::Postgres, sql);
+    let plan = |sql: String| {
+        let tx = &tx;
+        async move {
+            tx.query_all_raw(statement(format!("EXPLAIN {sql}")))
+                .await
+                .expect("the statement plans")
+                .iter()
+                .map(|row| row.try_get_by_index::<String>(0).expect("a plan line"))
+                .collect::<Vec<_>>()
+        }
+    };
+    let t = format!("'{tenant}'");
+    let row = tx
+        .query_one_raw(statement(format!(
+            "SELECT id, gts_node_type_id FROM node WHERE tenant_id = {t} AND node_key = 'n1'"
+        )))
+        .await
+        .expect("the seed resolves")
+        .expect("n1 exists");
+    let seed: i64 = row.try_get_by_index(0).expect("an id");
+    let type_id: i32 = row.try_get_by_index(1).expect("a type id");
+
+    let hop = plan(format!(
+        "SELECT cf_graph.neighbour FROM node, GRAPH_TABLE(kb MATCH \
+         (a IS node WHERE a.tenant_id = node.tenant_id AND a.id = node.id AND a.tenant_id IN ({t})) \
+         -[e IS edge WHERE e.tenant_id IN ({t})]-> \
+         (b IS node WHERE b.tenant_id IN ({t})) COLUMNS (b.id AS neighbour)) AS cf_graph \
+         WHERE node.tenant_id IN ({t}) AND node.id IN ({seed}) AND node.deleted_at IS NULL LIMIT 101"
+    ))
+    .await;
+    assert!(
+        hop.iter()
+            .any(|line| line.contains("Index Cond") && line.contains("src_node_id")),
+        "the pattern hop finds the frontier's edges through an index on their source:\n{}",
+        hop.join("\n")
+    );
+
+    let listing = plan(format!(
+        "SELECT node_key FROM node WHERE tenant_id IN ({t}) AND deleted_at IS NULL \
+         AND gts_node_type_id IN ({type_id}) ORDER BY node_key ASC LIMIT 51"
+    ))
+    .await;
+    let reads_the_type_by_index = listing
+        .iter()
+        .any(|line| line.contains("Index Cond") && line.contains("gts_node_type_id"));
+    let sorts = listing.iter().any(|line| {
+        let line = line.trim_start().trim_start_matches("->").trim_start();
+        line.starts_with("Sort") || line.starts_with("Incremental Sort")
+    });
+    assert!(
+        reads_the_type_by_index && !sorts,
+        "a listing reads one type in key order, without a sort:\n{}",
+        listing.join("\n")
+    );
+}
+
 /// Admission refuses a NUL before any statement; this is the net under it. A
 /// NUL that reaches the server anyway -- here through the store directly,
 /// which is where a path admission does not cover would put it -- is refused
