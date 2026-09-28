@@ -93,11 +93,18 @@ Each is the shipped behaviour, with the contract that fixes it.
 
 - **Registering an ontology is one batch, atomically** (`fr-type-registration`):
   one type that conflicts refuses the whole batch and registers nothing, and
-  the refusal names the type. A type that drifted compatibly (a description, an
-  optional field) is updated in place with `options.on_existing: update`, and
-  `POST /types/compatibility` says beforehand what a change would cost;
-  an incompatible change needs a new major or `options.revalidate`. Registering
-  one type at a time is a valid fallback, not a workaround.
+  the refusal names the type. A type that drifted compatibly is updated in
+  place with `options.on_existing: update`, and `POST /types/compatibility`
+  says beforehand what a change would cost; an incompatible change needs a new
+  major or `options.revalidate`. What is compatible is GTS's verdict, not a
+  rule of thumb: a description is; **an added optional property is only where
+  the level it is added to is closed** (`additionalProperties: false`). Under
+  an open `payload` -- the shape of every example here -- declaring a property
+  narrows what the level accepts (a value that was any type must now match the
+  declaration), so the same edit is backward-incompatible and `update` refuses
+  it; close the leaf's payload, restating inherited properties, to make it
+  compatible. Registering one type at a time is a valid fallback, not a
+  workaround.
 - **`expected_version` is the one conditional write.** A stored version is 1 or
   more and advances on every update; `Some(n)` requires exactly `n` and is a
   conflict otherwise, including when no node is stored under the key.
@@ -134,6 +141,16 @@ Each is the shipped behaviour, with the contract that fixes it.
   `created_at` and `updated_at` only, which is a scan of the tenant. The audit
   envelope's `updated_at` is when the gear last wrote the row, not when the
   object changed; an object's own time belongs in its payload.
+- **A cursor continues the listing that minted it, and only with its query.**
+  `next_cursor` carries the ordering and the hash of the `$filter` its first
+  page ran under; it does not carry `type_pattern` or `$top`. Send the next
+  page as `cursor` **plus the same `type_pattern`, `$filter` and `$top`**
+  (`$orderby` is refused next to a cursor, which already names it). A cursor
+  replayed without its filter, with another one, or with one added is refused
+  with `400` -- the filter is part of which listing this is -- and without
+  `type_pattern` a payload ordering is refused, since the admitted paths come
+  from the selected types. Without `$top` the page falls back to
+  `projection_max_page`.
 - **Readiness for a probe is the platform's `/readyz`**, which runs this gear's
   healthcheck and takes the pod out of traffic when a component is unhealthy;
   the gear's own `GET /graph-storage/v1/health/ready` is the detailed state
