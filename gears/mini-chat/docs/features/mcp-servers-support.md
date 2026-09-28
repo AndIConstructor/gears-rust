@@ -138,9 +138,9 @@ Mini-chat never sees the authorization code exchange, refresh tokens, or client 
 
 ## Tool Discovery & Injection
 
-Each allowed MCP tool maps to `LlmTool::Function` after validation, sanitization, and provider-specific JSON Schema normalization. The exposed name is provider-safe (allowed characters, bounded length, collision-resistant hash suffix, reversible through the routing map). Example: `mcp__a1b2c3d4__search_issues`.
+Each allowed MCP tool maps to `LlmTool::Function` after validation, sanitization, and provider-specific JSON Schema normalization. The exposed name is provider-safe (allowed characters, bounded length, collision-resistant hash suffix, reversible through the routing map). Example: `mcp__a1b2c3d4e5f60718__search_issues`.
 
-**Exposed-name derivation (hash input)** — the format is `mcp__<hash>__<tool_name>`, where `<hash>` is a truncated hex digest (default: first 8 hex chars of SHA-256) computed over the **internal `mcp_server_id` (UUID) concatenated with the `original_name`**: `hash = SHA-256(mcp_server_id || 0x1F || original_name)`. Because `mcp_server_id` is a globally-unique UUID assigned per server row — including global/`NULL`-tenant servers — the hash is guaranteed unique across tenants even when two tenants register servers with the same `(source, external_id)` and identical tool names. The hash input MUST NOT be derived from `external_id` or `original_name` alone; `tenant_id` is unsuitable because it is `NULL` for global servers and does not distinguish two servers owned by the same tenant. `<tool_name>` is a sanitized, possibly-truncated rendering of `original_name` for human readability only; uniqueness is carried entirely by the `mcp_server_id`-derived hash, so the `UNIQUE(exposed_name)` constraint on `mcp_server_tools` holds globally without collisions.
+**Exposed-name derivation (hash input)** — the format is `mcp__<hash>__<tool_name>`, where `<hash>` is a truncated hex digest (default: first 16 hex chars, 64 bits, of SHA-256) computed over the **internal `mcp_server_id` (UUID) concatenated with the `original_name`**: `hash = SHA-256(mcp_server_id || 0x1F || original_name)`. Because `mcp_server_id` is a globally-unique UUID assigned per server row — including global/`NULL`-tenant servers — two tenants that register servers with the same `(source, external_id)` and identical tool names get different hash inputs. The hash input MUST NOT be derived from `external_id` or `original_name` alone; `tenant_id` is unsuitable because it is `NULL` for global servers and does not distinguish two servers owned by the same tenant. `<tool_name>` is a sanitized, possibly-truncated rendering of `original_name` for human readability only; uniqueness is carried by the `mcp_server_id`-derived hash. A truncated hash can still collide (at 64 bits, about 50% only after ~5·10^9 tools), so `UNIQUE(exposed_name)` on `mcp_server_tools` stays the guard: a tool whose insert violates it is not registered, and the tool sync logs it and continues with the other tools.
 
 **Tool routing map** — built at stream time, lives for the duration of the request:
 
@@ -293,10 +293,10 @@ MCP tool execution emits the same `ClientSseEvent::Tool` events used by built-in
 
 ```
 event: tool
-data: {"phase":"start","name":"mcp__a1b2c3d4__search_issues","tool_type":"mcp"}
+data: {"phase":"start","name":"mcp__a1b2c3d4e5f60718__search_issues","tool_type":"mcp"}
 
 event: tool
-data: {"phase":"done","name":"mcp__a1b2c3d4__search_issues","tool_type":"mcp"}
+data: {"phase":"done","name":"mcp__a1b2c3d4e5f60718__search_issues","tool_type":"mcp"}
 ```
 
 ## Rate Limiting

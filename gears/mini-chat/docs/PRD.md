@@ -283,7 +283,7 @@ The system MUST allow users to upload image files (PNG, JPEG/JPG, WebP, GIF) to 
 **Rationale**: Users need to share visual content (screenshots, diagrams, photos) with the AI assistant and ask questions about what they see.
 **Actors**: `cpt-cf-mini-chat-actor-chat-user`
 
-All `attachment_ids` submitted with a message are strictly scoped to `(tenant_id, user_id, chat_id)` and validated before LLM invocation. Each array MUST contain unique attachment IDs; duplicate IDs within `attachment_ids` MUST be rejected with HTTP 400 before any provider call. No attachment validation may rely on provider-side failure. The checks run inside the reserve transaction, after the quota reserve is written; a failed check rolls the transaction back, so the reserve does not survive a rejected request, and no provider request is issued.
+All `attachment_ids` submitted with a message are strictly scoped to `(tenant_id, user_id, chat_id)` and validated before LLM invocation. Each array MUST contain unique attachment IDs; duplicate IDs within `attachment_ids` MUST be rejected with HTTP 400 before any provider call. A list longer than `rag.max_documents_per_chat + rag.max_images_per_message` (the most a valid message can reference) is rejected with the same 400 before any query that takes the list. No attachment validation may rely on provider-side failure. The checks run inside the reserve transaction, after the quota reserve is written; a failed check rolls the transaction back, so the reserve does not survive a rejected request, and no provider request is issued.
 
 #### Document Question Answering (File Search)
 
@@ -522,7 +522,7 @@ The system MUST emit structured audit events to the platform's `audit_service` f
 
 **P1 status** ([ADR-0009](./ADR/0009-cpt-cf-mini-chat-adr-data-lifecycle-audit-scope.md)):
 
-- **Transport**: audit events are enqueued in the finalization or mutation transaction to the outbox queue `mini-chat.audit` and delivered to the audit plugin selected through types-registry (`MiniChatAuditPluginClientV1`). The bundled `static_audit` plugin logs them. When no plugin is registered, events are acknowledged and dropped (counted in `mini_chat_audit_emit_total{result="dropped"}`). This result is not cached: every delivery looks the plugin up again, so a plugin registered later is used, and the warning is logged once per period without a plugin. If the plugin instance is found in types-registry but its client is not in ClientHub, the event is retried, not dropped.
+- **Transport**: audit events are enqueued in the finalization or mutation transaction to the outbox queue `mini-chat.audit` and delivered to the audit plugin selected through types-registry (`MiniChatAuditPluginClientV1`). The bundled `static_audit` plugin logs them. When no plugin is registered, events are acknowledged and dropped (counted in `mini_chat_audit_emit_total{result="dropped"}`). This result is not cached: every delivery looks the plugin up again, so a plugin registered later is used, and the warning is logged once per period without a plugin. If the plugin instance is found in types-registry but its client is not in ClientHub, the event is retried, not dropped. Retries are bounded: after 120 attempts (about an hour) the event is dead-lettered, so it does not block later audit events.
 - **Events**: turn finalization and turn mutations (retry, edit, delete) are audited. Chat deletion is **not** audited. `event_type` values: `turn_completed` (completed turn), `turn_failed` (every other terminal state: failed, cancelled and orphan-watchdog turns all emit `turn_failed`), `turn_retry`, `turn_edit`, `turn_delete`.
 - **Populated fields**: tenant, user, chat and turn identities, model, token usage, latency, tool-call counts (web search calls, and file search calls: provider-native `file_search` plus `search_knowledge`) and the quota decision.
 - **Not populated**: `prompt`, `response`, `attachments`, `license` and `quota_scope` are empty. Because no content is included, the redaction and truncation rules below are **not implemented**; they become mandatory when content is added.
@@ -952,10 +952,11 @@ The contract has two parts:
 
 - `mini_chat_attachment_upload_abandoned_total{from_status}` (`pending|uploaded`; attachments left by a dropped upload request and marked `failed` with `error_code = upload_abandoned`)
 - `mini_chat_upload_reaper_scan_duration_seconds`
+- `mini_chat_attachment_background_indexing_total{result}` (`ready|failed|timeout|set_ready_failed`; outcome of background indexing for a document returned as `uploaded`)
 
 ##### Emitted: audit and finalization
 
-- `mini_chat_audit_emit_total{result}` (`ok|retry|reject|dropped`; delivery outcomes of the outbox audit handler only, nothing is recorded at enqueue; `reject` includes corrupt payloads, `retry` includes plugin resolution failures; `dropped` is an event acknowledged without delivery because no plugin is registered)
+- `mini_chat_audit_emit_total{result}` (`ok|retry|reject|dropped`; delivery outcomes of the outbox audit handler only, nothing is recorded at enqueue; `reject` includes corrupt payloads and events dead-lettered after 120 attempts, `retry` includes plugin resolution failures; `dropped` is an event acknowledged without delivery because no plugin is registered)
 - `mini_chat_finalization_latency_ms`
 
 ##### Declared, deferred (not recorded in P1)
@@ -1172,7 +1173,7 @@ A turn soft-deleted by retry, edit or delete returns 404 (`not_found`). A turn o
 | Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
 | `DELETE /chats/{id}`: the chat-cleanup outbox payload exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail`; the same message is also in `context.format`. The same failure on attachment `DELETE` and on turn retry, edit and delete is returned as 500 `internal` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` (was 415) |
-| Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
+| Invalid, duplicate, foreign or not-ready `attachment_ids`, or more than `rag.max_documents_per_chat + rag.max_images_per_message` of them | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
 | Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` (was 413). A body above api-gateway `defaults.body_limit_bytes` (default 16 MiB) gets 413 from the gateway before it reaches mini-chat |
 | Too many images in one message | `out_of_range` | 400 | `TOO_MANY_IMAGES` |
 | Message exceeds `max_input_tokens` | `out_of_range` | 400 | `INPUT_TOO_LONG` |

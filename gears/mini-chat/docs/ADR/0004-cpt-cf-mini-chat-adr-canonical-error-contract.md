@@ -55,7 +55,7 @@ Chosen option: "Adopt the canonical `Problem` for REST, and keep `{code, message
 | Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
 | `DELETE /chats/{id}`: the chat-cleanup outbox payload exceeds the outbox size limit (`OutboxError::PayloadTooLarge`) | `invalid_argument` | 400 | `detail`; the same message is also in `context.format`. The same failure on attachment `DELETE` and on turn retry, edit and delete is returned as 500 `internal` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` (was 415) |
-| Invalid, duplicate, foreign or not-ready `attachment_ids` | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
+| Invalid, duplicate, foreign or not-ready `attachment_ids`, or more than `rag.max_documents_per_chat + rag.max_images_per_message` of them | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
 | Upload larger than the limit | `out_of_range` | 400 | `FILE_TOO_LARGE` (was 413). A body above api-gateway `defaults.body_limit_bytes` (default 16 MiB) gets 413 from the gateway before it reaches mini-chat |
 | Too many images in one message | `out_of_range` | 400 | `TOO_MANY_IMAGES` |
 | Message exceeds `max_input_tokens` | `out_of_range` | 400 | `INPUT_TOO_LONG` |
