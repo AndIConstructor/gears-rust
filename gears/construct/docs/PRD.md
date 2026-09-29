@@ -283,7 +283,7 @@ The subject **MUST** be able to delete any fact about them. From the next read o
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-fr-retention`
 
-A tenant administrator **MUST** be able to set one retention period for the tenant. Construct **MUST** delete a fact when the period ends, counted from the time it was stored. Without a period, facts are kept until the subject or the tenant deletes them. When a tenant leaves the deployment, Construct **MUST** delete all of its data.
+A tenant administrator **MUST** be able to set one retention period for the tenant. The period applies to everything Construct keeps about a subject: facts, review requests, question state, read records and records not processed yet. Construct **MUST** delete each item when the period ends, counted from the time it was stored. Without a period, this data is kept until the subject or the tenant deletes it. When a tenant leaves the deployment, Construct **MUST** delete all of its data.
 
 - **Rationale**: Data must not be kept longer than its purpose needs; deletion on request alone does not meet this.
 - **Actors**: `cpt-cf-construct-actor-tenant-admin`, `cpt-cf-construct-actor-dpo`
