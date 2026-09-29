@@ -129,7 +129,16 @@ claims.
    transaction runs at the server's default isolation, so rows a concurrent
    ingest commits meanwhile are rows the scan reads, and a pass that grows past
    the ceiling is refused where it crossed it rather than run to the deadline.
-   A refusal names up to `type_update_max_reported_rows` offending keys.
+   The claim is about the rows the scan read: a row a concurrent ingest
+   commits after the scan has passed its position was validated by that
+   ingest against the schema in force when it was written, and the update
+   does not re-check it. The platform offers neither a row lock nor an
+   isolation level to fence this (#4871), and a fence on the type's row would
+   serialize every ingest batch of the type against the evolution and against
+   each other; so a producer evolves a type with its ingest of that type
+   quiesced, as it would run any schema migration, and the fence is a
+   follow-up (#5012). A refusal names up to `type_update_max_reported_rows`
+   offending keys.
 4. **A dry run is part of the surface, not a debugging aid.**
    `POST /types/compatibility` runs the identical admission path and writes
    nothing, reporting per type: the state, both directional verdicts, every

@@ -154,7 +154,9 @@ Each is the shipped behaviour, with the contract that fixes it.
   different set of types -- both are part of which listing this is. Since the
   fingerprint is of the *selected* types, registering a type that the pattern
   matches invalidates the cursors in flight under it; start the listing
-  again. Without `type_pattern` a payload ordering is refused, since the
+  again. The tenant is not part of it: a cursor is a position in key order,
+  and presented under another tenant it continues that tenant's listing from
+  the same key. Without `type_pattern` a payload ordering is refused, since the
   admitted paths come from the selected types. Without `$top` the page falls
   back to `projection_max_page`.
 - **Readiness for a probe is the platform's `/readyz`**, which runs this gear's
@@ -212,6 +214,13 @@ independently developed implementation can reach the service yet; #4873).
   and `ingest_audit` (chunking, labels and the audit record are deferred).
 - *Hybrid search fails, rather than degrading to its lexical arm,* when the
   embedding provider is unavailable; lexical hits carry no snippets.
+- *A re-validating or migrating type update is a claim about the rows it
+  read.* The scan and a concurrent ingest of the same type are separate
+  transactions at the server's default isolation, and the platform offers no
+  lock or isolation level to fence them (#4871): a row committed after the
+  scan passed its position was validated against the schema in force when it
+  was written, not by the update. Evolve a type with its ingest quiesced, as
+  for any schema migration (ADR-0006 § 3); the fence is a follow-up (#5012).
 - *Compound reads on the built-in store are not one snapshot* (the platform
   offers no caller-held transaction), and the service opens a snapshot for
   traversal only. Search and projection responses still report the revision
