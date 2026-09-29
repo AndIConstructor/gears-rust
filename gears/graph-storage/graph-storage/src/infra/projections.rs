@@ -111,6 +111,21 @@ pub fn edge_ends_columns(query: Select<edge::Entity>) -> Select<edge::Entity> {
         .column(edge::Column::DstNodeId)
 }
 
+/// The scope that owns an edge, for a write that matched nothing to say
+/// whether the row was claimed or removed.
+#[derive(Debug, sea_orm::FromQueryResult)]
+pub struct EdgeOwner {
+    pub scope_attribute: Option<String>,
+    pub scope_value: Option<String>,
+}
+
+pub fn edge_owner_columns(query: Select<edge::Entity>) -> Select<edge::Entity> {
+    query
+        .select_only()
+        .column(edge::Column::ScopeAttribute)
+        .column(edge::Column::ScopeValue)
+}
+
 /// Whether a node is tombstoned: what a conflict re-read asks, to say which
 /// of its causes the caller hit.
 #[derive(Debug, sea_orm::FromQueryResult)]
@@ -199,9 +214,10 @@ mod tests {
     use sea_orm::{DatabaseBackend, EntityTrait, QueryTrait};
 
     use super::{
-        edge, edge_ends_columns, edge_hop_columns, edge_state_columns, endpoint_pair_columns,
-        gts_type, node, node_ident_columns, node_state_columns, node_typed_columns,
-        type_id_columns, type_meta_columns, type_name_columns, type_traits_columns,
+        edge, edge_ends_columns, edge_hop_columns, edge_owner_columns, edge_state_columns,
+        endpoint_pair_columns, gts_type, node, node_ident_columns, node_state_columns,
+        node_typed_columns, type_id_columns, type_meta_columns, type_name_columns,
+        type_traits_columns,
     };
 
     /// The columns no projection here may read, by entity. Each of them is
@@ -299,6 +315,16 @@ mod tests {
             &rendered(&edge_state_columns(edge::Entity::find())),
             &WIDE_EDGE,
             &["deleted_at"],
+        );
+    }
+
+    /// The lost-write re-read wants the owner and nothing else.
+    #[test]
+    fn an_edges_owner_reads_two_columns() {
+        holds(
+            &rendered(&edge_owner_columns(edge::Entity::find())),
+            &WIDE_EDGE,
+            &["scope_attribute", "scope_value"],
         );
     }
 

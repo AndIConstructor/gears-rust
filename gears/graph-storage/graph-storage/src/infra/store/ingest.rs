@@ -27,9 +27,9 @@ use crate::domain::identity;
 use crate::domain::ownership;
 use crate::domain::tally::IngestTally;
 use crate::infra::projections::{
-    EdgeEnds, EdgeHop, EdgeState, NodeIdent, NodeState, NodeTyped, TypeMeta, edge_ends_columns,
-    edge_hop_columns, edge_state_columns, node_ident_columns, node_state_columns,
-    node_typed_columns, type_meta_columns,
+    EdgeEnds, EdgeHop, EdgeOwner, EdgeState, NodeIdent, NodeState, NodeTyped, TypeMeta,
+    edge_ends_columns, edge_hop_columns, edge_owner_columns, edge_state_columns,
+    node_ident_columns, node_state_columns, node_typed_columns, type_meta_columns,
 };
 use crate::infra::storage::entity::{edge, graph_meta, ingest_idempotency, node, scope_registry};
 use crate::infra::store::types::interned_ids;
@@ -1516,10 +1516,13 @@ async fn lost_write(
         .secure()
         .scope_with(scope)
         .filter(Condition::all().add(edge::Column::Id.eq(id)))
-        .one(tx)
+        .limit(1)
+        .project_all(tx, |query| {
+            edge_owner_columns(query).into_model::<EdgeOwner>()
+        })
         .await
     {
-        Ok(row) => row,
+        Ok(rows) => rows.into_iter().next(),
         Err(error) => return map_scope_err(error),
     };
     let owner = row.and_then(|row| row.scope_attribute.zip(row.scope_value));
