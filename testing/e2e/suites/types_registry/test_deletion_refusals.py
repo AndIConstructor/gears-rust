@@ -272,13 +272,13 @@ async def test_one_entity_under_two_key_spellings_is_a_duplicate(
         [target(person, 1), target(other, 1), target(person, 1, key=reference)],
     )
     assert "location" not in response.headers, response.headers
+    # Positions, not a key: the two keys share no text, so neither repeats.
     assert_bad_request(
         response,
         invalid_argument(
-            "gts_id",
-            "INVALID_GTS_ID",
-            f"'{reference}' appears twice in one request",
-            resource_name=reference,
+            "entity_key",
+            "VALIDATION_FAILED",
+            "items[0] and items[2] name the same entity",
         ),
     )
     await _unchanged(

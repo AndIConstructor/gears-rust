@@ -70,19 +70,20 @@ fn derived() -> Value {
 
 impl Harness {
     async fn run(&self, key: &str, kind: OperationKind, candidate: Candidate) {
-        let accepted = self
-            .service
-            .submit(
-                &SubmitRequest {
-                    idempotency_key: Some(key.to_owned()),
-                    kind,
-                    dry_run: false,
-                    candidates: vec![candidate],
-                },
-                NOW,
-            )
-            .await
-            .expect("accepted");
+        let request = SubmitRequest {
+            idempotency_key: Some(key.to_owned()),
+            dry_run: false,
+            candidates: vec![candidate],
+        };
+        let accepted = match kind {
+            OperationKind::Registration => self.service.submit(&request, NOW).await,
+            OperationKind::Deletion => {
+                self.service
+                    .delete(&common::deletion_of(request), NOW)
+                    .await
+            }
+        }
+        .expect("accepted");
         self.service
             .admit(accepted.operation_id, NOW)
             .await
@@ -197,11 +198,13 @@ async fn a_current_validator_answers_unchanged_and_a_stale_one_the_representatio
         EntityLookup::Unchanged { etag } => assert_eq!(etag.encode(), current.encode()),
         other => panic!("unchanged: {other:?}"),
     }
+    // The same selection as the validator was issued under, so only the revision
+    // can make it stale.
     match h
-        .lookup(BASE, select(&["content"]), Some(holding(stale)))
+        .lookup(BASE, FieldSelection::default(), Some(holding(stale)))
         .await
     {
-        EntityLookup::Found { record, .. } => assert!(record.content.is_some()),
+        EntityLookup::Found { etag, .. } => assert_eq!(etag, current),
         other => panic!("found: {other:?}"),
     }
 }
@@ -273,6 +276,91 @@ async fn a_batch_answers_each_key_by_its_own_validator() {
         matches!(results[1].1, EntityLookup::Found { .. }),
         "{results:?}"
     );
+}
+
+/// A key named twice is answered by its first mention's condition; the second is
+/// the same question and is not asked again.
+#[tokio::test]
+async fn a_duplicate_key_is_answered_by_its_first_condition() {
+    let h = harness().await;
+    h.register("base", BASE, base("one"), None).await;
+    let (_, current) = h.found(BASE, FieldSelection::default()).await;
+    let conditional = BatchGetItem {
+        key: EntityKey::parse(BASE),
+        if_none_match: Some(holding(current)),
+    };
+    let unconditional = BatchGetItem {
+        key: EntityKey::parse(BASE),
+        if_none_match: None,
+    };
+
+    let results = h
+        .service
+        .batch_get(
+            &[conditional.clone(), unconditional.clone()],
+            FieldSelection::default(),
+        )
+        .await
+        .expect("read");
+    assert!(
+        matches!(results.as_slice(), [(_, EntityLookup::Unchanged { .. })]),
+        "{results:?}"
+    );
+    let results = h
+        .service
+        .batch_get(&[unconditional, conditional], FieldSelection::default())
+        .await
+        .expect("read");
+    assert!(
+        matches!(results.as_slice(), [(_, EntityLookup::Found { .. })]),
+        "{results:?}"
+    );
+}
+
+/// An identifier and its Registry Reference are two keys for one row, so one can
+/// be `unchanged` while the other is `found` with its document.
+#[tokio::test]
+async fn both_keys_of_one_entity_are_answered_by_their_own_conditions() {
+    let h = harness().await;
+    h.register("base", BASE, base("one"), None).await;
+    let (record, current) = h.found(BASE, select(&["content"])).await;
+    let reference = EntityKey::Uuid(record.gts_uuid);
+    let items = [
+        BatchGetItem {
+            key: reference.clone(),
+            if_none_match: Some(holding(current)),
+        },
+        BatchGetItem {
+            key: EntityKey::parse(BASE),
+            if_none_match: None,
+        },
+    ];
+    let results = h
+        .service
+        .batch_get(&items, select(&["content"]))
+        .await
+        .expect("read");
+    let answer = |key: &EntityKey| {
+        &results
+            .iter()
+            .find(|(asked, _)| asked == key)
+            .unwrap_or_else(|| panic!("{key:?} answered: {results:?}"))
+            .1
+    };
+    assert!(
+        matches!(answer(&reference), EntityLookup::Unchanged { etag } if *etag == current),
+        "{results:?}"
+    );
+    match answer(&EntityKey::parse(BASE)) {
+        EntityLookup::Found { record, etag } => {
+            assert_eq!(*etag, current);
+            assert!(
+                record.content.is_some(),
+                "the found answer carries its document"
+            );
+        }
+        other => panic!("found: {other:?}"),
+    }
 }
 
 #[tokio::test]

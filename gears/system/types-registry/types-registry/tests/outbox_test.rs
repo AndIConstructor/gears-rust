@@ -42,7 +42,6 @@ fn schema(gts_id: &str) -> Value {
 fn registration(idempotency_key: &str, gts_id: &str) -> SubmitRequest {
     SubmitRequest {
         idempotency_key: Some(idempotency_key.to_owned()),
-        kind: OperationKind::Registration,
         dry_run: false,
         candidates: vec![Candidate {
             gts_id: gts_id.to_owned(),

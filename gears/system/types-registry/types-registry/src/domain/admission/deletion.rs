@@ -28,8 +28,10 @@ use crate::observability;
 /// revision that does not exist (ADR-0005) — the same reason `unchanged` carries
 /// none.
 #[domain_model]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeletionCommit {
+    /// The identifier the target resolved to, whichever key named it.
+    pub gts_id: String,
     pub gts_uuid: Uuid,
     /// The version the tombstone now carries.
     pub resource_version: i64,
@@ -111,6 +113,7 @@ async fn decide(
     now: OffsetDateTime,
 ) -> Result<Result<DeletionCommit, ItemFailure>, WorkerError> {
     let gts_id = &entity.gts_id;
+    observability::record_resolved_gts_id(span, gts_id);
     // Asked **before** the version, deliberately: a tombstone must never suggest
     // retrying with a newer version, which is exactly what `precondition_failed`
     // would invite.
@@ -169,6 +172,7 @@ async fn decide(
     };
 
     Ok(Ok(DeletionCommit {
+        gts_id: gts_id.clone(),
         gts_uuid: entity.gts_uuid,
         resource_version,
     }))

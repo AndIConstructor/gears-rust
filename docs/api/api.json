@@ -1620,7 +1620,7 @@
             "type": "string"
           },
           "if_none_match": {
-            "description": "A prior `etag` for this key and `$select`; a match returns `unchanged`.\nBatch validators are per item.",
+            "description": "A prior `etag` for this key and `$select`; a match returns `unchanged`.\nBatch validators are per item. Exactly one entity-tag, weak or strong:\n`*`, an unquoted value or a list is refused rather than read as no condition.",
             "maxLength": 1024,
             "type": [
               "string",
@@ -5383,6 +5383,7 @@
         "properties": {
           "entity_key": {
             "description": "A canonical GTS identifier or a Registry Reference UUID.",
+            "maxLength": 1024,
             "type": "string"
           },
           "expected_resource_version": {
@@ -5402,7 +5403,7 @@
         "description": "One deletion target's durable outcome.",
         "properties": {
           "entity_key": {
-            "description": "The target's key exactly as the request spelled it: a GTS identifier or\na Registry Reference, whether or not it named an entity.",
+            "description": "The target's key, whether or not it named an entity: a GTS identifier as\nthe request spelled it (only the canonical spelling is accepted), or a\nRegistry Reference in canonical lowercase hyphenated form, however the\nrequest spelled the UUID.",
             "type": "string"
           },
           "error": {
@@ -6295,7 +6296,7 @@
         "type": "string"
       },
       "EntityLookupDto": {
-        "description": "One key's answer, echoing the key it was asked by.\n\nThe echo is not redundant: a caller that mixed identifiers and Registry\nReferences matches answers to questions without re-deriving either, and an\nabsence has no entity to carry the key for it.",
+        "description": "One key's answer, echoing the key it was asked by.\n\nThe echo is not redundant: batch order is not contractual, so a caller matches\nanswers to questions by it, and an absence has no entity to carry the key for\nit. A caller normalizes its own UUID keys before matching. A Registry Reference is echoed\nlowercase and hyphenated however the request spelled it, as an operation\nechoes it; an identifier is echoed as sent.",
         "properties": {
           "entity": {
             "oneOf": [
@@ -19234,6 +19235,7 @@
           },
           "gts_id": {
             "description": "The canonical GTS identifier. A non-canonical spelling is refused rather\nthan normalized.",
+            "maxLength": 1024,
             "type": "string"
           }
         },
@@ -60130,7 +60132,7 @@
     },
     "/types-registry/v2/entities:batchDelete": {
       "post": {
-        "description": "Submit one or more entities for deletion. Each item names its target in `entity_key` (a canonical GTS identifier or the Registry Reference UUID derived from it) and carries a required positive `expected_resource_version`. Returns 202 with the operation's Location; poll GET /types-registry/v2/operations/{operation_id} for the per-item outcome. Outcomes are reported in request order and echo each key as `entity_key`; a Registry Reference naming no entity fails only its own item. A stale version is not a 412: it is reported as a terminal `precondition_failed` item on the operation, and If-Match is refused rather than ignored.",
+        "description": "Submit one or more entities for deletion. Each item names its target in `entity_key` (a canonical GTS identifier or the Registry Reference UUID derived from it) and carries a required positive `expected_resource_version`. Returns 202 with the operation's Location; poll GET /types-registry/v2/operations/{operation_id} for the per-item outcome. Outcomes are reported in request order and echo each key as `entity_key`, a Registry Reference in canonical lowercase hyphenated form; a Registry Reference naming no entity fails only its own item. A stale version is not a 412: it is reported as a terminal `precondition_failed` item on the operation, and If-Match is refused rather than ignored.",
         "operationId": "types_registry.batch_delete_entities",
         "parameters": [
           {
@@ -60333,7 +60335,7 @@
     },
     "/types-registry/v2/entities:batchGet": {
       "post": {
-        "description": "Read up to 100 entities in one round trip. Each item names one entity in `entity_key` (a canonical GTS identifier or the Registry Reference UUID derived from it), resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves it. A top-level `$select` string applies to every key and follows that route's `$select` rules; absent, the document-free default. Tombstones are `found`. Returns 200 with one result per requested key, in request order and echoing the key it was asked by: `found` with the selected fields, exactly as the exact read returns them and always including `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`, or `not_found`. Every result but `not_found` carries the key's `etag`; an item whose `if_none_match` is still current answers `unchanged` without the entity. Query parameters are refused, `$select` included. A key named twice collapses onto its first mention; the two spellings of one entity are two keys and get two results. An absent key is not a 404: one missing key must not lose the answers for the others. The If-None-Match header is refused rather than ignored: validators are per key and belong in each item's `if_none_match`.",
+        "description": "Read up to 100 entities in one round trip. Each item names one entity in `entity_key` (a canonical GTS identifier or the Registry Reference UUID derived from it), resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves it. A top-level `$select` string applies to every key and follows that route's `$select` rules; absent, the document-free default. Tombstones are `found`. Returns 200 with one result per distinct requested key, in no contractual order, echoing the key it was asked by, a Registry Reference in canonical lowercase hyphenated form: `found` with the selected fields, exactly as the exact read returns them and always including `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`, or `not_found`. Every result but `not_found` carries the key's `etag`; an item whose `if_none_match` is still current answers `unchanged` without the entity. Query parameters are refused, `$select` included. A key named twice, in any UUID spelling, collapses onto its first mention and its condition; the identifier and the Registry Reference of one entity are two keys and get two results. An absent key is not a 404: one missing key must not lose the answers for the others. The If-None-Match header is refused rather than ignored: validators are per key and belong in each item's `if_none_match`.",
         "operationId": "types_registry.batch_get_entities",
         "requestBody": {
           "content": {

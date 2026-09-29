@@ -24,7 +24,7 @@
 //! [`unit::evaluate`](super::unit), keeping malformed references and quarantine
 //! refusals in the admission-stage vocabulary (P16).
 //!
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::sync::Arc;
 
 use gts::{GTS_ID_URI_PREFIX, GtsId, GtsIdSegment};
@@ -49,7 +49,10 @@ use crate::domain::enums::{OperationKind, OwnershipScope, Plane};
 use crate::domain::key::EntityKey;
 use crate::domain::policy::{PolicyRefusal, RegistrationPolicy};
 use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels, RefusalStage};
-use crate::domain::ports::{NewOperation, NewOperationItem, OperationRow, Stores};
+use crate::domain::ports::{
+    NewOperation, NewOperationItem, OperationItemRow, OperationRow, Stores,
+};
+use crate::domain::registry_service::MAX_KEY_LEN;
 
 /// Largest `Idempotency-Key` the column accepts (`varchar(255)`).
 pub(crate) const MAX_IDEMPOTENCY_KEY: usize = 255;
@@ -71,8 +74,23 @@ pub enum AcceptanceError {
     BatchTooLarge { count: usize, limit: usize },
     #[error("'{gts_id}' is not a canonical GTS identifier: {reason}")]
     InvalidIdentifier { gts_id: String, reason: String },
+    /// The key is not carried: it is unbounded caller input, and would otherwise
+    /// be echoed into the Problem and the refusal log.
+    #[error("a key must be at most {MAX_KEY_LEN} bytes; this one is {length}")]
+    KeyTooLong { length: usize },
+    /// A registration's [`Self::KeyTooLong`]: same bound and reason for not
+    /// carrying the value, but the field is `gts_id`.
+    #[error("a GTS identifier must be at most {MAX_KEY_LEN} bytes; this one is {length}")]
+    IdentifierTooLong { length: usize },
     #[error("'{gts_id}' appears twice in one batch")]
     DuplicateCandidate { gts_id: String },
+    /// A deletion's duplicate: two keys naming one entity, possibly by different
+    /// kinds of key, so the refusal names both positions rather than one string.
+    #[error("items[{first_index}] and items[{second_index}] name the same entity")]
+    DuplicateTarget {
+        first_index: usize,
+        second_index: usize,
+    },
     #[error("{0}")]
     PolicyRefused(#[source] PolicyRefusalError),
     #[error("'{gts_id}' carries an explicit UUID tail, which is not registrable")]
@@ -100,8 +118,6 @@ pub enum AcceptanceError {
     /// a deletion that races whoever last wrote the entity.
     #[error("deleting '{gts_id}' requires a positive expected_resource_version")]
     DeletionRequiresVersion { gts_id: String },
-    #[error("deleting '{gts_id}' takes no document, and nothing would read one")]
-    DeletionCarriesContent { gts_id: String },
     #[error("'{gts_id}' is {size} bytes, over limits.authored_document ({limit})")]
     AuthoredDocumentTooLarge {
         gts_id: String,
@@ -121,6 +137,13 @@ pub enum AcceptanceError {
         "expected_resource_version 0 on '{gts_id}' is refused: omit the field to require absence"
     )]
     ZeroPrecondition { gts_id: String },
+    /// A deletion's [`Self::ZeroPrecondition`]: omitting the version is refused
+    /// too, so the registration advice would be wrong here.
+    #[error(
+        "expected_resource_version 0 on '{gts_id}' is refused: deleting requires the positive \
+         version being deleted"
+    )]
+    DeletionZeroPrecondition { gts_id: String },
     #[error("expected_resource_version {version} on '{gts_id}' is negative")]
     NegativePrecondition { gts_id: String, version: i64 },
     /// The `409` case: the key exists with a different request behind it.
@@ -146,7 +169,9 @@ impl AcceptanceError {
             Self::EmptyBatch => "empty_batch",
             Self::BatchTooLarge { .. } => "batch_too_large",
             Self::InvalidIdentifier { .. } => "invalid_identifier",
-            Self::DuplicateCandidate { .. } => "duplicate_candidate",
+            Self::KeyTooLong { .. } => "key_too_long",
+            Self::IdentifierTooLong { .. } => "identifier_too_long",
+            Self::DuplicateCandidate { .. } | Self::DuplicateTarget { .. } => "duplicate_candidate",
             Self::PolicyRefused(_) => "policy_refused",
             Self::ExplicitUuidTail { .. } => "explicit_uuid_tail",
             Self::InstanceVersionProfile { .. } => "instance_version_profile",
@@ -157,13 +182,14 @@ impl AcceptanceError {
             Self::ConflictingDialect { .. } => "conflicting_dialect",
             Self::MissingContent { .. } => "missing_content",
             Self::DeletionRequiresVersion { .. } => "deletion_requires_version",
-            Self::DeletionCarriesContent { .. } => "deletion_carries_content",
             Self::AuthoredDocumentTooLarge { .. } => "authored_document_too_large",
             Self::ForceNotPermitted { .. } => "force_not_permitted",
             Self::ForceHasNothingToWaive { .. } => "force_has_nothing_to_waive",
             Self::UnreadableVersion { .. } => "unreadable_version",
             Self::MinorTypeSchemaRevision { .. } => "minor_type_schema_revision",
-            Self::ZeroPrecondition { .. } => "zero_precondition",
+            Self::ZeroPrecondition { .. } | Self::DeletionZeroPrecondition { .. } => {
+                "zero_precondition"
+            }
             Self::NegativePrecondition { .. } => "negative_precondition",
             Self::FingerprintConflict { .. } => "fingerprint_conflict",
             Self::Dispatch(_) => "dispatch_failure",
@@ -216,36 +242,6 @@ pub fn validate(
         request.idempotency_key.as_deref(),
         request.candidates.len(),
     )?;
-    if request.kind == OperationKind::Deletion {
-        let targets: Vec<DeleteTarget> = request
-            .candidates
-            .iter()
-            .map(|candidate| DeleteTarget {
-                key: EntityKey::GtsId(candidate.gts_id.clone()),
-                expected_resource_version: candidate.expected_resource_version,
-            })
-            .collect();
-        let validated = validate_targets(ctx, key, request.dry_run, &targets)?;
-        for candidate in &request.candidates {
-            if candidate.content.is_some() {
-                return Err(AcceptanceError::DeletionCarriesContent {
-                    gts_id: candidate.gts_id.clone(),
-                });
-            }
-            if candidate.force {
-                return Err(if ctx.config.allow_compatibility_force {
-                    AcceptanceError::ForceHasNothingToWaive {
-                        gts_id: candidate.gts_id.clone(),
-                    }
-                } else {
-                    AcceptanceError::ForceNotPermitted {
-                        gts_id: candidate.gts_id.clone(),
-                    }
-                });
-            }
-        }
-        return Ok(validated);
-    }
     let limit = ctx.config.limits.batch_candidates;
 
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -255,6 +251,12 @@ pub fn validate(
 
     for (index, candidate) in request.candidates.iter().enumerate() {
         // --- step 2: candidate identifiers -------------------------------
+        // Before a refusal copies it into the Problem and the refusal log.
+        if candidate.gts_id.len() > MAX_KEY_LEN {
+            return Err(AcceptanceError::IdentifierTooLong {
+                length: candidate.gts_id.len(),
+            });
+        }
         let id =
             GtsId::try_new(&candidate.gts_id).map_err(|e| AcceptanceError::InvalidIdentifier {
                 gts_id: candidate.gts_id.clone(),
@@ -402,13 +404,13 @@ pub fn validate(
         .collect();
 
     Ok(Validated {
-        kind: request.kind,
+        kind: OperationKind::Registration,
         dry_run: request.dry_run,
         // Past the check above, so a plain `String`: this key exists.
         idempotency_key: key.to_owned(),
         idempotency_scope_hash: p0_scope_hash(),
         request_fingerprint: request_fingerprint(&FingerprintInput {
-            kind: request.kind,
+            kind: OperationKind::Registration,
             dry_run: request.dry_run,
             plane: Plane::Platform,
             tenant_id: None,
@@ -471,10 +473,18 @@ fn validate_targets(
     dry_run: bool,
     targets: &[DeleteTarget],
 ) -> Result<Validated, AcceptanceError> {
-    let mut seen: BTreeSet<Uuid> = BTreeSet::new();
+    // Each Registry Reference with the index of the target that first named it.
+    let mut seen: BTreeMap<Uuid, usize> = BTreeMap::new();
     let mut items = Vec::with_capacity(targets.len());
     let mut fingerprinted = Vec::with_capacity(targets.len());
     for (index, target) in targets.iter().enumerate() {
+        // Before `spelled` or a refusal copies the key. REST checks the raw string
+        // too; this guards every other caller.
+        if let EntityKey::GtsId(raw) = &target.key
+            && raw.len() > MAX_KEY_LEN
+        {
+            return Err(AcceptanceError::KeyTooLong { length: raw.len() });
+        }
         let spelled = target.key.to_string();
         let gts_uuid = match &target.key {
             EntityKey::GtsId(raw) => {
@@ -493,14 +503,22 @@ fn validate_targets(
             }
             EntityKey::Uuid(gts_uuid) => *gts_uuid,
         };
-        if !seen.insert(gts_uuid) {
-            return Err(AcceptanceError::DuplicateCandidate { gts_id: spelled });
+        match seen.entry(gts_uuid) {
+            btree_map::Entry::Occupied(first) => {
+                return Err(AcceptanceError::DuplicateTarget {
+                    first_index: *first.get(),
+                    second_index: index,
+                });
+            }
+            btree_map::Entry::Vacant(slot) => {
+                slot.insert(index);
+            }
         }
         let precondition = match target.expected_resource_version {
             // Never "delete if present": the only other reading of an absent
             // version is a deletion that races whoever last wrote the entity.
             None => return Err(AcceptanceError::DeletionRequiresVersion { gts_id: spelled }),
-            Some(0) => return Err(AcceptanceError::ZeroPrecondition { gts_id: spelled }),
+            Some(0) => return Err(AcceptanceError::DeletionZeroPrecondition { gts_id: spelled }),
             Some(version) if version < 0 => {
                 return Err(AcceptanceError::NegativePrecondition {
                     gts_id: spelled,
@@ -612,7 +630,7 @@ pub async fn accept(
     };
     count_refusal(
         ctx,
-        request.kind,
+        OperationKind::Registration,
         request.dry_run,
         request.candidates.len(),
         &accepted,
@@ -813,6 +831,7 @@ async fn matches_legacy_deletion(
     existing: &OperationRow,
     validated: &Validated,
 ) -> Result<bool, AcceptanceError> {
+    // Before the read: neither a registration nor a registration's key can match.
     if validated.kind != OperationKind::Deletion || existing.kind != OperationKind::Deletion {
         return Ok(false);
     }
@@ -824,11 +843,22 @@ async fn matches_legacy_deletion(
             Box::pin(async move { Ok(stores.find_items(tx, &scope, operation_id).await?) })
         })
         .await?;
-    if recorded.len() != validated.items.len() {
-        return Ok(false);
+    Ok(legacy_deletion_fingerprint(validated, &recorded) == Some(existing.request_fingerprint))
+}
+
+/// The digest the previous acceptance would have given `validated`, reading a
+/// UUID target's identifier from `recorded` at its position; `None` when the two
+/// cannot be the same request. Only a deletion has one: a registration never
+/// takes this fallback, whatever its items.
+pub(super) fn legacy_deletion_fingerprint(
+    validated: &Validated,
+    recorded: &[OperationItemRow],
+) -> Option<RequestFingerprint> {
+    if validated.kind != OperationKind::Deletion || recorded.len() != validated.items.len() {
+        return None;
     }
     let mut gts_ids = Vec::with_capacity(recorded.len());
-    for (item, recorded) in validated.items.iter().zip(&recorded) {
+    for (item, recorded) in validated.items.iter().zip(recorded) {
         let gts_id = match (&item.key, &recorded.key) {
             (EntityKey::GtsId(gts_id), _) => gts_id.as_str(),
             (EntityKey::Uuid(gts_uuid), resolved @ EntityKey::GtsId(gts_id))
@@ -836,7 +866,7 @@ async fn matches_legacy_deletion(
             {
                 gts_id.as_str()
             }
-            _ => return Ok(false),
+            _ => return None,
         };
         gts_ids.push(gts_id);
     }
@@ -852,7 +882,7 @@ async fn matches_legacy_deletion(
         })
         .collect();
     let scope = p0_request_scope(OperationKind::Deletion, validated.dry_run);
-    let legacy = request_fingerprint(&FingerprintInput {
+    Some(request_fingerprint(&FingerprintInput {
         kind: scope.kind,
         dry_run: scope.dry_run,
         plane: scope.plane,
@@ -860,8 +890,7 @@ async fn matches_legacy_deletion(
         principal_id: scope.principal_id,
         ownership_scope: scope.ownership_scope,
         candidates: &candidates,
-    });
-    Ok(legacy == existing.request_fingerprint)
+    }))
 }
 
 /// Step 5. The document names the entity the item names: a Type Schema's

@@ -22,7 +22,7 @@ use uuid::Uuid;
 use common::{PausePoint, TestDir, TestStores, allow_all, stores};
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::AdmissionFailureReason;
-use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
+use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError};
 use types_registry::domain::admission::worker::{ItemOutcome, Tuning, WorkerError, run_operation};
 use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
 use types_registry::domain::enums::{OperationItemStatus, OperationKind};
@@ -116,7 +116,8 @@ async fn submit(
 ) -> Uuid {
     let provider: DBProvider<AcceptanceError> = DBProvider::new(db.db());
     let dispatch: Arc<dyn OperationDispatch> = Arc::new(NoDispatch);
-    accept(
+    common::accept_as(
+        kind,
         &stores(),
         &provider,
         &allow_all(),
@@ -126,9 +127,8 @@ async fn submit(
             metrics: &common::metrics(),
         },
         &dispatch,
-        &SubmitRequest {
+        SubmitRequest {
             idempotency_key: Some(key.to_owned()),
-            kind,
             dry_run,
             candidates,
         },

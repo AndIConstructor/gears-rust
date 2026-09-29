@@ -85,7 +85,6 @@ async fn submit(db: &Arc<DBProvider<DbError>>, key: &str, gts_id: &str, content:
         &dispatch,
         &SubmitRequest {
             idempotency_key: Some(key.to_owned()),
-            kind: domain_enums::OperationKind::Registration,
             dry_run: false,
             candidates: vec![Candidate {
                 gts_id: gts_id.to_owned(),
@@ -913,8 +912,12 @@ async fn a_terminal_item_whose_stored_identifier_does_not_parse_is_an_error() {
     )
     .await
     .expect_err("a corrupt stored identifier must not be reported as a success");
+    // The library's reason, which says why the row is corrupt, survives.
+    let expected = gts::GtsId::try_new("not a gts identifier")
+        .expect_err("not an identifier")
+        .to_string();
     assert!(
-        matches!(err, WorkerError::StoredIdentifierUnparsable { .. }),
+        matches!(err, WorkerError::StoredIdentifierUnparsable { ref reason, .. } if *reason == expected),
         "got {err}"
     );
 }

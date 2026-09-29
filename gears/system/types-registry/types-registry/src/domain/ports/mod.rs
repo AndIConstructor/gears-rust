@@ -188,8 +188,8 @@ pub struct OperationItemRow {
     pub id: i64,
     pub operation_id: Uuid,
     pub item_no: i32,
-    /// Always an identifier for a registration; a deletion's key as its request
-    /// named it.
+    /// Always an identifier for a registration — the repository refuses a row
+    /// that is not — and a deletion's key as its request named it.
     pub key: EntityKey,
     pub dry_run: bool,
     pub kind: OperationKind,

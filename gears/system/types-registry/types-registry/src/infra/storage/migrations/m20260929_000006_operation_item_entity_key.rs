@@ -34,7 +34,10 @@ fn statements(
     }
 }
 
-#[allow(elided_lifetimes_in_paths)]
+#[expect(
+    elided_lifetimes_in_paths,
+    reason = "`MigrationTrait` elides `SchemaManager`'s lifetime, so the impl must too"
+)]
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {

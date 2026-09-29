@@ -199,7 +199,7 @@ async fn predict_batch(
                                 )
                                 .instrument(observability::unit_span(
                                     operation_id,
-                                    &item.key.to_string(),
+                                    &item.key,
                                     item.kind,
                                     item.dry_run,
                                     item.id,
@@ -268,7 +268,7 @@ async fn predict_item(
             view.keep_candidate(layer);
             tracing::debug!(
                 operation_item_id = item.id,
-                gts_id = %item.key,
+                entity_key = %item.key,
                 "types_registry predicted a candidate would be admitted"
             );
             return Ok(Predicted::Terminal {

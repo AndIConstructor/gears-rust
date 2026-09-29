@@ -176,13 +176,7 @@ async fn deletion_order(
 }
 
 fn unit_span(operation_id: Uuid, item: &OperationItemRow) -> Span {
-    observability::unit_span(
-        operation_id,
-        &item.key.to_string(),
-        item.kind,
-        item.dry_run,
-        item.id,
-    )
+    observability::unit_span(operation_id, &item.key, item.kind, item.dry_run, item.id)
 }
 
 /// Terminalize a candidate the batch refused before it could be evaluated — a
@@ -417,7 +411,8 @@ async fn process_deletion(
             tracing::info!(
                 %operation_id,
                 operation_item_id = item.id,
-                gts_id = %item.key,
+                entity_key = %item.key,
+                gts_id = %commit.gts_id,
                 resource_version = commit.resource_version,
                 "types_registry entity deleted"
             );
@@ -741,7 +736,7 @@ async fn record_failure(
         tracing::warn!(
             %operation_id,
             operation_item_id = item.id,
-            gts_id = %item.key,
+            entity_key = %item.key,
             reason = %failure.reason,
             "types_registry candidate refused"
         );

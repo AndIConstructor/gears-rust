@@ -1081,14 +1081,14 @@ RegistrationItemResult {
 }
 
 DeletionItemResult {
-    entity_key,            // the key exactly as the request spelled it
+    entity_key,            // the key in canonical form: a GTS Identifier, or a lowercase hyphenated gts_uuid
     status: pending | running | succeeded | failed,
     resource_version?,
     error?
 }
 ```
 
-Results preserve request order. A registration result names its identifier; a deletion result echoes its key, a GTS Identifier or a `gts_uuid`, whether or not it named an entity. Real `succeeded` and `unchanged` results also contain `resource_version`.
+Results preserve request order. A registration result names its identifier; a deletion result echoes its key, a GTS Identifier or a `gts_uuid`, whether or not it named an entity. A `gts_uuid` accepted in any UUID spelling is echoed lowercase and hyphenated: the operation stores the classified key, and a replay under another spelling of it is the same operation. `:batchGet` echoes a `gts_uuid` the same way, so every `entity_key` a response carries follows one rule. Real `succeeded` and `unchanged` results also contain `resource_version`.
 
 Dry-run `succeeded` omits `resource_version` because none was allocated; dry-run `unchanged` returns the existing version because the real operation would also write nothing. `ck_tr_operation_item_state` enforces the stored `result_revision_no` and `result_resource_version` states. Public results omit revision number; future writes precondition on `resource_version`.
 
@@ -1131,7 +1131,7 @@ Plane-specific parameters are rejected on the other plane, never ignored. Regist
 
 Every batch item names its entity in one `entity_key` field, exactly as `GET /entities/{entity_key}` names it in one path segment. `EntityKey` is an enum over a *single* value, so one field is its faithful wire form; two exclusive fields would encode one value twice and buy an envelope rule — both-or-neither — that has no reason to exist.
 
-Classification is by shape and is total: a value that parses as a UUID is a Registry Reference, and anything else is an identifier. The two vocabularies cannot collide, because every GTS identifier segment carries dots and a version and no UUID does. A syntactically impossible identifier is therefore answered exactly as the single read answers it, on purpose — one classifier, one behaviour, and no way for the batch and the exact read to disagree about the same string.
+Classification is by shape and is total: a value that parses as a UUID is a Registry Reference, and anything else is an identifier. The two vocabularies cannot collide, because every GTS identifier segment carries dots and a version and no UUID does. A syntactically impossible identifier is therefore answered exactly as the single read answers it, on purpose — one classifier, one behaviour, and no way for the batch and the exact read to disagree about the same string. Reads and deletions share the classifier but not the answer: a read answers such an identifier `not_found`, while a deletion validates every target before it becomes an operation and refuses the whole request with `400`. A key over 1024 bytes is `400` on both, without echoing it.
 
 The batch arrays are all named `items`, matching the operation result, the discovery page, and the platform's `Page<T>`: the surfaces differ in what an item carries, never in what the array is called.
 
@@ -1161,7 +1161,7 @@ The batch arrays are all named `items`, matching the operation result, the disco
 }
 ```
 
-Each result echoes the `entity_key` it was asked by and carries the next validator in the same position, so a caller copies it straight back into `if_none_match` on the following poll:
+Each result echoes the `entity_key` it was asked by — a `gts_uuid` lowercase and hyphenated, whatever UUID spelling was sent, and an identifier as sent — and carries the next validator in the same result, so a caller that matches results by key copies it straight back into `if_none_match` on the following poll:
 
 ```jsonc
 {
@@ -1174,7 +1174,7 @@ Each result echoes the `entity_key` it was asked by and carries the next validat
 }
 ```
 
-The `If-None-Match` **header** is unavailable here, and refused rather than ignored, because validators and `unchanged` results are per key and one header cannot carry them. A key with no `if_none_match` is read unconditionally, which is how a caller mixes cached and uncached keys in one round trip. An `unchanged` result **does** carry its `etag`, matching [RFC 9110 §15.4.5](https://www.rfc-editor.org/rfc/rfc9110#name-304-not-modified), which has a `304` send the validator a `200` would have sent. Every result but `not_found` therefore has one, so a caller's refresh loop reads the same field in every branch instead of remembering which token it sent for which key.
+The `If-None-Match` **header** is unavailable here, and refused rather than ignored, because validators and `unchanged` results are per key and one header cannot carry them. A key with no `if_none_match` is read unconditionally, which is how a caller mixes cached and uncached keys in one round trip. A present `if_none_match` is exactly one entity-tag — the `etag` of an earlier read, weak or strong — and `*`, an unquoted value or a list is refused with `400`; the exact read's `If-None-Match` header is `*` or a list of entity-tags, and a header that is neither, holds a non-ASCII byte, or mixes `*` with tags is refused with `400` on that header. Neither surface reads an unusable condition as no condition, because a caller that sent one believes the read is conditional. An `unchanged` result **does** carry its `etag`, matching [RFC 9110 §15.4.5](https://www.rfc-editor.org/rfc/rfc9110#name-304-not-modified), which has a `304` send the validator a `200` would have sent. Every result but `not_found` therefore has one, so a caller's refresh loop reads the same field in every branch instead of remembering which token it sent for which key.
 
 ##### `GET /entities`
 
@@ -1224,7 +1224,7 @@ On the tenant plane the owner is derived from the `SecurityContext` and is never
 }
 ```
 
-The operation this returns echoes each target's key as `entity_key`, in request order. Acceptance reads no entity state, so a UUID is resolved by the worker under its write claim: a key naming no entity is still accepted, and only its item fails `precondition_failed`. A caller that deleted by UUID reads the tombstone by the same key when it needs the identifier. The request fingerprint covers each target's `gts_uuid`, which an identifier determines, so both spellings of one entity are one duplicate and one replay whether or not it exists.
+The operation this returns echoes each target's key as `entity_key`, in request order, a `gts_uuid` in canonical lowercase hyphenated form. Acceptance reads no entity state, so a UUID is resolved by the worker under its write claim: a key naming no entity is still accepted, and only its item fails `precondition_failed`. A caller that deleted by UUID reads the tombstone by the same key when it needs the identifier. The request fingerprint covers each target's `gts_uuid`, which an identifier determines, so both spellings of one entity are one duplicate and one replay whether or not it exists; the duplicate refusal names the two item positions, since the two keys need not share a string.
 
 The precondition is in the body and not in `If-Match` for the reason the name gives: one header cannot express several preconditions, and a batch has one per item. `:batchDelete` rather than `:delete` because the name should say what a reader will find in the body — an array — and because it then reads as the sibling of `:batchGet` that it is.
 
@@ -1591,7 +1591,7 @@ pub struct DeletionOperation {
 }
 
 pub struct DeletionItemResult {
-    /// The target's key as the request spelled it.
+    /// The target's key; a Registry Reference in canonical form.
     pub entity_key: EntityKey,
     pub status: CandidateStatus,
     pub resource_version: Option<u64>,
@@ -1611,7 +1611,7 @@ Platform reads cross tenant visibility for diagnostics; the PDP is not substitut
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-tech-read-result`
 
-A mixed batch accepts canonical GTS Identifiers and `gts_uuid` references as one `EntityKey`, implementing both directions of `cpt-cf-types-registry-fr-id-resolution`. Each key maps to `found`, `unchanged`, `not_found`, or per-key `failed`; ADR-0002 forbids mapping source failure to absence. Duplicate keys collapse and order is not contractual.
+A mixed batch accepts canonical GTS Identifiers and `gts_uuid` references as one `EntityKey`, implementing both directions of `cpt-cf-types-registry-fr-id-resolution`. Each key maps to `found`, `unchanged`, `not_found`, or per-key `failed`; ADR-0002 forbids mapping source failure to absence. Duplicate keys collapse — every UUID spelling of one `gts_uuid` is one key, echoed in canonical form — and order is not contractual, so a caller matches results by key after normalizing its own UUID keys.
 
 That gives three read operations with three different completeness contracts:
 

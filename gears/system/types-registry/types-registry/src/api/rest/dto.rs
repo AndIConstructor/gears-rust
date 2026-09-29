@@ -6,14 +6,14 @@ use uuid::Uuid;
 use gts::GtsIdSegment;
 use types_registry_sdk::RegisterSummary;
 
-use crate::domain::admission::{AdmissionFailureReason, StoredFailure};
+use crate::domain::admission::{AdmissionFailureReason, StoredFailure, UnreadableFailure};
 use crate::domain::enums::{
     EntityKind, LifecycleStatus, OperationItemStatus, OperationKind, OperationStatus,
 };
+use crate::domain::key::EntityKey;
 use crate::domain::model::{GtsEntity, ListQuery, SegmentMatchScope};
 use crate::domain::registry_service::{
     EntityLookup, EntityRecord, MAX_BATCH_GET_KEYS, OperationItemRecord, OperationRecord,
-    ServiceError,
 };
 
 /// DTO for a GTS ID segment.
@@ -366,36 +366,16 @@ mod tests {
             "message": "PropertyAdded at $.payload",
         });
         let dto = RegistrationItemDto::from_record(
-            &OperationItemRecord {
+            OperationItemRecord {
                 key: EntityKey::GtsId(gts_id!("cf.core.compat.thing.v1~").to_owned()),
                 status: OperationItemStatus::Failed,
                 resource_version: None,
                 error: Some(StoredFailure::parse(&payload.to_string())),
             },
             Uuid::nil(),
-        )
-        .expect("an identifier key");
+        );
         assert_eq!(serde_json::to_value(dto)?["error"], payload);
         Ok(())
-    }
-
-    /// Acceptance stores only identifiers for a registration, so anything else
-    /// is corruption rather than a `null` on the wire.
-    #[test]
-    fn a_registration_item_naming_a_registry_reference_is_corrupt() {
-        let refused = RegistrationItemDto::from_record(
-            &OperationItemRecord {
-                key: EntityKey::Uuid(Uuid::nil()),
-                status: OperationItemStatus::Failed,
-                resource_version: None,
-                error: None,
-            },
-            Uuid::nil(),
-        );
-        assert!(
-            matches!(refused, Err(ServiceError::CorruptDocument(_))),
-            "{refused:?}"
-        );
     }
 
     /// A deletion echoes its key, including a Registry Reference that named nothing.
@@ -407,7 +387,7 @@ mod tests {
             "message": "names no entity",
         });
         let dto = DeletionItemDto::from_record(
-            &OperationItemRecord {
+            OperationItemRecord {
                 key: EntityKey::Uuid(gts_uuid),
                 status: OperationItemStatus::Failed,
                 resource_version: None,
@@ -455,7 +435,7 @@ mod tests {
             (OperationKind::Registration, "registration"),
             (OperationKind::Deletion, "deletion"),
         ] {
-            let dto = OperationDto::try_from(record(kind)).expect("no items to refuse");
+            let dto = OperationDto::from(record(kind));
             assert_eq!(serde_json::to_value(dto)?["kind"], wire);
         }
         Ok(())
@@ -463,7 +443,7 @@ mod tests {
 
     fn item_error(stored: Option<&str>) -> serde_json::Value {
         let dto = DeletionItemDto::from_record(
-            &OperationItemRecord {
+            OperationItemRecord {
                 key: EntityKey::GtsId(gts_id!("cf.core.compat.thing.v1~").to_owned()),
                 status: OperationItemStatus::Failed,
                 resource_version: None,
@@ -808,6 +788,7 @@ mod tests {
 pub struct SubmitEntityDto {
     /// The canonical GTS identifier. A non-canonical spelling is refused rather
     /// than normalized.
+    #[schema(max_length = 1024)]
     pub gts_id: String,
     /// The authored document.
     pub content: serde_json::Value,
@@ -854,6 +835,7 @@ pub struct SubmitEntitiesRequest {
 #[serde(deny_unknown_fields)]
 pub struct DeleteEntityDto {
     /// A canonical GTS identifier or a Registry Reference UUID.
+    #[schema(max_length = 1024)]
     pub entity_key: String,
     /// Required positive version; optional internally for uniform validation errors.
     #[serde(default)]
@@ -916,8 +898,10 @@ pub struct RegistrationItemDto {
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct DeletionItemDto {
-    /// The target's key exactly as the request spelled it: a GTS identifier or
-    /// a Registry Reference, whether or not it named an entity.
+    /// The target's key, whether or not it named an entity: a GTS identifier as
+    /// the request spelled it (only the canonical spelling is accepted), or a
+    /// Registry Reference in canonical lowercase hyphenated form, however the
+    /// request spelled the UUID.
     pub entity_key: String,
     pub status: OperationItemStatusDto,
     pub resource_version: Option<i64>,
@@ -1180,13 +1164,17 @@ impl From<LifecycleStatus> for LifecycleStatusDto {
     }
 }
 
-fn item_error(item: &OperationItemRecord, operation_id: Uuid) -> Option<OperationItemErrorDto> {
-    item.error.clone().map(|stored| {
+fn item_error(
+    key: &EntityKey,
+    error: Option<Result<StoredFailure, UnreadableFailure>>,
+    operation_id: Uuid,
+) -> Option<OperationItemErrorDto> {
+    error.map(|stored| {
         stored.map_or_else(
             |unreadable| {
                 tracing::error!(
                     %operation_id,
-                    entity_key = %item.key,
+                    entity_key = %key,
                     reason = unreadable.reason.as_str(),
                     cause = %unreadable.cause,
                     "types_registry cannot read a stored item failure"
@@ -1199,30 +1187,27 @@ fn item_error(item: &OperationItemRecord, operation_id: Uuid) -> Option<Operatio
 }
 
 impl RegistrationItemDto {
-    fn from_record(item: &OperationItemRecord, operation_id: Uuid) -> Result<Self, ServiceError> {
-        let error = item_error(item, operation_id);
-        let Some(gts_id) = item.key.gts_id() else {
-            return Err(ServiceError::CorruptDocument(format!(
-                "registration item of operation {operation_id} names Registry Reference '{}'",
-                item.key
-            )));
-        };
-        Ok(Self {
-            gts_id: gts_id.to_owned(),
+    /// The repository refuses a registration row naming anything but an
+    /// identifier, so the key's text is that identifier.
+    fn from_record(item: OperationItemRecord, operation_id: Uuid) -> Self {
+        let error = item_error(&item.key, item.error, operation_id);
+        Self {
+            gts_id: item.key.to_string(),
             status: item.status.into(),
             resource_version: item.resource_version,
             error,
-        })
+        }
     }
 }
 
 impl DeletionItemDto {
-    fn from_record(item: &OperationItemRecord, operation_id: Uuid) -> Self {
+    fn from_record(item: OperationItemRecord, operation_id: Uuid) -> Self {
+        let error = item_error(&item.key, item.error, operation_id);
         Self {
             entity_key: item.key.to_string(),
             status: item.status.into(),
             resource_version: item.resource_version,
-            error: item_error(item, operation_id),
+            error,
         }
     }
 }
@@ -1254,13 +1239,11 @@ impl From<StoredFailure> for OperationItemErrorDto {
     }
 }
 
-impl TryFrom<OperationRecord> for OperationDto {
-    type Error = ServiceError;
-
-    fn try_from(record: OperationRecord) -> Result<Self, ServiceError> {
+impl From<OperationRecord> for OperationDto {
+    fn from(record: OperationRecord) -> Self {
         let id = record.operation_id;
         let status = record.status.into();
-        Ok(match record.kind {
+        match record.kind {
             OperationKind::Registration => Self::Registration(RegistrationOperationDto {
                 operation_id: id,
                 kind: RegistrationKindDto::Registration,
@@ -1271,9 +1254,9 @@ impl TryFrom<OperationRecord> for OperationDto {
                 completed_at: record.completed_at,
                 items: record
                     .items
-                    .iter()
+                    .into_iter()
                     .map(|item| RegistrationItemDto::from_record(item, id))
-                    .collect::<Result<_, _>>()?,
+                    .collect(),
             }),
             OperationKind::Deletion => Self::Deletion(DeletionOperationDto {
                 operation_id: id,
@@ -1285,11 +1268,11 @@ impl TryFrom<OperationRecord> for OperationDto {
                 completed_at: record.completed_at,
                 items: record
                     .items
-                    .iter()
+                    .into_iter()
                     .map(|item| DeletionItemDto::from_record(item, id))
                     .collect(),
             }),
-        })
+        }
     }
 }
 
@@ -1335,7 +1318,8 @@ pub struct BatchGetItemDto {
     #[schema(max_length = 1024)]
     pub entity_key: String,
     /// A prior `etag` for this key and `$select`; a match returns `unchanged`.
-    /// Batch validators are per item.
+    /// Batch validators are per item. Exactly one entity-tag, weak or strong:
+    /// `*`, an unquoted value or a list is refused rather than read as no condition.
     #[serde(default)]
     #[schema(max_length = 1024)]
     pub if_none_match: Option<String>,
@@ -1430,9 +1414,11 @@ pub enum EntityLookupStatusDto {
 
 /// One key's answer, echoing the key it was asked by.
 ///
-/// The echo is not redundant: a caller that mixed identifiers and Registry
-/// References matches answers to questions without re-deriving either, and an
-/// absence has no entity to carry the key for it.
+/// The echo is not redundant: batch order is not contractual, so a caller matches
+/// answers to questions by it, and an absence has no entity to carry the key for
+/// it. A caller normalizes its own UUID keys before matching. A Registry Reference is echoed
+/// lowercase and hyphenated however the request spelled it, as an operation
+/// echoes it; an identifier is echoed as sent.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct EntityLookupDto {

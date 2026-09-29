@@ -705,3 +705,68 @@ async fn restate_stored_revision(
          otherwise assert over a baseline it never changed",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Submitting either kind of operation
+// ---------------------------------------------------------------------------
+
+use types_registry::domain::admission::acceptance::{
+    AcceptanceContext, AcceptanceError, accept, accept_deletion,
+};
+use types_registry::domain::admission::{
+    Accepted, DeleteRequest, DeleteTarget, OperationDispatch, SubmitRequest,
+};
+use types_registry::domain::enums::OperationKind as DomainOperationKind;
+use types_registry::domain::key::EntityKey;
+use types_registry::domain::ports::Stores;
+
+/// A deletion of the entities `request` names, as both REST routes build one.
+/// Tests describe a batch as candidates whatever its kind; a deletion target has
+/// no document and no `force`, so a candidate carrying either is a test bug.
+pub fn deletion_of(request: SubmitRequest) -> DeleteRequest {
+    DeleteRequest {
+        idempotency_key: request.idempotency_key,
+        dry_run: request.dry_run,
+        targets: request
+            .candidates
+            .into_iter()
+            .map(|candidate| {
+                assert!(
+                    candidate.content.is_none() && !candidate.force,
+                    "a deletion target carries no document and no force: {}",
+                    candidate.gts_id,
+                );
+                DeleteTarget {
+                    key: EntityKey::parse(&candidate.gts_id),
+                    expected_resource_version: candidate.expected_resource_version,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Accept `request` as the operation `kind` names: a registration as itself, a
+/// deletion through [`deletion_of`] and `accept_deletion`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`accept`'s own context, plus the kind that picks between it and `accept_deletion`"
+)]
+pub async fn accept_as(
+    kind: DomainOperationKind,
+    stores: &Arc<dyn Stores>,
+    db: &DBProvider<AcceptanceError>,
+    scope: &AccessScope,
+    ctx: &AcceptanceContext<'_>,
+    dispatch: &Arc<dyn OperationDispatch>,
+    request: SubmitRequest,
+    now: OffsetDateTime,
+) -> Result<Accepted, AcceptanceError> {
+    match kind {
+        DomainOperationKind::Registration => {
+            accept(stores, db, scope, ctx, dispatch, &request, now).await
+        }
+        DomainOperationKind::Deletion => {
+            accept_deletion(stores, db, scope, ctx, dispatch, &deletion_of(request), now).await
+        }
+    }
+}

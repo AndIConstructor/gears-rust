@@ -625,7 +625,8 @@ async def delete_and_assert(
 
 def removal(subject, status, resource_version, reason=None, **error_fields):
     """A complete deletion item; `subject` is a document, named by its GTS ID,
-    or the key exactly as the request spelled it, which the item echoes."""
+    or the key the item echoes: a GTS ID as sent, a UUID in canonical lowercase
+    hyphenated form."""
     key = subject["gts_id"] if isinstance(subject, dict) else subject
     return {
         "entity_key": key,

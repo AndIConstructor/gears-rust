@@ -215,7 +215,7 @@ Each scenario lists its source fixtures before Given and refers to them by name 
 
 **When:** batchGet other with its retained `if_none_match`, person with its now-stale `if_none_match`, `other_instance` without a condition, and the absent key with any retained tag. Build a second request from only the three keys that returned an `etag`, copying each into its next `if_none_match`.
 
-**Then:** the first conditional batch returns HTTP `200`: other is `unchanged` with the same `etag` and no `entity`; person is `found` with its revised document and new `etag`; the unconditioned Instance is `found` with its own content and `etag`; the absent key is `not_found` without either field. The second batch returns HTTP `200` with three `unchanged` results. Match every result by echoed key after checking completeness and uniqueness, since batch order is not contractual.
+**Then:** the first conditional batch returns HTTP `200`: other is `unchanged` with the same `etag` and no `entity`; person is `found` with its revised document and new `etag`; the unconditioned Instance is `found` with its own content and `etag`; the absent key is `not_found` without either field. The second batch returns HTTP `200` with three `unchanged` results. Match every result by echoed key after checking completeness and uniqueness, since batch order is not contractual; a UUID key is echoed lowercase and hyphenated.
 
 ### TR-READ-303 — A validator belongs to one projection
 

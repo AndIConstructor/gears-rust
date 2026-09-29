@@ -331,7 +331,6 @@ async fn submit_via(
         &dispatch,
         &SubmitRequest {
             idempotency_key: Some(key.to_owned()),
-            kind: domain_enums::OperationKind::Registration,
             dry_run: false,
             candidates,
         },
@@ -367,7 +366,6 @@ async fn submit_forced(
         &dispatch,
         &SubmitRequest {
             idempotency_key: Some(key.to_owned()),
-            kind: domain_enums::OperationKind::Registration,
             dry_run: false,
             candidates: vec![Candidate {
                 gts_id: gts_id.to_owned(),
@@ -1449,7 +1447,8 @@ async fn one_pass(
     let policy = RegistrationPolicy::default();
     let config = TypesRegistryConfig::default();
     let dispatch: Arc<dyn OperationDispatch> = Arc::new(NoDispatch);
-    let operation_id = accept(
+    let operation_id = common::accept_as(
+        kind,
         &stores(),
         &provider,
         &allow_all(),
@@ -1459,9 +1458,8 @@ async fn one_pass(
             metrics: metrics(),
         },
         &dispatch,
-        &SubmitRequest {
+        SubmitRequest {
             idempotency_key: Some(key.to_owned()),
-            kind,
             dry_run,
             candidates: vec![candidate],
         },

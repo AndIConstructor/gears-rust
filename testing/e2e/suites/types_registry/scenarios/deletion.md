@@ -4,7 +4,7 @@ End-to-end deletion scenarios cover both routes, dependency ordering, partial su
 
 Each scenario describes its starting entities, requests, terminal item outcomes and observable reads; the [suite README](../README.md) lists the test file of each group. Scenarios proved by one workflow share a test: TR-DEL-201 with 404, 203 with 213, 301 with 305, 302 with 209, and 403 with 208. Each scenario lists its source fixtures before Given; named variants are described in Given. All fixture links belong to `fixtures/deletion/`.
 
-Unless stated otherwise, setup registrations and revisions have completed, each mutation uses a fresh `Idempotency-Key`, and deletion supplies the target's current positive `expected_resource_version`. Accepted requests return `202` with an operation `Location`; polling reaches `completed`. Outcomes preserve request order and echo each key as `entity_key`, exactly as the request spelled it; an unknown UUID produces an item refusal under its own key rather than an invented identifier. Synchronous refusals return Problem JSON without an operation `Location` and change no entity.
+Unless stated otherwise, setup registrations and revisions have completed, each mutation uses a fresh `Idempotency-Key`, and deletion supplies the target's current positive `expected_resource_version`. Accepted requests return `202` with an operation `Location`; polling reaches `completed`. Outcomes preserve request order and echo each key as `entity_key`: a GTS ID as sent, a UUID in canonical lowercase hyphenated form however it was sent; an unknown UUID produces an item refusal under its own key rather than an invented identifier. Synchronous refusals return Problem JSON without an operation `Location` and change no entity.
 
 Successful deletion increments `resource_version` once and leaves a readable tombstone with the same UUID and content. Refused items have no resulting version and leave their entities unchanged. Reads explicitly select the compared fields; conditional reads retain the same projection. `A → B` means A depends on B, so A must be deleted first. Named schema copies change both `gts_id` and `content.$id`; version or base changes also update the affected chain segments and `$ref` targets. Every scenario uses a fresh namespace.
 
@@ -185,7 +185,7 @@ Successful deletion increments `resource_version` once and leaves a readable tom
 
 **When:** batch-delete `[person_schema by GTS ID, other_schema, person_schema by UUID]`, with correct versions.
 
-**Then:** the request fails synchronously with `400` and a duplicate-identity validation error; neither `person_schema` nor `other_schema` changes. Duplicate detection concerns resolved identity, not key spelling.
+**Then:** the request fails synchronously with `400` and a duplicate-identity validation error on `entity_key` naming positions `items[0]` and `items[2]`; neither `person_schema` nor `other_schema` changes. Duplicate detection concerns resolved identity, not key spelling.
 
 ### TR-DEL-108 — Unknown UUIDs fail per item without blocking valid neighbours
 

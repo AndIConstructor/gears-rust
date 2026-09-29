@@ -917,6 +917,50 @@ async fn the_same_repository_methods_run_inside_a_transaction() {
     assert_eq!(row.id, committed);
 }
 
+/// Acceptance stores only identifiers for a registration, so a registration row
+/// naming a Registry Reference is corruption, refused where rows are read rather
+/// than by each reader.
+#[tokio::test]
+async fn a_registration_item_naming_a_registry_reference_is_refused_on_read() {
+    let db = test_db().await;
+    let conn = db.conn().expect("conn");
+    let scope = allow_all();
+    let operation = OperationRepo::insert(
+        &conn,
+        &scope,
+        NewOperation {
+            id: Uuid::new_v4(),
+            kind: OperationKind::Registration,
+            dry_run: false,
+            plane: Plane::Platform,
+            tenant_id: None,
+            principal_id: Uuid::nil(),
+            idempotency_key: "corrupt-registration-key".to_owned(),
+            idempotency_scope_hash: ScopeHash::from_stored(vec![0x01; 32]).expect("32 bytes"),
+            request_fingerprint: RequestFingerprint::from_stored(vec![0x02; 32]).expect("32 bytes"),
+            now: NOW,
+        },
+    )
+    .await
+    .expect("insert operation");
+    let item = NewOperationItem {
+        item_no: 0,
+        key: EntityKey::Uuid(Uuid::new_v4()),
+        precondition: Precondition::MustNotExist,
+        compat_forced: false,
+        request_payload: "{}".to_owned(),
+    };
+    OperationRepo::insert_items(&conn, &scope, &operation, &[item])
+        .await
+        .expect("insert items");
+
+    let read = OperationRepo::find_items(&conn, &scope, operation.id).await;
+    assert!(
+        matches!(read, Err(ScopeError::Invalid(detail)) if detail.contains("Registry Reference")),
+        "{read:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_system_failure_fails_every_undecided_item_of_one_operation_and_no_other() {
     const SYSTEM_FAILURE: &str = r#"{"reason":"system_failure"}"#;

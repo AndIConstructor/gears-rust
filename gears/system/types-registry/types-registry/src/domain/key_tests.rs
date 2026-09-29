@@ -26,3 +26,25 @@ fn a_registry_reference_is_stored_lowercase_and_hyphenated() {
         "0f5c8e3a-0000-5000-8000-000000000001"
     );
 }
+
+/// Every UUID form `Uuid::parse_str` reads is a Registry Reference with one
+/// canonical `Display`, which an operation stores and echoes.
+#[test]
+fn every_uuid_spelling_is_one_registry_reference() {
+    let canonical = "0f5c8e3a-0000-5000-8000-000000000001";
+    for spelled in [
+        "0F5C8E3A-0000-5000-8000-000000000001",
+        "0f5c8e3a000050008000000000000001",
+        "{0f5c8e3a-0000-5000-8000-000000000001}",
+        "urn:uuid:0f5c8e3a-0000-5000-8000-000000000001",
+    ] {
+        let key = EntityKey::parse(spelled);
+        assert!(matches!(key, EntityKey::Uuid(_)), "{spelled}");
+        assert_eq!(key.to_string(), canonical, "{spelled}");
+    }
+}
+
+#[test]
+fn an_unparsable_identifier_has_no_registry_reference() {
+    assert_eq!(EntityKey::GtsId("not-a-gts-id".to_owned()).gts_uuid(), None);
+}

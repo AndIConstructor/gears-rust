@@ -138,7 +138,8 @@ async fn submit(
 ) -> Result<Uuid, AcceptanceError> {
     let provider: DBProvider<AcceptanceError> = DBProvider::new(db.db());
     let dispatch: Arc<dyn OperationDispatch> = Arc::new(NoDispatch);
-    accept(
+    common::accept_as(
+        kind,
         &stores(),
         &provider,
         &allow_all(),
@@ -148,9 +149,8 @@ async fn submit(
             metrics: &common::metrics(),
         },
         &dispatch,
-        &SubmitRequest {
+        SubmitRequest {
             idempotency_key: Some(key.to_owned()),
-            kind,
             dry_run,
             candidates,
         },
@@ -1006,7 +1006,6 @@ async fn run_batch_permitting_force(
         &dispatch,
         &SubmitRequest {
             idempotency_key: Some(key.to_owned()),
-            kind: OperationKind::Registration,
             dry_run,
             candidates,
         },
@@ -1119,7 +1118,6 @@ async fn a_dry_run_does_not_waive_where_the_deployment_refuses_force() {
         &dispatch,
         &SubmitRequest {
             idempotency_key: Some("forced".to_owned()),
-            kind: OperationKind::Registration,
             dry_run: true,
             candidates: vec![forced_creation(FORCED_ONE, open_schema(FORCED_ONE, true))],
         },

@@ -346,13 +346,16 @@ fn register_batch_get(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rout
              resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves it. \
              A top-level `$select` string applies to every key and follows that route's \
              `$select` rules; absent, the document-free default. Tombstones are `found`. Returns 200 with one result \
-             per requested key, in request order and echoing the key it was asked by: `found` \
+             per distinct requested key, in no contractual order, echoing the key it was asked by, a Registry \
+             Reference in canonical lowercase hyphenated form: `found` \
              with the selected fields, exactly as the exact read returns them and always \
              including `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`, or `not_found`. \
              Every result but `not_found` carries the key's `etag`; an item whose \
              `if_none_match` is still current answers `unchanged` without the entity. \
              Query parameters are refused, `$select` included. A key \
-             named twice collapses onto its first mention; the two spellings of one entity are \
+             named twice, in any UUID spelling, collapses onto its first mention and its \
+             condition; the identifier \
+             and the Registry Reference of one entity are \
              two keys and get two results. An absent key is not a 404: one missing key must \
              not lose the answers for the others. The If-None-Match header is refused rather \
              than ignored: validators are per key and belong in each item's `if_none_match`.",
@@ -486,7 +489,8 @@ fn register_batch_delete(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
              carries a required positive `expected_resource_version`. Returns 202 with the \
              operation's Location; poll GET /types-registry/v2/operations/{operation_id} for \
              the per-item outcome. Outcomes are reported in request order and echo each key as \
-             `entity_key`; a Registry Reference naming no entity fails only its own item. A \
+             `entity_key`, a Registry Reference in canonical lowercase hyphenated form; a \
+             Registry Reference naming no entity fails only its own item. A \
              stale version is not a 412: \
              it is reported as a terminal `precondition_failed` item on the operation, and \
              If-Match is refused rather than ignored.",

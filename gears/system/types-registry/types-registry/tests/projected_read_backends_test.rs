@@ -34,7 +34,6 @@ use toolkit_gts::gts_id;
 use common::{allow_all, doc, stores};
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
-use types_registry::domain::enums::OperationKind;
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::registry_service::{
     BatchGetItem, DiscoveryQuery, EntityKey, EntityLookup, MAX_KEY_LEN, RegistryService,
@@ -119,7 +118,6 @@ async fn admit(service: &RegistryService, key: &str, gts_id: &str, content: Valu
         .submit(
             &SubmitRequest {
                 idempotency_key: Some(key.to_owned()),
-                kind: OperationKind::Registration,
                 dry_run: false,
                 candidates: vec![Candidate {
                     gts_id: gts_id.to_owned(),
@@ -459,19 +457,29 @@ async fn an_unchanged_key_fetches_no_document(h: &Harness, backend: &str) {
     }
 }
 
-/// As for keys, the domain bounds what the handler bounds early.
+/// As for keys, the domain bounds what the handler bounds early; a validator at
+/// the bound is read, and matches nothing.
 async fn an_over_long_validator_is_refused_by_the_service(h: &Harness, backend: &str) {
-    let item = BatchGetItem {
+    let item = |len: usize| BatchGetItem {
         key: EntityKey::GtsId(TYPE.to_owned()),
-        if_none_match: Some(IfNoneMatch::Validators(vec!["a".repeat(MAX_KEY_LEN + 1)])),
+        if_none_match: Some(IfNoneMatch::Validators(vec!["a".repeat(len)])),
     };
     let result = h
         .service
-        .batch_get(&[item], FieldSelection::default())
+        .batch_get(&[item(MAX_KEY_LEN + 1)], FieldSelection::default())
         .await;
     assert!(
         matches!(result, Err(ServiceError::ValidatorTooLong { len }) if len == MAX_KEY_LEN + 1),
         "{backend}: {result:?}",
+    );
+    let at_bound = h
+        .service
+        .batch_get(&[item(MAX_KEY_LEN)], FieldSelection::default())
+        .await
+        .expect("a validator at the bound is read");
+    assert!(
+        matches!(at_bound.as_slice(), [(_, EntityLookup::Found { .. })]),
+        "{backend}: {at_bound:?}",
     );
 }
 

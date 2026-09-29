@@ -25,7 +25,7 @@ use toolkit_gts::gts_id;
 
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::{Accepted, Candidate, OperationDispatch, SubmitRequest};
-use types_registry::domain::enums::{OperationKind, OperationStatus};
+use types_registry::domain::enums::OperationStatus;
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::registry_service::{EntityKey, RegistryService, ServiceError};
 use types_registry::infra::storage::entity::enums as storage_enums;
@@ -165,7 +165,6 @@ async fn read_durable_state(db: &Arc<DBProvider<DbError>>) -> DurableState {
 fn submission(key: &str, gts_id: &str, content: Value) -> SubmitRequest {
     SubmitRequest {
         idempotency_key: Some(key.to_owned()),
-        kind: OperationKind::Registration,
         dry_run: false,
         candidates: vec![Candidate {
             gts_id: gts_id.to_owned(),

@@ -21,10 +21,12 @@ fn digest_of(validator: Validator) -> Vec<u8> {
     wire[1..].to_vec()
 }
 
+/// The golden wire-form test pins a Type Schema under the default selection;
+/// this covers the inputs it does not, an Instance under a document selection.
 #[test]
-fn equal_inputs_give_a_byte_identical_token() {
-    let a = Validator::compute(3, Some(FINGERPRINT), FieldSelection::default());
-    let b = Validator::compute(3, Some(FINGERPRINT), FieldSelection::default());
+fn equal_instance_inputs_give_a_byte_identical_token() {
+    let a = Validator::compute(3, None, select(&["content"]));
+    let b = Validator::compute(3, None, select(&["content"]));
     assert_eq!(a.encode(), b.encode());
 }
 
@@ -90,8 +92,26 @@ fn the_wire_form_is_base64url_of_the_version_byte_and_the_digest() {
 
 #[test]
 fn a_token_decodes_back_to_its_validator() {
-    let validator = Validator::compute(3, None, select(&["provenance"]));
-    assert_eq!(Validator::decode(&validator.encode()), Some(validator));
+    for validator in [
+        Validator::compute(3, None, select(&["provenance"])),
+        Validator::compute(1, Some(FINGERPRINT), FieldSelection::default()),
+        Validator::compute(i64::MAX, Some(&[]), select(&["content", "origin"])),
+    ] {
+        assert_eq!(Validator::decode(&validator.encode()), Some(validator));
+    }
+}
+
+/// Any 128-bit digest under the current version byte is a token, and decodes to
+/// the validator that encodes back to it: the wire form loses nothing.
+#[test]
+fn every_digest_round_trips_through_the_wire_form() {
+    let ascending: Vec<u8> = (0..16).collect();
+    for digest in [[0_u8; 16].to_vec(), [0xff; 16].to_vec(), ascending] {
+        let wire = token(1, &digest);
+        let validator = Validator::decode(&wire).expect("a well-formed token");
+        assert_eq!(validator.encode(), wire);
+        assert_eq!(digest_of(validator), digest);
+    }
 }
 
 #[test]

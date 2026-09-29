@@ -16,13 +16,17 @@ use uuid::Uuid;
 
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::AdmissionFailureReason;
-use types_registry::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
+use types_registry::domain::admission::acceptance::{
+    AcceptanceContext, AcceptanceError, accept_deletion,
+};
 use types_registry::domain::admission::worker::{
     ItemOutcome, OperationOutcome, Tuning, WorkerError, run_operation,
 };
-use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
-use types_registry::domain::enums as domain_enums;
+use types_registry::domain::admission::{
+    Candidate, DeleteRequest, DeleteTarget, OperationDispatch, SubmitRequest,
+};
 use types_registry::domain::enums::{LifecycleStatus, OperationItemStatus, OperationKind};
+use types_registry::domain::key::EntityKey;
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::ports::EntityRow;
 use types_registry::domain::ports::OperationItemRow;
@@ -99,7 +103,8 @@ async fn submit(
     let policy = RegistrationPolicy::default();
     let config = TypesRegistryConfig::default();
     let dispatch: Arc<dyn OperationDispatch> = Arc::new(NoDispatch);
-    accept(
+    common::accept_as(
+        kind,
         &stores(),
         &provider,
         &allow_all(),
@@ -109,9 +114,8 @@ async fn submit(
             metrics: &common::metrics(),
         },
         &dispatch,
-        &SubmitRequest {
+        SubmitRequest {
             idempotency_key: Some(key.to_owned()),
-            kind,
             dry_run: false,
             candidates,
         },
@@ -471,15 +475,12 @@ async fn the_same_key_for_a_dry_run_and_a_commit_is_a_conflict_not_a_replay() {
     let policy = RegistrationPolicy::default();
     let config = TypesRegistryConfig::default();
     let dispatch: Arc<dyn OperationDispatch> = Arc::new(NoDispatch);
-    let request = |dry_run: bool| SubmitRequest {
+    let request = |dry_run: bool| DeleteRequest {
         idempotency_key: Some("one-key".to_owned()),
-        kind: domain_enums::OperationKind::Deletion,
         dry_run,
-        candidates: vec![Candidate {
-            gts_id: TARGET.to_owned(),
-            content: None,
+        targets: vec![DeleteTarget {
+            key: EntityKey::parse(TARGET),
             expected_resource_version: Some(1),
-            force: false,
         }],
     };
     let context = AcceptanceContext {
@@ -488,7 +489,7 @@ async fn the_same_key_for_a_dry_run_and_a_commit_is_a_conflict_not_a_replay() {
         metrics: &common::metrics(),
     };
 
-    accept(
+    accept_deletion(
         &stores(),
         &provider,
         &allow_all(),
@@ -500,7 +501,7 @@ async fn the_same_key_for_a_dry_run_and_a_commit_is_a_conflict_not_a_replay() {
     .await
     .expect("the dry run is accepted");
 
-    let conflict = accept(
+    let conflict = accept_deletion(
         &stores(),
         &provider,
         &allow_all(),

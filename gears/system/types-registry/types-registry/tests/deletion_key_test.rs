@@ -27,11 +27,12 @@ use types_registry::domain::admission::{
     Accepted, AdmissionFailureReason, Candidate, DeleteRequest, DeleteTarget, OperationDispatch,
     Precondition, SubmitRequest,
 };
+use types_registry::domain::enums::LifecycleStatus;
 use types_registry::domain::enums::{OperationItemStatus, OperationKind, OwnershipScope, Plane};
 use types_registry::domain::key::EntityKey;
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::ports::{NewOperation, NewOperationItem, OperationItemRow};
-use types_registry::infra::storage::repo::OperationRepo;
+use types_registry::infra::storage::repo::{EntityRepo, OperationRepo};
 
 mod common;
 use common::{allow_all, stores, test_db};
@@ -59,6 +60,10 @@ fn dispatch() -> Arc<dyn OperationDispatch> {
 }
 
 async fn register(db: &Provider, key: &str, gts_id: &str) {
+    register_with(db, key, gts_id, schema(gts_id)).await;
+}
+
+async fn register_with(db: &Provider, key: &str, gts_id: &str, content: Value) {
     let provider: DBProvider<AcceptanceError> = DBProvider::new(db.db());
     let accepted = accept(
         &stores(),
@@ -72,11 +77,10 @@ async fn register(db: &Provider, key: &str, gts_id: &str) {
         &dispatch(),
         &SubmitRequest {
             idempotency_key: Some(key.to_owned()),
-            kind: OperationKind::Registration,
             dry_run: false,
             candidates: vec![Candidate {
                 gts_id: gts_id.to_owned(),
-                content: Some(schema(gts_id)),
+                content: Some(content),
                 expected_resource_version: None,
                 force: false,
             }],
@@ -162,7 +166,13 @@ async fn an_absent_identifier_and_its_registry_reference_are_one_duplicate() {
     )
     .await;
     assert!(
-        matches!(refused, Err(AcceptanceError::DuplicateCandidate { ref gts_id }) if *gts_id == uuid_of(TARGET).to_string()),
+        matches!(
+            refused,
+            Err(AcceptanceError::DuplicateTarget {
+                first_index: 0,
+                second_index: 1
+            })
+        ),
         "{refused:?}"
     );
 }
@@ -286,6 +296,75 @@ async fn a_dry_run_predicts_each_reference_as_the_commit_would() {
     assert_eq!(outcome.items[0].status, OperationItemStatus::Succeeded);
     assert_eq!(outcome.items[1].key, unknown);
     assert_eq!(outcome.items[1].status, OperationItemStatus::Failed);
+    // A prediction writes nothing: the entity it would delete is untouched.
+    let conn = db.conn().expect("conn");
+    let row = EntityRepo::find_by_gts_id(&conn, &allow_all(), TARGET)
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.lifecycle_status, LifecycleStatus::Active);
+    assert_eq!(row.resource_version, 1);
+}
+
+/// A schema that inlines `target`, which is a real dependency edge.
+fn holding(gts_id: &str, target: &str) -> Value {
+    let mut doc = schema(gts_id);
+    doc["properties"] = json!({ "target": { "$ref": format!("gts://{target}") } });
+    doc
+}
+
+/// Deletion ordering resolves a Registry Reference to its identifier, so a pair
+/// named by either kind of key deletes the dependant first. Without that, the
+/// target would take no edge and be refused for a dependant the same batch was
+/// about to remove.
+#[tokio::test]
+async fn a_batch_orders_a_dependant_before_its_target_named_by_reference() {
+    const HOLDER: &str = gts_id!("cf.core.delkey.holder.v1~");
+    for (index, targets) in [
+        [(EntityKey::Uuid(uuid_of(TARGET)), 1), (gts(HOLDER), 1)],
+        [(gts(TARGET), 1), (EntityKey::Uuid(uuid_of(HOLDER)), 1)],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let db = test_db().await;
+        register(&db, "reg", TARGET).await;
+        register_with(&db, "reg-holder", HOLDER, holding(HOLDER, TARGET)).await;
+        let accepted = delete(&db, &format!("del-{index}"), false, &targets)
+            .await
+            .expect("accepted");
+        let outcome = run(&db, accepted.operation_id).await;
+        for item in &outcome.items {
+            assert_eq!(
+                item.status,
+                OperationItemStatus::Succeeded,
+                "{targets:?}: {:?}",
+                item.failure
+            );
+        }
+    }
+}
+
+/// Redelivery rebuilds a finished item from its row rather than re-running it; a
+/// deletion by reference must come back exactly as the first pass reported it.
+#[tokio::test]
+async fn a_redelivered_deletion_by_reference_reports_its_first_outcome() {
+    let db = test_db().await;
+    register(&db, "reg", TARGET).await;
+    let reference = EntityKey::Uuid(uuid_of(TARGET));
+    let accepted = delete(&db, "del", false, &[(reference.clone(), 1)])
+        .await
+        .expect("accepted");
+    let first = run(&db, accepted.operation_id).await;
+    assert!(!first.already_terminal);
+    assert_eq!(first.items[0].status, OperationItemStatus::Succeeded);
+
+    let again = run(&db, accepted.operation_id).await;
+    assert!(again.already_terminal);
+    assert_eq!(again.items, first.items);
+    assert_eq!(again.items[0].key, reference);
+    assert_eq!(again.items[0].gts_uuid, Some(uuid_of(TARGET)));
+    assert_eq!(again.items[0].resource_version, Some(2));
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +470,8 @@ async fn a_changed_request_under_a_legacy_key_conflicts() {
         Err(AcceptanceError::FingerprintConflict { .. })
     ));
 
-    // A registration never takes the deletion fallback.
+    // A registration under a legacy deletion's key conflicts. Its payload differs
+    // too, so the kind guard itself is pinned by `only_a_deletion_takes_the_legacy_fallback`.
     let provider: DBProvider<AcceptanceError> = DBProvider::new(db.db());
     let registration = accept(
         &stores(),
@@ -405,7 +485,6 @@ async fn a_changed_request_under_a_legacy_key_conflicts() {
         &dispatch(),
         &SubmitRequest {
             idempotency_key: Some("legacy".to_owned()),
-            kind: OperationKind::Registration,
             dry_run: false,
             candidates: vec![Candidate {
                 gts_id: TARGET.to_owned(),

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use gts::GtsId;
 use toolkit_db::DBProvider;
 use toolkit_db::secure::AccessScope;
 use toolkit_macros::domain_model;
@@ -26,8 +27,9 @@ pub struct OperationOutcome {
 #[domain_model]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemOutcome {
-    /// An identifier, except for a deletion naming a Registry Reference that
-    /// nothing resolved.
+    /// The key the request named: always an identifier for a registration, and
+    /// for a deletion whichever key its target used — a Registry Reference stays
+    /// one whether or not it resolved. The resolved identity is `gts_uuid`.
     pub key: EntityKey,
     pub status: OperationItemStatus,
     /// The Registry Reference of the admitted entity, on success.
@@ -65,7 +67,9 @@ pub(super) async fn read_operation(
     found.ok_or(WorkerError::OperationNotFound { operation_id })
 }
 
-/// A registration item's identifier: acceptance stores nothing else for one.
+/// A registration item's identifier: acceptance stores nothing else for one, and
+/// the repository refuses a row that names anything else, so this error is
+/// defence in depth rather than a path a reader handles.
 pub(super) fn registration_gts_id(item: &OperationItemRow) -> Result<&str, WorkerError> {
     item.key
         .gts_id()
@@ -84,15 +88,18 @@ pub(super) fn stored_outcome(item: &OperationItemRow) -> Result<ItemOutcome, Wor
     );
     // Do not hide corrupt identifiers behind a missing success UUID.
     let gts_uuid = if terminal_success {
-        Some(
-            item.key
-                .gts_uuid()
-                .ok_or_else(|| WorkerError::StoredIdentifierUnparsable {
+        Some(match &item.key {
+            // Parsed here rather than through `EntityKey::gts_uuid`, which would
+            // drop the reason the operator needs to find the corruption.
+            EntityKey::GtsId(gts_id) => GtsId::try_new(gts_id)
+                .map_err(|e| WorkerError::StoredIdentifierUnparsable {
                     item_id: item.id,
-                    gts_id: item.key.to_string(),
-                    reason: "not a GTS identifier".to_owned(),
-                })?,
-        )
+                    gts_id: gts_id.clone(),
+                    reason: e.to_string(),
+                })?
+                .to_uuid(),
+            EntityKey::Uuid(gts_uuid) => *gts_uuid,
+        })
     } else {
         None
     };

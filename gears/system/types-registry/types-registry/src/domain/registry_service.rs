@@ -525,12 +525,12 @@ impl RegistryService {
 
     /// Read a bounded set of keys, answering every one of them (DESIGN §3.3).
     ///
-    /// Results are returned in request order with the key each was asked by, so a
-    /// caller that mixed identifiers and Registry References matches answers to
-    /// questions without re-deriving either. A key named twice collapses onto its
-    /// first mention: the answer is per key, not per mention. The two spellings of
-    /// one row are **not** duplicates of each other — each is a key a caller asked
-    /// about and each is echoed.
+    /// Each result carries the key it answers; their order is not contractual
+    /// (DESIGN §3.3), so a caller matches answers to questions by key. A key named
+    /// twice collapses onto its first mention, condition included: the answer is
+    /// per key, not per mention. The identifier and the Registry Reference of one
+    /// row are **not** duplicates of each other — each is a key a caller asked
+    /// about and each is answered.
     ///
     /// Constant in round trips, all in one snapshot; selected documents are fetched
     /// only for `Found` keys.

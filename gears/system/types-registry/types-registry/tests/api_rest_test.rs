@@ -1154,17 +1154,30 @@ async fn absent_resources_are_not_found_problems() {
     .await;
     assert_eq!(operation.status, StatusCode::NOT_FOUND);
     assert!(operation.body["type"].is_string());
+    // An operation, not an entity: a client dispatching on the resource type must
+    // not read a missing operation as a missing entity.
+    assert_eq!(
+        operation.body["context"]["resource_type"],
+        json!(types_registry_sdk::gts::OPERATION_RESOURCE_TYPE),
+        "{:?}",
+        operation.body,
+    );
+    assert_eq!(
+        operation.body["context"]["resource_name"],
+        json!("00000000-0000-0000-0000-000000000001"),
+    );
 
-    let entity = call(
-        &router,
-        get(&format!(
-            "{V2}/entities/{}",
-            gts_id!("cf.core.absent.type.v1~")
-        )),
-    )
-    .await;
+    let absent = gts_id!("cf.core.absent.type.v1~");
+    let entity = call(&router, get(&format!("{V2}/entities/{absent}"))).await;
     assert_eq!(entity.status, StatusCode::NOT_FOUND);
     assert!(entity.body["type"].is_string());
+    assert_eq!(
+        entity.body["context"]["resource_type"],
+        json!(types_registry_sdk::gts::TYPE_RESOURCE_TYPE),
+        "{:?}",
+        entity.body,
+    );
+    assert_eq!(entity.body["context"]["resource_name"], json!(absent));
 }
 
 /// A candidate that fails admission on its merits is **not** a failed request: the
@@ -1842,6 +1855,66 @@ async fn deleting_by_registry_reference_echoes_the_reference() {
         operation["items"],
     );
     assert_eq!(operation["items"][0]["status"], json!("succeeded"));
+}
+
+/// Any UUID spelling is a Registry Reference, and the operation echoes it in
+/// canonical form. A replay spelled differently is the same operation.
+#[tokio::test]
+async fn deleting_by_a_non_canonical_reference_echoes_it_canonically() {
+    let router = router_with_db().await;
+    register_entity(&router, "register", CF_TYPE).await;
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    let reference = entity.body["gts_uuid"]
+        .as_str()
+        .expect("the read carries the Registry Reference")
+        .to_owned();
+
+    let accepted = call(
+        &router,
+        batch_delete(
+            Some("delete-upper"),
+            &one_target(&reference.to_uppercase(), 1),
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+    let operation = poll(&router, &accepted).await;
+    assert_eq!(operation["items"][0]["entity_key"], json!(reference));
+    assert_eq!(operation["items"][0]["status"], json!("succeeded"));
+
+    let replayed = call(
+        &router,
+        batch_delete(Some("delete-upper"), &one_target(&reference, 1)),
+    )
+    .await;
+    assert_eq!(
+        replayed.body["operation_id"], accepted.body["operation_id"],
+        "{:?}",
+        replayed.body,
+    );
+    let replay = poll(&router, &replayed).await;
+    assert_eq!(replay["items"][0]["entity_key"], json!(reference));
+}
+
+/// An identifier and its Registry Reference are one duplicate; the refusal is on
+/// `entity_key` and names both positions, since neither string repeats.
+#[tokio::test]
+async fn a_batch_naming_one_entity_by_both_keys_is_refused_naming_both() {
+    let router = router_with_db().await;
+    let reference = gts::GtsId::try_new(CF_TYPE)
+        .expect("identifier")
+        .to_uuid()
+        .to_string();
+    let body = json!({
+        "items": [
+            { "entity_key": CF_TYPE, "expected_resource_version": 1 },
+            { "entity_key": reference, "expected_resource_version": 1 },
+        ],
+    });
+    let refused = call(&router, batch_delete(Some("delete-dup"), &body)).await;
+    assert_field_refusal(&refused, "entity_key", "VALIDATION_FAILED");
+    let detail = refused.body.to_string();
+    assert!(detail.contains("items[0] and items[1]"), "{detail}");
 }
 
 #[tokio::test]
@@ -2761,6 +2834,42 @@ async fn a_batch_read_answers_identifiers_and_registry_references_alike() {
     }
 }
 
+/// Every UUID spelling is one Registry Reference: the spellings collapse onto one
+/// result, echoed lowercase and hyphenated as an operation echoes it. A key that
+/// is no identifier has no canonical form, so its `not_found` echoes it as sent.
+#[tokio::test]
+async fn a_batch_read_echoes_registry_references_canonically() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let uuid = gts::GtsId::try_new(CF_TYPE)
+        .expect("identifier")
+        .to_uuid()
+        .to_string();
+    let upper = uuid.to_uppercase();
+    let simple = uuid.replace('-', "");
+    let bogus = "gts.NOT.an.identifier";
+
+    let response = call(&router, batch_get(&keys(&[&upper, &simple, bogus]))).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+    let items = response.body["items"].as_array().expect("items");
+    assert_eq!(
+        items.len(),
+        2,
+        "two spellings of one UUID are one key: {items:?}"
+    );
+    let by_key = |key: &str| {
+        items
+            .iter()
+            .find(|item| item["entity_key"] == json!(key))
+            .unwrap_or_else(|| panic!("no result for {key}: {items:?}"))
+    };
+    let found = by_key(&uuid);
+    assert_eq!(found["status"], json!("found"));
+    assert_eq!(found["entity"]["gts_id"], json!(CF_TYPE));
+    assert_eq!(by_key(bogus)["status"], json!("not_found"));
+}
+
 /// A key named twice is one result: the answer is per key, not per mention.
 #[tokio::test]
 async fn duplicate_keys_collapse_to_one_result() {
@@ -3059,18 +3168,41 @@ async fn a_batch_key_over_1024_bytes_is_refused() {
     assert_field_refusal(&refused, "entity_key", "VALIDATION_FAILED");
 }
 
-/// An item's `if_none_match` has the key's bound: 1024 bytes are served, 1025 refused.
+/// An item's `if_none_match` has the key's bound: 1024 bytes are served, 1025
+/// refused, whether the handler (raw value) or the parser (quoted tag) sees it.
 #[tokio::test]
 async fn a_batch_validator_over_1024_bytes_is_refused() {
     let router = router_with_db().await;
-    let item = |len: usize| json!({ "items": [{ "entity_key": CF_TYPE, "if_none_match": "v".repeat(len) }] });
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let item = |tag: String| json!({ "items": [{ "entity_key": CF_TYPE, "if_none_match": tag }] });
 
-    let served = call(&router, batch_get(&item(1024))).await;
+    // 1024 bytes quoted: read as a condition that does not match, so `found`.
+    let served = call(
+        &router,
+        batch_get(&item(format!("\"{}\"", "v".repeat(1022)))),
+    )
+    .await;
     assert_eq!(served.status, StatusCode::OK, "{:?}", served.body);
-    assert_eq!(served.body["items"][0]["status"], json!("not_found"));
+    assert_eq!(served.body["items"][0]["status"], json!("found"));
 
-    let refused = call(&router, batch_get(&item(1025))).await;
+    let refused = call(
+        &router,
+        batch_get(&item(format!("\"{}\"", "v".repeat(1023)))),
+    )
+    .await;
     assert_field_refusal(&refused, "if_none_match", "VALIDATION_FAILED");
+}
+
+/// A batch item's condition is one entity-tag from an earlier read; anything else
+/// is refused rather than read as no condition.
+#[tokio::test]
+async fn a_batch_item_condition_that_is_no_entity_tag_is_refused() {
+    let router = router_with_db().await;
+    for tag in ["*", "unquoted", "", "\"a b\"", "\"a\nb\""] {
+        let body = json!({ "items": [{ "entity_key": CF_TYPE, "if_none_match": tag }] });
+        let refused = call(&router, batch_get(&body)).await;
+        assert_field_refusal(&refused, "if_none_match", "VALIDATION_FAILED");
+    }
 }
 
 /// The exact read shares the batch key bound; a non-canonical spelling is absent.
@@ -3095,6 +3227,91 @@ async fn an_exact_read_bounds_its_key_and_matches_only_the_canonical_spelling() 
             response.body
         );
     }
+}
+
+/// A registration identifier has the key bound, refused under `gts_id` with the
+/// code a longer identifier had before, and without echoing it.
+#[tokio::test]
+async fn a_registration_identifier_over_1024_bytes_is_refused_without_being_echoed() {
+    let router = router_with_db().await;
+    let over = format!("gts.{}", "a".repeat(1021));
+
+    let refused = call(
+        &router,
+        submit(Some("register-long"), &one_candidate(&over)),
+    )
+    .await;
+    assert_field_refusal(&refused, "gts_id", "INVALID_GTS_ID");
+    assert!(
+        !refused.body.to_string().contains(&over),
+        "{:?}",
+        refused.body
+    );
+
+    let at = format!("gts.{}", "a".repeat(1020));
+    let parsed = call(&router, submit(Some("register-at"), &one_candidate(&at))).await;
+    assert_eq!(parsed.status, StatusCode::BAD_REQUEST, "{:?}", parsed.body);
+    assert!(
+        parsed
+            .body
+            .to_string()
+            .contains("not a canonical GTS identifier")
+    );
+}
+
+/// A missing Registry Reference is reported as one, not as a GTS identifier.
+#[tokio::test]
+async fn an_absent_registry_reference_is_not_found_by_uuid() {
+    let router = router_with_db().await;
+    let reference = uuid::Uuid::new_v4().to_string();
+    let missing = call(&router, exact(&reference, "")).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{:?}", missing.body);
+    let detail = missing.body["detail"].as_str().expect("detail");
+    assert!(detail.contains(&reference), "{detail}");
+    assert!(!detail.contains("GTS ID"), "{detail}");
+}
+
+/// Both deletion routes share the read key bound, and the refusal names the
+/// length only: echoing the key would amplify it into the response and the log.
+#[tokio::test]
+async fn a_deletion_key_over_1024_bytes_is_refused_without_being_echoed() {
+    let router = router_with_db().await;
+    let over = format!("gts.{}", "a".repeat(1021));
+
+    let single = call(
+        &router,
+        delete_one(Some("delete-long"), &over, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_field_refusal(&single, "entity_key", "VALIDATION_FAILED");
+    assert!(
+        !single.body.to_string().contains(&over),
+        "{:?}",
+        single.body
+    );
+
+    let batch = call(
+        &router,
+        batch_delete(Some("batch-delete-long"), &one_target(&over, 1)),
+    )
+    .await;
+    assert_field_refusal(&batch, "entity_key", "VALIDATION_FAILED");
+    assert!(!batch.body.to_string().contains(&over), "{:?}", batch.body);
+
+    // At the bound the key is classified, and refused as the identifier it is not.
+    let at = format!("gts.{}", "a".repeat(1020));
+    let parsed = call(
+        &router,
+        batch_delete(Some("batch-delete-at"), &one_target(&at, 1)),
+    )
+    .await;
+    assert_eq!(parsed.status, StatusCode::BAD_REQUEST, "{:?}", parsed.body);
+    assert!(
+        parsed
+            .body
+            .to_string()
+            .contains("not a canonical GTS identifier")
+    );
 }
 
 /// A pattern is bounded at 1024 bytes before `gts-rust` parses it.
@@ -4740,6 +4957,28 @@ fn get_if_none_match(uri: &str, value: &str) -> Request<Body> {
         .header("if-none-match", value)
         .body(Body::empty())
         .expect("request")
+}
+
+/// The exact read refuses a header it cannot read, naming the header rather than
+/// the batch body field, instead of answering unconditionally.
+#[tokio::test]
+async fn an_unreadable_if_none_match_header_is_refused() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let over = format!("\"{}\"", "v".repeat(1025));
+    for value in [over.as_str(), "unquoted", "*, \"a\"", " , ", "\"a b\""] {
+        let refused = call(
+            &router,
+            get_if_none_match(&format!("{V2}/entities/{CF_TYPE}"), value),
+        )
+        .await;
+        assert_field_refusal(&refused, "If-None-Match", "VALIDATION_FAILED");
+        assert!(
+            !refused.body.to_string().contains("each if_none_match"),
+            "{:?}",
+            refused.body
+        );
+    }
 }
 
 /// The exact read hands out a quoted `ETag`, and sending it back answers a bodyless

@@ -16,7 +16,7 @@ use uuid::Uuid;
 use types_registry::api::rest::dto::OperationDto;
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::{Candidate, SubmitRequest};
-use types_registry::domain::enums::{OperationItemStatus, OperationKind, OperationStatus};
+use types_registry::domain::enums::{OperationItemStatus, OperationStatus};
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::registry_service::{EntityKey, RegistryService};
 use types_registry::infra::outbox::AdmissionHandler;
@@ -73,7 +73,6 @@ async fn first_delivery_with_mode(
         .submit(
             &SubmitRequest {
                 idempotency_key: Some("missing-dependency".to_owned()),
-                kind: OperationKind::Registration,
                 dry_run,
                 candidates,
             },
@@ -144,8 +143,7 @@ async fn assert_missing_dependency(
         "the client explanation identifies the missing dependency: {error}",
     );
 
-    let wire = serde_json::to_value(OperationDto::try_from(operation).expect("identifier keys"))
-        .expect("serialize polling DTO");
+    let wire = serde_json::to_value(OperationDto::from(operation)).expect("serialize polling DTO");
     let wire_item = wire["items"]
         .as_array()
         .expect("items array")

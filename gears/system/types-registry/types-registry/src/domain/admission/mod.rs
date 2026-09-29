@@ -41,7 +41,7 @@ use toolkit_db::outbox::Wake;
 use toolkit_macros::domain_model;
 use uuid::Uuid;
 
-use crate::domain::enums::{OperationKind, OperationStatus};
+use crate::domain::enums::OperationStatus;
 use crate::domain::key::EntityKey;
 
 /// One candidate in a submitted request.
@@ -105,7 +105,9 @@ impl Precondition {
     }
 }
 
-/// A submitted request, before acceptance.
+/// A submitted registration, before acceptance. A deletion is a
+/// [`DeleteRequest`]: one type per kind, so neither carries fields the other
+/// would have to refuse.
 #[domain_model]
 #[derive(Clone, Debug)]
 pub struct SubmitRequest {
@@ -118,7 +120,6 @@ pub struct SubmitRequest {
     /// [`Validated::idempotency_key`] is a plain `String`, because by then the
     /// key exists and is non-empty.
     pub idempotency_key: Option<String>,
-    pub kind: OperationKind,
     pub dry_run: bool,
     pub candidates: Vec<Candidate>,
 }
