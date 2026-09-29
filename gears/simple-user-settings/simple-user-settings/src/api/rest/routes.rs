@@ -1,6 +1,7 @@
 use crate::api::rest::{dto, handlers};
 use crate::domain::service::Service;
 use crate::infra::storage::sea_orm_repo::SeaOrmSettingsRepository;
+use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::{Extension, Router};
 use std::sync::Arc;
@@ -85,11 +86,23 @@ pub fn register_routes(
         .error_500(openapi)
         .register(router, openapi);
 
-    router = register_named_routes(router, openapi);
+    let body_limit = named_body_limit(service.named_value_max_bytes());
+    router = router.merge(
+        register_named_routes(Router::new(), openapi).layer(DefaultBodyLimit::max(body_limit)),
+    );
 
     router = router.layer(Extension(service));
 
     router
+}
+
+/// The largest request body the named routes accept: room for a value at its
+/// bound sent pretty-printed, inside the `{"value": ...}` envelope. A larger
+/// body is refused with 413 before it is parsed, rather than parsed and
+/// re-serialized only to be refused as too large; the gateway-wide limit is
+/// megabytes.
+fn named_body_limit(value_max_bytes: usize) -> usize {
+    value_max_bytes.saturating_mul(4).saturating_add(1024)
 }
 
 /// Keyed JSON values next to the fixed fields, one resource per key.
@@ -152,6 +165,7 @@ fn register_named_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
+        .error_413(openapi)
         .error_422(openapi)
         .error_429(openapi)
         .error_500(openapi)

@@ -1232,6 +1232,20 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["value"], "table");
 
+        // The body bound is 4 x the value bound (4096 by default) + 1 KiB: a
+        // value at its bound still fits when sent pretty-printed, and a body
+        // past the bound is refused before it is parsed.
+        let padded = format!(
+            "{{\n{}\"value\": \"{}\"\n}}",
+            " ".repeat(8_000),
+            "x".repeat(4_000)
+        );
+        let (status, _) = call("PUT", "/portal.view", Some(&padded)).await;
+        assert_eq!(status, StatusCode::OK, "a padded value at its bound");
+        let huge = format!("{{\"value\": \"{}\"}}", "x".repeat(4 * 4096 + 1024));
+        let (status, _) = call("PUT", "/portal.view", Some(&huge)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
         let (status, body) = call("GET", "", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["settings"].as_array().map(Vec::len), Some(1));

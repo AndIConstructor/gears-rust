@@ -40,17 +40,31 @@ fn default_named_value_max_bytes() -> usize {
 /// smallest column any supported backend stores the value in.
 pub const MAX_NAMED_VALUE_BYTES: usize = 65_535;
 
+/// Upper bound on `named_settings_per_user`. The list endpoint returns every key
+/// of a user in one response, unpaged, so the count times the value bound is
+/// what one response can carry: 4096 keys at the default 4 KiB is 16 MiB. This
+/// is a store for small UI preferences, and 16 times the default key count is
+/// room enough for that.
+pub const MAX_NAMED_SETTINGS_PER_USER: usize = 4096;
+
 impl SettingsConfig {
     /// Reject limits that would break the gear at request time rather than at
     /// startup, where a typo is cheap to notice.
     ///
     /// # Errors
     ///
-    /// When `named_settings_per_user` is 0 (every new key refused), or
-    /// `named_value_max_bytes` is 0 or above [`MAX_NAMED_VALUE_BYTES`].
+    /// When `named_settings_per_user` is 0 (every new key refused) or above
+    /// [`MAX_NAMED_SETTINGS_PER_USER`], or `named_value_max_bytes` is 0 or
+    /// above [`MAX_NAMED_VALUE_BYTES`].
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.named_settings_per_user == 0 {
-            anyhow::bail!("simple-user-settings: named_settings_per_user must be at least 1");
+        if self.named_settings_per_user == 0
+            || self.named_settings_per_user > MAX_NAMED_SETTINGS_PER_USER
+        {
+            anyhow::bail!(
+                "simple-user-settings: named_settings_per_user must be between 1 and \
+                 {MAX_NAMED_SETTINGS_PER_USER}, got {}",
+                self.named_settings_per_user
+            );
         }
         if self.named_value_max_bytes == 0 || self.named_value_max_bytes > MAX_NAMED_VALUE_BYTES {
             anyhow::bail!(
@@ -80,13 +94,19 @@ mod tests {
             ..SettingsConfig::default()
         };
         assert!(with(0, 4096).validate().is_err(), "no keys at all");
+        assert!(
+            with(MAX_NAMED_SETTINGS_PER_USER + 1, 4096)
+                .validate()
+                .is_err(),
+            "more keys than one unpaged list should carry"
+        );
         assert!(with(256, 0).validate().is_err(), "no value fits");
         assert!(
             with(256, MAX_NAMED_VALUE_BYTES + 1).validate().is_err(),
             "past TEXT"
         );
         with(1, 1).validate().expect("smallest usable");
-        with(256, MAX_NAMED_VALUE_BYTES)
+        with(MAX_NAMED_SETTINGS_PER_USER, MAX_NAMED_VALUE_BYTES)
             .validate()
             .expect("largest allowed");
     }

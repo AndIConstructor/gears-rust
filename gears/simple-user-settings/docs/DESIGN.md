@@ -100,8 +100,12 @@ reads need `get`, writes and deletes need `update`.
 **Bounds on named settings** (configurable):
 - key: 1–128 characters from `A–Z a–z 0–9 . _ - :`
 - value: `named_value_max_bytes` as serialized JSON (default 4096)
-- count: `named_settings_per_user` per user and tenant (default 256); applies to
+- count: `named_settings_per_user` per user and tenant (default 256, at most
+  4096, because the list returns every key in one unpaged response); applies to
   new keys only, so replacing a value at the bound still works
+- request body: 4 × `named_value_max_bytes` + 1 KiB on the named routes, so a
+  value at its bound fits even pretty-printed, and a larger body is refused
+  before it is parsed
 
 ## 6. Sequences
 
@@ -131,9 +135,13 @@ reads need `get`, writes and deletes need `update`.
   that needs to know whether the key existed can `GET` it first.
 - **Retries are safe.** `PUT` is an upsert on `(tenant_id, user_id, key)` and
   `DELETE` is idempotent, so a client that got no answer (a timeout, a dropped
-  connection) can repeat the same request. The gear itself does not retry. Its
-  database calls are bounded by the connection pool's acquire timeout
-  (toolkit-db configuration), and a failure surfaces as `500`.
+  connection) can repeat the same request. The gear itself retries only a
+  transaction that lost a serialization conflict (below). The pool's
+  `acquire_timeout` bounds only the wait for a connection. Running a statement
+  or a transaction is bounded only if toolkit-db's `params` set
+  `statement_timeout` / `transaction_timeout`, which have no default, so a
+  deployment that wants a deadline on a stalled query must set them. A failure
+  surfaces as `500`.
 - **Count bound under concurrency.** Whether a key is new, the caller's key count
   and the write run in one `SERIALIZABLE` transaction, retried when it loses a
   conflict (toolkit-db's `transaction_with_retry`). A new key over the bound is
@@ -170,6 +178,8 @@ reads need `get`, writes and deletes need `update`.
 - Named setting not set → 404 Not Found
 - Malformed key or oversized value → 400 Bad Request with a field violation on
   `key` or `value`
+- A request body past 4 × `named_value_max_bytes` + 1 KiB → 413 Payload Too
+  Large, before the body is parsed
 - A new named key past `named_settings_per_user` → 429 Too Many Requests
   (`resource_exhausted`, quota code `NAMED_SETTINGS_PER_USER`): the request is
   valid once the caller deletes a key

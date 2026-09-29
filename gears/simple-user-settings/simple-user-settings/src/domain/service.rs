@@ -67,6 +67,13 @@ pub struct Service<R: SettingsRepository> {
 }
 
 impl<R: SettingsRepository> Service<R> {
+    /// The configured bound on one named setting's value, as JSON bytes; the
+    /// routes size their request-body limit from it.
+    #[must_use]
+    pub fn named_value_max_bytes(&self) -> usize {
+        self.config.named_value_max_bytes
+    }
+
     pub fn new(
         db: Arc<DbProvider>,
         repo: Arc<R>,

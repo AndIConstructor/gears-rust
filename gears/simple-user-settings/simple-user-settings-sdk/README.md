@@ -40,6 +40,10 @@ Keys are 1–128 characters from `A–Z a–z 0–9 . _ - :`; namespace them you
 (a dotted product prefix is the usual shape). Values and the number of keys per
 user are bounded by the gear's configuration.
 
+JSON `null` is a value like any other: it is stored, takes a slot of the key
+count, and reads back as `Some` with a `null` value (`200` over REST). To unset
+a key, delete it; a key that is not set reads back as `None` (`404`).
+
 The store is one per user and tenant, shared by every product in the deployment
 that writes to it. There is no per-product namespace, quota or policy: the key
 count bound (`named_settings_per_user`, default 256) is one budget for all of
