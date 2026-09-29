@@ -46,7 +46,9 @@ pub const MAX_NAMED_SETTINGS_PER_USER: usize = 4096;
 
 /// Upper bound on `named_settings_per_user` x `named_value_max_bytes`. The
 /// list endpoint returns every key of a user in one response, unpaged, so the
-/// product of the two bounds is what one response can carry. It is checked as
+/// product of the two bounds is how many value bytes one response can carry.
+/// Keys and JSON syntax come on top: at most 128 bytes of key and a few dozen
+/// of punctuation per entry, about 0.6 MiB at 4096 keys. It is checked as
 /// a product because the bounds are not independent: each maximum is reachable
 /// (4096 keys of 4 KiB, or 256 keys of 64 KiB), but not both at once, which
 /// would be 256 MiB.
