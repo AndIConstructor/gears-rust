@@ -2616,6 +2616,75 @@ async fn a_cursor_is_bound_to_the_filter_it_was_minted_under() {
     }
 }
 
+/// The same for the selected types: a cursor minted under one `type_pattern`
+/// and replayed under another, with the same filter, used to pass both checks
+/// and resume the second listing at the first one's position -- a keyset over
+/// `node_key` does not know which types it walked. The token's identity is
+/// the filter *and* the resolved type set, on both sides of the store
+/// boundary, so the replay is refused where a filter change is.
+#[tokio::test]
+async fn a_cursor_is_bound_to_the_type_set_it_was_minted_under() {
+    use graph_storage::domain::admission::listing_identity;
+    use graph_storage_sdk::models::TypeIdSet;
+
+    let harness = Harness::allowed();
+    let ctx = harness.ctx();
+    harness.seed_ontology(&ctx).await;
+
+    let owned = TypeIdSet(std::iter::once(conformance::OWNED.to_owned()).collect());
+    let cursor = |f: Option<String>| toolkit_odata::CursorV1 {
+        k: vec!["v:x".to_owned()],
+        o: toolkit_odata::SortDir::Asc,
+        s: "+node_key".to_owned(),
+        f,
+        d: "fwd".to_owned(),
+    };
+    let minted_under_owned = listing_identity(None, Some(&owned));
+    assert!(
+        minted_under_owned.is_some(),
+        "a type set alone gives the listing an identity"
+    );
+
+    for (case, patterns, query) in [
+        (
+            "minted under one type, replayed under another",
+            vec![conformance::REFERENCE.to_owned()],
+            toolkit_odata::ODataQuery::new().with_cursor(cursor(minted_under_owned.clone())),
+        ),
+        (
+            "minted under a type, replayed without a pattern",
+            Vec::new(),
+            toolkit_odata::ODataQuery::new().with_cursor(cursor(minted_under_owned.clone())),
+        ),
+        (
+            "minted without a pattern, replayed under a type",
+            vec![conformance::OWNED.to_owned()],
+            toolkit_odata::ODataQuery::new().with_cursor(cursor(None)),
+        ),
+    ] {
+        match harness.services.project_nodes(&ctx, &patterns, query).await {
+            Err(DomainError::InvalidArgument { message }) => assert!(
+                message.contains("type_pattern"),
+                "{case}: the refusal names the option that broke the listing: {message}"
+            ),
+            other => panic!("{case}: expected an invalid-argument refusal, got {other:?}"),
+        }
+    }
+
+    // The same type set is the same listing, whatever pattern spelled it.
+    let same = toolkit_odata::ODataQuery::new().with_cursor(cursor(minted_under_owned));
+    if let Err(DomainError::InvalidArgument { message }) = harness
+        .services
+        .project_nodes(&ctx, &[conformance::OWNED.to_owned()], same)
+        .await
+    {
+        assert!(
+            !message.contains("type_pattern"),
+            "the same types continue their own listing: {message}"
+        );
+    }
+}
+
 /// `PostgreSQL` stores U+0000 in neither `text` nor `jsonb`. A payload string,
 /// key or query carrying one used to reach the statement and fail there as
 /// `unknown: internal error`, losing the batch with the cause only in the

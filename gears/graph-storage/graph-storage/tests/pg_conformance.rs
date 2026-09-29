@@ -923,6 +923,112 @@ async fn a_payload_ordered_projection_pages_by_keyset() {
     assert_eq!(walked, expected, "pages concatenate to the one-page answer");
 }
 
+/// The store holds a cursor to the listing that minted it without the
+/// service in front of it: a request built in-process carries no filter hash
+/// (`ODataQuery::with_filter` never sets one), and the store's check used to
+/// compare `None` with `None` for such a caller. The identity is computed
+/// from what the request holds, on both paths the store pages -- the
+/// platform pager over the columns, the keyset walk over a payload ordering.
+#[tokio::test]
+async fn a_cursor_is_held_to_its_filter_and_type_set_at_the_store() {
+    use toolkit_odata::SortDir;
+    let Some(stand) = stand(HopStrategy::Pgq).await else {
+        return;
+    };
+    let tenant = tenant_on(&stand).await;
+    let store = stand.store.as_ref();
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = conformance::ctx(tenant, &scope, None);
+    conformance::projection_seeded(store, &ctx, &[]).await;
+
+    let first_page = |mut request: graph_storage_sdk::models::ProjectionRequest| {
+        request.query = request.query.with_limit(2);
+        request
+    };
+    // One listing per path: the columns-only one is paged by the platform,
+    // the payload-ordered one by this gear's keyset walk.
+    for (path, minted) in [
+        (
+            "platform pager",
+            first_page(conformance::projection(
+                &[conformance::INDEXED],
+                "payload/severity eq 'high'",
+                &[],
+            )),
+        ),
+        (
+            "keyset over a payload ordering",
+            first_page(conformance::projection(
+                &[conformance::INDEXED],
+                "payload/severity eq 'high'",
+                &[("payload/score", SortDir::Desc)],
+            )),
+        ),
+    ] {
+        let page = store
+            .project_table(&ctx, minted.clone())
+            .await
+            .expect("the first page is served");
+        let token = page
+            .page_info
+            .next_cursor
+            .expect("three matching tickets over a page of two leave a continuation");
+        let cursor = toolkit_odata::CursorV1::decode(&token).expect("a CursorV1 token");
+        assert!(
+            cursor.f.is_some(),
+            "{path}: the token names the listing although the request carried no hash"
+        );
+
+        let replay = |type_set: Option<&[&str]>, filter_text: &str| {
+            let mut request = conformance::projection(
+                type_set.unwrap_or(&[conformance::INDEXED]),
+                filter_text,
+                &[],
+            );
+            if type_set.is_none() {
+                request.type_set = None;
+            }
+            request.query = request.query.with_limit(2).with_cursor(cursor.clone());
+            request
+        };
+        for (case, request) in [
+            (
+                "replayed under another filter",
+                replay(Some(&[conformance::INDEXED]), "payload/severity eq 'low'"),
+            ),
+            (
+                "replayed without its filter",
+                replay(Some(&[conformance::INDEXED]), ""),
+            ),
+            (
+                "replayed without its type set",
+                replay(None, "payload/severity eq 'high'"),
+            ),
+        ] {
+            let refused = store
+                .project_table(&ctx, request)
+                .await
+                .expect_err("the cursor does not continue a different listing");
+            assert!(
+                matches!(&refused, graph_storage_sdk::plugin_api::GraphStoreError::InvalidQuery { what } if what.contains("cursor")),
+                "{path}, {case}: expected the cursor refused, got {refused:?}"
+            );
+        }
+
+        // Its own listing continues.
+        let same = replay(Some(&[conformance::INDEXED]), "payload/severity eq 'high'");
+        let rest = store
+            .project_table(&ctx, same)
+            .await
+            .expect("the cursor continues the listing that minted it");
+        assert_eq!(
+            page.items.len() + rest.items.len(),
+            3,
+            "{path}: the two pages together are the three high tickets"
+        );
+    }
+}
+
 #[tokio::test]
 async fn colliding_node_keys_stay_inside_their_tenants() {
     let Some(stand) = stand(HopStrategy::Pgq).await else {

@@ -629,6 +629,29 @@ pub async fn project_table(
         select = select.filter(Condition::all().add(node::Column::GtsNodeTypeId.is_in(ids)));
     }
 
+    // The listing's identity, and the cursor's claim to continue it. Both
+    // paths below mint a cursor from `filter_hash` and compare an incoming
+    // one against it (the platform pager only when both are present, the
+    // payload path on the whole `Option`), so the field is set here to what
+    // the cursor is bound to -- the filter *and* the selected types -- and
+    // checked once for both. Computed from what the request holds rather
+    // than trusted as given: the service stamps the same value first
+    // (`admission::bind_listing_to_cursor`), and a caller that reaches the
+    // store directly with a filter and no hash is held to the same rule.
+    let identity = crate::domain::admission::listing_identity(
+        req.query.filter.as_deref(),
+        req.type_set.as_ref(),
+    );
+    if let Some(cursor) = &req.query.cursor
+        && cursor.f != identity
+    {
+        return Err(GraphStoreError::InvalidQuery {
+            what: "the cursor was minted under a different $filter or type set".to_owned(),
+        });
+    }
+    let mut req = req;
+    req.query.filter_hash = identity;
+
     if crate::domain::projection::mentions_payload(&req.query) {
         let admitted = req
             .type_set
@@ -682,20 +705,13 @@ async fn project_over_payload(
                 "backward paging is not available over a payload ordering".to_owned(),
             ));
         }
-        // The whole `Option`, not only two present hashes: a cursor minted
-        // under a filter and replayed without one is a different listing too
-        // (the service refuses it first, `admission::bind_filter_to_cursor`;
-        // this keeps the store honest for a caller that reaches it directly).
-        if cursor.f.as_deref() != req.query.filter_hash.as_deref() {
-            return Err(invalid(
-                "the cursor was minted under a different $filter".to_owned(),
-            ));
-        }
-        // And under the same *ordering*. A keyset cursor carries one value
+        // The listing's identity (filter and type set) was checked by
+        // `project_table` for both paths. What is left is the *ordering*. A
+        // keyset cursor carries one value
         // per ordering term, and the statement compares them positionally
         // against the terms of the current plan — so a cursor minted under
         // `$orderby=name` and replayed under `$orderby=payload/score` of the
-        // same arity would compare a score against a name. The filter hash
+        // same arity would compare a score against a name. The identity
         // does not catch it: the filter can be identical while the ordering
         // is not. Neither half of the pair is optional, which is why this is
         // checked rather than clamped: there is no page the caller could

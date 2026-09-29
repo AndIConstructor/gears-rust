@@ -475,47 +475,101 @@ pub fn admit_neighborhood(
 
 /// Bind a continuation cursor to the `$filter` of the listing that minted it.
 ///
-/// A cursor records the hash of the filter its first page ran under (`f`),
-/// and a page is the continuation of that listing only under the same filter.
-/// The comparison is on the whole `Option`: a cursor minted under a filter and
-/// replayed without one would otherwise resume an *unfiltered* walk at a
+/// What a cursor is bound to: the `$filter` and the selected types.
+///
+/// A continuation token carries the ordering it was minted under (`s`) and
+/// one more field, `f`, that the platform pager compares against the query's
+/// `filter_hash` and otherwise leaves alone. Two things decide which rows a
+/// listing walks, and the token has to name both: the filter, and the type
+/// set the statement is narrowed to (`ProjectionRequest::type_set`, resolved
+/// from `type_pattern`). A cursor minted under type `A` and replayed under
+/// type `B` with the same filter used to pass both checks, and resumed `B`'s
+/// listing at `A`'s last key — skipping every `B` row that sorts before it.
+///
+/// So `f` is the identity of the listing, not of the filter alone: the
+/// filter's hash as the platform computes it, joined to a hash of the sorted
+/// type ids when a type set is selected. A listing with neither has no
+/// identity (`None`), which keeps a token minted before this rule readable
+/// where it is still correct. One function mints and checks it on both
+/// sides — the service before the store round trip, and the store for a
+/// caller that reaches it directly — so the two cannot drift.
+#[must_use]
+pub fn listing_identity(
+    filter: Option<&toolkit_odata::ast::Expr>,
+    type_set: Option<&graph_storage_sdk::models::TypeIdSet>,
+) -> Option<String> {
+    let filter = toolkit_odata::short_filter_hash(filter);
+    let types = type_set.map(|set| {
+        let mut text = String::new();
+        for type_id in &set.0 {
+            text.push_str(type_id);
+            text.push('\n');
+        }
+        format!("{:016x}", fnv1a_64(text.as_bytes()))
+    });
+    match (filter, types) {
+        (None, None) => None,
+        (Some(filter), None) => Some(filter),
+        (None, Some(types)) => Some(format!("-:{types}")),
+        (Some(filter), Some(types)) => Some(format!("{filter}:{types}")),
+    }
+}
+
+/// FNV-1a, 64-bit: the fingerprint `toolkit_odata::short_filter_hash` uses
+/// for the filter, applied here to the type ids so the two halves of the
+/// identity are the same kind of thing. A fingerprint, not a security hash:
+/// nothing is authenticated by it, and a collision costs one wrong refusal.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01B3;
+    bytes.iter().fold(BASIS, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    })
+}
+
+/// A page is the continuation of the listing that minted its cursor, and
+/// only of that listing: same `$filter`, same selected types.
+///
+/// The comparison is on the whole `Option`: a cursor minted under a filter
+/// and replayed without one would otherwise resume an *unfiltered* walk at a
 /// filtered position, which answered an empty page with `200` -- a caller
 /// forwarding only the cursor concluded the listing had ended. The reverse,
-/// a filter added to a cursor minted without one, is refused for the same
-/// reason.
+/// a filter or a type set added to a cursor minted without one, is refused
+/// for the same reason.
 ///
-/// The REST extractor stamps the hash; an in-process query built with
-/// `ODataQuery::with_filter` carries none, so it is stamped here with the
-/// extractor's own function, and both transports mint and check the same
-/// value.
+/// The REST extractor stamps a filter hash; an in-process query built with
+/// `ODataQuery::with_filter` carries none. Neither is what the cursor is
+/// bound to, so the identity is computed here from what the query holds
+/// ([`listing_identity`]) and stamped on it, and the store computes the same
+/// value from the same inputs.
 ///
 /// # Errors
 ///
-/// [`DomainError::InvalidArgument`] when the cursor's filter is not the
+/// [`DomainError::InvalidArgument`] when the cursor's identity is not the
 /// query's.
-pub fn bind_filter_to_cursor(
+pub fn bind_listing_to_cursor(
     mut query: toolkit_odata::ODataQuery,
+    type_set: Option<&graph_storage_sdk::models::TypeIdSet>,
 ) -> Result<toolkit_odata::ODataQuery, DomainError> {
-    if query.filter_hash.is_none() {
-        query.filter_hash = toolkit_odata::short_filter_hash(query.filter.as_deref());
-    }
+    let identity = listing_identity(query.filter.as_deref(), type_set);
     if let Some(cursor) = &query.cursor
-        && cursor.f != query.filter_hash
+        && cursor.f != identity
     {
-        return Err(DomainError::invalid(
-            match (&cursor.f, &query.filter_hash) {
-                (Some(_), None) => {
-                    "the cursor was minted under a $filter; send the same $filter with it"
-                        .to_owned()
-                }
-                (None, Some(_)) => {
-                    "the cursor was minted without a $filter; a filter cannot be added mid-listing"
-                        .to_owned()
-                }
-                _ => "the cursor was minted under a different $filter".to_owned(),
-            },
-        ));
+        return Err(DomainError::invalid(match (&cursor.f, &identity) {
+            (Some(_), None) => {
+                "the cursor was minted under a $filter or a type_pattern; send the same \
+                 ones with it"
+                    .to_owned()
+            }
+            (None, Some(_)) => {
+                "the cursor was minted without a $filter or a type_pattern; neither can be \
+                 added mid-listing"
+                    .to_owned()
+            }
+            _ => "the cursor was minted under a different $filter or type_pattern".to_owned(),
+        }));
     }
+    query.filter_hash = identity;
     Ok(query)
 }
 

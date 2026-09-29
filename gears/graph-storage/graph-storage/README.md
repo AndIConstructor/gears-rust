@@ -145,15 +145,18 @@ Each is the shipped behaviour, with the contract that fixes it.
   envelope's `updated_at` is when the gear last wrote the row, not when the
   object changed; an object's own time belongs in its payload.
 - **A cursor continues the listing that minted it, and only with its query.**
-  `next_cursor` carries the ordering and the hash of the `$filter` its first
-  page ran under; it does not carry `type_pattern` or `$top`. Send the next
+  `next_cursor` carries the ordering and a fingerprint of the `$filter` and of
+  the types its first page ran under; it does not carry `$top`. Send the next
   page as `cursor` **plus the same `type_pattern`, `$filter` and `$top`**
   (`$orderby` is refused next to a cursor, which already names it). A cursor
   replayed without its filter, with another one, or with one added is refused
-  with `400` -- the filter is part of which listing this is -- and without
-  `type_pattern` a payload ordering is refused, since the admitted paths come
-  from the selected types. Without `$top` the page falls back to
-  `projection_max_page`.
+  with `400`, and so is one replayed with a `type_pattern` that selects a
+  different set of types -- both are part of which listing this is. Since the
+  fingerprint is of the *selected* types, registering a type that the pattern
+  matches invalidates the cursors in flight under it; start the listing
+  again. Without `type_pattern` a payload ordering is refused, since the
+  admitted paths come from the selected types. Without `$top` the page falls
+  back to `projection_max_page`.
 - **Readiness for a probe is the platform's `/readyz`**, which runs this gear's
   healthcheck and takes the pod out of traffic when a component is unhealthy;
   the gear's own `GET /graph-storage/v1/health/ready` is the detailed state
