@@ -770,7 +770,7 @@ proc-macro-crate = "3"
 # `testcontainers` pair it wraps.
 test-containers = { package = "cf-gears-test-containers", path = "libs/test-containers" }
 trybuild = "1"
-serial_test = { version = "3", features = ["file_locks"] }
+serial_test = { version = "4", features = ["file_locks"] }
 criterion = { version = "0.8", default-features = false }
 testcontainers = { version = "0.27", default-features = false, features = ["aws-lc-rs"] }
 testcontainers-modules = { version = "0.15", default-features = false, features = ["aws-lc-rs", "postgres", "mysql", "redis"] }
