@@ -85,6 +85,38 @@ fn numeric_out_of_decimal_range_is_rejected() {
 }
 
 #[test]
+fn numeric_with_precision_beyond_scale_9_is_rejected() {
+    // Ten fractional digits, the last non-zero: no stored Decimal128(9) value
+    // can equal it, so the literal is refused here instead of being coerced
+    // server-side.
+    let fine = BigDecimal::from_str("1.1234567891").unwrap();
+    let err = odata_value_to_bind(&ODataValue::Number(fine)).unwrap_err();
+    assert!(
+        err.contains("Decimal128(9)"),
+        "rejection must name the column's scale, got: {err}"
+    );
+}
+
+#[test]
+fn numeric_with_trailing_zeros_beyond_scale_9_is_accepted() {
+    // 1.1000000000 is exactly 1.1: nothing is lost at scale 9.
+    let v = odata_value_to_bind(&ODataValue::Number(
+        BigDecimal::from_str("1.1000000000").unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(v, SqlBind::Decimal(d) if d == Decimal::new(11, 1)));
+}
+
+#[test]
+fn numeric_at_exactly_scale_9_is_accepted() {
+    let v = odata_value_to_bind(&ODataValue::Number(
+        BigDecimal::from_str("0.123456789").unwrap(),
+    ))
+    .unwrap();
+    assert!(matches!(v, SqlBind::Decimal(d) if d.to_string() == "0.123456789"));
+}
+
+#[test]
 fn bind_one_accepts_every_sql_bind_variant() {
     // Construction-only: no network I/O. Exercises each `bind_one` match arm so
     // llvm-cov counts the dialect wiring.

@@ -13,7 +13,7 @@ use usage_collector_sdk::{UsageCollectorPluginError, UsageRecord, UsageTypeGtsId
 use super::{
     AggregateNdjsonParser, ChRecordStore, InsertKind, catalog_lookup_sql, err_for_slot,
     insert_dedup_token, parse_aggregate_response, prefer_dedup_row, record_dedup_key,
-    row_dedup_key, split_by_catalog,
+    row_dedup_key, split_by_catalog, split_by_representable,
 };
 use crate::domain::ports::RecordStore;
 use crate::infra::metrics::Metrics;
@@ -1905,4 +1905,199 @@ async fn get_against_an_unreachable_backend_clears_readiness() {
         Some(0),
         "a connection failure on the request path must clear the readiness gauge"
     );
+}
+
+// ── create / create_batch: the Decimal128(9) value check runs before any I/O ─
+//
+// The column holds nine fractional digits. A value with non-zero digits beyond
+// that would be rounded by the RowBinary encoder, so it is refused locally.
+// The rejection message names `Decimal128(9)`, which is what distinguishes the
+// guard from the refused connection (`"ClickHouse error"` / `Transient`).
+
+/// `1.0000000005`: ten fractional digits, the last one non-zero.
+fn lossy_scale_10_value() -> Decimal {
+    Decimal::new(10_000_000_005, 10)
+}
+
+/// `1.0000000000`: ten fractional digits, all trailing zeros — exactly `1`
+/// at scale 9.
+fn exact_scale_10_value() -> Decimal {
+    Decimal::new(10_000_000_000, 10)
+}
+
+fn assert_decimal_rejection(err: &UsageCollectorPluginError, what: &str) {
+    match err {
+        UsageCollectorPluginError::Internal(msg) => assert!(
+            msg.contains("Decimal128(9)"),
+            "{what} must name the Decimal128(9) column, got: {msg}"
+        ),
+        other => panic!("{what} must be Internal, got {other:?}"),
+    }
+}
+
+fn assert_not_decimal_rejection(err: &UsageCollectorPluginError, what: &str) {
+    assert_backend_failure(err, what);
+    assert!(
+        !err.to_string().contains("Decimal128(9)"),
+        "{what} must not be a value rejection, got {err:?}"
+    );
+}
+
+/// The value pre-pass decides exactly the slots whose value would be rounded,
+/// at their own input positions, and hands every other record on to the
+/// catalog step. Trailing zeros beyond scale 9 lose nothing and pass.
+#[test]
+fn split_by_representable_marks_only_the_unrepresentable_slots() {
+    let tenant_id = Uuid::from_u128(2);
+    let mut records = vec![
+        make_record(Uuid::from_u128(1), tenant_id, 1_700_000_000_000_000),
+        make_record(Uuid::from_u128(3), tenant_id, 1_700_000_000_000_001),
+        make_record(Uuid::from_u128(4), tenant_id, 1_700_000_000_000_002),
+    ];
+    records[1].value = lossy_scale_10_value();
+    records[2].value = exact_scale_10_value();
+    let mut outcomes = vec![None, None, None];
+
+    let passed = split_by_representable(&records, &mut outcomes);
+
+    assert_eq!(
+        passed,
+        vec![0, 2],
+        "trailing zeros beyond scale 9 pass; lost digits do not"
+    );
+    match &outcomes[1] {
+        Some(Err(err)) => assert_decimal_rejection(err, "slot 1"),
+        other => panic!("slot 1 must be rejected, got {other:?}"),
+    }
+    assert!(
+        outcomes[0].is_none() && outcomes[2].is_none(),
+        "passed slots are left for the catalog step to decide"
+    );
+}
+
+/// A slot an earlier pass already decided is neither overwritten with
+/// `UsageTypeNotFound` nor handed on to the dedup step.
+#[test]
+fn split_by_catalog_leaves_a_decided_slot_alone() {
+    let tenant_id = Uuid::from_u128(2);
+    let records = vec![
+        // Unknown type AND already decided: the earlier decision must win.
+        make_record_for(
+            RAM_GTS,
+            Uuid::from_u128(1),
+            tenant_id,
+            1_700_000_000_000_000,
+        ),
+        make_record(Uuid::from_u128(3), tenant_id, 1_700_000_000_000_001),
+    ];
+    let known: HashSet<String> = [VCPU_GTS.to_owned()].into_iter().collect();
+    let mut outcomes = vec![
+        Some(Err(UsageCollectorPluginError::internal("decided earlier"))),
+        None,
+    ];
+
+    let passed = split_by_catalog(&records, &known, &mut outcomes);
+
+    assert_eq!(passed, vec![1], "a decided slot is not passed on");
+    match &outcomes[0] {
+        Some(Err(UsageCollectorPluginError::Internal(msg))) => assert_eq!(
+            msg, "decided earlier",
+            "an earlier decision is not overwritten by UsageTypeNotFound"
+        ),
+        other => panic!("slot 0 must keep its earlier decision, got {other:?}"),
+    }
+}
+
+/// `create` refuses a value the column cannot hold exactly before its first
+/// statement — the message, not merely "some error", proves the guard fired
+/// rather than the connection failing.
+#[tokio::test]
+async fn create_rejects_an_unrepresentable_value_before_any_statement() {
+    let store = offline_store();
+    let mut record = make_record(
+        Uuid::from_u128(1),
+        Uuid::from_u128(2),
+        1_700_000_000_000_000,
+    );
+    record.value = lossy_scale_10_value();
+
+    let err = store
+        .create(record)
+        .await
+        .expect_err("a value the column cannot hold exactly must be refused");
+
+    assert_decimal_rejection(
+        &err,
+        "create of a value with ten significant fractional digits",
+    );
+}
+
+/// A scale-10 value that is exactly representable at scale 9 is not a value
+/// rejection: `create` proceeds to the (unreachable) backend.
+#[tokio::test]
+async fn create_accepts_trailing_zeros_beyond_scale_9_and_reaches_the_backend() {
+    let store = offline_store();
+    let mut record = make_record(
+        Uuid::from_u128(1),
+        Uuid::from_u128(2),
+        1_700_000_000_000_000,
+    );
+    record.value = exact_scale_10_value();
+
+    let err = store
+        .create(record)
+        .await
+        .expect_err("create cannot succeed against an unreachable backend");
+
+    assert_not_decimal_rejection(&err, "create of a trailing-zero scale-10 value");
+}
+
+/// One unrepresentable value is decided in its own slot and does not stop the
+/// rest of the batch from reaching the backend.
+#[tokio::test]
+async fn create_batch_decides_an_unrepresentable_slot_locally_and_isolates_it() {
+    let store = offline_store();
+    let tenant_id = Uuid::from_u128(2);
+    let good = make_record(Uuid::from_u128(1), tenant_id, 1_700_000_000_000_000);
+    let mut bad = make_record(Uuid::from_u128(3), tenant_id, 1_700_000_000_000_001);
+    bad.value = lossy_scale_10_value();
+
+    let outcomes = store
+        .create_batch(vec![good, bad])
+        .await
+        .expect("a value rejection inside the batch is a per-record outcome");
+
+    assert_eq!(outcomes.len(), 2, "one outcome per input row, in order");
+    let good_err = outcomes[0]
+        .as_ref()
+        .expect_err("the representable record still reaches the unreachable backend");
+    assert_not_decimal_rejection(good_err, "slot 0");
+    let bad_err = outcomes[1]
+        .as_ref()
+        .expect_err("the unrepresentable record is refused");
+    assert_decimal_rejection(bad_err, "slot 1");
+}
+
+/// A batch with nothing representable never issues a statement: its only
+/// slot carries the value rejection, not a backend failure.
+#[tokio::test]
+async fn create_batch_of_only_unrepresentable_values_issues_no_statement() {
+    let store = offline_store();
+    let mut bad = make_record(
+        Uuid::from_u128(1),
+        Uuid::from_u128(2),
+        1_700_000_000_000_000,
+    );
+    bad.value = lossy_scale_10_value();
+
+    let outcomes = store
+        .create_batch(vec![bad])
+        .await
+        .expect("per-record outcomes");
+
+    assert_eq!(outcomes.len(), 1);
+    let err = outcomes[0]
+        .as_ref()
+        .expect_err("the only record is refused");
+    assert_decimal_rejection(err, "the only slot");
 }

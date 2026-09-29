@@ -93,29 +93,74 @@ pub(crate) mod ch_uuid_opt {
 
 /// `RowBinary`-compatible serde helper for `Decimal128(9)` columns.
 ///
-/// Apply with `#[serde(with = "ch_decimal128_9")]`.
+/// Apply with `#[serde(with = "ch_decimal128_9")]`. The binary encoding is
+/// fail-closed: a value that is not exactly representable at scale 9 is
+/// refused rather than rounded (see [`ch_decimal128_9::scaled_mantissa`]).
 pub(crate) mod ch_decimal128_9 {
     use rust_decimal::Decimal;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+    /// Scale of the `usage_records.value` column (`Decimal128(9)`).
+    ///
+    /// **Accepted decision.** The gear contract publishes quantities with up
+    /// to 28 significant digits and up to 28 fractional digits
+    /// (`docs/usage-collector-v1.yaml`, `UsageQuantity`), which no
+    /// `Decimal128` scale can hold losslessly: 28 fractional plus 28 integer
+    /// digits needs `Decimal256(28)`, and with it 256-bit mantissa arithmetic
+    /// on both the write and read paths. Nine fractional digits are accepted
+    /// as sufficient for metering, and the narrower column is kept. The
+    /// consequence is enforced rather than hidden: a value with non-zero
+    /// digits beyond the ninth fractional place is refused by
+    /// [`scaled_mantissa`] before it is written, never rounded. Recorded in
+    /// the plugin PRD §12 and DESIGN §3.7.
     const SCALE: u32 = 9;
+
+    /// Convert `d` to the scale-9 mantissa `ClickHouse` stores for a
+    /// `Decimal128(9)` column, refusing any value the column cannot hold
+    /// exactly.
+    ///
+    /// Trailing zeros beyond scale 9 (e.g. `1.0000000000`) are exactly
+    /// representable and are accepted; the result is the same mantissa as
+    /// for `1.000000000`.
+    ///
+    /// # Errors
+    ///
+    /// - The value has non-zero digits beyond the ninth fractional place.
+    ///   `rust_decimal::Decimal::rescale` would silently round them away,
+    ///   which would persist a usage amount other than the one supplied.
+    /// - The mantissa cannot be multiplied up to scale 9 without exceeding
+    ///   `rust_decimal`'s 96-bit capacity, so `rescale` stops short and the
+    ///   resulting mantissa would encode the wrong `Decimal128(9)`.
+    pub fn scaled_mantissa(d: &Decimal) -> Result<i128, String> {
+        let mut rescaled = *d;
+        // `rescale` never fails: lowering the scale rounds, and raising it
+        // stops short when the mantissa would overflow. Both outcomes are
+        // detected below instead of being encoded.
+        rescaled.rescale(SCALE);
+        if rescaled.scale() != SCALE {
+            return Err(format!(
+                "Decimal128(9) value cannot be represented at scale {SCALE} (got scale {})",
+                rescaled.scale()
+            ));
+        }
+        // `Decimal` equality is numeric across scales, so any difference here
+        // means non-zero fractional digits were rounded away.
+        if rescaled != *d {
+            return Err(format!(
+                "Decimal128(9) value {d} has {} fractional digits and cannot be stored at scale {SCALE} without rounding",
+                d.scale()
+            ));
+        }
+        Ok(rescaled.mantissa())
+    }
 
     pub fn serialize<S: Serializer>(d: &Decimal, s: S) -> Result<S::Ok, S::Error> {
         if s.is_human_readable() {
             d.to_string().serialize(s)
         } else {
-            let mut rescaled = *d;
-            // `rescale` may stop short of `SCALE` when multiplying the mantissa
-            // by 10 would overflow the 96-bit Decimal capacity — serializing
-            // that mantissa would encode the wrong ClickHouse Decimal128(9).
-            rescaled.rescale(SCALE);
-            if rescaled.scale() != SCALE {
-                return Err(serde::ser::Error::custom(format!(
-                    "Decimal128(9) value cannot be represented at scale {SCALE} (got scale {})",
-                    rescaled.scale()
-                )));
-            }
-            rescaled.mantissa().serialize(s)
+            scaled_mantissa(d)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(s)
         }
     }
 

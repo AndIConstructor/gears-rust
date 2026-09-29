@@ -109,6 +109,61 @@ fn ch_decimal128_9_binary_rejects_rescale_that_cannot_reach_scale_9() {
 }
 
 #[test]
+fn ch_decimal128_9_binary_rejects_precision_beyond_scale_9() {
+    // 1.0000000005: ten fractional digits, the last non-zero. `rescale(9)`
+    // would round it to 1.000000001; the binary encode must refuse instead of
+    // persisting a value other than the one supplied.
+    let d = Decimal::new(10_000_000_005, 10);
+    assert!(
+        serde_json::to_string(&DecimalWrap(d)).is_ok(),
+        "the human-readable path carries the full value unchanged"
+    );
+    assert!(
+        postcard::to_allocvec(&DecimalWrap(d)).is_err(),
+        "non-zero digits beyond scale 9 must fail Decimal128(9) encode rather than round"
+    );
+}
+
+#[test]
+fn ch_decimal128_9_binary_accepts_trailing_zeros_beyond_scale_9() {
+    // 1.0000000000 is exactly 1 at scale 9: nothing is lost by rescaling.
+    let d = Decimal::new(10_000_000_000, 10);
+    let bytes = postcard::to_allocvec(&DecimalWrap(d)).unwrap();
+    let back: DecimalWrap = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(back.0, d, "numerically equal after the round trip");
+    assert_eq!(back.0.scale(), 9, "decoded at the column's scale");
+}
+
+#[test]
+fn scaled_mantissa_reports_lost_precision_and_overflow() {
+    use ch_decimal128_9::scaled_mantissa;
+
+    assert_eq!(
+        scaled_mantissa(&Decimal::new(1_250_000_009, 9)),
+        Ok(1_250_000_009)
+    );
+    assert_eq!(scaled_mantissa(&Decimal::new(425, 1)), Ok(42_500_000_000));
+    assert_eq!(
+        scaled_mantissa(&Decimal::new(10_000_000_000, 10)),
+        Ok(1_000_000_000),
+        "trailing zeros beyond scale 9 are exactly representable"
+    );
+
+    let lossy = scaled_mantissa(&Decimal::new(10_000_000_005, 10)).unwrap_err();
+    assert!(
+        lossy.contains("Decimal128(9)") && lossy.contains("10 fractional digits"),
+        "message names the column and the offending scale: {lossy}"
+    );
+
+    let too_large = Decimal::from_parts(u32::MAX, u32::MAX, u32::MAX, false, 0);
+    let overflow = scaled_mantissa(&too_large).unwrap_err();
+    assert!(
+        overflow.contains("cannot be represented at scale 9"),
+        "mantissa overflow is still refused: {overflow}"
+    );
+}
+
+#[test]
 fn ch_uuid_json_rejects_malformed() {
     let err = serde_json::from_str::<UuidWrap>("\"not-a-uuid\"").unwrap_err();
     assert!(!err.to_string().is_empty());

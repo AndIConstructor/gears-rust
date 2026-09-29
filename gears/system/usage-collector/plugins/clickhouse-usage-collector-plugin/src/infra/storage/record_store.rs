@@ -66,7 +66,9 @@ use usage_collector_sdk::{
 
 use crate::domain::ports::RecordStore;
 use crate::infra::metrics::{InsertMode, Metrics, OpDurationGuard, QueryKind, TimedOp};
-use crate::infra::storage::entity::{EpochMicros, UsageRecordRow, UsageRecordStatusCode};
+use crate::infra::storage::entity::{
+    EpochMicros, UsageRecordRow, UsageRecordStatusCode, ch_decimal128_9,
+};
 use crate::infra::storage::error::{tracked_ch_err, with_deadline};
 use crate::infra::storage::mapper::{
     canonical_equal, current_merge_version, make_inactive_marker, record_row_key,
@@ -776,9 +778,53 @@ fn catalog_lookup_sql(gts_ids: &BTreeSet<&str>) -> (String, SqlCtx) {
     )
 }
 
-/// Apply the batch catalog check: every record whose `gts_id` is not in
-/// `known` gets `UsageTypeNotFound` in its own slot; the input indices of the
-/// rest are returned in input order for the dedup step.
+/// Decide locally whether `record.value` can be stored in the
+/// `Decimal128(9)` column exactly.
+///
+/// The column holds nine fractional digits; `rust_decimal::Decimal` carries
+/// up to twenty-eight. A value with non-zero digits beyond the ninth place
+/// would be rounded by the `RowBinary` encoder, persisting a usage amount
+/// other than the one supplied, so it is refused before any statement is
+/// issued (`ch_decimal128_9::scaled_mantissa`). Trailing zeros beyond scale 9
+/// are exactly representable and pass. The plugin error contract has no
+/// validation variant, so the rejection is reported as `Internal` carrying the
+/// reason; it is not a backend error and does not touch the backend metrics.
+fn unrepresentable_value(record: &UsageRecord) -> Option<UsageCollectorPluginError> {
+    ch_decimal128_9::scaled_mantissa(&record.value)
+        .err()
+        .map(|msg| {
+            tracing::warn!(
+                record_id = %record.id,
+                gts_id = %record.gts_id.as_ref(),
+                value_scale = record.value.scale(),
+                "usage record value cannot be stored exactly in Decimal128(9); rejecting without insert"
+            );
+            UsageCollectorPluginError::internal(format!("usage record {}: {msg}", record.id))
+        })
+}
+
+/// Apply the batch value check ([`unrepresentable_value`]): every record
+/// whose `value` cannot be stored exactly gets its rejection in its own slot;
+/// the input indices of the rest are returned in input order for the catalog
+/// step. Performs no I/O.
+fn split_by_representable(
+    records: &[UsageRecord],
+    outcomes: &mut [Option<Result<UsageRecord, UsageCollectorPluginError>>],
+) -> Vec<usize> {
+    let mut passed = Vec::with_capacity(records.len());
+    for (idx, record) in records.iter().enumerate() {
+        match unrepresentable_value(record) {
+            Some(err) => outcomes[idx] = Some(Err(err)),
+            None => passed.push(idx),
+        }
+    }
+    passed
+}
+
+/// Apply the batch catalog check: every undecided record whose `gts_id` is not
+/// in `known` gets `UsageTypeNotFound` in its own slot; the input indices of
+/// the rest are returned in input order for the dedup step. A slot an earlier
+/// pass already decided (the value check) is left alone and is not returned.
 fn split_by_catalog(
     records: &[UsageRecord],
     known: &HashSet<String>,
@@ -786,6 +832,9 @@ fn split_by_catalog(
 ) -> Vec<usize> {
     let mut passed = Vec::with_capacity(records.len());
     for (idx, record) in records.iter().enumerate() {
+        if outcomes[idx].is_some() {
+            continue;
+        }
         if known.contains(record.gts_id.as_ref()) {
             passed.push(idx);
         } else {
@@ -962,8 +1011,10 @@ impl ChRecordStore {
     /// Compose the rows a batch has to write, deciding every passed record's
     /// outcome in input order.
     ///
-    /// `passed` holds the input indices that survived the catalog check;
-    /// `existing` is the dedup pre-read over exactly those records. A stored
+    /// `passed` holds the input indices that survived the value and catalog
+    /// checks, so every record composed here is known to be exactly
+    /// representable in the `Decimal128(9)` column; `existing` is the dedup
+    /// pre-read over exactly those records. A stored
     /// row for a record's dedup key decides its outcome via
     /// [`Self::resolve_dedup_hit`]. A row already composed in this batch for
     /// the same key is treated identically: since [`DedupKey`] is the
@@ -1024,7 +1075,12 @@ impl ChRecordStore {
 #[async_trait]
 impl RecordStore for ChRecordStore {
     // @cpt-flow:cpt-cf-uc-ch-plugin-seq-ingest-dedup
-    /// Create one record: catalog existence check, dedup pre-read, `INSERT`.
+    /// Create one record: local value check, catalog existence check, dedup
+    /// pre-read, `INSERT`.
+    ///
+    /// The value check ([`unrepresentable_value`]) runs before any statement:
+    /// a `value` the `Decimal128(9)` column cannot hold exactly is rejected
+    /// rather than rounded, and never reaches the backend.
     ///
     /// The three statements are independent — nothing serialises two creates
     /// for the same dedup key, so both can pass the pre-read and both insert.
@@ -1037,6 +1093,9 @@ impl RecordStore for ChRecordStore {
     #[instrument(skip(self, record), fields(gts_id = %record.gts_id.as_ref()))]
     async fn create(&self, record: UsageRecord) -> Result<UsageRecord, UsageCollectorPluginError> {
         let op_start = Instant::now();
+        if let Some(err) = unrepresentable_value(&record) {
+            return Err(err);
+        }
         self.check_catalog_existence(&record.gts_id).await?;
 
         if let Some(row) = self.dedup_point_lookup(&record).await? {
@@ -1058,8 +1117,14 @@ impl RecordStore for ChRecordStore {
     /// `gts_id`s, one dedup pre-read over every record that passed it, one
     /// multi-row `INSERT` of the composed rows.
     ///
+    /// Before the first statement, a local value check
+    /// ([`split_by_representable`]) decides every record whose `value` the
+    /// `Decimal128(9)` column cannot hold exactly; those slots are rejected
+    /// rather than rounded and take no part in the statements that follow.
+    ///
     /// Outcomes are positional. A failed catalog or dedup read is a failure
-    /// for every slot that depended on it; a failed `INSERT` is reported only
+    /// for every slot that depended on it (every slot that passed the value
+    /// check for the catalog read); a failed `INSERT` is reported only
     /// in the slots backed by a composed row, so rows absorbed from storage
     /// keep the outcome the pre-read decided. The single `INSERT` commits one
     /// part per `toYYYYMM(created_at)` partition it touches, so a reader sees
@@ -1085,12 +1150,25 @@ impl RecordStore for ChRecordStore {
         let mut outcomes: Vec<Option<Result<UsageRecord, UsageCollectorPluginError>>> =
             (0..records.len()).map(|_| None).collect();
 
-        // 1. One catalog existence query over the distinct usage types. A
-        //    failed read decides nothing for anyone, so every slot carries it.
-        let distinct: BTreeSet<&str> = records.iter().map(|r| r.gts_id.as_ref()).collect();
+        // 0. Local value check, no I/O. A record the column cannot hold
+        //    exactly is decided here and shapes none of the statements below.
+        let representable = split_by_representable(&records, &mut outcomes);
+
+        // 1. One catalog existence query over the distinct usage types of the
+        //    records still undecided. A failed read decides nothing for any of
+        //    them, so every such slot carries it; value rejections stay put.
+        let distinct: BTreeSet<&str> = representable
+            .iter()
+            .map(|&i| records[i].gts_id.as_ref())
+            .collect();
         let known = match self.existing_usage_types(&distinct).await {
             Ok(known) => known,
-            Err(e) => return Ok(records.iter().map(|_| Err(err_for_slot(&e))).collect()),
+            Err(e) => {
+                for &idx in &representable {
+                    outcomes[idx] = Some(Err(err_for_slot(&e)));
+                }
+                return Ok(finalize_outcomes(outcomes, &records));
+            }
         };
         let passed = split_by_catalog(&records, &known, &mut outcomes);
 

@@ -1339,3 +1339,80 @@ async fn ch_identical_racing_batches_are_deduplicated_by_token() {
         );
     }
 }
+
+/// The `value` column is `Decimal128(9)`. A record whose value carries
+/// non-zero digits beyond the ninth fractional place is refused in its own
+/// slot before any statement is issued — never rounded — and the rest of the
+/// batch still lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker (testcontainers)"]
+async fn ch_batch_isolates_an_unrepresentable_value() {
+    let Some((h, store)) = setup().await else {
+        return;
+    };
+    let tenant = Uuid::from_u128(0x1009);
+
+    let row0 = common::fixture_usage_record(VCPU_GTS, tenant, "prec-0", Decimal::new(2, 0));
+    // 1.0000000005: ten fractional digits, the last one non-zero.
+    let row1 =
+        common::fixture_usage_record(VCPU_GTS, tenant, "prec-1", Decimal::new(10_000_000_005, 10));
+    let row2 = common::fixture_usage_record(VCPU_GTS, tenant, "prec-2", Decimal::new(3, 0));
+
+    let results = store
+        .create_batch(vec![row0.clone(), row1.clone(), row2.clone()])
+        .await
+        .expect("batch returns per-row outcomes");
+
+    assert_eq!(results.len(), 3, "one result per input row, in order");
+    let r0 = results[0].as_ref().expect("row 0 inserted");
+    assert_eq!(r0.id, row0.id);
+    match results[1].as_ref() {
+        Err(UsageCollectorPluginError::Internal(msg)) => assert!(
+            msg.contains("Decimal128(9)"),
+            "row 1 must be refused for its precision, got: {msg}"
+        ),
+        other => panic!("row 1 must be a value rejection, got {other:?}"),
+    }
+    let r2 = results[2].as_ref().expect("row 2 inserted");
+    assert_eq!(r2.id, row2.id);
+
+    let stored0 = store.get(row0.id).await.expect("row 0 is readable");
+    assert_eq!(stored0.value, Decimal::new(2, 0));
+    let stored2 = store.get(row2.id).await.expect("row 2 is readable");
+    assert_eq!(stored2.value, Decimal::new(3, 0));
+    assert_eq!(
+        common::raw_rows_for_id(&h, row1.id).await,
+        0,
+        "the refused record must leave no row behind — not even a rounded one"
+    );
+}
+
+/// Trailing zeros beyond scale 9 lose nothing: `1.0000000000` is stored and
+/// read back as exactly `1`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker (testcontainers)"]
+async fn ch_create_persists_trailing_zero_scale_10_value_exactly() {
+    let Some((_h, store)) = setup().await else {
+        return;
+    };
+    let tenant = Uuid::from_u128(0x100A);
+
+    let record = common::fixture_usage_record(
+        VCPU_GTS,
+        tenant,
+        "prec-zeros",
+        Decimal::new(10_000_000_000, 10),
+    );
+    let created = store
+        .create(record.clone())
+        .await
+        .expect("a scale-10 value with only trailing zeros is representable");
+    assert_eq!(created.value, Decimal::ONE);
+
+    let stored = store.get(record.id).await.expect("record is readable");
+    assert_eq!(
+        stored.value,
+        Decimal::ONE,
+        "read back numerically unchanged"
+    );
+}

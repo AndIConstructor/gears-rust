@@ -16,7 +16,10 @@
 //!   `UUID` literal.
 //! - [`rust_decimal::Decimal`] has `features = ["serde"]`; its `to_string()`
 //!   produces a decimal string (`"42.5"`) that `ClickHouse` accepts for
-//!   `Decimal128(9)` columns.
+//!   `Decimal128(9)` columns. A numeric literal is bound only when it is
+//!   exactly representable at scale 9 (`ch_decimal128_9::scaled_mantissa`);
+//!   one with non-zero digits beyond the ninth fractional place is refused
+//!   here rather than left to server-side coercion.
 //! - `DateTime64(6)` values are epoch-microseconds bound as `i64`, but their
 //!   SQL placeholder must be wrapped in `fromUnixTimestamp64Micro(?)`.
 //!   A bare microsecond integer in a tuple comparison is coerced through
@@ -28,6 +31,8 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use toolkit_odata::filter::ODataValue;
+
+use crate::infra::storage::entity::ch_decimal128_9::scaled_mantissa;
 
 /// A storage-typed value ready to be bound to a `ClickHouse` `?` placeholder.
 ///
@@ -76,8 +81,11 @@ impl SqlBind {
 /// # Errors
 ///
 /// Returns an error string on `Null` / `Date` / `Time` values (none of the
-/// `usage_records` filter columns are date-only or time-only) or when a
-/// numeric value is out of the `rust_decimal::Decimal` range.
+/// `usage_records` filter columns are date-only or time-only), when a
+/// numeric value is out of the `rust_decimal::Decimal` range, or when a
+/// numeric value is not exactly representable in the `Decimal128(9)` column
+/// (non-zero digits beyond the ninth fractional place). Trailing zeros beyond
+/// scale 9 lose nothing and are accepted.
 ///
 /// [`timestamp_micros`]: chrono::DateTime::timestamp_micros
 pub fn odata_value_to_bind(v: &ODataValue) -> Result<SqlBind, String> {
@@ -85,11 +93,18 @@ pub fn odata_value_to_bind(v: &ODataValue) -> Result<SqlBind, String> {
         ODataValue::Uuid(u) => Ok(SqlBind::Uuid(*u)),
         ODataValue::String(s) => Ok(SqlBind::Str(s.clone())),
         ODataValue::Bool(b) => Ok(SqlBind::Bool(*b)),
-        ODataValue::Number(n) => n
-            .to_string()
-            .parse::<Decimal>()
-            .map(SqlBind::Decimal)
-            .map_err(|e| format!("numeric out of range: {e}")),
+        ODataValue::Number(n) => {
+            let d = n
+                .to_string()
+                .parse::<Decimal>()
+                .map_err(|e| format!("numeric out of range: {e}"))?;
+            // Reject deterministically here rather than let ClickHouse coerce
+            // the literal against the scale-9 column. The value itself is
+            // bound unchanged.
+            scaled_mantissa(&d)
+                .map_err(|msg| format!("numeric filter value not representable: {msg}"))?;
+            Ok(SqlBind::Decimal(d))
+        }
         ODataValue::DateTime(dt) => Ok(SqlBind::DateTime64Micros(dt.timestamp_micros())),
         ODataValue::Null => Err("null filter value unsupported".to_owned()),
         ODataValue::Date(_) | ODataValue::Time(_) => {
