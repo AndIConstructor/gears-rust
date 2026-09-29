@@ -46,10 +46,6 @@ reason = "Ignore module 'api-gateway' (not SDLC-documented yet: missing required
 patterns = ["gears/system/api-gateway/*"]
 
 [[ignore]]
-reason = "Ignore module 'construct' (not SDLC-documented yet: missing required PRD/DESIGN)."
-patterns = ["gears/construct/*"]
-
-[[ignore]]
 reason = "Ignore module 'grpc-hub' (not SDLC-documented yet: missing required PRD/DESIGN)."
 patterns = ["gears/system/grpc-hub/*"]
 
