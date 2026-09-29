@@ -124,8 +124,12 @@ claims.
    all of them pass. This is a claim about *these rows*, not about the type; it
    is reported as `admission_basis: "data_backed"` with the number of rows read,
    is never cached or restated as a verdict, and is bounded by
-   `type_update_max_rows` and by the caller's remaining deadline. A refusal names
-   up to `type_update_max_reported_rows` offending keys.
+   `type_update_max_rows` and by the caller's remaining deadline. The ceiling is
+   checked against a count before the scan and held per batch during it: the
+   transaction runs at the server's default isolation, so rows a concurrent
+   ingest commits meanwhile are rows the scan reads, and a pass that grows past
+   the ceiling is refused where it crossed it rather than run to the deadline.
+   A refusal names up to `type_update_max_reported_rows` offending keys.
 4. **A dry run is part of the surface, not a debugging aid.**
    `POST /types/compatibility` runs the identical admission path and writes
    nothing, reporting per type: the state, both directional verdicts, every

@@ -1029,6 +1029,33 @@ async fn a_cursor_is_held_to_its_filter_and_type_set_at_the_store() {
     }
 }
 
+/// The row ceiling, on a store configured below what the case seeds. The
+/// conformance body is what the ceiling is held to; this is the store that
+/// can be told to hold it at two rows.
+#[tokio::test]
+async fn a_pass_over_the_ceiling_is_refused_and_a_dry_run_reports_it() {
+    let Some(stand) = stand(HopStrategy::Pgq).await else {
+        return;
+    };
+    let bounded = Arc::new(PgGraphStore::new(
+        Arc::clone(&stand.db),
+        GraphStorageConfig {
+            type_update_max_rows: 2,
+            ontology_max_chain_depth: 8,
+            ..GraphStorageConfig::default()
+        }
+        .validated()
+        .expect("the test configuration is valid"),
+        true,
+    ));
+    let tenant = tenant_on(&stand).await;
+    conformance::a_pass_over_the_ceiling_is_refused_and_a_dry_run_reports_it(
+        bounded.as_ref(),
+        tenant,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn colliding_node_keys_stay_inside_their_tenants() {
     let Some(stand) = stand(HopStrategy::Pgq).await else {

@@ -2192,6 +2192,80 @@ pub async fn a_dry_run_reports_every_verdict_and_writes_nothing(
     assert_eq!(stored.revision, 1, "a dry run writes nothing");
 }
 
+/// A row-reading pass is bounded by its ceiling, for a write and for a dry
+/// run alike: the write is refused naming the key, the dry run reports the
+/// refusal as a diagnostic and admits nothing.
+///
+/// Run against a store whose `type_update_max_rows` is below the rows seeded
+/// here (three), which only the built-in store can be configured to. The
+/// ceiling is held twice on that store -- against a count before the scan and
+/// per batch during it -- and this case is what both are held to, so a count
+/// that goes stale under a concurrent ingest is caught by the scan on the
+/// same assertion.
+// Called from the `PostgreSQL` lane only: the fake has no ceiling to set.
+#[allow(dead_code)]
+pub async fn a_pass_over_the_ceiling_is_refused_and_a_dry_run_reports_it(
+    store: &dyn GraphStoreV1,
+    tenant: Uuid,
+) {
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = ctx(tenant, &scope, None);
+    seed_requirements(store, &ctx, &["proposed", "proposed", "proposed"]).await;
+
+    let narrowed = requirement_revision(
+        &requirement_properties(&["proposed"], false, false),
+        &["key", "statement"],
+        &["/payload/status"],
+    );
+    let options = graph_storage_sdk::models::TypeRegistrationOptions {
+        on_existing: graph_storage_sdk::models::OnExisting::Update,
+        revalidate: true,
+        dry_run: false,
+        migrations: Vec::new(),
+    };
+    let refused = store
+        .register_types_with(&ctx, vec![narrowed.clone()], options.clone())
+        .await
+        .expect_err("three rows over a ceiling of two are not re-validated");
+    let GraphStoreError::LimitExceeded { what } = refused else {
+        panic!("a ceiling is a limit, got {refused:?}");
+    };
+    assert!(
+        what.contains("type_update_max_rows") && what.contains("3 live rows"),
+        "the refusal names the key and the count: {what}"
+    );
+
+    let reported = store
+        .register_types_with(
+            &ctx,
+            vec![narrowed],
+            graph_storage_sdk::models::TypeRegistrationOptions {
+                dry_run: true,
+                ..options
+            },
+        )
+        .await
+        .expect("a dry run reports the refusal rather than raising it");
+    let change = reported[reported.len() - 1]
+        .change
+        .as_ref()
+        .expect("a dry run always reports the verdict");
+    assert!(!change.admissible, "over the ceiling nothing is admitted");
+    assert!(
+        change
+            .diagnostics
+            .iter()
+            .any(|d| d.finding == "row_ceiling_exceeded" && d.message.contains("3 live rows")),
+        "{:?}",
+        change.diagnostics
+    );
+    let stored = store
+        .get_type(&ctx, &EVOLVING.to_owned())
+        .await
+        .expect("the type is untouched");
+    assert_eq!(stored.revision, 1, "neither attempt wrote");
+}
+
 /// A narrowed enum is not backward compatible — the old definition accepted
 /// `approved` and the new one does not. But if no stored row ever used it, the
 /// change is safe *for this graph*, and the gear holds the rows to prove it.

@@ -179,7 +179,9 @@ pub struct GraphStorageConfig {
     /// all; a provably backward-compatible change touches none, whatever this
     /// says. The ceiling is what keeps a re-validating update inside one
     /// interactive request: above it the honest answer is an asynchronous
-    /// migration with progress, which the gear does not have.
+    /// migration with progress, which the gear does not have. It is checked
+    /// before the scan and held during it, so rows committed by a concurrent
+    /// ingest cannot carry the pass past it.
     pub type_update_max_rows: u32,
     /// Live rows a synchronous *migration* may rewrite.
     ///

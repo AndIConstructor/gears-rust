@@ -39,6 +39,25 @@ pub(crate) struct ScanBounds {
     pub max_reported: usize,
     /// What is left of the operation's absolute deadline.
     pub budget: graph_storage_sdk::models::RemainingBudget,
+    /// The most rows this pass may read, and the key that set it.
+    pub ceiling: RowCeiling,
+}
+
+/// The row ceiling a pass runs under: `type_update_max_rows` for a
+/// re-validation, `type_migration_max_rows` for a migration.
+#[derive(Clone, Copy)]
+pub(crate) struct RowCeiling {
+    pub max_rows: u64,
+    /// The configuration key, so a refusal names the knob that applies.
+    pub key: &'static str,
+}
+
+/// The refusal a pass over the ceiling raises, in the words both sites use.
+pub(crate) fn ceiling_message(type_id: &str, rows: u64, ceiling: RowCeiling) -> String {
+    format!(
+        "type `{type_id}` has {rows} live rows; one synchronous pass handles at most {} (`{}`)",
+        ceiling.max_rows, ceiling.key
+    )
 }
 
 /// Give up between batches when the caller's deadline is spent.
@@ -50,6 +69,28 @@ fn still_within(bounds: ScanBounds) -> Result<(), GraphStoreError> {
         return Err(GraphStoreError::Deadline);
     }
     Ok(())
+}
+
+/// Refuse once the rows read so far pass the ceiling the pass was admitted
+/// under.
+///
+/// Admission counts the live rows and refuses above the ceiling before the
+/// scan starts; this is the same ceiling held during it. The transaction
+/// runs at the server's default isolation, so each batch is a fresh
+/// snapshot, and rows a concurrent ingest commits between the count and the
+/// last batch are rows this pass reads. Without a check here the bound was
+/// a statement about the moment of admission, not about the work done: a
+/// type counted at 999 could be scanned at 5 999, up to whatever the
+/// deadline allowed. Checked per batch with the rows just fetched, before
+/// they are validated, so the pass never does work past the bound and a
+/// refusal costs one batch at most.
+fn within_ceiling(type_id: &str, scanned: u64, ceiling: RowCeiling) -> Result<(), GraphStoreError> {
+    if scanned <= ceiling.max_rows {
+        return Ok(());
+    }
+    Err(GraphStoreError::LimitExceeded {
+        what: ceiling_message(type_id, scanned, ceiling),
+    })
 }
 
 /// Producer keys of every endpoint in the batch.
@@ -206,6 +247,7 @@ async fn revalidate_nodes(
     let mut errors: Vec<ItemError> = Vec::new();
     let mut after: i64 = i64::MIN;
     let mut index = 0usize;
+    let mut scanned = 0u64;
     loop {
         still_within(bounds)?;
         let rows = node::Entity::find()
@@ -225,6 +267,8 @@ async fn revalidate_nodes(
         if rows.is_empty() {
             return Ok(errors);
         }
+        scanned += rows.len() as u64;
+        within_ceiling(type_id, scanned, bounds.ceiling)?;
         for model in &rows {
             after = model.id;
             let mut instance = node_instance(model);
@@ -256,6 +300,7 @@ async fn revalidate_edges(
     let mut errors: Vec<ItemError> = Vec::new();
     let mut after: i64 = i64::MIN;
     let mut index = 0usize;
+    let mut scanned = 0u64;
     loop {
         still_within(bounds)?;
         let rows = edge::Entity::find()
@@ -275,6 +320,8 @@ async fn revalidate_edges(
         if rows.is_empty() {
             return Ok(errors);
         }
+        scanned += rows.len() as u64;
+        within_ceiling(type_id, scanned, bounds.ceiling)?;
         let keys = endpoint_keys(scope, tx, &rows).await?;
 
         for model in &rows {
@@ -391,6 +438,11 @@ async fn migrate_nodes(
         if rows.is_empty() {
             return Ok(out);
         }
+        within_ceiling(
+            what.type_id,
+            out.rows_scanned + rows.len() as u64,
+            bounds.ceiling,
+        )?;
         for model in &rows {
             after = model.id;
             out.rows_scanned += 1;
@@ -536,6 +588,11 @@ async fn migrate_edges(
         if rows.is_empty() {
             return Ok(out);
         }
+        within_ceiling(
+            what.type_id,
+            out.rows_scanned + rows.len() as u64,
+            bounds.ceiling,
+        )?;
         let keys = endpoint_keys(who.scope, tx, &rows).await?;
         for model in &rows {
             after = model.id;
@@ -611,5 +668,39 @@ async fn migrate_edges(
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use graph_storage_sdk::plugin_api::GraphStoreError;
+
+    use super::{RowCeiling, within_ceiling};
+
+    const CEILING: RowCeiling = RowCeiling {
+        max_rows: 1_000,
+        key: "type_update_max_rows",
+    };
+
+    /// The ceiling is inclusive: a type admitted at exactly the bound scans
+    /// to the end.
+    #[test]
+    fn a_scan_at_the_ceiling_proceeds() {
+        assert!(within_ceiling("gts.acme.gs._.thing.v1~", 1_000, CEILING).is_ok());
+        assert!(within_ceiling("gts.acme.gs._.thing.v1~", 1, CEILING).is_ok());
+    }
+
+    /// One row past it is the refusal admission would have raised, naming
+    /// the count that was actually read and the key that bounds it.
+    #[test]
+    fn a_scan_past_the_ceiling_is_refused_with_the_count_and_the_key() {
+        let refused = within_ceiling("gts.acme.gs._.thing.v1~", 1_001, CEILING)
+            .expect_err("one row past the ceiling is past it");
+        let GraphStoreError::LimitExceeded { what } = refused else {
+            panic!("a ceiling is a limit, got {refused:?}");
+        };
+        assert!(what.contains("1001 live rows"), "{what}");
+        assert!(what.contains("type_update_max_rows"), "{what}");
+        assert!(what.contains("at most 1000"), "{what}");
     }
 }

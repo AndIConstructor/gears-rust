@@ -691,11 +691,12 @@ async fn admit(
             Ok(Some(AdmissionBasis::SchemaProved))
         }
         evolution::Decision::Revalidate | evolution::Decision::Migrate => {
+            let ceiling = limits.bound(decision);
             let rows =
                 super::evolution::count_live(who.scope, tx, descriptor.kind, candidate.interned)
                     .await?;
             change.rows = Some(rows);
-            if let Some(refusal) = row_ceiling(&descriptor.type_id, rows, limits.bound(decision)) {
+            if let Some(refusal) = row_ceiling(&descriptor.type_id, rows, ceiling) {
                 if who.dry_run {
                     change.diagnostics.push(refusal.diagnostic);
                     return Ok(None);
@@ -703,17 +704,21 @@ async fn admit(
                 return Err(refusal.error);
             }
             let validator = chain_validator(candidate.ancestors, descriptor)?;
+            // The count above admits the pass; the same ceiling travels with
+            // the scan and is held per batch, because the count is a
+            // snapshot and the scan is not (`evolution::within_ceiling`).
             let bounds = super::evolution::ScanBounds {
                 batch: limits.batch,
                 max_reported: limits.max_reported,
                 budget: limits.budget,
+                ceiling,
             };
 
             if decision == evolution::Decision::Revalidate {
                 // What the schemas could not prove, the rows may still
                 // satisfy. A claim about *these* rows, reported as its own
                 // basis and never cached as a verdict about the type.
-                let failures = super::evolution::revalidate(
+                let scan = super::evolution::revalidate(
                     who.scope,
                     tx,
                     &descriptor.type_id,
@@ -722,7 +727,10 @@ async fn admit(
                     &validator,
                     bounds,
                 )
-                .await?;
+                .await;
+                let Some(failures) = past_ceiling_mid_scan(scan, who.dry_run, change)? else {
+                    return Ok(None);
+                };
                 if failures.is_empty() {
                     change.admissible = true;
                     return Ok(Some(AdmissionBasis::DataBacked {
@@ -750,7 +758,7 @@ async fn admit(
                     what: error.to_string(),
                 }
             })?;
-            let outcome = super::evolution::migrate(
+            let scan = super::evolution::migrate(
                 who,
                 tx,
                 super::evolution::Migrating {
@@ -764,7 +772,10 @@ async fn admit(
                 },
                 bounds,
             )
-            .await?;
+            .await;
+            let Some(outcome) = past_ceiling_mid_scan(scan, who.dry_run, change)? else {
+                return Ok(None);
+            };
             change.rows_rewritten = Some(outcome.rows_rewritten);
             if outcome.failures.is_empty() {
                 change.admissible = true;
@@ -781,6 +792,26 @@ async fn admit(
             report_rows(change, &outcome.failures, "row_invalid_after_migration");
             Ok(None)
         }
+    }
+}
+
+/// A scan that met the ceiling partway is the same refusal as one that met
+/// it at admission: an error for a write, a diagnostic for a dry run.
+///
+/// `Ok(None)` is the dry run's refusal, reported on `change`; every other
+/// error passes through unchanged.
+fn past_ceiling_mid_scan<T>(
+    scan: Result<T, GraphStoreError>,
+    dry_run: bool,
+    change: &mut TypeChange,
+) -> Result<Option<T>, GraphStoreError> {
+    match scan {
+        Ok(value) => Ok(Some(value)),
+        Err(GraphStoreError::LimitExceeded { what }) if dry_run => {
+            change.diagnostics.push(ceiling_diagnostic(what));
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -817,11 +848,17 @@ impl UpdateLimits {
     /// shared ceiling sized for the first admits a migration that does all of
     /// its work and is then killed — the work rolls back, and the caller hears
     /// about a timeout rather than about a bound.
-    fn bound(self, decision: evolution::Decision) -> (u64, &'static str) {
+    fn bound(self, decision: evolution::Decision) -> super::evolution::RowCeiling {
         if decision == evolution::Decision::Migrate {
-            (self.max_migration_rows, "type_migration_max_rows")
+            super::evolution::RowCeiling {
+                max_rows: self.max_migration_rows,
+                key: "type_migration_max_rows",
+            }
         } else {
-            (self.max_rows, "type_update_max_rows")
+            super::evolution::RowCeiling {
+                max_rows: self.max_rows,
+                key: "type_update_max_rows",
+            }
         }
     }
 }
@@ -831,23 +868,24 @@ impl UpdateLimits {
 /// The bound is not the gear's own deadline: `api-gateway` kills a synchronous
 /// request at 30 s whatever this gear is configured with, so the ceiling is
 /// what keeps a row-reading update inside a request that can actually answer.
-fn row_ceiling(type_id: &str, rows: u64, bound: (u64, &str)) -> Option<Ceiling> {
-    let (max_rows, key) = bound;
-    if rows <= max_rows {
+fn row_ceiling(type_id: &str, rows: u64, ceiling: super::evolution::RowCeiling) -> Option<Ceiling> {
+    if rows <= ceiling.max_rows {
         return None;
     }
-    let what = format!(
-        "type `{type_id}` has {rows} live rows; one synchronous pass handles at most \
-         {max_rows} (`{key}`)"
-    );
+    let what = super::evolution::ceiling_message(type_id, rows, ceiling);
     Some(Ceiling {
         error: GraphStoreError::LimitExceeded { what: what.clone() },
-        diagnostic: graph_storage_sdk::models::SchemaDiagnostic {
-            location: "$".to_owned(),
-            finding: "row_ceiling_exceeded".to_owned(),
-            message: what,
-        },
+        diagnostic: ceiling_diagnostic(what),
     })
+}
+
+/// The dry run's report of a ceiling refusal, wherever the ceiling was met.
+fn ceiling_diagnostic(what: String) -> graph_storage_sdk::models::SchemaDiagnostic {
+    graph_storage_sdk::models::SchemaDiagnostic {
+        location: "$".to_owned(),
+        finding: "row_ceiling_exceeded".to_owned(),
+        message: what,
+    }
 }
 
 /// A validator for the candidate, with its ancestors resolvable.
