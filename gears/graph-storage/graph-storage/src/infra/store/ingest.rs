@@ -1731,7 +1731,7 @@ pub async fn soft_delete(
                             .await
                             .map_err(map_scope_err)?;
                         if visible.len() != endpoints.len() {
-                            return Err(GraphStoreError::NotFound.into());
+                            return endpoint_hidden(&scope, tx, &key, epoch).await;
                         }
                         let removed = edge::Entity::update_many()
                             .col_expr(edge::Column::DeletedAt, Expr::value(Some(now)))
@@ -1821,7 +1821,18 @@ async fn already_tombstoned_edge(
     key: &str,
     epoch: i64,
 ) -> Result<DeleteOutcome, TxStoreError> {
-    let found = edge::Entity::find()
+    let found = edge_tombstoned(scope, tx, key).await?;
+    settle_no_op(scope, tx, found, "edge", key, epoch).await
+}
+
+/// Whether the edge under `key` is tombstoned now: `None` when no row holds
+/// the key, `Some(false)` while it is live.
+async fn edge_tombstoned(
+    scope: &AccessScope,
+    tx: &impl DBRunner,
+    key: &str,
+) -> Result<Option<bool>, TxStoreError> {
+    Ok(edge::Entity::find()
         .secure()
         .scope_with(scope)
         .filter(Condition::all().add(edge::Column::EdgeKey.eq(key.to_owned())))
@@ -1833,8 +1844,53 @@ async fn already_tombstoned_edge(
         .map_err(map_scope_err)?
         .into_iter()
         .next()
-        .map(|row| row.deleted_at.is_some());
-    settle_no_op(scope, tx, found, "edge", key, epoch).await
+        .map(|row| row.deleted_at.is_some()))
+}
+
+/// Settle an edge delete whose endpoint is not visible, although the edge
+/// was live when it was read.
+///
+/// Two reads, two snapshots: these transactions begin at the server's
+/// default isolation, so a node delete can commit between the edge read
+/// above and the endpoint read -- and a node delete tombstones the node
+/// and its incident edges in one transaction. The endpoint that vanished
+/// then took this edge with it, and the delete the caller asked for has
+/// already happened: rule 3 of the Soft Delete Contract, a no-op, exactly
+/// as it would be had the edge read come a moment later. Answering
+/// `NotFound` here was the seam the race test found once in nine runs.
+///
+/// The verdict is read back from the edge, not inferred from the endpoint:
+/// an endpoint hidden for any other reason -- a scope the caller does not
+/// hold, a scope replacement's hard delete -- leaves the edge live or gone,
+/// and both of those are still `NotFound`, the answer the edge read gives.
+async fn endpoint_hidden(
+    scope: &AccessScope,
+    tx: &impl DBRunner,
+    key: &str,
+    epoch: i64,
+) -> Result<DeleteOutcome, TxStoreError> {
+    let tombstoned = edge_tombstoned(scope, tx, key).await?;
+    hidden_endpoint_verdict(tombstoned)?;
+    let revision = current_revision(scope, tx).await?;
+    Ok(DeleteOutcome {
+        revision: GraphRevision {
+            source_epoch: epoch,
+            revision,
+        },
+        tombstoned_nodes: 0,
+        tombstoned_edges: 0,
+    })
+}
+
+/// What an edge delete may answer when an endpoint is not visible, from the
+/// edge's own state: only a tombstone under the key is a delete that already
+/// happened. Pure, so both arms are pinned by a unit case rather than by the
+/// race that found the seam.
+fn hidden_endpoint_verdict(tombstoned: Option<bool>) -> Result<(), GraphStoreError> {
+    match tombstoned {
+        Some(true) => Ok(()),
+        Some(false) | None => Err(GraphStoreError::NotFound),
+    }
 }
 
 /// The revision as it stands, with nothing tombstoned — or absence, when the
@@ -2224,6 +2280,35 @@ mod lost_write_verdict_tests {
             Some(("repository", "acme/infra")),
         ));
         assert!(text.contains("was removed"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod hidden_endpoint_verdict_tests {
+    use graph_storage_sdk::plugin_api::GraphStoreError;
+
+    use super::hidden_endpoint_verdict;
+
+    /// The endpoint went with a node delete that took this edge too: the
+    /// delete already happened.
+    #[test]
+    fn a_tombstoned_edge_settles_as_a_no_op() {
+        assert!(hidden_endpoint_verdict(Some(true)).is_ok());
+    }
+
+    /// An endpoint the caller cannot see, over an edge that is still there
+    /// or no longer there, is what the edge read answers: absent.
+    #[test]
+    fn a_live_or_missing_edge_is_not_found() {
+        for state in [Some(false), None] {
+            assert!(
+                matches!(
+                    hidden_endpoint_verdict(state),
+                    Err(GraphStoreError::NotFound)
+                ),
+                "{state:?} must stay not-found"
+            );
+        }
     }
 }
 
