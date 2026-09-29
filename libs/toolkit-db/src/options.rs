@@ -729,43 +729,19 @@ fn parse_sqlite_path_from_dsn(dsn: &str) -> Result<std::path::PathBuf> {
     }
 }
 
-/// The longest environment-variable name this accepts.
-///
-/// Nothing in POSIX fixes one, but a name is an operator-typed identifier:
-/// past a hundred-odd characters the value is a mistake, and the name is
-/// about to be printed in a diagnostic.
-const MAX_ENV_VAR_NAME: usize = 128;
-
-/// A `${VAR}` placeholder names an environment variable, so it has to look
-/// like one.
-///
-/// The name is taken from configuration, handed to `std::env::var`, and --
-/// when the lookup fails -- printed in `DbError::EnvVar`'s message, which
-/// reaches logs. Unvalidated, a name carrying a newline splits that line in
-/// two and the second half is attacker-shaped text in the position a log
-/// reader expects a record. A name outside this shape could not have been
-/// exported by a POSIX shell in the first place, so refusing it rejects
-/// nothing that would have worked.
-fn check_env_var_name(name: &str) -> Result<()> {
-    let shaped = !name.is_empty()
-        && name.len() <= MAX_ENV_VAR_NAME
-        && !name.starts_with(|c: char| c.is_ascii_digit())
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if shaped {
-        return Ok(());
-    }
-    Err(DbError::InvalidParameter(format!(
-        "a ${{VAR}} password placeholder names an environment variable, and {name:?} is \
-         not one: at most {MAX_ENV_VAR_NAME} characters of [A-Za-z0-9_], not starting \
-         with a digit"
-    )))
-}
-
 /// Resolve password from environment variable if it starts with ${VAR}.
+///
+/// The name is whatever sits between the braces, handed to `std::env::var`
+/// as it is: the process environment is the authority on what a variable
+/// name can be, and a shell's identifier rule is narrower than it (a name
+/// like `DB-PASSWORD` is set by a container runtime and read by this
+/// function without complaint). When the lookup fails the name is printed
+/// in `DbError::EnvVar`, escaped by the error's own rendering, so a newline
+/// in it cannot split the log line -- the escaping sits on the type, and
+/// reaches every caller that builds the variant.
 fn resolve_password(password: &str) -> Result<String> {
     if password.starts_with("${") && password.ends_with('}') {
         let var_name = &password[2..password.len() - 1];
-        check_env_var_name(var_name)?;
         std::env::var(var_name).map_err(|source| DbError::EnvVar {
             name: var_name.to_owned(),
             source,
@@ -880,62 +856,73 @@ pub fn redact_credentials_in_dsn(dsn: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    /// A `${VAR}` placeholder's name is printed in a diagnostic when the
-    /// lookup fails, so it is checked before it gets there.
-    ///
-    /// The newline case is the one that matters: unvalidated, it splits the
-    /// log line in two and the second half is configuration-shaped text
-    /// sitting where a log reader expects a record.
+    /// A well-formed placeholder resolves to the variable's value, and an
+    /// unset one is `DbError::EnvVar` naming the variable. The value and
+    /// the names are generated rather than written as literals: nothing
+    /// depends on what they are, and a string literal handed to something
+    /// named `password` is, to `CodeQL`'s hard-coded-credential rule, a
+    /// credential committed to the repository (the redis-cluster-plugin
+    /// tests generate their throwaway ACL password for the same reason).
     #[test]
-    fn a_password_placeholder_names_a_real_environment_variable() {
-        for name in ["PGPASSWORD", "db_password", "_SECRET", "A1"] {
-            assert!(
-                check_env_var_name(name).is_ok(),
-                "{name} is a name a shell can export"
+    fn a_placeholder_resolves_to_its_variable_or_names_it() {
+        let value = uuid::Uuid::new_v4().simple().to_string();
+        let name = format!("TOOLKIT_DB_TEST_{}", uuid::Uuid::new_v4().simple());
+        temp_env::with_var(&name, Some(&value), || {
+            assert_eq!(
+                resolve_password(&format!("${{{name}}}")).expect("a set variable resolves"),
+                value
             );
-        }
-        for name in [
-            "",
-            "PG PASSWORD",
-            "PG\nPASSWORD",
-            "PG=PASSWORD",
-            "1PASSWORD",
-            "PG-PASSWORD",
-        ] {
-            let refused = check_env_var_name(name)
-                .expect_err("a name no shell could export is not looked up");
-            assert!(matches!(refused, DbError::InvalidParameter(_)), "{refused}");
-        }
-        let long = "A".repeat(MAX_ENV_VAR_NAME + 1);
-        assert!(check_env_var_name(&long).is_err(), "and a name is bounded");
-        assert!(
-            check_env_var_name(&long[1..]).is_ok(),
-            "at exactly the bound"
+        });
+        temp_env::with_var_unset(&name, || {
+            let error = resolve_password(&format!("${{{name}}}"))
+                .expect_err("an unset variable is an error, not an empty password");
+            assert!(
+                matches!(&error, DbError::EnvVar { name: named, .. } if *named == name),
+                "the error names the variable: {error}"
+            );
+            assert!(
+                error.to_string().contains(&name),
+                "and so does its message: {error}"
+            );
+        });
+        assert_eq!(
+            resolve_password(&value).expect("a value that is not a placeholder passes through"),
+            value
         );
     }
 
-    /// The check runs before the lookup, so a malformed name never reaches
-    /// `std::env::var` or the error message it would land in.
-    ///
-    /// The values are generated rather than written as literals. Nothing
-    /// depends on what they are, and a string literal handed to something
-    /// named `password` is, to `CodeQL`'s hard-coded-credential rule, a
-    /// credential committed to the repository. Generating them removes the
-    /// finding instead of suppressing it, as the redis-cluster-plugin tests
-    /// do for their throwaway ACL password.
+    /// The environment, not a shell, decides what a name is: a name a
+    /// container runtime sets and a POSIX shell could not export resolves
+    /// like any other.
     #[test]
-    fn a_malformed_placeholder_is_refused_rather_than_looked_up() {
+    fn a_name_that_is_not_a_shell_identifier_resolves_too() {
+        let value = uuid::Uuid::new_v4().simple().to_string();
+        let name = format!("TOOLKIT-DB-TEST-{}", uuid::Uuid::new_v4().simple());
+        temp_env::with_var(&name, Some(&value), || {
+            assert_eq!(
+                resolve_password(&format!("${{{name}}}")).expect("the environment holds it"),
+                value
+            );
+        });
+    }
+
+    /// The name is printed when the lookup fails, and it comes from
+    /// configuration: a newline in it used to split the log line in two,
+    /// with the second half sitting where a reader expects a record. The
+    /// error's rendering escapes it, on the type, for every caller.
+    #[test]
+    fn a_newline_in_the_name_does_not_split_the_error_line() {
         let generated = uuid::Uuid::new_v4().simple().to_string();
-        let placeholder = format!("${{PG\n{generated}}}");
-        let refused = resolve_password(&placeholder)
-            .expect_err("a placeholder with a newline in its name is not a variable");
+        let name = format!("TOOLKIT_DB_TEST_{generated}\nERROR forged line");
+        let error = temp_env::with_var_unset(&name, || {
+            resolve_password(&format!("${{{name}}}"))
+                .expect_err("a variable with a newline in its name is not set")
+        });
+        let text = error.to_string();
+        assert!(!text.contains('\n'), "one line: {text:?}");
         assert!(
-            matches!(refused, DbError::InvalidParameter(_)),
-            "the shape is refused before the lookup, got {refused}"
-        );
-        assert_eq!(
-            resolve_password(&generated).expect("a value that is not a placeholder passes through"),
-            generated
+            text.contains("\\nERROR forged line"),
+            "escaped, not dropped: {text}"
         );
     }
 
