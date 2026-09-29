@@ -538,11 +538,6 @@ fn register_batch_delete(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         ))
         .problem_response(
             openapi,
-            StatusCode::NOT_FOUND,
-            "An item names a Registry Reference that resolves to no entity",
-        )
-        .problem_response(
-            openapi,
             StatusCode::CONFLICT,
             "The Idempotency-Key is bound to a different request",
         )
@@ -634,11 +629,6 @@ fn register_delete_entity(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
             "Whether this submission replayed an existing operation",
             ResponseHeaderType::Boolean,
         ))
-        .problem_response(
-            openapi,
-            StatusCode::NOT_FOUND,
-            "The entity_key is a Registry Reference that resolves to no entity",
-        )
         .problem_response(
             openapi,
             StatusCode::CONFLICT,

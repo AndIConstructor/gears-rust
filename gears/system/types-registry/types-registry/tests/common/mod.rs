@@ -13,8 +13,8 @@ pub use test_stores::{FailingCall, Hooks, PausePoint, SharedPause, TestStores, T
 
 use gts::GtsConfig;
 use types_registry::{
-    config::TypesRegistryConfig, domain::service::TypesRegistryService,
-    infra::InMemoryGtsRepository,
+    config::TypesRegistryConfig, domain::registry_service::EntityLookup,
+    domain::service::TypesRegistryService, infra::InMemoryGtsRepository,
 };
 
 pub fn default_config() -> GtsConfig {
@@ -176,6 +176,19 @@ where
 /// A read document as a tree, to compare with an authored `json!` value.
 pub fn doc(raw: Option<&serde_json::value::RawValue>) -> Option<serde_json::Value> {
     raw.map(|raw| serde_json::from_str(raw.get()).expect("a read document is JSON"))
+}
+
+/// A batch read's answer for `key`, found by key: batch order is not contractual
+/// (DESIGN §3.3).
+pub fn answer_for<'a>(
+    results: &'a [(EntityKey, EntityLookup)],
+    key: &EntityKey,
+) -> &'a EntityLookup {
+    &results
+        .iter()
+        .find(|(asked, _)| asked == key)
+        .unwrap_or_else(|| panic!("{key:?} answered: {results:?}"))
+        .1
 }
 
 pub fn stores() -> Arc<dyn types_registry::domain::ports::Stores> {

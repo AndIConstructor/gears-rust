@@ -1,5 +1,3 @@
-<!-- Updated: 2026-09-29 by Constructor Tech -->
-
 # Types Registry e2e suite
 
 The suite covers asynchronous admission (`202` + `GET /operations/{id}`), exact and batch reads, and discovery through numbered scenarios. The [legacy suite](legacy/README.md) covers the original synchronous v1 API (`200` + a `results` array) and has no reserved scenario IDs.
@@ -38,7 +36,7 @@ Every scenario has a test. Scenarios proved by one workflow share a test functio
 | 24 | [Cursor continuation](scenarios/discovery.md#cursor-continuation) | `TR-DISC-201`–`TR-DISC-299` | [test_discovery.py](test_discovery.py) | Implemented |
 | 25 | [Read discovered entities with batchGet](scenarios/discovery.md#read-discovered-entities-with-batchget) | `TR-DISC-301`–`TR-DISC-399` | [test_discovery.py](test_discovery.py) | Implemented |
 
-The default Types Registry e2e config enables compatibility force and allows vendor `acme` only under `gts.acme.e2e.*`. TR-REG-902 uses the force-disabled profile; the default profile skips it.
+The shared base config (`config/e2e-local.yaml`) enables compatibility force and allows vendor `acme` only under `gts.acme.e2e.*`, so the unscoped `make e2e-local` server runs TR-REG-903 and TR-REG-904 too. TR-REG-902 uses the force-disabled profile; every other run skips it.
 
 `conftest.py` provides HTTP/fixture setup, `given_registered` and scenario-ID binding; `helpers.py` provides submit-and-poll and read helpers, expected-body builders and comparators. Pytest collects both sets.
 
@@ -58,8 +56,7 @@ Leave exhaustive parameter combinations, malformed inputs, numeric boundaries, a
 
 - `registry_api` defaults to `v2` today. Set `TYPES_REGISTRY_API_VERSION` explicitly when running against another version; there is no fallback.
 - Each test gets a fresh `cf.e2e.r<uuid>.` namespace. Fixture loaders rewrite IDs and `$ref` targets, not schema constraints or values. TR-REG-901 and TR-REG-904 change the vendor and package after loading to exercise the configured policy region.
-- Submissions use a fresh `Idempotency-Key` by default. Replay and conflict
-  scenarios intentionally reuse the key they are testing.
+- Submissions use a fresh `Idempotency-Key` by default. Replay and conflict scenarios intentionally reuse the key they are testing.
 - Registration outcomes match by GTS ID. Deletion outcomes preserve request order and use `assert_operation(..., ordered=True)`.
 - Read responses are compared whole. `assert_exact` compares `{"status", "etag", "body"}` as one JSON value; a `304` has no `body`. An expected `"<etag>"` stands for a validated ETag that is none of the known ones, so a changed ETag is part of the expectation. `assert_batch` matches results by echoed key, because batch order is not contractual. `walk` follows every cursor and `assert_pages` compares the whole walk.
 - Only unpredictable values are masked, after validation: operation IDs, receipt status, timestamps, new ETags, cursors, implementation versions, trace IDs and non-contractual messages.

@@ -5,7 +5,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use toolkit_macros::domain_model;
 
-use crate::domain::selection::FieldSelection;
+use crate::domain::selection::{EntityField, FieldSelection};
 
 /// ponytail: ceiling C7 — no visibility or availability inputs yet; P1 adds them
 /// under a new version, which a v1 token then never matches.
@@ -37,7 +37,7 @@ impl Validator {
                 update_prefixed(&mut ctx, fingerprint);
             }
         }
-        update_prefixed(&mut ctx, selection.canonical().as_bytes());
+        update_selection(&mut ctx, selection);
         let mut digest = [0; 16];
         digest.copy_from_slice(&ctx.finish().as_ref()[..16]);
         Self(digest)
@@ -94,6 +94,20 @@ impl IfNoneMatch {
 fn update_prefixed(ctx: &mut Context, bytes: &[u8]) {
     ctx.update(&(bytes.len() as u64).to_be_bytes());
     ctx.update(bytes);
+}
+
+/// [`update_prefixed`] over [`FieldSelection::canonical`], streamed: a batch
+/// digests one selection per row, so this allocates nothing.
+fn update_selection(ctx: &mut Context, selection: FieldSelection) {
+    let names = || selection.fields().map(EntityField::name);
+    let len = names().map(str::len).sum::<usize>() + names().count().saturating_sub(1);
+    ctx.update(&(len as u64).to_be_bytes());
+    for (index, name) in names().enumerate() {
+        if index > 0 {
+            ctx.update(b",");
+        }
+        ctx.update(name.as_bytes());
+    }
 }
 
 #[cfg(test)]

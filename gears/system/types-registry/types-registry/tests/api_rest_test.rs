@@ -2722,6 +2722,17 @@ fn batch_get(body: &Value) -> Request<Body> {
     post(&format!("{V2}/entities:batchGet"), body)
 }
 
+/// A `:batchGet` result by its echoed key: batch order is not contractual
+/// (DESIGN §3.3).
+fn result_for<'a>(body: &'a Value, key: &str) -> &'a Value {
+    body["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|item| item["entity_key"] == key)
+        .unwrap_or_else(|| panic!("{key} answered: {body}"))
+}
+
 /// One `items` envelope of unconditional keys.
 fn keys(keys: &[&str]) -> Value {
     json!({ "items": keys.iter().map(|k| json!({ "entity_key": k })).collect::<Vec<_>>() })
@@ -2766,7 +2777,7 @@ fn page_ids(body: &Value) -> Vec<String> {
 // --- `:batchGet` ------------------------------------------------------------
 
 /// One explicit result per requested key, absence included, echoing the key it was
-/// asked by and in request order (DESIGN §3.3).
+/// asked by (DESIGN §3.3).
 #[tokio::test]
 async fn a_batch_read_answers_every_key_including_the_absent_one() {
     let router = router_with_db().await;
@@ -2779,20 +2790,19 @@ async fn a_batch_read_answers_every_key_including_the_absent_one() {
     let response = call(&router, batch_get(&body)).await;
 
     assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
-    let items = response.body["items"].as_array().expect("items").to_owned();
+    let items = response.body["items"].as_array().expect("items");
     assert_eq!(items.len(), 3, "one result per requested key: {items:?}");
 
-    assert_eq!(items[0]["entity_key"], json!(CF_ABSENT_TYPE));
-    assert_eq!(items[0]["status"], json!("not_found"));
+    let absent = result_for(&response.body, CF_ABSENT_TYPE);
+    assert_eq!(absent["status"], json!("not_found"));
     assert!(
-        items[0].get("entity").is_none() || items[0]["entity"].is_null(),
-        "an absence carries no entity: {:?}",
-        items[0],
+        absent.get("entity").is_none() || absent["entity"].is_null(),
+        "an absence carries no entity: {absent:?}",
     );
 
-    assert_eq!(items[1]["entity_key"], json!(CF_TYPE));
-    assert_eq!(items[1]["status"], json!("found"));
-    let schema = &items[1]["entity"];
+    let schema = result_for(&response.body, CF_TYPE);
+    assert_eq!(schema["status"], json!("found"));
+    let schema = &schema["entity"];
     assert_eq!(schema["gts_id"], json!(CF_TYPE));
     assert_eq!(schema["kind"], json!("type_schema"));
     assert_eq!(schema["origin"]["resource_version"], json!(1));
@@ -2804,9 +2814,9 @@ async fn a_batch_read_answers_every_key_including_the_absent_one() {
         "a batch read returns every selected document, D3 artifacts included: {schema:?}",
     );
 
-    assert_eq!(items[2]["entity_key"], json!(CF_INSTANCE));
-    assert_eq!(items[2]["status"], json!("found"));
-    assert_eq!(items[2]["entity"]["content"], json!({ "name": "first" }));
+    let instance = result_for(&response.body, CF_INSTANCE);
+    assert_eq!(instance["status"], json!("found"));
+    assert_eq!(instance["entity"]["content"], json!({ "name": "first" }));
 }
 
 /// Both key spellings resolve one row, and each result echoes the spelling it was
@@ -2825,9 +2835,10 @@ async fn a_batch_read_answers_identifiers_and_registry_references_alike() {
     assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
     let items = response.body["items"].as_array().expect("items");
     assert_eq!(items.len(), 2, "{items:?}");
-    assert_eq!(items[0]["entity_key"], json!(uuid));
-    assert_eq!(items[1]["entity_key"], json!(CF_TYPE));
-    for item in items {
+    for item in [
+        result_for(&response.body, &uuid),
+        result_for(&response.body, CF_TYPE),
+    ] {
         assert_eq!(item["status"], json!("found"), "{item:?}");
         assert_eq!(item["entity"]["gts_id"], json!(CF_TYPE));
         assert_eq!(item["entity"]["gts_uuid"], json!(uuid));
@@ -2915,10 +2926,13 @@ async fn an_impossible_identifier_is_classified_alike_by_both_read_surfaces() {
 
     let batched = call(&router, batch_get(&keys(&[IMPOSSIBLE_KEY, CF_ABSENT_TYPE]))).await;
     assert_eq!(batched.status, StatusCode::OK, "{:?}", batched.body);
-    let items = batched.body["items"].as_array().expect("items");
-    assert_eq!(items[0]["entity_key"], json!(IMPOSSIBLE_KEY));
-    assert_eq!(items[0]["status"], json!("not_found"));
-    assert_eq!(items[1]["status"], json!("not_found"));
+    for key in [IMPOSSIBLE_KEY, CF_ABSENT_TYPE] {
+        assert_eq!(
+            result_for(&batched.body, key)["status"],
+            json!("not_found"),
+            "{key}"
+        );
+    }
 }
 
 /// One header cannot represent a batch of validators, so `If-None-Match` is refused
@@ -5058,8 +5072,8 @@ async fn a_batch_answers_unchanged_per_key_with_the_same_etag() {
 
     let first = call(&router, batch_get(&keys(&[CF_TYPE, CF_INSTANCE]))).await;
     assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
-    let etag = |i: usize| {
-        first.body["items"][i]["etag"]
+    let etag = |key: &str| {
+        result_for(&first.body, key)["etag"]
             .as_str()
             .expect("a found result carries etag")
             .to_owned()
@@ -5067,26 +5081,28 @@ async fn a_batch_answers_unchanged_per_key_with_the_same_etag() {
     let exact = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
     assert_eq!(
         exact.etag,
-        Some(etag(0)),
+        Some(etag(CF_TYPE)),
         "byte-identical to the exact read's ETag"
     );
 
     let body = json!({ "items": [
-        { "entity_key": CF_TYPE, "if_none_match": etag(0) },
+        { "entity_key": CF_TYPE, "if_none_match": etag(CF_TYPE) },
         { "entity_key": CF_INSTANCE, "if_none_match": "\"stale\"" },
-        { "entity_key": CF_ABSENT_TYPE, "if_none_match": etag(0) },
+        { "entity_key": CF_ABSENT_TYPE, "if_none_match": etag(CF_TYPE) },
     ] });
     let response = call(&router, batch_get(&body)).await;
     assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
-    let items = &response.body["items"];
-    assert_eq!(items[0]["status"], json!("unchanged"));
-    assert_eq!(items[0]["etag"], json!(etag(0)));
-    assert!(items[0].get("entity").is_none(), "{items}");
-    assert_eq!(items[1]["status"], json!("found"));
-    assert_eq!(items[1]["etag"], json!(etag(1)));
-    assert!(items[1]["entity"].is_object(), "{items}");
-    assert_eq!(items[2]["status"], json!("not_found"));
-    assert!(items[2].get("etag").is_none(), "{items}");
+    let unchanged = result_for(&response.body, CF_TYPE);
+    assert_eq!(unchanged["status"], json!("unchanged"));
+    assert_eq!(unchanged["etag"], json!(etag(CF_TYPE)));
+    assert!(unchanged.get("entity").is_none(), "{unchanged}");
+    let found = result_for(&response.body, CF_INSTANCE);
+    assert_eq!(found["status"], json!("found"));
+    assert_eq!(found["etag"], json!(etag(CF_INSTANCE)));
+    assert!(found["entity"].is_object(), "{found}");
+    let absent = result_for(&response.body, CF_ABSENT_TYPE);
+    assert_eq!(absent["status"], json!("not_found"));
+    assert!(absent.get("etag").is_none(), "{absent}");
 }
 
 /// A page is a changing set, not an exact-key answer (DESIGN §3.3).

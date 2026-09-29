@@ -46,13 +46,12 @@ use super::{
 use crate::config::TypesRegistryConfig;
 use crate::domain::compat::{normalize_dialect, select_baseline};
 use crate::domain::enums::{OperationKind, OwnershipScope, Plane};
-use crate::domain::key::EntityKey;
+use crate::domain::key::{EntityKey, MAX_KEY_LEN};
 use crate::domain::policy::{PolicyRefusal, RegistrationPolicy};
 use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels, RefusalStage};
 use crate::domain::ports::{
     NewOperation, NewOperationItem, OperationItemRow, OperationRow, Stores,
 };
-use crate::domain::registry_service::MAX_KEY_LEN;
 
 /// Largest `Idempotency-Key` the column accepts (`varchar(255)`).
 pub(crate) const MAX_IDEMPOTENCY_KEY: usize = 255;

@@ -1,6 +1,10 @@
 # Discovery scenarios (`GET /entities`)
 
-Each scenario lists its source fixtures before Given and refers to them by name in Given/When/Then. All fixture links point to `fixtures/discovery/`.
+End-to-end discovery scenarios cover namespace patterns, the `kind`, `depth` and lifecycle filters, projection, cursor continuation and hydration through `:batchGet`. The local launcher uses **SQLite**; these tests do not prove PostgreSQL/MySQL or tenant/PDP behavior.
+
+Every scenario has an e2e test in [test_discovery.py](../test_discovery.py); the [suite README](../README.md) lists each group. Each scenario lists its source fixtures before Given and refers to them by name in Given/When/Then; all fixture links point to `fixtures/discovery/`. Every scenario registers into a fresh target namespace and discovers through that namespace's pattern; entities in a neighbouring namespace are controls the pattern must exclude.
+
+Unless a scenario says otherwise, discovery lists only active entities, a walk follows every `next_cursor` with the same query until none remains, and it returns each matching entity once in canonical GTS-ID order. Items are projected as an exact read projects them: the mandatory `gts_id`, `gts_uuid`, `kind` and `lifecycle_status` accompany every selection, an absent `$select` returns the document-free default metadata, and a field that does not apply to an item's kind is absent. Pages carry no validators.
 
 ## Contents
 

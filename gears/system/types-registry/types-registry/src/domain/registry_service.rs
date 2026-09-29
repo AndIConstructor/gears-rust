@@ -27,7 +27,7 @@ use crate::domain::enums::{
     EntityKind, LifecycleFilter, LifecycleStatus, OperationItemStatus, OperationKind,
     OperationStatus,
 };
-pub use crate::domain::key::EntityKey;
+pub use crate::domain::key::{EntityKey, MAX_KEY_LEN};
 use crate::domain::policy::RegistrationPolicy;
 use crate::domain::ports::metrics::AdmissionMetrics;
 use crate::domain::ports::{
@@ -197,9 +197,6 @@ pub struct DiscoveryPage {
 /// bound: a deployment that raises the write ceiling must not silently widen read
 /// fan-out with it.
 pub const MAX_BATCH_GET_KEYS: usize = 100;
-
-/// A read key's ceiling in bytes: a GTS identifier runs to 1024.
-pub const MAX_KEY_LEN: usize = 1024;
 
 /// What the service can fail with. One layer above the two admission halves, so a
 /// transport adapter maps one type.

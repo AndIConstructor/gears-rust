@@ -1,6 +1,10 @@
 # Exact and batch read scenarios
 
-Each scenario lists its source fixtures before Given and refers to them by name in Given/When/Then. Registration and deletion in a Given are completed before the read.
+End-to-end read scenarios cover exact `GET /entities/{entity_key}`, `:batchGet` and conditional reads over live entities and tombstones. The local launcher uses **SQLite**; these tests do not prove PostgreSQL/MySQL or tenant/PDP behavior.
+
+Every scenario has an e2e test in [test_reading.py](../test_reading.py); the [suite README](../README.md) lists each group. Each scenario lists its source fixtures before Given and refers to them by name in Given/When/Then; all fixture links point to `fixtures/reading/`. Every scenario uses a fresh namespace, and registration and deletion in a Given are completed before the read. Independent `other_*` and `device_*` entities are controls: they show that each response answers its own key and that unrequested entities stay out of it.
+
+Responses are compared whole as JSON values. The mandatory `gts_id`, `gts_uuid`, `kind` and `lifecycle_status` accompany every selection, and an absent `$select` returns the document-free default metadata. A field that does not apply to an entity's kind is absent, not `null`. Batch results are matched by echoed `entity_key` after checking completeness and uniqueness, because batch order is not contractual. ETags are compared byte for byte; a `304` carries its ETag and has no body. Reads follow a terminal operation immediately, without sleeps or retries.
 
 ## Contents
 

@@ -90,6 +90,28 @@ fn the_wire_form_is_base64url_of_the_version_byte_and_the_digest() {
     );
 }
 
+/// The streamed selection digests exactly as its canonical string would, so
+/// streaming changes no token.
+#[test]
+fn a_streamed_selection_digests_as_its_canonical_form() {
+    for selection in [
+        FieldSelection::default(),
+        select(&["content"]),
+        select(&["content", "origin", "provenance", "effective_traits"]),
+    ] {
+        let mut streamed = Context::new(&SHA256);
+        update_selection(&mut streamed, selection);
+        let mut joined = Context::new(&SHA256);
+        update_prefixed(&mut joined, selection.canonical().as_bytes());
+        assert_eq!(
+            streamed.finish().as_ref(),
+            joined.finish().as_ref(),
+            "{}",
+            selection.canonical()
+        );
+    }
+}
+
 #[test]
 fn a_token_decodes_back_to_its_validator() {
     for validator in [

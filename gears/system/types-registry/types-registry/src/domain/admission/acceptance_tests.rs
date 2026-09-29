@@ -16,8 +16,8 @@ use super::{
 use crate::config::{PolicyEntry, TypesRegistryConfig};
 use crate::domain::enums::OperationKind;
 use crate::domain::key::EntityKey;
+use crate::domain::key::MAX_KEY_LEN;
 use crate::domain::policy::RegistrationPolicy;
-use crate::domain::registry_service::MAX_KEY_LEN;
 
 fn noop_metrics() -> std::sync::Arc<dyn crate::domain::ports::metrics::AdmissionMetrics> {
     std::sync::Arc::new(crate::domain::ports::metrics::NoopMetrics)

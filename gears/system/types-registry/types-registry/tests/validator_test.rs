@@ -239,16 +239,17 @@ async fn a_batch_answers_each_key_by_its_own_validator() {
         .expect("read");
 
     // Both moved: the base by revision, the derived schema by its refresh.
+    let answer = |key: &str| common::answer_for(&results, &EntityKey::parse(key));
     assert!(
-        matches!(results[0].1, EntityLookup::Found { .. }),
+        matches!(answer(DERIVED), EntityLookup::Found { .. }),
         "{results:?}"
     );
     assert!(
-        matches!(results[1].1, EntityLookup::Found { .. }),
+        matches!(answer(BASE), EntityLookup::Found { .. }),
         "{results:?}"
     );
     assert!(
-        matches!(results[2].1, EntityLookup::NotFound),
+        matches!(answer(MISSING), EntityLookup::NotFound),
         "{results:?}"
     );
 
@@ -268,12 +269,13 @@ async fn a_batch_answers_each_key_by_its_own_validator() {
         .batch_get(&items, FieldSelection::default())
         .await
         .expect("read");
+    let answer = |key: &str| common::answer_for(&results, &EntityKey::parse(key));
     assert!(
-        matches!(results[0].1, EntityLookup::Unchanged { etag } if etag == fresh),
+        matches!(answer(BASE), EntityLookup::Unchanged { etag } if *etag == fresh),
         "{results:?}",
     );
     assert!(
-        matches!(results[1].1, EntityLookup::Found { .. }),
+        matches!(answer(DERIVED), EntityLookup::Found { .. }),
         "{results:?}"
     );
 }
@@ -340,13 +342,7 @@ async fn both_keys_of_one_entity_are_answered_by_their_own_conditions() {
         .batch_get(&items, select(&["content"]))
         .await
         .expect("read");
-    let answer = |key: &EntityKey| {
-        &results
-            .iter()
-            .find(|(asked, _)| asked == key)
-            .unwrap_or_else(|| panic!("{key:?} answered: {results:?}"))
-            .1
-    };
+    let answer = |key: &EntityKey| common::answer_for(&results, key);
     assert!(
         matches!(answer(&reference), EntityLookup::Unchanged { etag } if *etag == current),
         "{results:?}"

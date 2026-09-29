@@ -230,7 +230,7 @@ async fn selected_documents_are_fetched_and_only_they(h: &Harness, backend: &str
     let EntityLookup::Found {
         record: schema_record,
         ..
-    } = &results[0].1
+    } = common::answer_for(&results, &keys[0].key)
     else {
         panic!("type found on {backend}");
     };
@@ -260,7 +260,7 @@ async fn selected_documents_are_fetched_and_only_they(h: &Harness, backend: &str
     let EntityLookup::Found {
         record: schema_record,
         ..
-    } = &results[0].1
+    } = common::answer_for(&results, &keys[0].key)
     else {
         panic!("type found on {backend}");
     };

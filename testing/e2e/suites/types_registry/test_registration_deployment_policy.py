@@ -23,7 +23,8 @@ from .helpers import (
 )
 
 
-FORCE_ENABLED = os.getenv("TYPES_REGISTRY_FORCE_ENABLED_E2E") == "1"
+# The shared e2e config enables force; only the force-disabled profile sets "0".
+FORCE_ENABLED = os.getenv("TYPES_REGISTRY_FORCE_ENABLED_E2E") != "0"
 
 
 def _acme_schema(template, package):
