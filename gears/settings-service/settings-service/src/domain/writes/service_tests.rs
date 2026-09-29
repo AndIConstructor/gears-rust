@@ -13,10 +13,10 @@ use uuid::Uuid;
 
 use std::sync::atomic::Ordering;
 
-use super::ImpactReport;
 use super::{
     Change, Committed, Gated, StagePrecondition, Staged, StepUpPolicy, ValueWriter, WriteActor,
 };
+use super::{ImpactPage, ImpactReport};
 use crate::audit::{AuditOperation, AuditValue};
 use crate::domain::access::{AccessRepository, RestrictionDraft, TenantAccess};
 use crate::domain::error::DomainError;
@@ -1857,7 +1857,7 @@ async fn the_impact_walk_asks_the_resolver_and_the_database_a_fixed_number_of_ti
             &declaration,
             ScopeTarget::Tenant(t.a),
             &json!(true),
-            None,
+            ImpactPage::Of(None),
         )
         .await
         .expect("validates");
@@ -1914,7 +1914,7 @@ async fn a_walk_the_resolver_never_answers_is_cut_by_the_time_budget() {
             &declaration,
             ScopeTarget::Platform,
             &json!(true),
-            None,
+            ImpactPage::Of(None),
         )
         .await
         .expect("answers");
@@ -1928,4 +1928,51 @@ async fn a_walk_the_resolver_never_answers_is_cut_by_the_time_budget() {
     );
     assert!(validated.violations.is_empty());
     assert_eq!(validated.effective.value, json!(false));
+}
+
+#[tokio::test]
+async fn validate_skips_the_impact_walk_when_the_caller_says_so() {
+    // A client that fetches the report through `impact` on its own time asks
+    // for the type check alone: no report, and no walk behind it.
+    let h = WriteHarness::new().await;
+    h.declare("strict", scope_class::CASCADING, json!(false))
+        .await;
+    let conn = h.base.db.conn().expect("connection");
+    let declaration = h
+        .base
+        .resolver
+        .find_declaration(&conn, &h.base.key("strict"))
+        .await
+        .expect("lookup")
+        .expect("declared");
+    let walks = h.base.hierarchy.subtree_calls();
+
+    let report = h
+        .writer
+        .validate(
+            &conn,
+            &declaration,
+            ScopeTarget::Platform,
+            &json!(true),
+            ImpactPage::Skipped,
+        )
+        .await
+        .expect("answers");
+    assert!(report.impact.is_none());
+    assert!(report.violations.is_empty());
+    assert_eq!(h.base.hierarchy.subtree_calls(), walks, "no walk was made");
+
+    let carried = h
+        .writer
+        .validate(
+            &conn,
+            &declaration,
+            ScopeTarget::Platform,
+            &json!(true),
+            ImpactPage::Of(Some(1)),
+        )
+        .await
+        .expect("answers");
+    assert!(carried.impact.is_some());
+    assert_eq!(h.base.hierarchy.subtree_calls(), walks + 1);
 }

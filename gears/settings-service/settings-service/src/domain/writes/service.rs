@@ -216,6 +216,19 @@ pub struct Committed {
     pub released_secret: Option<String>,
 }
 
+/// Whether `validate` carries the impact report, and how long a page.
+///
+/// The report is advisory; a client that fetches it on its own time through
+/// `impact` — asynchronously, once the type check has answered — asks
+/// `validate` to skip it, and pays only for the type check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImpactPage {
+    /// The report, with the page size `impact` takes.
+    Of(Option<usize>),
+    /// No report.
+    Skipped,
+}
+
 /// The read-only report of `validate`.
 #[derive(Debug, Clone)]
 pub struct ValidationReport {
@@ -1099,8 +1112,9 @@ where
     }
 
     /// The read-only report: validity with field-level detail, the current
-    /// effective value, and the impact for a cascading setting. Stores nothing
-    /// and emits no record; the same answer for the same inputs.
+    /// effective value, and — unless the caller skips it — the impact for a
+    /// cascading setting. Stores nothing and emits no record; the same answer
+    /// for the same inputs.
     ///
     /// # Errors
     /// [`DomainError`] when the resolver or the walk cannot answer.
@@ -1110,7 +1124,7 @@ where
         declaration: &Declaration,
         target: ScopeTarget,
         value: &Value,
-        limit: Option<usize>,
+        page: ImpactPage,
     ) -> Result<ValidationReport, DomainError> {
         // @cpt-begin:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-5
         let violations = self
@@ -1126,10 +1140,11 @@ where
         let effective = self.resolver.resolve(conn, &key, target).await?;
         // @cpt-end:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-6
         // @cpt-begin:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-7
-        let impact = if declaration.scope_class == scope_class::CASCADING {
-            Some(self.impact(conn, declaration, target, value, limit).await?)
-        } else {
-            None
+        let impact = match page {
+            ImpactPage::Of(limit) if declaration.scope_class == scope_class::CASCADING => {
+                Some(self.impact(conn, declaration, target, value, limit).await?)
+            }
+            ImpactPage::Of(_) | ImpactPage::Skipped => None,
         };
         // @cpt-end:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-7
         Ok(ValidationReport {

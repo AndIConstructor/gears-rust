@@ -104,14 +104,14 @@ Throughout, `tenant` omitted means the caller's own tenant, which for a platform
 - The target is outside the caller's subtree
 
 **Steps**:
-1. [x] - `p1` - Actor sends POST /settings-service/v1/settings/{key}/validate?tenant={tenant_id} with the candidate `value` and an optional `limit` for the impact page - `inst-vw-val-1`
+1. [x] - `p1` - Actor sends POST /settings-service/v1/settings/{key}/validate?tenant={tenant_id} with the candidate `value`, an optional `limit` for the impact page, and optionally `impact: false` to skip that page — for a client that fetches the report on its own time through `impact`, asynchronously, and waits only on the type check - `inst-vw-val-1`
 2. [x] - `p1` - Authorize `read` on the setting's key; **IF** deny or cannot be obtained → **RETURN** `403`; no step-up is consulted, since nothing is written - `inst-vw-val-2`
 3. [x] - `p1` - Confirm the target is within the caller's subtree and not standalone; **IF** not → **RETURN** `403` - `inst-vw-val-3`
 4. [x] - `p1` - DB: SELECT the declaration by key; **IF** none, **OR** the caller's effective access is `hidden` → **RETURN** `404` - `inst-vw-val-4`
 5. [x] - `p1` - Validate the value through the Type Validator against the declaration's `value_type_id`, including the size cap and numeric canonicality, collecting field-level detail rather than stopping at the first fault - `inst-vw-val-5`
 6. [x] - `p1` - Resolve the current effective value and its source at the target through the Value Resolver - `inst-vw-val-6`
-7. [x] - `p1` - **IF** the scope class is `cascading` → invoke the bounded impact walk for the target and the candidate value - `inst-vw-val-7`
-8. [x] - `p1` - **RETURN** `200` with `valid` and any violations, the current effective value and source, and the impact page; the call stores nothing, emits no audit record, and is never a prerequisite for a write - `inst-vw-val-8`
+7. [x] - `p1` - **IF** the scope class is `cascading` **AND** the request did not skip the impact → invoke the bounded impact walk for the target and the candidate value - `inst-vw-val-7`
+8. [x] - `p1` - **RETURN** `200` with `valid` and any violations, the current effective value and source, and the impact page when it was asked for; the call stores nothing, emits no audit record, and is never a prerequisite for a write - `inst-vw-val-8`
 
 ### Set a Value
 

@@ -32,6 +32,11 @@ pub struct ValidateRequest {
     /// Page size of the impact report, for a cascading setting.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Whether to carry the impact report; `true` when absent. A client that
+    /// fetches the report on its own time through `impact` sends `false` and
+    /// gets the type check alone.
+    #[serde(default)]
+    pub impact: Option<bool>,
 }
 
 /// `POST /settings/{key}/impact`: the candidate whose reach is asked about.
@@ -363,7 +368,8 @@ pub struct ValidationReportDto {
     pub violations: Vec<ViolationDto>,
     /// The current effective value at the target.
     pub effective: EffectiveValueDto,
-    /// The descendants the change would affect, for a cascading setting.
+    /// The descendants the change would affect, for a cascading setting;
+    /// absent when the request skipped it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub impact: Option<ImpactReportDto>,
 }

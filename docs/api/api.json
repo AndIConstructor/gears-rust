@@ -21275,6 +21275,13 @@
       "ValidateRequest": {
         "description": "`POST /settings/{key}/validate`: the candidate to check.",
         "properties": {
+          "impact": {
+            "description": "Whether to carry the impact report; `true` when absent. A client that\nfetches the report on its own time through `impact` sends `false` and\ngets the type check alone.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "limit": {
             "description": "Page size of the impact report, for a cascading setting.",
             "minimum": 0,
@@ -21306,7 +21313,7 @@
               },
               {
                 "$ref": "#/components/schemas/ImpactReportDto",
-                "description": "The descendants the change would affect, for a cascading setting."
+                "description": "The descendants the change would affect, for a cascading setting;\nabsent when the request skipped it."
               }
             ]
           },
@@ -57037,7 +57044,7 @@
     },
     "/settings-service/v1/settings/{key}/validate": {
       "post": {
-        "description": "Report whether the candidate would be accepted, with field-level detail, the current effective value and its source at the target, and - for a cascading setting - the descendants the change would affect, in pages. Read-only: needs no step-up, stores nothing, emits no audit record, and is never required before a write.",
+        "description": "Report whether the candidate would be accepted, with field-level detail, the current effective value and its source at the target, and - for a cascading setting - the descendants the change would affect, in pages, unless the body says `impact: false`, for a client that fetches that report on its own time through `impact`. Read-only: needs no step-up, stores nothing, emits no audit record, and is never required before a write.",
         "operationId": "settings_service.validate_value",
         "parameters": [
           {
