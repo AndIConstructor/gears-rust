@@ -97,13 +97,19 @@ pub(super) async fn resolve_type_filter<F: FilterField>(
     }
     map_type_values(node, type_field, &mut |value| {
         let raw = type_path(value, type_field.name())?;
-        let id = ids.get(raw).ok_or_else(|| {
-            DomainError::validation(format!(
-                "invalid $filter: Unknown type in filter: {raw} (field {})",
-                type_field.name()
-            ))
+        // Registered identifiers are authoritative: type creation historically
+        // accepted codes outside the stricter GTS grammar. Keep those records
+        // queryable by their exact stored identifier.
+        if let Some(id) = ids.get(raw) {
+            return Ok(Value::Number((*id).into()));
+        }
+        GtsTypePath::new(raw).map_err(|e| {
+            DomainError::validation(format!("invalid $filter: field {}: {e}", type_field.name()))
         })?;
-        Ok(Value::Number((*id).into()))
+        Err(DomainError::validation(format!(
+            "invalid $filter: Unknown type in filter: {raw} (field {})",
+            type_field.name()
+        )))
     })
 }
 
@@ -154,10 +160,8 @@ fn type_path<'a>(value: &'a Value, field: &str) -> Result<&'a str, DomainError> 
             "invalid $filter: field {field} expects a GTS type path string"
         )));
     };
-    GtsTypePath::new(raw)
-        .map_err(|e| DomainError::validation(format!("invalid $filter: field {field}: {e}")))?;
-    // Type creation stores the original spelling. Validate without normalizing
-    // the lookup, which could miss the type or select a different stored type.
+    // Preserve the original spelling for lookup. Syntax validation happens only
+    // if no registered identifier matches it.
     Ok(raw)
 }
 

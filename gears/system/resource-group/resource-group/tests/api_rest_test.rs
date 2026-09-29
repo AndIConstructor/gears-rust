@@ -2679,10 +2679,16 @@ async fn group_filters_share_uuid_normalization_and_gts_resolution() {
 
 /// Existing type codes are stored verbatim. Filtering must not redirect an
 /// exact stored identifier to another row with its normalized spelling.
+/// Registered codes accepted by type creation remain queryable even when the
+/// stricter GTS parser rejects their syntax.
 #[tokio::test]
-async fn group_type_filters_preserve_stored_identifier_spelling() {
+async fn group_type_filters_preserve_registered_identifiers() {
     let canonical = rg_type_id!("test.filter._.spelling.v1~");
-    for stored in [format!(" {canonical} "), canonical.to_uppercase()] {
+    for stored in [
+        format!(" {canonical} "),
+        canonical.to_uppercase(),
+        rg_type_id!("test.filter.spelling.v1~"),
+    ] {
         let (router, types, groups, _) = build_shared_router().await;
         let tenant = Uuid::now_v7();
         let mut expected_id = Uuid::nil();

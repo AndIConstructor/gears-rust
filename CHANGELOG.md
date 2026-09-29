@@ -12,7 +12,8 @@ release-plz updates this file in the Release PR.
 ### Fixed
 
 - Resource-group filters accept quoted UUIDs and resolve membership GTS type paths
-  to storage IDs while preserving the registered identifier spelling. Invalid
+  to storage IDs while preserving exact registered identifiers, including legacy
+  codes accepted by type creation outside the stricter GTS grammar. Invalid
   query parameters return HTTP 400 instead of 500. GTS filters support `eq`, `ne`,
   and `in`; operators without meaningful surrogate-ID semantics are rejected.
 
