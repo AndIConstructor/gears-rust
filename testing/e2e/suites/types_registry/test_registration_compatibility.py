@@ -5,9 +5,13 @@ from copy import deepcopy
 import pytest
 
 from .helpers import (
+    assert_exact,
     assert_exact_entity,
     assert_json,
+    get_entity,
     instance_entity,
+    managed,
+    mandatory,
     outcome,
     register_and_assert,
     schema_entity,
@@ -185,3 +189,103 @@ async def test_breaking_contract_is_published_under_a_new_major(
     )
     assert_json(v1_after.json(), v1_before.json())
     assert_json(instance_after.json(), instance_before.json())
+
+
+def _inlined(document, content=None):
+    """A resolved `$ref` target: authored content without `$id` and `$schema`."""
+    content = document["content"] if content is None else content
+    return {key: value for key, value in content.items() if key not in {"$id", "$schema"}}
+
+
+def _referring(template, target_content):
+    resolved = deepcopy(template["content"])
+    resolved["properties"]["payload"]["properties"]["person"] = _inlined(template, target_content)
+    return resolved
+
+
+@pytest.mark.scenario("TR-REG-505")
+async def test_a_revision_refreshes_transitive_schema_references(
+    registry_http, registry_api_path, registration_fixture, given_registered
+):
+    """Referrers at every level see the revision; their versions and authored
+    content do not move, and an unrelated schema keeps its validator."""
+    person = registration_fixture("person_schema")
+    referrer = registration_fixture("person_referrer_schema")
+    outer = schema_with_id(
+        referrer, referrer["gts_id"].replace(".referrer.v1~", ".outer_referrer.v1~")
+    )
+    outer["content"]["properties"]["payload"]["properties"]["person"] = {
+        "$ref": f"gts://{referrer['gts_id']}"
+    }
+    independent = schema_with_id(
+        person, person["gts_id"].replace(".person.v1~", ".independent.v1~")
+    )
+    await given_registered(person, referrer, outer, independent)
+    select = "content,origin,resolved_schema"
+
+    def body(document, version, resolved):
+        return {
+            **mandatory(document),
+            "origin": managed(version),
+            "content": document["content"],
+            "resolved_schema": resolved,
+        }
+
+    revised = deepcopy(person)
+    revised["content"]["properties"]["nickname"] = {"type": "string"}
+    revised["expected_resource_version"] = 1
+
+    def referrer_resolution(person_content):
+        return _referring(referrer, _inlined(person, person_content))
+
+    before = {
+        "person": body(person, 1, person["content"]),
+        "referrer": body(referrer, 1, referrer_resolution(person["content"])),
+        "outer": body(outer, 1, _referring(outer, referrer_resolution(person["content"]))),
+        "independent": body(independent, 1, independent["content"]),
+    }
+    after = {
+        "person": body(revised, 2, revised["content"]),
+        "referrer": body(referrer, 1, referrer_resolution(revised["content"])),
+        "outer": body(outer, 1, _referring(outer, referrer_resolution(revised["content"]))),
+    }
+    documents = {"person": person, "referrer": referrer, "outer": outer, "independent": independent}
+    etags = {}
+    for name, document in documents.items():
+        response = await get_entity(
+            registry_http, registry_api_path, document["gts_id"], select=select
+        )
+        etags[name] = assert_exact(
+            response, {"status": 200, "etag": "<etag>", "body": before[name]}
+        )
+
+    await register_and_assert(
+        registry_http, registry_api_path, [revised], outcome(person, "succeeded", 2)
+    )
+
+    fresh = {}
+    for name, document in documents.items():
+        response = await get_entity(
+            registry_http,
+            registry_api_path,
+            document["gts_id"],
+            select=select,
+            if_none_match=etags[name],
+        )
+        if name == "independent":
+            assert_exact(response, {"status": 304, "etag": etags[name]})
+            continue
+        fresh[name] = assert_exact(
+            response,
+            {"status": 200, "etag": "<etag>", "body": after[name]},
+            known_etags=tuple(etags.values()),
+        )
+    for name in ("referrer", "outer"):
+        response = await get_entity(
+            registry_http,
+            registry_api_path,
+            documents[name]["gts_id"],
+            select=select,
+            if_none_match=fresh[name],
+        )
+        assert_exact(response, {"status": 304, "etag": fresh[name]})

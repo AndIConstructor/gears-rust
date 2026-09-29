@@ -186,6 +186,10 @@ pub async fn batch_delete_entities(
     extract::Json(req): extract::Json<DeleteEntitiesRequest>,
 ) -> ApiResult<(StatusCode, HeaderMap, Json<OperationAcceptedDto>)> {
     let service = require_registry(service)?;
+    // Refused rather than ignored, exactly as on the single route.
+    if headers.contains_key(header::IF_MATCH) {
+        return Err(super::error::if_match_not_supported());
+    }
     let request = DeleteRequest {
         idempotency_key: idempotency_key(&headers)?,
         dry_run: req.dry_run.unwrap_or(false),
@@ -193,7 +197,7 @@ pub async fn batch_delete_entities(
             .items
             .into_iter()
             .map(|item| DeleteTarget {
-                key: EntityKey::parse(&item.key),
+                key: EntityKey::parse(&item.entity_key),
                 expected_resource_version: item.expected_resource_version,
             })
             .collect(),
@@ -331,7 +335,8 @@ pub async fn get_operation(
         .await
         .map_err(CanonicalError::from)?
         .ok_or_else(|| CanonicalError::from(WorkerError::OperationNotFound { operation_id }))?;
-    Ok((no_store(), Json(record.into())))
+    let dto = OperationDto::try_from(record).map_err(CanonicalError::from)?;
+    Ok((no_store(), Json(dto)))
 }
 
 /// Add `Cache-Control: no-store` to caller-specific, changing responses.
@@ -428,18 +433,18 @@ pub async fn batch_get_entities(
     let mut reads: Vec<BatchGetItem> = Vec::with_capacity(items.len());
     for item in items {
         // Before `EntityKey::parse` copies the key; the domain repeats the check.
-        if item.key.len() > MAX_KEY_LEN {
-            return Err(super::error::key_too_long(item.key.len()));
+        if item.entity_key.len() > MAX_KEY_LEN {
+            return Err(super::error::key_too_long(item.entity_key.len()));
         }
         if let Some(validator) = &item.if_none_match
             && validator.len() > MAX_KEY_LEN
         {
             return Err(super::error::validator_too_long(validator.len()));
         }
-        let key = EntityKey::parse(&item.key);
+        let key = EntityKey::parse(&item.entity_key);
         // The service dedups; the echo keeps the first spelling.
         if let Entry::Vacant(e) = spelling_map.entry(key.clone()) {
-            e.insert(item.key);
+            e.insert(item.entity_key);
         }
         reads.push(BatchGetItem {
             key,

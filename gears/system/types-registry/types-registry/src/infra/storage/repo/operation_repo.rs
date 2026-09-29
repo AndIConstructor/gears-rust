@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::domain::admission::Precondition;
 use crate::domain::admission::fingerprint::{RequestFingerprint, ScopeHash};
+use crate::domain::key::EntityKey;
 use crate::domain::ports::{
     ItemSuccess, NewOperation, NewOperationItem, OperationItemRow, OperationRow,
 };
@@ -60,7 +61,7 @@ fn operation_item_row(m: operation_item::Model) -> Result<OperationItemRow, Scop
         id: m.id,
         operation_id: m.operation_id,
         item_no: m.item_no,
-        gts_id: m.gts_id,
+        key: EntityKey::parse(&m.entity_key),
         dry_run: m.dry_run,
         kind: m.kind.into(),
         precondition,
@@ -170,7 +171,7 @@ impl OperationRepo {
             .map(|item| operation_item::ActiveModel {
                 operation_id: Set(parent.id),
                 item_no: Set(item.item_no),
-                gts_id: Set(item.gts_id.clone()),
+                entity_key: Set(item.key.to_string()),
                 dry_run: Set(parent.dry_run),
                 kind: Set(parent.kind.into()),
                 expected_resource_version: Set(item.precondition.stored_value()),

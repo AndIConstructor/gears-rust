@@ -7,10 +7,15 @@ import pytest
 from .helpers import (
     assert_absent,
     assert_bad_request,
+    assert_exact,
     assert_exact_entity,
     assert_json,
+    get_entity,
     invalid_argument,
+    mandatory,
     outcome,
+    provenance,
+    read_created,
     post_registration,
     register_and_assert,
     schema_entity,
@@ -158,3 +163,58 @@ async def test_failed_first_minor_blocks_the_next_minor(
     )
     await assert_absent(registry_http, registry_api_path, first)
     await assert_absent(registry_http, registry_api_path, second)
+
+
+@pytest.mark.scenario("TR-REG-606")
+async def test_a_compatible_minor_with_changed_content_needs_no_force(
+    registry_http, registry_api_path, registration_fixture, given_registered
+):
+    """An ordinary cross-minor check admits a widening; nothing is waived."""
+    first = registration_fixture("person_minor_0_schema")
+    second = registration_fixture("person_minor_1_schema")
+    await given_registered(first)
+    before = await _read(registry_http, registry_api_path, first, 1)
+    second["content"]["properties"]["nickname"] = {"type": "string"}
+
+    operation = await register_and_assert(
+        registry_http, registry_api_path, [second], outcome(second, "succeeded", 1)
+    )
+    await read_created(registry_http, registry_api_path, schema_entity(second, 1), operation)
+    assert_exact(
+        await get_entity(
+            registry_http, registry_api_path, second["gts_id"], select="provenance"
+        ),
+        {
+            "status": 200,
+            "etag": "<etag>",
+            "body": {**mandatory(second), "provenance": provenance(False)},
+        },
+    )
+    after = await _read(
+        registry_http, registry_api_path, first, 1, etag=before.headers["etag"]
+    )
+    assert_json(after.json(), before.json())
+
+
+@pytest.mark.scenario("TR-REG-607")
+async def test_an_incompatible_minor_is_refused_without_force(
+    registry_http, registry_api_path, registration_fixture, given_registered
+):
+    """A deployment that permits `force` still applies it only when asked."""
+    first = registration_fixture("person_minor_0_schema")
+    second = registration_fixture("person_minor_1_schema")
+    await given_registered(first)
+    before = await _read(registry_http, registry_api_path, first, 1)
+    second["content"]["properties"]["name"]["minLength"] = 2
+
+    await register_and_assert(
+        registry_http,
+        registry_api_path,
+        [second],
+        outcome(second, "failed", None, "incompatible_with_baseline"),
+    )
+    await assert_absent(registry_http, registry_api_path, second)
+    after = await _read(
+        registry_http, registry_api_path, first, 1, etag=before.headers["etag"]
+    )
+    assert_json(after.json(), before.json())

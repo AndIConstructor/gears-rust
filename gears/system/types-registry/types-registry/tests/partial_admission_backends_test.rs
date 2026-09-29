@@ -136,7 +136,7 @@ fn assert_succeeded(outcome: &OperationOutcome, gts_id: &str, backend: &str) {
     let item = outcome
         .items
         .iter()
-        .find(|item| item.gts_id == gts_id)
+        .find(|item| item.key.gts_id() == Some(gts_id))
         .unwrap_or_else(|| panic!("{gts_id} is owed an outcome on {backend}"));
     assert_eq!(
         item.status,
@@ -155,7 +155,7 @@ fn assert_refused(
     let item = outcome
         .items
         .iter()
-        .find(|item| item.gts_id == gts_id)
+        .find(|item| item.key.gts_id() == Some(gts_id))
         .unwrap_or_else(|| panic!("{gts_id} is owed an outcome on {backend}"));
     assert_eq!(
         (item.status, item.failure.as_ref().map(|f| &f.reason)),

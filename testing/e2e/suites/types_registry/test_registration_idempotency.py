@@ -13,12 +13,15 @@ from .helpers import (
     assert_json,
     assert_not_found,
     assert_operation,
+    assert_absent,
     assert_problem,
     assert_uuid,
     completed,
+    key_conflict,
     outcome,
     poll_operation,
     post_registration,
+    read_created,
     schema_entity,
 )
 
@@ -212,4 +215,137 @@ async def test_an_unknown_operation_is_a_not_found_naming_the_operation(
                 "resource_name": operation_id,
             },
         },
+    )
+
+
+@pytest.mark.scenario("TR-REG-205")
+async def test_replay_keeps_a_refusal_after_its_dependency_arrives(
+    registry_http, registry_api_path, registration_fixture
+):
+    """Replay does not re-evaluate; a new key does."""
+    target = registration_fixture("person_schema")
+    referrer = registration_fixture("person_referrer_schema")
+    k1 = str(uuid.uuid4())
+    refused, refused_location = await _submit_and_await(
+        registry_http,
+        registry_api_path,
+        referrer,
+        k1,
+        outcome(
+            referrer,
+            "failed",
+            None,
+            "dependency_not_found",
+            dependency_id=target["gts_id"],
+            dependency_kind="ref",
+        ),
+    )
+    await _submit_and_await(
+        registry_http,
+        registry_api_path,
+        target,
+        str(uuid.uuid4()),
+        outcome(target, "succeeded", 1),
+    )
+    target_read = await assert_exact_entity(
+        registry_http, registry_api_path, target, schema_entity(target, 1)
+    )
+
+    replay_receipt, replay_location = _assert_receipt(
+        await post_registration(registry_http, registry_api_path, [referrer], idempotency_key=k1),
+        replayed_operation_id=refused["operation_id"],
+    )
+    assert replay_location == refused_location
+    assert_json(
+        await poll_operation(registry_http, replay_receipt, replay_location, "registration"),
+        refused,
+    )
+    await assert_absent(registry_http, registry_api_path, referrer)
+
+    admitted, _ = await _submit_and_await(
+        registry_http,
+        registry_api_path,
+        referrer,
+        str(uuid.uuid4()),
+        outcome(referrer, "succeeded", 1),
+    )
+    resolved = deepcopy(referrer["content"])
+    resolved["properties"]["payload"]["properties"]["person"] = {
+        key: value for key, value in target["content"].items() if key not in {"$id", "$schema"}
+    }
+    await read_created(
+        registry_http,
+        registry_api_path,
+        schema_entity(referrer, 1, resolved_schema=resolved),
+        admitted,
+    )
+    await assert_exact_entity(
+        registry_http,
+        registry_api_path,
+        target,
+        schema_entity(target, 1),
+        etag=target_read.headers["etag"],
+    )
+
+
+@pytest.mark.scenario("TR-REG-206")
+async def test_changing_only_the_precondition_conflicts_with_a_used_key(
+    registry_http, registry_api_path, registration_fixture, given_registered
+):
+    """The precondition is part of the request a key is bound to."""
+    schema = registration_fixture("person_schema")
+    await given_registered(schema)
+    current = deepcopy(schema)
+    current["content"]["title"] = "Current Person"
+    current["expected_resource_version"] = 1
+    await _submit_and_await(
+        registry_http,
+        registry_api_path,
+        current,
+        str(uuid.uuid4()),
+        outcome(schema, "succeeded", 2),
+    )
+    candidate = deepcopy(current)
+    candidate["content"]["description"] = "Updated description"
+    k1 = str(uuid.uuid4())
+    stale, stale_location = await _submit_and_await(
+        registry_http,
+        registry_api_path,
+        candidate,
+        k1,
+        outcome(schema, "failed", None, "precondition_failed"),
+    )
+    before = await assert_exact_entity(
+        registry_http, registry_api_path, schema, schema_entity(current, 2)
+    )
+
+    corrected = {**candidate, "expected_resource_version": 2}
+    assert_problem(
+        await post_registration(
+            registry_http, registry_api_path, [corrected], idempotency_key=k1
+        ),
+        409,
+        key_conflict(stale["operation_id"]),
+    )
+    assert_json(
+        await poll_operation(registry_http, stale, stale_location, "registration"),
+        stale,
+    )
+    await assert_exact_entity(
+        registry_http,
+        registry_api_path,
+        schema,
+        schema_entity(current, 2),
+        etag=before.headers["etag"],
+    )
+
+    await _submit_and_await(
+        registry_http,
+        registry_api_path,
+        corrected,
+        str(uuid.uuid4()),
+        outcome(schema, "succeeded", 3),
+    )
+    await assert_exact_entity(
+        registry_http, registry_api_path, schema, schema_entity(corrected, 3)
     )

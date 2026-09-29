@@ -1713,7 +1713,7 @@ fn delete_one(key: Option<&str>, entity_key: &str, query: &str) -> Request<Body>
 }
 
 fn one_target(key: &str, expected_resource_version: i64) -> Value {
-    json!({ "items": [{ "key": key, "expected_resource_version": expected_resource_version }] })
+    json!({ "items": [{ "entity_key": key, "expected_resource_version": expected_resource_version }] })
 }
 
 async fn register_entity(router: &Router, idempotency_key: &str, gts_id: &str) {
@@ -1774,7 +1774,7 @@ async fn a_deletion_is_accepted_polled_and_leaves_a_tombstone() {
     assert_eq!(operation["dry_run"], json!(false));
     assert_eq!(operation["status"], json!("completed"));
     let item = &operation["items"][0];
-    assert_eq!(item["gts_id"], json!(CF_TYPE));
+    assert_eq!(item["entity_key"], json!(CF_TYPE));
     assert_eq!(item["status"], json!("succeeded"));
 
     let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
@@ -1796,8 +1796,8 @@ async fn a_batch_deletion_reports_outcomes_in_request_order() {
 
     let body = json!({
         "items": [
-            { "key": second, "expected_resource_version": 1 },
-            { "key": CF_TYPE, "expected_resource_version": 1 },
+            { "entity_key": second, "expected_resource_version": 1 },
+            { "entity_key": CF_TYPE, "expected_resource_version": 1 },
         ]
     });
     let accepted = call(&router, batch_delete(Some("delete-both"), &body)).await;
@@ -1806,19 +1806,19 @@ async fn a_batch_deletion_reports_outcomes_in_request_order() {
     let operation = poll(&router, &accepted).await;
     assert_eq!(operation["kind"], json!("deletion"));
     assert_eq!(
-        operation["items"][0]["gts_id"],
+        operation["items"][0]["entity_key"],
         json!(second),
         "request order, not identifier order: {:?}",
         operation["items"],
     );
-    assert_eq!(operation["items"][1]["gts_id"], json!(CF_TYPE));
+    assert_eq!(operation["items"][1]["entity_key"], json!(CF_TYPE));
     for index in 0..2 {
         assert_eq!(operation["items"][index]["status"], json!("succeeded"));
     }
 }
 
 #[tokio::test]
-async fn deleting_by_registry_reference_reports_the_identifier() {
+async fn deleting_by_registry_reference_echoes_the_reference() {
     let router = router_with_db().await;
     register_entity(&router, "register", CF_TYPE).await;
     let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
@@ -1836,9 +1836,9 @@ async fn deleting_by_registry_reference_reports_the_identifier() {
 
     let operation = poll(&router, &accepted).await;
     assert_eq!(
-        operation["items"][0]["gts_id"],
-        json!(CF_TYPE),
-        "the outcome is keyed by identifier even for a UUID submission: {:?}",
+        operation["items"][0]["entity_key"],
+        json!(reference),
+        "the outcome echoes the key as submitted: {:?}",
         operation["items"],
     );
     assert_eq!(operation["items"][0]["status"], json!("succeeded"));
@@ -1869,9 +1869,9 @@ async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
             Some("mixed-batch"),
             &json!({
                 "items": [
-                    { "key": CF_TYPE, "expected_resource_version": 1 },
-                    { "key": references[0], "expected_resource_version": 1 },
-                    { "key": references[1], "expected_resource_version": 1 },
+                    { "entity_key": CF_TYPE, "expected_resource_version": 1 },
+                    { "entity_key": references[0], "expected_resource_version": 1 },
+                    { "entity_key": references[1], "expected_resource_version": 1 },
                 ]
             }),
         ),
@@ -1885,9 +1885,10 @@ async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
         .expect("the operation carries its items");
     assert_eq!(items.len(), 3, "{items:?}");
 
-    for (position, expected) in [CF_TYPE, CF_OTHER, CF_THIRD].iter().enumerate() {
+    let keys = [CF_TYPE, references[0].as_str(), references[1].as_str()];
+    for (position, expected) in keys.iter().enumerate() {
         assert_eq!(
-            items[position]["gts_id"],
+            items[position]["entity_key"],
             json!(expected),
             "item {position} is paired with the wrong target: {items:?}",
         );
@@ -1900,31 +1901,60 @@ async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
 }
 
 #[tokio::test]
-async fn an_unknown_registry_reference_is_a_not_found_problem() {
+async fn an_unknown_registry_reference_fails_its_item_only() {
     let router = router_with_db().await;
-    let reference = uuid::Uuid::new_v4().to_string();
+    register_entity(&router, "register", CF_TYPE).await;
+    let reference = uuid::Uuid::new_v4();
 
-    let refused = call(
+    let single = call(
         &router,
-        delete_one(Some("delete"), &reference, "?expected_resource_version=1"),
+        delete_one(
+            Some("delete"),
+            &reference.to_string(),
+            "?expected_resource_version=1",
+        ),
     )
     .await;
-    assert_eq!(refused.status, StatusCode::NOT_FOUND, "{:?}", refused.body);
-    assert_eq!(
-        refused.content_type.as_deref(),
-        Some("application/problem+json"),
-    );
+    assert_eq!(single.status, StatusCode::ACCEPTED, "{:?}", single.body);
+    let operation = poll(&router, &single).await;
+    assert_eq!(operation["status"], json!("completed"));
+    // The message is for humans; everything else is the contract.
+    let masked = |item: &Value| {
+        let mut item = item.clone();
+        item["error"]["message"] = json!("<message>");
+        item
+    };
+    let unresolved = json!({
+        "entity_key": reference.to_string(),
+        "status": "failed",
+        "resource_version": null,
+        "error": { "reason": "precondition_failed", "message": "<message>" },
+    });
+    let items = operation["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(masked(&items[0]), unresolved);
 
-    let batched = call(
-        &router,
-        batch_delete(Some("batch"), &one_target(&reference, 1)),
-    )
-    .await;
+    // One refusal does not decide its batch neighbour.
+    let body = json!({
+        "items": [
+            { "entity_key": reference.to_string(), "expected_resource_version": 1 },
+            { "entity_key": CF_TYPE, "expected_resource_version": 1 },
+        ]
+    });
+    let batched = call(&router, batch_delete(Some("batch"), &body)).await;
+    assert_eq!(batched.status, StatusCode::ACCEPTED, "{:?}", batched.body);
+    let operation = poll(&router, &batched).await;
+    let items = operation["items"].as_array().expect("items");
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(masked(&items[0]), unresolved);
     assert_eq!(
-        batched.status,
-        StatusCode::NOT_FOUND,
-        "one deletion model, one answer: {:?}",
-        batched.body,
+        items[1],
+        json!({
+            "entity_key": CF_TYPE,
+            "status": "succeeded",
+            "resource_version": 2,
+            "error": null,
+        })
     );
 }
 
@@ -1954,7 +1984,7 @@ async fn batch_deletion_requires_a_positive_expected_resource_version() {
     let router = router_with_db().await;
 
     for (case, body) in [
-        ("missing", json!({ "items": [{ "key": CF_TYPE }] })),
+        ("missing", json!({ "items": [{ "entity_key": CF_TYPE }] })),
         ("zero", one_target(CF_TYPE, 0)),
         ("negative", one_target(CF_TYPE, -1)),
     ] {
@@ -1978,7 +2008,7 @@ async fn a_misspelled_dry_run_is_refused_rather_than_committed() {
         batch_delete(
             Some("camel-case-dry-run"),
             &json!({
-                "items": [{ "key": CF_TYPE, "expected_resource_version": 1 }],
+                "items": [{ "entity_key": CF_TYPE, "expected_resource_version": 1 }],
                 "dryRun": true,
             }),
         ),
@@ -2061,9 +2091,10 @@ async fn single_deletion_requires_a_positive_expected_resource_version() {
 }
 
 #[tokio::test]
-async fn single_deletion_refuses_an_if_match_header() {
+async fn both_deletion_routes_refuse_an_if_match_header() {
     let router = router_with_db().await;
-    let request = Request::builder()
+    register_entity(&router, "register", CF_TYPE).await;
+    let single = Request::builder()
         .method("DELETE")
         .uri(format!(
             "{V2}/entities/{CF_TYPE}?expected_resource_version=1"
@@ -2072,23 +2103,37 @@ async fn single_deletion_refuses_an_if_match_header() {
         .header("if-match", "\"1\"")
         .body(Body::empty())
         .expect("request");
+    let batch = Request::builder()
+        .method("POST")
+        .uri(format!("{V2}/entities:batchDelete"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "batch")
+        .header("if-match", "\"1\"")
+        .body(Body::from(one_target(CF_TYPE, 1).to_string()))
+        .expect("request");
 
-    let refused = call(&router, request).await;
-    assert_eq!(
-        refused.status,
-        StatusCode::BAD_REQUEST,
-        "{:?}",
-        refused.body
-    );
-    let text = serde_json::to_string(&refused.body).expect("serialize");
-    assert!(
-        text.contains("If-Match"),
-        "the refusal must name the header it refuses: {text}",
-    );
-    assert!(
-        text.contains("expected_resource_version"),
-        "and the parameter that replaces it: {text}",
-    );
+    for request in [single, batch] {
+        let refused = call(&router, request).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::BAD_REQUEST,
+            "{:?}",
+            refused.body
+        );
+        assert!(refused.location.is_none(), "no operation was created");
+        let text = serde_json::to_string(&refused.body).expect("serialize");
+        assert!(
+            text.contains("If-Match"),
+            "the refusal must name the header it refuses: {text}",
+        );
+        assert!(
+            text.contains("expected_resource_version"),
+            "and the parameter that replaces it: {text}",
+        );
+    }
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(entity.body["lifecycle_status"], json!("active"));
+    assert_eq!(entity.body["origin"]["resource_version"], json!(1));
 }
 
 #[tokio::test]
@@ -2146,7 +2191,7 @@ async fn a_dry_run_deletion_predicts_and_the_commit_performs() {
             batch_delete(
                 Some("dry-batch"),
                 &json!({
-                    "items": [{ "key": CF_TYPE, "expected_resource_version": 1 }],
+                    "items": [{ "entity_key": CF_TYPE, "expected_resource_version": 1 }],
                     "dry_run": true,
                 }),
             ),
@@ -2164,7 +2209,7 @@ async fn a_dry_run_deletion_predicts_and_the_commit_performs() {
         assert_eq!(operation["dry_run"], json!(true), "{idempotency_key}");
         assert_eq!(operation["status"], json!("completed"), "{idempotency_key}");
         let item = &operation["items"][0];
-        assert_eq!(item["gts_id"], json!(CF_TYPE), "{idempotency_key}");
+        assert_eq!(item["entity_key"], json!(CF_TYPE), "{idempotency_key}");
         assert_eq!(item["status"], json!("succeeded"), "{idempotency_key}");
 
         let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
@@ -2606,7 +2651,7 @@ fn batch_get(body: &Value) -> Request<Body> {
 
 /// One `items` envelope of unconditional keys.
 fn keys(keys: &[&str]) -> Value {
-    json!({ "items": keys.iter().map(|k| json!({ "key": k })).collect::<Vec<_>>() })
+    json!({ "items": keys.iter().map(|k| json!({ "entity_key": k })).collect::<Vec<_>>() })
 }
 
 /// `GET {V2}/entities`, with the query string spelled by the caller.
@@ -2664,7 +2709,7 @@ async fn a_batch_read_answers_every_key_including_the_absent_one() {
     let items = response.body["items"].as_array().expect("items").to_owned();
     assert_eq!(items.len(), 3, "one result per requested key: {items:?}");
 
-    assert_eq!(items[0]["key"], json!(CF_ABSENT_TYPE));
+    assert_eq!(items[0]["entity_key"], json!(CF_ABSENT_TYPE));
     assert_eq!(items[0]["status"], json!("not_found"));
     assert!(
         items[0].get("entity").is_none() || items[0]["entity"].is_null(),
@@ -2672,7 +2717,7 @@ async fn a_batch_read_answers_every_key_including_the_absent_one() {
         items[0],
     );
 
-    assert_eq!(items[1]["key"], json!(CF_TYPE));
+    assert_eq!(items[1]["entity_key"], json!(CF_TYPE));
     assert_eq!(items[1]["status"], json!("found"));
     let schema = &items[1]["entity"];
     assert_eq!(schema["gts_id"], json!(CF_TYPE));
@@ -2686,7 +2731,7 @@ async fn a_batch_read_answers_every_key_including_the_absent_one() {
         "a batch read returns every selected document, D3 artifacts included: {schema:?}",
     );
 
-    assert_eq!(items[2]["key"], json!(CF_INSTANCE));
+    assert_eq!(items[2]["entity_key"], json!(CF_INSTANCE));
     assert_eq!(items[2]["status"], json!("found"));
     assert_eq!(items[2]["entity"]["content"], json!({ "name": "first" }));
 }
@@ -2707,8 +2752,8 @@ async fn a_batch_read_answers_identifiers_and_registry_references_alike() {
     assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
     let items = response.body["items"].as_array().expect("items");
     assert_eq!(items.len(), 2, "{items:?}");
-    assert_eq!(items[0]["key"], json!(uuid));
-    assert_eq!(items[1]["key"], json!(CF_TYPE));
+    assert_eq!(items[0]["entity_key"], json!(uuid));
+    assert_eq!(items[1]["entity_key"], json!(CF_TYPE));
     for item in items {
         assert_eq!(item["status"], json!("found"), "{item:?}");
         assert_eq!(item["entity"]["gts_id"], json!(CF_TYPE));
@@ -2733,7 +2778,7 @@ async fn duplicate_keys_collapse_to_one_result() {
     assert_eq!(
         items
             .iter()
-            .map(|item| item["key"].clone())
+            .map(|item| item["entity_key"].clone())
             .collect::<Vec<_>>(),
         vec![json!(CF_TYPE), json!(CF_ABSENT_TYPE)],
         "the duplicate collapses onto its first mention: {items:?}",
@@ -2762,7 +2807,7 @@ async fn an_impossible_identifier_is_classified_alike_by_both_read_surfaces() {
     let batched = call(&router, batch_get(&keys(&[IMPOSSIBLE_KEY, CF_ABSENT_TYPE]))).await;
     assert_eq!(batched.status, StatusCode::OK, "{:?}", batched.body);
     let items = batched.body["items"].as_array().expect("items");
-    assert_eq!(items[0]["key"], json!(IMPOSSIBLE_KEY));
+    assert_eq!(items[0]["entity_key"], json!(IMPOSSIBLE_KEY));
     assert_eq!(items[0]["status"], json!("not_found"));
     assert_eq!(items[1]["status"], json!("not_found"));
 }
@@ -2855,7 +2900,7 @@ async fn a_batch_read_is_bounded_at_its_ceiling() {
 async fn an_oversized_batch_read_is_refused_with_its_exact_count() {
     let router = router_with_db().await;
     let items: Vec<Value> = (0..10_000)
-        .map(|i| json!({ "key": format!("k{i}") }))
+        .map(|i| json!({ "entity_key": format!("k{i}") }))
         .collect();
 
     let response = call(&router, batch_get(&json!({ "items": items }))).await;
@@ -2997,21 +3042,28 @@ async fn a_batch_key_over_1024_bytes_is_refused() {
     let router = router_with_db().await;
 
     let at = "a".repeat(1024);
-    let served = call(&router, batch_get(&json!({ "items": [{ "key": at }] }))).await;
+    let served = call(
+        &router,
+        batch_get(&json!({ "items": [{ "entity_key": at }] })),
+    )
+    .await;
     assert_eq!(served.status, StatusCode::OK, "{:?}", served.body);
     assert_eq!(served.body["items"][0]["status"], json!("not_found"));
 
     let over = "a".repeat(1025);
-    let refused = call(&router, batch_get(&json!({ "items": [{ "key": over }] }))).await;
-    assert_field_refusal(&refused, "key", "VALIDATION_FAILED");
+    let refused = call(
+        &router,
+        batch_get(&json!({ "items": [{ "entity_key": over }] })),
+    )
+    .await;
+    assert_field_refusal(&refused, "entity_key", "VALIDATION_FAILED");
 }
 
 /// An item's `if_none_match` has the key's bound: 1024 bytes are served, 1025 refused.
 #[tokio::test]
 async fn a_batch_validator_over_1024_bytes_is_refused() {
     let router = router_with_db().await;
-    let item =
-        |len: usize| json!({ "items": [{ "key": CF_TYPE, "if_none_match": "v".repeat(len) }] });
+    let item = |len: usize| json!({ "items": [{ "entity_key": CF_TYPE, "if_none_match": "v".repeat(len) }] });
 
     let served = call(&router, batch_get(&item(1024))).await;
     assert_eq!(served.status, StatusCode::OK, "{:?}", served.body);
@@ -3028,7 +3080,7 @@ async fn an_exact_read_bounds_its_key_and_matches_only_the_canonical_spelling() 
     register_type_and_instance(&router).await;
 
     let refused = call(&router, exact(&"a".repeat(1025), "")).await;
-    assert_field_refusal(&refused, "key", "VALIDATION_FAILED");
+    assert_field_refusal(&refused, "entity_key", "VALIDATION_FAILED");
 
     for key in [
         "a".repeat(1024),
@@ -3778,11 +3830,11 @@ async fn unknown_batch_body_fields_are_refused() {
     let router = router_with_db().await;
     for (body, field) in [
         (
-            json!({ "items": [{ "key": CF_TYPE }], "select": "content" }),
+            json!({ "items": [{ "entity_key": CF_TYPE }], "select": "content" }),
             "select",
         ),
         (
-            json!({ "items": [{ "key": CF_TYPE, "$select": "content" }] }),
+            json!({ "items": [{ "entity_key": CF_TYPE, "$select": "content" }] }),
             "$select",
         ),
     ] {
@@ -4781,9 +4833,9 @@ async fn a_batch_answers_unchanged_per_key_with_the_same_etag() {
     );
 
     let body = json!({ "items": [
-        { "key": CF_TYPE, "if_none_match": etag(0) },
-        { "key": CF_INSTANCE, "if_none_match": "\"stale\"" },
-        { "key": CF_ABSENT_TYPE, "if_none_match": etag(0) },
+        { "entity_key": CF_TYPE, "if_none_match": etag(0) },
+        { "entity_key": CF_INSTANCE, "if_none_match": "\"stale\"" },
+        { "entity_key": CF_ABSENT_TYPE, "if_none_match": etag(0) },
     ] });
     let response = call(&router, batch_get(&body)).await;
     assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);

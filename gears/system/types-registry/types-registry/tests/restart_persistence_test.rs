@@ -328,7 +328,7 @@ async fn a_schema_and_instance_survive_database_reopen() {
             .expect("the operation survived");
         assert_eq!(op.status, OperationStatus::Completed);
         assert_eq!(op.items.len(), 1);
-        assert_eq!(op.items[0].gts_id, gts_id);
+        assert_eq!(op.items[0].key.gts_id(), Some(gts_id));
     }
 
     // The idempotency record is durable too. Comparing all eight tables proves

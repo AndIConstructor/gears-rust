@@ -15,60 +15,26 @@ use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 use crate::config::TypesRegistryConfig;
-use crate::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
+use crate::domain::admission::acceptance::{
+    AcceptanceContext, AcceptanceError, accept, accept_deletion,
+};
 use crate::domain::admission::worker::{Tuning, WorkerError, run_operation};
 use crate::domain::admission::{
-    Accepted, Candidate, OperationDispatch, StoredFailure, SubmitRequest, UnreadableFailure,
+    Accepted, OperationDispatch, StoredFailure, SubmitRequest, UnreadableFailure,
 };
+pub use crate::domain::admission::{DeleteRequest, DeleteTarget};
 use crate::domain::enums::{
     EntityKind, LifecycleFilter, LifecycleStatus, OperationItemStatus, OperationKind,
     OperationStatus,
 };
+pub use crate::domain::key::EntityKey;
 use crate::domain::policy::RegistrationPolicy;
-use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels, RefusalStage};
+use crate::domain::ports::metrics::AdmissionMetrics;
 use crate::domain::ports::{
     CurrentReadRow, EntityRow, ListFilter, PageRequest, Stores, snapshot_read,
 };
 use crate::domain::selection::{EntityField, FieldSelection};
 use crate::domain::validator::{IfNoneMatch, Validator};
-
-/// GTS identifier or deterministic Registry Reference for the same row.
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum EntityKey {
-    GtsId(String),
-    Uuid(Uuid),
-}
-
-impl EntityKey {
-    /// Parse a UUID as a Registry Reference; otherwise keep the GTS identifier.
-    #[must_use]
-    pub fn parse(key: &str) -> Self {
-        match Uuid::parse_str(key) {
-            Ok(uuid) => Self::Uuid(uuid),
-            Err(_) => Self::GtsId(key.to_owned()),
-        }
-    }
-}
-
-/// Deletion target shared by single and batch requests.
-#[domain_model]
-#[derive(Clone, Debug)]
-pub struct DeleteTarget {
-    pub key: EntityKey,
-    /// Required positive version, validated during acceptance.
-    pub expected_resource_version: Option<i64>,
-}
-
-/// A submitted deletion, before its keys are resolved to identifiers.
-#[domain_model]
-#[derive(Clone, Debug)]
-pub struct DeleteRequest {
-    /// Required; optional only to share acceptance validation.
-    pub idempotency_key: Option<String>,
-    pub dry_run: bool,
-    pub targets: Vec<DeleteTarget>,
-}
 
 /// One operation and its per-candidate outcomes, as a caller polls it.
 #[domain_model]
@@ -88,7 +54,7 @@ pub struct OperationRecord {
 #[domain_model]
 #[derive(Clone, Debug)]
 pub struct OperationItemRecord {
-    pub gts_id: String,
+    pub key: EntityKey,
     pub status: OperationItemStatus,
     pub resource_version: Option<i64>,
     pub error: Option<Result<StoredFailure, UnreadableFailure>>,
@@ -253,9 +219,6 @@ pub enum ServiceError {
     /// A blocking task panicked or was cancelled; the source says which.
     #[error("a blocking task did not complete: {0}")]
     Blocking(#[source] tokio::task::JoinError),
-    /// Registry Reference with no identifier for an asynchronous item outcome.
-    #[error("no entity has Registry Reference {gts_uuid}")]
-    UnresolvedReference { gts_uuid: Uuid },
     /// A batch read named no key at all, or more than [`MAX_BATCH_GET_KEYS`].
     #[error(
         "a batch read must name between 1 and {MAX_BATCH_GET_KEYS} keys; this one named {count}"
@@ -284,7 +247,6 @@ impl ServiceError {
             Self::Db(_) => "database",
             Self::CorruptDocument(_) => "corrupt_document",
             Self::Blocking(_) => "blocking_task",
-            Self::UnresolvedReference { .. } => "unresolved_reference",
             Self::BatchReadOutOfRange { .. } => "batch_read_out_of_range",
             Self::KeyTooLong { .. } => "key_too_long",
             Self::ValidatorTooLong { .. } => "validator_too_long",
@@ -444,105 +406,28 @@ impl RegistryService {
     /// Submit a single or batch deletion through the shared admission path (SPEC §8.4).
     ///
     /// # Errors
-    /// [`ServiceError::UnresolvedReference`] for an unknown Registry Reference,
-    /// plus errors from [`Self::submit`].
+    /// [`ServiceError::Acceptance`] for every synchronous refusal. An unknown
+    /// Registry Reference is not one: its item fails in the worker.
     pub async fn delete(
         &self,
         request: &DeleteRequest,
         now: OffsetDateTime,
     ) -> Result<Accepted, ServiceError> {
-        // Bound Registry Reference lookups before resolving targets.
-        let limit = self.config.limits.batch_candidates;
-        if request.targets.len() > limit {
-            let error = AcceptanceError::BatchTooLarge {
-                count: request.targets.len(),
-                limit,
-            };
-            // This refusal never reaches acceptance's metric.
-            self.metrics.refused(
-                RefusalStage::Acceptance,
-                error.reason(),
-                PassLabels::new(OperationKind::Deletion, request.dry_run),
-            );
-            return Err(ServiceError::Acceptance(error));
-        }
-        let candidates = self.resolve_targets(&request.targets).await?;
-        self.submit(
-            &SubmitRequest {
-                idempotency_key: request.idempotency_key.clone(),
-                kind: OperationKind::Deletion,
-                dry_run: request.dry_run,
-                candidates,
+        let provider: DBProvider<AcceptanceError> = DBProvider::new(self.db.clone());
+        Ok(accept_deletion(
+            &self.stores,
+            &provider,
+            &Self::scope(),
+            &AcceptanceContext {
+                policy: &self.policy,
+                config: &self.config,
+                metrics: &self.metrics,
             },
+            &self.dispatch,
+            request,
             now,
         )
-        .await
-    }
-
-    /// Resolve immutable Registry References; admission rechecks mutable state.
-    async fn resolve_targets(
-        &self,
-        targets: &[DeleteTarget],
-    ) -> Result<Vec<Candidate>, ServiceError> {
-        let references: Vec<Uuid> = targets
-            .iter()
-            .filter_map(|target| match &target.key {
-                EntityKey::Uuid(gts_uuid) => Some(*gts_uuid),
-                EntityKey::GtsId(_) => None,
-            })
-            .collect();
-        // Identifier-only batches need no lookup.
-        let resolved = if references.is_empty() {
-            BTreeMap::new()
-        } else {
-            self.reverse_resolve(references).await?
-        };
-
-        targets
-            .iter()
-            .map(|target| {
-                let gts_id = match &target.key {
-                    EntityKey::GtsId(gts_id) => gts_id.clone(),
-                    EntityKey::Uuid(gts_uuid) => resolved.get(gts_uuid).cloned().ok_or(
-                        ServiceError::UnresolvedReference {
-                            gts_uuid: *gts_uuid,
-                        },
-                    )?,
-                };
-                Ok(Candidate {
-                    gts_id,
-                    // Deletion has no content or compatibility check to waive (ADR-0004).
-                    content: None,
-                    expected_resource_version: target.expected_resource_version,
-                    force: false,
-                })
-            })
-            .collect()
-    }
-
-    /// Resolve Registry References under one snapshot, in chunked batch reads
-    /// rather than one query per reference. The caller has already bounded the
-    /// batch by `limits.batch_candidates`. Omit missing rows so the caller reports
-    /// the first unresolved target in request order.
-    async fn reverse_resolve(
-        &self,
-        references: Vec<Uuid>,
-    ) -> Result<BTreeMap<Uuid, String>, ServiceError> {
-        let provider: DBProvider<ServiceError> = DBProvider::new(self.db.clone());
-        let scope = Self::scope();
-        let stores = Arc::clone(&self.stores);
-        provider
-            .transaction_with_config(snapshot_read(&self.db), move |tx| {
-                Box::pin(async move {
-                    // Resolve tombstones too, preserving the identifier path's `not_active` outcome.
-                    let rows = stores.find_by_gts_uuids(tx, &scope, &references).await?;
-                    Ok(rows
-                        .into_iter()
-                        .map(|row| (row.gts_uuid, row.gts_id))
-                        .collect())
-                })
-            })
-            .await
+        .await?)
     }
 
     /// Read one operation and its per-candidate outcomes.
@@ -583,7 +468,7 @@ impl RegistryService {
                 .map(|item| {
                     let error = item.error_payload.as_deref().map(StoredFailure::parse);
                     OperationItemRecord {
-                        gts_id: item.gts_id,
+                        key: item.key,
                         status: item.status,
                         resource_version: item.result_resource_version,
                         error,

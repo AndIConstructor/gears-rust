@@ -13,6 +13,7 @@ use crate::domain::enums::{
 use crate::domain::model::{GtsEntity, ListQuery, SegmentMatchScope};
 use crate::domain::registry_service::{
     EntityLookup, EntityRecord, MAX_BATCH_GET_KEYS, OperationItemRecord, OperationRecord,
+    ServiceError,
 };
 
 /// DTO for a GTS ID segment.
@@ -224,6 +225,8 @@ mod tests {
     use gts::GtsIdSegment;
     use toolkit_gts::{GTS_ID_PREFIX, gts_id};
 
+    use crate::domain::key::EntityKey;
+
     fn schema_json<T: utoipa::PartialSchema>() -> serde_json::Value {
         serde_json::to_value(T::schema()).expect("a schema serializes")
     }
@@ -286,14 +289,14 @@ mod tests {
     fn a_batch_keeps_the_first_items_up_to_the_ceiling_and_counts_all() {
         for total in [0, 1, MAX_BATCH_GET_KEYS, MAX_BATCH_GET_KEYS + 1, 10_000] {
             let items: Vec<serde_json::Value> = (0..total)
-                .map(|i| serde_json::json!({ "key": format!("k{i}") }))
+                .map(|i| serde_json::json!({ "entity_key": format!("k{i}") }))
                 .collect();
             let request = batch_request(&items).expect("a well-formed batch parses");
             assert_eq!(request.items.count(), total);
             let kept = request.items.into_items();
             assert_eq!(kept.len(), total.min(MAX_BATCH_GET_KEYS), "{total}");
             for (i, item) in kept.iter().enumerate() {
-                assert_eq!(item.key, format!("k{i}"));
+                assert_eq!(item.entity_key, format!("k{i}"));
             }
         }
     }
@@ -301,7 +304,7 @@ mod tests {
     #[test]
     fn only_items_within_the_ceiling_are_validated() {
         let mut items: Vec<serde_json::Value> = (0..MAX_BATCH_GET_KEYS)
-            .map(|i| serde_json::json!({ "key": format!("k{i}") }))
+            .map(|i| serde_json::json!({ "entity_key": format!("k{i}") }))
             .collect();
         items.push(serde_json::json!({ "unknown": true }));
         let past = batch_request(&items).expect("an item past the ceiling is not read");
@@ -362,23 +365,106 @@ mod tests {
             "reason": "incompatible_with_baseline",
             "message": "PropertyAdded at $.payload",
         });
-        let dto = OperationItemDto::from_record(
-            OperationItemRecord {
-                gts_id: gts_id!("cf.core.compat.thing.v1~").to_owned(),
+        let dto = RegistrationItemDto::from_record(
+            &OperationItemRecord {
+                key: EntityKey::GtsId(gts_id!("cf.core.compat.thing.v1~").to_owned()),
+                status: OperationItemStatus::Failed,
+                resource_version: None,
+                error: Some(StoredFailure::parse(&payload.to_string())),
+            },
+            Uuid::nil(),
+        )
+        .expect("an identifier key");
+        assert_eq!(serde_json::to_value(dto)?["error"], payload);
+        Ok(())
+    }
+
+    /// Acceptance stores only identifiers for a registration, so anything else
+    /// is corruption rather than a `null` on the wire.
+    #[test]
+    fn a_registration_item_naming_a_registry_reference_is_corrupt() {
+        let refused = RegistrationItemDto::from_record(
+            &OperationItemRecord {
+                key: EntityKey::Uuid(Uuid::nil()),
+                status: OperationItemStatus::Failed,
+                resource_version: None,
+                error: None,
+            },
+            Uuid::nil(),
+        );
+        assert!(
+            matches!(refused, Err(ServiceError::CorruptDocument(_))),
+            "{refused:?}"
+        );
+    }
+
+    /// A deletion echoes its key, including a Registry Reference that named nothing.
+    #[test]
+    fn a_deletion_item_echoes_an_unresolved_registry_reference() -> Result<(), serde_json::Error> {
+        let gts_uuid = Uuid::from_u128(0x0f5c_8e3a_0000_5000_8000_0000_0000_0001);
+        let payload = serde_json::json!({
+            "reason": "precondition_failed",
+            "message": "names no entity",
+        });
+        let dto = DeletionItemDto::from_record(
+            &OperationItemRecord {
+                key: EntityKey::Uuid(gts_uuid),
                 status: OperationItemStatus::Failed,
                 resource_version: None,
                 error: Some(StoredFailure::parse(&payload.to_string())),
             },
             Uuid::nil(),
         );
-        assert_eq!(serde_json::to_value(dto)?["error"], payload);
+        assert_eq!(
+            serde_json::to_value(dto)?,
+            serde_json::json!({
+                "entity_key": "0f5c8e3a-0000-5000-8000-000000000001",
+                "status": "failed",
+                "resource_version": null,
+                "error": payload,
+            })
+        );
+        Ok(())
+    }
+
+    /// Clients pick the operation shape by `kind` without trying each variant.
+    #[test]
+    fn an_operation_is_discriminated_by_kind() -> Result<(), serde_json::Error> {
+        let schema = schema_json::<OperationDto>();
+        assert_eq!(
+            schema["discriminator"],
+            serde_json::json!({
+                "propertyName": "kind",
+                "mapping": {
+                    "registration": "#/components/schemas/RegistrationOperationDto",
+                    "deletion": "#/components/schemas/DeletionOperationDto",
+                },
+            })
+        );
+        let record = |kind| OperationRecord {
+            operation_id: Uuid::nil(),
+            kind,
+            dry_run: false,
+            status: crate::domain::enums::OperationStatus::Pending,
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            started_at: None,
+            completed_at: None,
+            items: Vec::new(),
+        };
+        for (kind, wire) in [
+            (OperationKind::Registration, "registration"),
+            (OperationKind::Deletion, "deletion"),
+        ] {
+            let dto = OperationDto::try_from(record(kind)).expect("no items to refuse");
+            assert_eq!(serde_json::to_value(dto)?["kind"], wire);
+        }
         Ok(())
     }
 
     fn item_error(stored: Option<&str>) -> serde_json::Value {
-        let dto = OperationItemDto::from_record(
-            OperationItemRecord {
-                gts_id: gts_id!("cf.core.compat.thing.v1~").to_owned(),
+        let dto = DeletionItemDto::from_record(
+            &OperationItemRecord {
+                key: EntityKey::GtsId(gts_id!("cf.core.compat.thing.v1~").to_owned()),
                 status: OperationItemStatus::Failed,
                 resource_version: None,
                 error: stored.map(StoredFailure::parse),
@@ -471,14 +557,21 @@ mod tests {
         }
         assert_eq!(properties["operation_id"]["format"], "uuid");
 
-        let item = schema_json::<OperationItemDto>();
-        let variants = &item["properties"]["error"]["oneOf"];
-        assert_eq!(variants.as_array().map(Vec::len), Some(2), "{variants}");
-        assert_eq!(variants[0], serde_json::json!({"type": "null"}));
-        assert_eq!(
-            variants[1]["$ref"],
-            "#/components/schemas/OperationItemErrorDto"
-        );
+        let registration = schema_json::<RegistrationItemDto>();
+        let deletion = schema_json::<DeletionItemDto>();
+        for item in [&registration, &deletion] {
+            let variants = &item["properties"]["error"]["oneOf"];
+            assert_eq!(variants.as_array().map(Vec::len), Some(2), "{variants}");
+            assert_eq!(variants[0], serde_json::json!({"type": "null"}));
+            assert_eq!(
+                variants[1]["$ref"],
+                "#/components/schemas/OperationItemErrorDto"
+            );
+        }
+        // A registration reports its identifier; a deletion echoes its key.
+        assert_eq!(registration["properties"]["gts_id"]["type"], "string");
+        assert_eq!(deletion["properties"]["entity_key"]["type"], "string");
+        assert!(deletion["properties"].get("gts_id").is_none(), "{deletion}");
     }
 
     fn seg(full_id: &str, idx: usize) -> GtsIdSegment {
@@ -761,7 +854,7 @@ pub struct SubmitEntitiesRequest {
 #[serde(deny_unknown_fields)]
 pub struct DeleteEntityDto {
     /// A canonical GTS identifier or a Registry Reference UUID.
-    pub key: String,
+    pub entity_key: String,
     /// Required positive version; optional internally for uniform validation errors.
     #[serde(default)]
     #[schema(required, value_type = i64, minimum = 1)]
@@ -807,14 +900,28 @@ pub struct OperationAcceptedDto {
     pub replayed: bool,
 }
 
-/// One candidate's durable outcome.
+/// One registration candidate's durable outcome.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
-pub struct OperationItemDto {
+pub struct RegistrationItemDto {
+    /// A registration names only identifiers, so this is always the submitted one.
     pub gts_id: String,
     pub status: OperationItemStatusDto,
     pub resource_version: Option<i64>,
     /// Present when this candidate failed.
+    pub error: Option<OperationItemErrorDto>,
+}
+
+/// One deletion target's durable outcome.
+#[derive(Debug, Clone)]
+#[toolkit_macros::api_dto(response)]
+pub struct DeletionItemDto {
+    /// The target's key exactly as the request spelled it: a GTS identifier or
+    /// a Registry Reference, whether or not it named an entity.
+    pub entity_key: String,
+    pub status: OperationItemStatusDto,
+    pub resource_version: Option<i64>,
+    /// Present when this target failed.
     pub error: Option<OperationItemErrorDto>,
 }
 
@@ -825,7 +932,7 @@ pub struct OperationItemDto {
 pub struct OperationItemErrorDto {
     pub reason: String,
     pub message: String,
-    /// The missing dependency, for `dependency_not_found`.
+    /// The dependency, for `dependency_not_found` and `dependency_deleted`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub dependency_id: Option<String>,
@@ -843,12 +950,27 @@ pub struct OperationItemErrorDto {
     pub operation_id: Option<Uuid>,
 }
 
-/// An operation as a caller polls it.
+/// An operation as a caller polls it; `kind` selects the item shape.
+// Untagged over structs that carry `kind` themselves: the one enum shape utoipa
+// can annotate with a `discriminator`.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
-pub struct OperationDto {
+#[serde(untagged)]
+#[schema(discriminator(property_name = "kind", mapping(
+    ("registration" = "#/components/schemas/RegistrationOperationDto"),
+    ("deletion" = "#/components/schemas/DeletionOperationDto")
+)))]
+pub enum OperationDto {
+    Registration(RegistrationOperationDto),
+    Deletion(DeletionOperationDto),
+}
+
+/// A registration operation.
+#[derive(Debug, Clone)]
+#[toolkit_macros::api_dto(response)]
+pub struct RegistrationOperationDto {
     pub operation_id: Uuid,
-    pub kind: OperationKindDto,
+    pub kind: RegistrationKindDto,
     pub dry_run: bool,
     /// Progress only — the outcomes are on the items and are deliberately not
     /// aggregated here.
@@ -859,7 +981,40 @@ pub struct OperationDto {
     pub started_at: Option<time::OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub completed_at: Option<time::OffsetDateTime>,
-    pub items: Vec<OperationItemDto>,
+    pub items: Vec<RegistrationItemDto>,
+}
+
+/// A deletion operation.
+#[derive(Debug, Clone)]
+#[toolkit_macros::api_dto(response)]
+pub struct DeletionOperationDto {
+    pub operation_id: Uuid,
+    pub kind: DeletionKindDto,
+    pub dry_run: bool,
+    /// Progress only — the outcomes are on the items and are deliberately not
+    /// aggregated here.
+    pub status: OperationStatusDto,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: time::OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub started_at: Option<time::OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub completed_at: Option<time::OffsetDateTime>,
+    pub items: Vec<DeletionItemDto>,
+}
+
+/// The discriminator of a registration operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum RegistrationKindDto {
+    Registration,
+}
+
+/// The discriminator of a deletion operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum DeletionKindDto {
+    Deletion,
 }
 
 /// One entity, projected by `$select` (SPEC §10.2).
@@ -991,23 +1146,6 @@ impl From<OperationItemStatus> for OperationItemStatusDto {
     }
 }
 
-/// `registration` or `deletion`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[toolkit_macros::api_dto(response)]
-pub enum OperationKindDto {
-    Registration,
-    Deletion,
-}
-
-impl From<OperationKind> for OperationKindDto {
-    fn from(kind: OperationKind) -> Self {
-        match kind {
-            OperationKind::Registration => Self::Registration,
-            OperationKind::Deletion => Self::Deletion,
-        }
-    }
-}
-
 /// `type_schema` or `instance`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[toolkit_macros::api_dto(response)]
@@ -1042,28 +1180,49 @@ impl From<LifecycleStatus> for LifecycleStatusDto {
     }
 }
 
-impl OperationItemDto {
-    fn from_record(item: OperationItemRecord, operation_id: Uuid) -> Self {
-        let error = item.error.map(|stored| {
-            stored.map_or_else(
-                |unreadable| {
-                    tracing::error!(
-                        %operation_id,
-                        gts_id = %item.gts_id,
-                        reason = unreadable.reason.as_str(),
-                        cause = %unreadable.cause,
-                        "types_registry cannot read a stored item failure"
-                    );
-                    OperationItemErrorDto::unreadable(&unreadable.reason)
-                },
-                Into::into,
-            )
-        });
-        Self {
-            gts_id: item.gts_id,
+fn item_error(item: &OperationItemRecord, operation_id: Uuid) -> Option<OperationItemErrorDto> {
+    item.error.clone().map(|stored| {
+        stored.map_or_else(
+            |unreadable| {
+                tracing::error!(
+                    %operation_id,
+                    entity_key = %item.key,
+                    reason = unreadable.reason.as_str(),
+                    cause = %unreadable.cause,
+                    "types_registry cannot read a stored item failure"
+                );
+                OperationItemErrorDto::unreadable(&unreadable.reason)
+            },
+            Into::into,
+        )
+    })
+}
+
+impl RegistrationItemDto {
+    fn from_record(item: &OperationItemRecord, operation_id: Uuid) -> Result<Self, ServiceError> {
+        let error = item_error(item, operation_id);
+        let Some(gts_id) = item.key.gts_id() else {
+            return Err(ServiceError::CorruptDocument(format!(
+                "registration item of operation {operation_id} names Registry Reference '{}'",
+                item.key
+            )));
+        };
+        Ok(Self {
+            gts_id: gts_id.to_owned(),
             status: item.status.into(),
             resource_version: item.resource_version,
             error,
+        })
+    }
+}
+
+impl DeletionItemDto {
+    fn from_record(item: &OperationItemRecord, operation_id: Uuid) -> Self {
+        Self {
+            entity_key: item.key.to_string(),
+            status: item.status.into(),
+            resource_version: item.resource_version,
+            error: item_error(item, operation_id),
         }
     }
 }
@@ -1095,22 +1254,42 @@ impl From<StoredFailure> for OperationItemErrorDto {
     }
 }
 
-impl From<OperationRecord> for OperationDto {
-    fn from(record: OperationRecord) -> Self {
-        Self {
-            operation_id: record.operation_id,
-            kind: record.kind.into(),
-            dry_run: record.dry_run,
-            status: record.status.into(),
-            created_at: record.created_at,
-            started_at: record.started_at,
-            completed_at: record.completed_at,
-            items: record
-                .items
-                .into_iter()
-                .map(|item| OperationItemDto::from_record(item, record.operation_id))
-                .collect(),
-        }
+impl TryFrom<OperationRecord> for OperationDto {
+    type Error = ServiceError;
+
+    fn try_from(record: OperationRecord) -> Result<Self, ServiceError> {
+        let id = record.operation_id;
+        let status = record.status.into();
+        Ok(match record.kind {
+            OperationKind::Registration => Self::Registration(RegistrationOperationDto {
+                operation_id: id,
+                kind: RegistrationKindDto::Registration,
+                dry_run: record.dry_run,
+                status,
+                created_at: record.created_at,
+                started_at: record.started_at,
+                completed_at: record.completed_at,
+                items: record
+                    .items
+                    .iter()
+                    .map(|item| RegistrationItemDto::from_record(item, id))
+                    .collect::<Result<_, _>>()?,
+            }),
+            OperationKind::Deletion => Self::Deletion(DeletionOperationDto {
+                operation_id: id,
+                kind: DeletionKindDto::Deletion,
+                dry_run: record.dry_run,
+                status,
+                created_at: record.created_at,
+                started_at: record.started_at,
+                completed_at: record.completed_at,
+                items: record
+                    .items
+                    .iter()
+                    .map(|item| DeletionItemDto::from_record(item, id))
+                    .collect(),
+            }),
+        })
     }
 }
 
@@ -1154,7 +1333,7 @@ pub struct BatchGetItemDto {
     /// A canonical GTS identifier or a Registry Reference UUID, classified exactly
     /// as `GET /entities/{entity_key}` classifies its path segment.
     #[schema(max_length = 1024)]
-    pub key: String,
+    pub entity_key: String,
     /// A prior `etag` for this key and `$select`; a match returns `unchanged`.
     /// Batch validators are per item.
     #[serde(default)]
@@ -1257,7 +1436,7 @@ pub enum EntityLookupStatusDto {
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct EntityLookupDto {
-    pub key: String,
+    pub entity_key: String,
     pub status: EntityLookupStatusDto,
     /// The validator for this key under this `$select`, byte-identical to the exact
     /// read's `ETag`. Present unless `not_found`.
@@ -1271,7 +1450,7 @@ pub struct EntityLookupDto {
 
 impl EntityLookupDto {
     #[must_use]
-    pub fn new(key: String, lookup: EntityLookup) -> Self {
+    pub fn new(entity_key: String, lookup: EntityLookup) -> Self {
         let (status, etag, entity) = match lookup {
             EntityLookup::Found { record, etag } => (
                 EntityLookupStatusDto::Found,
@@ -1284,7 +1463,7 @@ impl EntityLookupDto {
             EntityLookup::NotFound => (EntityLookupStatusDto::NotFound, None, None),
         };
         Self {
-            key,
+            entity_key,
             status,
             etag: etag.map(super::etag::entity_tag),
             entity,

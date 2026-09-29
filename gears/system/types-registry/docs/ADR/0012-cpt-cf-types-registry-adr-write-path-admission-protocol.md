@@ -277,7 +277,7 @@ Removal releases the scoped request key, so a later replay executes afresh:
 |---|---|
 | Dry run | Harmless because it has no effect. |
 | Nothing admitted | Fails again, or succeeds because registry state changed. |
-| Successful deletion | Fails its stale precondition: the entity is already `DELETED` at a later `resource_version`. |
+| Successful deletion | Fails `not_active`: it is a new deletion of a tombstone, refused before its version is checked. |
 | Revisions purged | Runs as an ordinary registration of a free identifier, subject to current authorization and its original precondition. |
 
 In the last case, a precondition that permits creation can create a new logical entity; it does not restore the purged one. An original update carrying `match_resource_version` instead fails because the entity is absent. Purge releases the identifier for reuse and reserves nothing against it. This does not breach ADR-0013, which reserves removal of admitted content and identity to one operator-invoked act; replay of an unpinned operation is neither.

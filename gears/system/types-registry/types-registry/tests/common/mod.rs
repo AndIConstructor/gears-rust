@@ -417,7 +417,7 @@ pub async fn seed_completed_operation_item(
         operation_item::ActiveModel {
             operation_id: Set(op_id),
             item_no: Set(0),
-            gts_id: Set(gts_id.to_owned()),
+            entity_key: Set(gts_id.to_owned()),
             dry_run: Set(false),
             kind: Set(OperationKind::Registration),
             expected_resource_version: Set(0),
@@ -493,7 +493,7 @@ pub async fn seed_pending_revision_item_with(
         operation_item::ActiveModel {
             operation_id: Set(op_id),
             item_no: Set(0),
-            gts_id: Set(gts_id.to_owned()),
+            entity_key: Set(gts_id.to_owned()),
             dry_run: Set(false),
             kind: Set(OperationKind::Registration),
             expected_resource_version: Set(expected_resource_version),
@@ -554,7 +554,7 @@ pub async fn seed_pending_deletion_item(
         operation_item::ActiveModel {
             operation_id: Set(op_id),
             item_no: Set(0),
-            gts_id: Set(gts_id.to_owned()),
+            entity_key: Set(gts_id.to_owned()),
             dry_run: Set(dry_run),
             kind: Set(OperationKind::Deletion),
             expected_resource_version: Set(expected_resource_version),

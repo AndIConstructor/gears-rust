@@ -325,7 +325,7 @@ async def test_the_lifecycle_filter_separates_live_rows_and_tombstones(
             "completed_at": "<completed_at>",
             "items": [
                 {
-                    "gts_id": person_schema["gts_id"],
+                    "entity_key": person_schema["gts_id"],
                     "status": "succeeded",
                     "resource_version": 2,
                     "error": None,
@@ -446,13 +446,13 @@ async def test_discovered_references_hydrate_through_batch_get(
         await batch_get(
             registry_http,
             registry_api_path,
-            [{"key": reference} for reference in references],
+            [{"entity_key": reference} for reference in references],
             select="content",
         ),
         {
             "items": [
                 {
-                    "key": gts_uuid(tree[name]["gts_id"]),
+                    "entity_key": gts_uuid(tree[name]["gts_id"]),
                     "status": "found",
                     "etag": "<etag>",
                     "entity": with_content(tree[name]),

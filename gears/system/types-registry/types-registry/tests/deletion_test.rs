@@ -224,7 +224,7 @@ fn item<'a>(outcome: &'a OperationOutcome, gts_id: &str) -> &'a ItemOutcome {
     outcome
         .items
         .iter()
-        .find(|item| item.gts_id == gts_id)
+        .find(|item| item.key.gts_id() == Some(gts_id))
         .unwrap_or_else(|| panic!("the operation owes {gts_id} an outcome"))
 }
 
@@ -544,7 +544,7 @@ fn all_succeeded(outcome: &OperationOutcome) {
             item.status,
             OperationItemStatus::Succeeded,
             "{} must be deleted: {:?}",
-            item.gts_id,
+            item.key,
             item.failure,
         );
     }
@@ -626,7 +626,7 @@ async fn a_deletion_batch_reports_its_outcomes_in_submission_order() {
 
     let outcome = delete_batch(&db, "del", &[(TARGET, 1), (HOLDER, 1)]).await;
 
-    let reported: Vec<&str> = outcome.items.iter().map(|i| i.gts_id.as_str()).collect();
+    let reported: Vec<String> = outcome.items.iter().map(|i| i.key.to_string()).collect();
     assert_eq!(reported, vec![TARGET, HOLDER]);
 }
 
@@ -892,4 +892,87 @@ async fn a_dry_run_over_a_stored_deletion_item_with_no_version_is_refused_too() 
         LifecycleStatus::Active,
         "and a dry run writes nothing either way",
     );
+}
+
+/// A tombstone stays readable but is no target: each new edge kind to it is
+/// refused, naming the tombstone, while an unrelated candidate commits.
+#[tokio::test]
+async fn a_tombstone_cannot_become_a_new_dependency() {
+    const INSTANCE: &str = gts_id!("cf.core.del.target.v1~cf.core.del.alice.v1");
+    const BY_ID: &str = gts_id!("cf.core.del.target.v1~cf.core.del.byid.v1~");
+    const WITH_REF: &str = gts_id!("cf.core.del.target.v1~cf.core.del.withref.v1~");
+    let db = test_db().await;
+    register(&db, "reg", TARGET, schema(TARGET)).await;
+    assert_eq!(
+        delete(&db, "del", TARGET, 1).await.status,
+        OperationItemStatus::Succeeded
+    );
+
+    let mut with_ref = schema(WITH_REF);
+    with_ref["allOf"] = json!([{ "$ref": format!("gts://{TARGET}") }]);
+    let candidates = vec![
+        Candidate {
+            gts_id: INSTANCE.to_owned(),
+            content: Some(json!({ "name": "Alice" })),
+            expected_resource_version: None,
+            force: false,
+        },
+        Candidate {
+            gts_id: BY_ID.to_owned(),
+            content: Some(schema(BY_ID)),
+            expected_resource_version: None,
+            force: false,
+        },
+        Candidate {
+            gts_id: WITH_REF.to_owned(),
+            content: Some(with_ref),
+            expected_resource_version: None,
+            force: false,
+        },
+        Candidate {
+            gts_id: HOLDER.to_owned(),
+            content: Some(referencing(HOLDER, TARGET)),
+            expected_resource_version: None,
+            force: false,
+        },
+        Candidate {
+            gts_id: OTHER.to_owned(),
+            content: Some(schema(OTHER)),
+            expected_resource_version: None,
+            force: false,
+        },
+    ];
+    let op = submit(&db, "new-edges", OperationKind::Registration, candidates)
+        .await
+        .expect("accepted");
+    let outcome = run(&db, op).await;
+
+    for (item, (gts_id, kind)) in outcome.items[..4].iter().zip([
+        (INSTANCE, "conforming_type"),
+        (BY_ID, "base"),
+        // The base role wins over the `$ref` spelling of the same edge.
+        (WITH_REF, "base"),
+        (HOLDER, "ref"),
+    ]) {
+        assert_eq!(item.key.gts_id(), Some(gts_id));
+        let failure = item.failure.as_ref().expect("refused");
+        assert_eq!(
+            failure.reason,
+            AdmissionFailureReason::DependencyDeleted,
+            "{gts_id}"
+        );
+        let dependency = failure.dependency.as_ref().expect("names the tombstone");
+        assert_eq!(dependency.target, TARGET, "{gts_id}");
+        assert_eq!(dependency.kind, kind, "{gts_id}");
+    }
+    assert_eq!(outcome.items[4].status, OperationItemStatus::Succeeded);
+    for gts_id in [INSTANCE, BY_ID, WITH_REF, HOLDER] {
+        assert!(
+            entity_of(&db, gts_id).await.is_none(),
+            "{gts_id} stays absent"
+        );
+    }
+    let tombstone = entity_of(&db, TARGET).await.expect("still readable");
+    assert_eq!(tombstone.lifecycle_status, LifecycleStatus::Deleted);
+    assert_eq!(tombstone.resource_version, 2);
 }

@@ -149,12 +149,6 @@ impl From<ServiceError> for CanonicalError {
             ServiceError::CorruptDocument(detail) => {
                 opaque_internal(&detail, "stored document parse")
             }
-            // Match GET's unresolved-key response (DESIGN §3.3).
-            ServiceError::UnresolvedReference { gts_uuid } => TypeRegistryError::not_found(
-                format!("No entity with Registry Reference: {gts_uuid}"),
-            )
-            .with_resource(gts_uuid.to_string())
-            .create(),
             // The three read-surface envelope refusals (T22a). Each names the
             // request field the caller has to change, and each states the bound
             // rather than the configuration key holding it — as
@@ -302,7 +296,7 @@ mod violation_field {
     pub const IF_MATCH: &str = "If-Match";
     pub const IF_NONE_MATCH: &str = "If-None-Match";
     pub const ITEMS: &str = "items";
-    pub const KEY: &str = "key";
+    pub const ENTITY_KEY: &str = "entity_key";
     pub const IF_NONE_MATCH_ITEM: &str = "if_none_match";
     pub const FORCE: &str = "force";
     pub const EXPECTED_RESOURCE_VERSION: &str = "expected_resource_version";
@@ -501,7 +495,7 @@ fn selectable_fields() -> String {
 #[must_use]
 pub fn key_too_long(len: usize) -> CanonicalError {
     invalid_field(
-        violation_field::KEY,
+        violation_field::ENTITY_KEY,
         format!("a key must be at most {MAX_KEY_LEN} bytes; this one is {len}"),
         field::VALIDATION_FAILED,
     )

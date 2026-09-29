@@ -213,7 +213,7 @@ fn verdicts(items: &[ItemOutcome]) -> Vec<Verdict> {
     items
         .iter()
         .map(|item| Verdict {
-            gts_id: item.gts_id.clone(),
+            gts_id: item.key.to_string(),
             status: item.status,
             reason: item.failure.as_ref().map(|failure| failure.reason.clone()),
         })
@@ -254,7 +254,7 @@ fn assert_predicted_fields(items: &[ItemOutcome]) {
         // The Registry Reference is derived from the identifier, so a virtual
         // entity id can never reach it — and this is what says so.
         if let Some(gts_uuid) = item.gts_uuid {
-            let derived = gts::GtsId::try_new(&item.gts_id)
+            let derived = gts::GtsId::try_new(&item.key.to_string())
                 .expect("a stored identifier parses")
                 .to_uuid();
             assert_eq!(gts_uuid, derived, "{item:?}");
@@ -908,7 +908,7 @@ async fn assert_replay_matches_the_first_pass(dry_run: bool) {
             ),
             "this fixture admits both candidates: {item:?}",
         );
-        let derived = gts::GtsId::try_new(&item.gts_id)
+        let derived = gts::GtsId::try_new(&item.key.to_string())
             .expect("a stored identifier parses")
             .to_uuid();
         assert_eq!(

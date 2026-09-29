@@ -1197,7 +1197,7 @@ pub trait TypesRegistryEntities: Send + Sync {
         &self,
         key: IdempotencyKey,
         request: DeleteEntities,
-    ) -> Result<RegistrationOperation, CanonicalError>;
+    ) -> Result<DeletionOperation, CanonicalError>;
 
     /// Provided: a one-item `delete_entities`, mirroring
     /// `DELETE /entities/{entity_key}`. One deletion model, two spellings.
@@ -1206,12 +1206,12 @@ pub trait TypesRegistryEntities: Send + Sync {
         key: IdempotencyKey,
         entity: DeleteItem,
         dry_run: bool,
-    ) -> Result<RegistrationOperation, CanonicalError> { /* … */ }
+    ) -> Result<DeletionOperation, CanonicalError> { /* … */ }
 
     async fn get_operation(
         &self,
         operation_id: Uuid,
-    ) -> Result<RegistrationOperation, CanonicalError>;
+    ) -> Result<Operation, CanonicalError>;
 
     /// Provided: submits, polls to terminality, returns per-identifier outcomes.
     /// This is where the async contract is made ergonomic for startup
@@ -1303,7 +1303,8 @@ without federation), `EntitySnapshot`, `EntityKind`, `LifecycleStatus`,
 `Origin::Managed`, `Provenance`, `Projection`, `FieldSelection`,
 `EntityQuery`, `EntityPage`, `BatchGet`, `BatchGetItem`,
 `RegisterEntities`, `RegisterItem`, `DeleteEntities`, `DeleteItem`,
-`RegistrationOperation`, `RegistrationItemResult`,
+`Operation`, `RegistrationOperation`, `RegistrationItemResult`,
+`DeletionOperation`, `DeletionItemResult`,
 `OperationStatus`, `CandidateStatus`. Field-for-field the DESIGN §3.3 shapes with the
 out-of-scope fields absent — never renamed, so P1 adds rather than rewrites.
 
@@ -1441,7 +1442,7 @@ documents by default. P0 makes discovery a page and adopts DESIGN §3.3's field 
   deleted result, so a narrow projection still says which documents apply;
   they are always in the normalized effective set, so naming them does not change cursor,
   validator or cache identity. Unselected fields
-  are omitted, while a selected JSON `null` remains present. `key`, per-key status and
+  are omitted, while a selected JSON `null` remains present. `entity_key`, per-key status and
   `etag` are batch result
   envelope metadata outside selection. An exact `ETag` is likewise outside the body.
   REST DTOs and OpenAPI mark the four mandatory fields required and non-nullable and

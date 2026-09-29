@@ -42,6 +42,7 @@ use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 use crate::domain::enums::{OperationKind, OperationStatus};
+use crate::domain::key::EntityKey;
 
 /// One candidate in a submitted request.
 #[domain_model]
@@ -120,6 +121,26 @@ pub struct SubmitRequest {
     pub kind: OperationKind,
     pub dry_run: bool,
     pub candidates: Vec<Candidate>,
+}
+
+/// Deletion target shared by single and batch requests.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub struct DeleteTarget {
+    pub key: EntityKey,
+    /// Required positive version, validated during acceptance.
+    pub expected_resource_version: Option<i64>,
+}
+
+/// A submitted deletion. Keys stay unresolved: the worker resolves them under
+/// its write claim, so an unknown Registry Reference is an item outcome.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub struct DeleteRequest {
+    /// Required; optional only to share acceptance validation.
+    pub idempotency_key: Option<String>,
+    pub dry_run: bool,
+    pub targets: Vec<DeleteTarget>,
 }
 
 /// What acceptance decided.

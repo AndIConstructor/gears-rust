@@ -24,6 +24,7 @@ from .helpers import (
     namespace_pattern,
     not_found,
     outcome,
+    removal,
     provenance,
     submit_and_poll,
     timestamp,
@@ -290,7 +291,7 @@ async def test_a_projected_tombstone_is_not_an_absence(
         registry_http, registry_api_path, person_schema["gts_id"], 1, RECEIPT
     )
     assert_operation(
-        operation, completed("deletion", outcome(person_schema, "succeeded", 2)), ordered=True
+        operation, completed("deletion", removal(person_schema, "succeeded", 2)), ordered=True
     )
 
     # `kind` and `lifecycle_status` are mandatory, so the projection shows the deletion.
@@ -384,24 +385,24 @@ async def test_a_mixed_batch_answers_every_key(
             registry_http,
             registry_api_path,
             [
-                {"key": absent_id},
-                {"key": person_schema["gts_id"]},
-                {"key": absent_uuid},
-                {"key": person_instance["gts_id"]},
+                {"entity_key": absent_id},
+                {"entity_key": person_schema["gts_id"]},
+                {"entity_key": absent_uuid},
+                {"entity_key": person_instance["gts_id"]},
             ],
         ),
         {
             "items": [
-                {"key": absent_id, "status": "not_found"},
+                {"entity_key": absent_id, "status": "not_found"},
                 {
-                    "key": person_schema["gts_id"],
+                    "entity_key": person_schema["gts_id"],
                     "status": "found",
                     "etag": "<etag>",
                     "entity": {**mandatory(person_schema), "origin": managed(1)},
                 },
-                {"key": absent_uuid, "status": "not_found"},
+                {"entity_key": absent_uuid, "status": "not_found"},
                 {
-                    "key": person_instance["gts_id"],
+                    "entity_key": person_instance["gts_id"],
                     "status": "found",
                     "etag": "<etag>",
                     "entity": {**mandatory(person_instance), "origin": managed(1)},
@@ -440,20 +441,20 @@ async def test_a_batch_projection_equals_the_exact_read(
             exact_reads[key], {"status": 200, "etag": "<etag>", "body": entity}
         )
     batch = await batch_get(
-        registry_http, registry_api_path, [{"key": key} for key in expected], select=select
+        registry_http, registry_api_path, [{"entity_key": key} for key in expected], select=select
     )
 
     assert_batch(
         batch,
         {
             "items": [
-                {"key": key, "status": "found", "etag": exact_etags[key], "entity": entity}
+                {"entity_key": key, "status": "found", "etag": exact_etags[key], "entity": entity}
                 for key, entity in expected.items()
             ],
         },
     )
     for item in batch.json()["items"]:
-        assert_json(item["entity"], exact_reads[item["key"]].json())
+        assert_json(item["entity"], exact_reads[item["entity_key"]].json())
 
 
 @pytest.mark.scenario("TR-READ-103")
@@ -474,20 +475,20 @@ async def test_a_batch_reads_a_tombstone_beside_a_live_entity(
         registry_http, registry_api_path, person_schema["gts_id"], 1, RECEIPT
     )
     assert_operation(
-        operation, completed("deletion", outcome(person_schema, "succeeded", 2)), ordered=True
+        operation, completed("deletion", removal(person_schema, "succeeded", 2)), ordered=True
     )
 
     assert_batch(
         await batch_get(
             registry_http,
             registry_api_path,
-            [{"key": person_schema["gts_id"]}, {"key": other_schema["gts_id"]}],
+            [{"entity_key": person_schema["gts_id"]}, {"entity_key": other_schema["gts_id"]}],
             select="content",
         ),
         {
             "items": [
                 {
-                    "key": person_schema["gts_id"],
+                    "entity_key": person_schema["gts_id"],
                     "status": "found",
                     "etag": "<etag>",
                     "entity": {
@@ -496,7 +497,7 @@ async def test_a_batch_reads_a_tombstone_beside_a_live_entity(
                     },
                 },
                 {
-                    "key": other_schema["gts_id"],
+                    "entity_key": other_schema["gts_id"],
                     "status": "found",
                     "etag": "<etag>",
                     "entity": {**mandatory(other_schema), "content": other_schema["content"]},
@@ -531,7 +532,7 @@ async def test_an_unknown_selection_is_refused_on_both_transports(
         await batch_get(
             registry_http,
             registry_api_path,
-            [{"key": person_schema["gts_id"]}],
+            [{"entity_key": person_schema["gts_id"]}],
             select="contents",
         ),
         refusal,
@@ -558,7 +559,7 @@ async def test_a_batch_wide_if_none_match_is_refused(
         await batch_get(
             registry_http,
             registry_api_path,
-            [{"key": person_schema["gts_id"]}],
+            [{"entity_key": person_schema["gts_id"]}],
             headers={"If-None-Match": etag},
         ),
         invalid_argument(
@@ -587,14 +588,14 @@ async def test_every_read_route_observes_a_completed_revision(
         exact = await get_entity(registry_http, registry_api_path, exact_key, select=select)
         assert_exact(exact, {"status": 200, "etag": "<etag>", "body": person})
         batch = await batch_get(
-            registry_http, registry_api_path, [{"key": person_schema["gts_id"]}], select=select
+            registry_http, registry_api_path, [{"entity_key": person_schema["gts_id"]}], select=select
         )
         assert_batch(
             batch,
             {
                 "items": [
                     {
-                        "key": person_schema["gts_id"],
+                        "entity_key": person_schema["gts_id"],
                         "status": "found",
                         "etag": "<etag>",
                         "entity": person,
@@ -714,14 +715,14 @@ async def test_an_exact_key_never_falls_back_to_a_minor_version(
         await batch_get(
             registry_http,
             registry_api_path,
-            [{"key": major_only_id}, {"key": minor["gts_id"]}],
+            [{"entity_key": major_only_id}, {"entity_key": minor["gts_id"]}],
             select="content",
         ),
         {
             "items": [
-                {"key": major_only_id, "status": "not_found"},
+                {"entity_key": major_only_id, "status": "not_found"},
                 {
-                    "key": minor["gts_id"],
+                    "entity_key": minor["gts_id"],
                     "status": "found",
                     "etag": "<etag>",
                     "entity": minor_entity,
@@ -824,13 +825,13 @@ async def test_batch_revalidation_answers_each_key(
         await batch_get(
             registry_http,
             registry_api_path,
-            [{"key": person_id}, {"key": other_id}],
+            [{"entity_key": person_id}, {"entity_key": other_id}],
             select=select,
         ),
         {
             "items": [
                 {
-                    "key": person_id,
+                    "entity_key": person_id,
                     "status": "found",
                     "etag": "<etag>",
                     "entity": {
@@ -840,7 +841,7 @@ async def test_batch_revalidation_answers_each_key(
                     },
                 },
                 {
-                    "key": other_id,
+                    "entity_key": other_id,
                     "status": "found",
                     "etag": "<etag>",
                     "entity": {
@@ -862,18 +863,18 @@ async def test_batch_revalidation_answers_each_key(
             registry_http,
             registry_api_path,
             [
-                {"key": other_id, "if_none_match": held[other_id]},
-                {"key": person_id, "if_none_match": held[person_id]},
-                {"key": other_instance["gts_id"]},
-                {"key": absent_id, "if_none_match": held[person_id]},
+                {"entity_key": other_id, "if_none_match": held[other_id]},
+                {"entity_key": person_id, "if_none_match": held[person_id]},
+                {"entity_key": other_instance["gts_id"]},
+                {"entity_key": absent_id, "if_none_match": held[person_id]},
             ],
             select=select,
         ),
         {
             "items": [
-                {"key": other_id, "status": "unchanged", "etag": held[other_id]},
+                {"entity_key": other_id, "status": "unchanged", "etag": held[other_id]},
                 {
-                    "key": person_id,
+                    "entity_key": person_id,
                     "status": "found",
                     "etag": "<etag>",
                     "entity": {
@@ -883,7 +884,7 @@ async def test_batch_revalidation_answers_each_key(
                     },
                 },
                 {
-                    "key": other_instance["gts_id"],
+                    "entity_key": other_instance["gts_id"],
                     "status": "found",
                     "etag": "<etag>",
                     "entity": {
@@ -892,7 +893,7 @@ async def test_batch_revalidation_answers_each_key(
                         "origin": managed(1),
                     },
                 },
-                {"key": absent_id, "status": "not_found"},
+                {"entity_key": absent_id, "status": "not_found"},
             ],
         },
         known_etags=held.values(),
@@ -904,12 +905,12 @@ async def test_batch_revalidation_answers_each_key(
         await batch_get(
             registry_http,
             registry_api_path,
-            [{"key": key, "if_none_match": etag} for key, etag in current.items()],
+            [{"entity_key": key, "if_none_match": etag} for key, etag in current.items()],
             select=select,
         ),
         {
             "items": [
-                {"key": key, "status": "unchanged", "etag": etag}
+                {"entity_key": key, "status": "unchanged", "etag": etag}
                 for key, etag in current.items()
             ],
         },

@@ -13,6 +13,7 @@ from .helpers import (
     delete_one_and_poll,
     instance_entity,
     outcome,
+    removal,
     register_and_assert,
     schema_entity,
     timestamp,
@@ -175,7 +176,7 @@ async def test_tombstone_refuses_creation_and_revision(
         registry_http, registry_api_path, schema["gts_id"], 1, RECEIPT
     )
     assert_operation(
-        deletion, completed("deletion", outcome(schema, "succeeded", 2)), ordered=True
+        deletion, completed("deletion", removal(schema, "succeeded", 2)), ordered=True
     )
     tombstone = await assert_exact_entity(
         registry_http, registry_api_path, schema, schema_entity(schema, 2, "deleted")

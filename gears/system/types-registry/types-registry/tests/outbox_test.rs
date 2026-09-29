@@ -812,7 +812,7 @@ async fn seed_partition_operation(
                         &operation,
                         &[NewOperationItem {
                             item_no: 0,
-                            gts_id: gts_id.to_owned(),
+                            key: EntityKey::GtsId(gts_id.to_owned()),
                             precondition: Precondition::MustNotExist,
                             compat_forced: false,
                             request_payload: schema(gts_id).to_string(),

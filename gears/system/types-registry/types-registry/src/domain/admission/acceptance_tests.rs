@@ -103,7 +103,7 @@ fn a_platform_vendor_creation_is_accepted_and_records_its_item() {
     assert_eq!(validated.items.len(), 1);
     let item = &validated.items[0];
     assert_eq!(item.item_no, 0);
-    assert_eq!(item.gts_id, CF_TYPE);
+    assert_eq!(item.key.gts_id(), Some(CF_TYPE));
     assert_eq!(item.precondition, Precondition::MustNotExist);
     assert!(
         item.request_payload.starts_with(r#"{"$id":"#),
@@ -126,7 +126,10 @@ fn items_are_numbered_in_submission_order() {
         ]),
     )
     .expect("accepted");
-    assert_eq!(validated.items[0].gts_id, gts_id!("cf.core.b.type.v1~"));
+    assert_eq!(
+        validated.items[0].key.gts_id(),
+        Some(gts_id!("cf.core.b.type.v1~"))
+    );
     assert_eq!(validated.items[0].item_no, 0);
     assert_eq!(validated.items[1].item_no, 1);
 }

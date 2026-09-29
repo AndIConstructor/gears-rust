@@ -341,7 +341,7 @@ fn register_batch_get(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rout
         .operation_id("types_registry.batch_get_entities")
         .summary("Read a set of GTS entities by key")
         .description(
-            "Read up to 100 entities in one round trip. Each item names one entity in `key` \
+            "Read up to 100 entities in one round trip. Each item names one entity in `entity_key` \
              (a canonical GTS identifier or the Registry Reference UUID derived from it), \
              resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves it. \
              A top-level `$select` string applies to every key and follows that route's \
@@ -481,14 +481,15 @@ fn register_batch_delete(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .operation_id("types_registry.batch_delete_entities")
         .summary("Submit GTS entities for deletion")
         .description(
-            "Submit one or more entities for deletion. Each item names its target in `key` \
+            "Submit one or more entities for deletion. Each item names its target in `entity_key` \
              (a canonical GTS identifier or the Registry Reference UUID derived from it) and \
              carries a required positive `expected_resource_version`. Returns 202 with the \
              operation's Location; poll GET /types-registry/v2/operations/{operation_id} for \
-             the per-item outcome. Outcomes are keyed by GTS identifier and reported in \
-             request order, so a caller that deleted by Registry Reference matches results to \
-             requests by position. A stale version is not a 412: it is reported as a terminal \
-             `precondition_failed` item on the operation.",
+             the per-item outcome. Outcomes are reported in request order and echo each key as \
+             `entity_key`; a Registry Reference naming no entity fails only its own item. A \
+             stale version is not a 412: \
+             it is reported as a terminal `precondition_failed` item on the operation, and \
+             If-Match is refused rather than ignored.",
         )
         .param(idempotency_key_param())
         .tag(API_TAG)
@@ -557,8 +558,8 @@ fn register_delete_entity(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
         .summary("Delete one GTS entity")
         .description(
             "Delete a single entity named by canonical GTS identifier or Registry Reference \
-             UUID, resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves \
-             it. One item's worth of :batchDelete. Returns 202 with the operation's Location; \
+             UUID, spelled as GET /types-registry/v2/entities/{entity_key} takes it and \
+             resolved by the worker. One item's worth of :batchDelete. Returns 202 with the operation's Location; \
              a stale version is reported as a terminal `precondition_failed` item rather than \
              a 412, and If-Match is refused rather than ignored.",
         )

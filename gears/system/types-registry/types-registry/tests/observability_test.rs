@@ -1856,10 +1856,6 @@ async fn an_oversized_deletion_batch_is_refused_before_it_reads_and_counted_as_a
                 "the refusal names both numbers so an operator can size the batch: {rendered}",
             );
         }
-        Err(ServiceError::UnresolvedReference { .. }) => panic!(
-            "the bound must be checked before `resolve_targets`: reaching the lookup means an \
-             oversized batch became an unbounded read",
-        ),
         other => panic!("an over-limit deletion batch must be refused synchronously: {other:?}"),
     }
 

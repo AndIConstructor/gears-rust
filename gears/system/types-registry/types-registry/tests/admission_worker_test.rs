@@ -136,7 +136,7 @@ async fn admitting_a_schema_writes_one_row_in_each_affected_table() {
     assert_eq!(outcome.items.len(), 1);
     let item = &outcome.items[0];
     assert_eq!(item.status, domain_enums::OperationItemStatus::Succeeded);
-    assert_eq!(item.gts_id, CF_TYPE);
+    assert_eq!(item.key.gts_id(), Some(CF_TYPE));
     assert_eq!(item.revision_no, Some(1));
     assert_eq!(item.resource_version, Some(1));
     // The Registry Reference is `gts-rust`'s deterministic derivation, never a
@@ -340,7 +340,10 @@ async fn a_pass_that_loses_the_item_cas_writes_nothing_at_all() {
         &provider,
         &allow_all(),
         EvaluationTarget {
-            gts_id: &item.gts_id,
+            gts_id: item
+                .key
+                .gts_id()
+                .expect("a registration item names an identifier"),
             canonical_body: &payload,
             operation_item_id: item.id,
             precondition: item.precondition,

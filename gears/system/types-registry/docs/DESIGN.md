@@ -509,7 +509,7 @@ Deletion cascades to operation items and releases `(idempotency_scope_hash, idem
 |---|---|---|
 | Dry run | wrote nothing, by construction | nothing, by definition |
 | No candidate succeeded | admitted nothing | fails again, or succeeds because the world has since changed |
-| Successful deletion | a lifecycle transition creates no content revision | fails `precondition_failed`: the entity is already `DELETED` and `resource_version` has moved past what the replay carries |
+| Successful deletion | a lifecycle transition creates no content revision | fails `not_active`: it is now a new deletion of a tombstone, refused whichever version it names |
 | Revisions removed by a purge | ADR-0013 leaves operation items in place, subject to this ordinary sweep once their revisions no longer pin them | registers a new logical entity under a name purge freed — not a restore of what was released |
 
 The sweep reaches no admitted content, identity, or tombstone and therefore does not weaken ADR-0013. Extending retention to revisions and their pinned operations is D4 in §4.
@@ -578,7 +578,7 @@ The three guards cover distinct races:
 
 Only commit transactions are serialized; validation remains concurrent and outside the transaction. Impact refresh is bounded by `limits.activation_write_set`, and lock timeout is treated as retryable contention. A future graph-generation compare-and-swap may restore parallel commits if measurements justify it.
 
-Deletion follows the same writer order. It rechecks the positive `expected_resource_version`, `ACTIVE` status, and absence of direct registered dependants before atomically marking the entity `DELETED`, incrementing `resource_version`, and recording the outcome. Deleting a Registry Source Plugin also stamps `retired_at` on active claims and advances the `routing` generation last; source unreachability never triggers deletion.
+Deletion follows the same writer order. It rechecks the positive `expected_resource_version`, `ACTIVE` status, and absence of direct registered dependants before atomically marking the entity `DELETED`, incrementing `resource_version`, and recording the outcome. A new deletion of a tombstone fails `not_active` whichever version it names, because lifecycle is checked first; replaying the request that deleted it returns that operation instead. A new `$ref`, derivation or conformance edge to a tombstone fails `dependency_deleted`, naming the target; a deleted predecessor still serves as a cross-minor baseline, which is no edge. Deleting a Registry Source Plugin also stamps `retired_at` on active claims and advances the `routing` generation last; source unreachability never triggers deletion.
 
 The unique family row is the ownership authority. Creation uses backend-specific insert-if-absent followed by a locked read; admission requires the requested owner to equal the stored one. The entity's owner is only a SecureORM projection and changes while this lock is held.
 
@@ -1063,27 +1063,34 @@ The identifier is authoritative; a Type Schema's
 refuses the request. Literal `0` is invalid because absence already
 expresses creation and versions never equal zero.
 
-Registration has one operation model:
+Registration and deletion share one operation model; `kind` selects the item shape:
 
 ```text
-RegistrationOperation {
+Operation {
     operation_id: UUID,
+    kind: registration | deletion,
     status: pending | running | completed,   // progress; the outcome is in items
-    items: [RegistrationItemResult]
+    items: [RegistrationItemResult] | [DeletionItemResult]
 }
 
 RegistrationItemResult {
-    gts_id,
+    gts_id,                // the submitted identifier: registration names nothing else
     status: pending | running | succeeded | unchanged | failed,
-    gts_uuid?,
     resource_version?,
     error?                 // structured error, including already_exists and precondition_failed
 }
+
+DeletionItemResult {
+    entity_key,            // the key exactly as the request spelled it
+    status: pending | running | succeeded | failed,
+    resource_version?,
+    error?
+}
 ```
 
-Results preserve request order but remain keyed by `gts_id`. Real `succeeded` and `unchanged` results contain `gts_uuid` and `resource_version`.
+Results preserve request order. A registration result names its identifier; a deletion result echoes its key, a GTS Identifier or a `gts_uuid`, whether or not it named an entity. Real `succeeded` and `unchanged` results also contain `resource_version`.
 
-Dry-run `succeeded` omits `resource_version` because none was allocated; dry-run `unchanged` returns the existing version because the real operation would also write nothing. Both return identifier-derived `gts_uuid`. `ck_tr_operation_item_state` enforces the stored `result_revision_no` and `result_resource_version` states. Public results omit revision number; future writes precondition on `resource_version`.
+Dry-run `succeeded` omits `resource_version` because none was allocated; dry-run `unchanged` returns the existing version because the real operation would also write nothing. `ck_tr_operation_item_state` enforces the stored `result_revision_no` and `result_resource_version` states. Public results omit revision number; future writes precondition on `resource_version`.
 
 Errors use canonical RFC-9457 vocabulary and stable reasons. Optimistic-lock failure is an async item result, not HTTP `412`; envelope, authorization, malformed precondition, batch limit, and idempotency failures are synchronous. Reusing a scoped key with another request fingerprint returns `409`.
 Resource-scoped errors name one of two GTS resource types:
@@ -1122,7 +1129,7 @@ Plane-specific parameters are rejected on the other plane, never ignored. Regist
 
 ##### Naming a single entity in a batch
 
-Every batch item names its entity in one `key` field, exactly as `GET /entities/{entity_key}` names it in one path segment. `EntityKey` is an enum over a *single* value, so one field is its faithful wire form; two exclusive fields would encode one value twice and buy an envelope rule — both-or-neither — that has no reason to exist.
+Every batch item names its entity in one `entity_key` field, exactly as `GET /entities/{entity_key}` names it in one path segment. `EntityKey` is an enum over a *single* value, so one field is its faithful wire form; two exclusive fields would encode one value twice and buy an envelope rule — both-or-neither — that has no reason to exist.
 
 Classification is by shape and is total: a value that parses as a UUID is a Registry Reference, and anything else is an identifier. The two vocabularies cannot collide, because every GTS identifier segment carries dots and a version and no UUID does. A syntactically impossible identifier is therefore answered exactly as the single read answers it, on purpose — one classifier, one behaviour, and no way for the batch and the exact read to disagree about the same string.
 
@@ -1141,28 +1148,28 @@ The batch arrays are all named `items`, matching the operation result, the disco
 
 | Parameter | Where | Meaning |
 |---|---|---|
-| `items[]` | body | Non-empty, at most 500 items. Each names one entity in `key` and may carry `if_none_match`, the validator from an earlier read of that key. The higher-than-write limit lets reconciliation read every potential write before selecting its ≤100 candidates |
+| `items[]` | body | Non-empty, at most 500 items. Each names one entity in `entity_key` and may carry `if_none_match`, the validator from an earlier read of that key. The higher-than-write limit lets reconciliation read every potential write before selecting its ≤100 candidates |
 | `$select` | body | As above, applied to every key in the batch |
 | `tenant_id` | body | The Context Tenant, as above |
 
 ```jsonc
 {
   "items": [
-    { "key": "gts.acme.core.events.user_created.v1~", "if_none_match": "…" },
-    { "key": "3f2a…" }                         // a UUID key; unconditional
+    { "entity_key": "gts.acme.core.events.user_created.v1~", "if_none_match": "…" },
+    { "entity_key": "3f2a…" }                         // a UUID key; unconditional
   ]
 }
 ```
 
-Each result echoes the `key` it was asked by and carries the next validator in the same position, so a caller copies it straight back into `if_none_match` on the following poll:
+Each result echoes the `entity_key` it was asked by and carries the next validator in the same position, so a caller copies it straight back into `if_none_match` on the following poll:
 
 ```jsonc
 {
   "items": [
-    { "key": "…", "status": "unchanged", "etag": "…" },   // validator, no snapshot
-    { "key": "3f2a…", "status": "found",
+    { "entity_key": "…", "status": "unchanged", "etag": "…" },   // validator, no snapshot
+    { "entity_key": "3f2a…", "status": "found",
       "etag": "…", "entity": { /* the selected fields */ } },
-    { "key": "…", "status": "not_found" }
+    { "entity_key": "…", "status": "not_found" }
   ]
 }
 ```
@@ -1205,19 +1212,19 @@ On the tenant plane the owner is derived from the `SecurityContext` and is never
 
 | Parameter | Where | Meaning |
 |---|---|---|
-| `items[]` | body | Each names one entity in `key` and carries a required positive `expected_resource_version`; deletion only targets an entity the caller read, so `must_not_exist` has no meaningful delete case |
+| `items[]` | body | Each names one entity in `entity_key` and carries a required positive `expected_resource_version`; deletion only targets an entity the caller read, so `must_not_exist` has no meaningful delete case |
 | `dry_run` | body | As above. Defaults to false |
 
 ```jsonc
 {
   "items": [
-    { "key": "gts.acme.core.events.user_created.v1~", "expected_resource_version": 7 },
-    { "key": "3f2a…", "expected_resource_version": 2 }
+    { "entity_key": "gts.acme.core.events.user_created.v1~", "expected_resource_version": 7 },
+    { "entity_key": "3f2a…", "expected_resource_version": 2 }
   ]
 }
 ```
 
-The operation this returns keys its items by `gts_id`, as every operation does, so a caller that deleted by UUID matches results to requests by position — which is why request order is preserved and said to be.
+The operation this returns echoes each target's key as `entity_key`, in request order. Acceptance reads no entity state, so a UUID is resolved by the worker under its write claim: a key naming no entity is still accepted, and only its item fails `precondition_failed`. A caller that deleted by UUID reads the tombstone by the same key when it needs the identifier. The request fingerprint covers each target's `gts_uuid`, which an identifier determines, so both spellings of one entity are one duplicate and one replay whether or not it exists.
 
 The precondition is in the body and not in `If-Match` for the reason the name gives: one header cannot express several preconditions, and a batch has one per item. `:batchDelete` rather than `:delete` because the name should say what a reader will find in the body — an array — and because it then reads as the sibling of `:batchGet` that it is.
 
@@ -1227,12 +1234,12 @@ The single-entity spelling: one item's worth of `:batchDelete`, with the item sp
 
 | Parameter | Where | Meaning |
 |---|---|---|
-| `entity_key` | path | A GTS Identifier or a `gts_uuid`, resolved exactly as `GET /entities/{entity_key}` resolves it. The two-field mutual exclusion does not arise: a path segment is one value |
+| `entity_key` | path | A GTS Identifier or a `gts_uuid`, spelled exactly as `GET /entities/{entity_key}` takes it and resolved by the worker. The two-field mutual exclusion does not arise: a path segment is one value |
 | `expected_resource_version` | query | Required and positive, the same field the batch item carries and with the same meaning |
 | `dry_run` | query | As above. Defaults to false |
 | `Idempotency-Key` | request header | Required, exactly as on the batch routes |
 
-**The precondition is not `If-Match`,** even though one entity would fit in one header. `If-None-Match` on the read of this same resource already carries a *validator* — projection-scoped, and including `resolution_fingerprint`, which the caller's write precondition deliberately excludes (the worker's drift check includes it). Putting a `resource_version` in `If-Match` would give one resource two unrelated token vocabularies in two conditional headers, and a caller that reasonably fed the `ETag` back into `If-Match` would be refused for a reason the shape does not explain. So `If-Match` is not merely unused here: it is **refused** if sent, rather than ignored, because a caller that sent one believes the request is conditional in the RFC 9110 §13.1.1 sense — and it is not, per the next paragraph. `expected_resource_version` is the same name the batch body uses, taken from the entity body rather than from any response header.
+**The precondition is not `If-Match`,** even though one entity would fit in one header. `If-None-Match` on the read of this same resource already carries a *validator* — projection-scoped, and including `resolution_fingerprint`, which the caller's write precondition deliberately excludes (the worker's drift check includes it). Putting a `resource_version` in `If-Match` would give one resource two unrelated token vocabularies in two conditional headers, and a caller that reasonably fed the `ETag` back into `If-Match` would be refused for a reason the shape does not explain. So `If-Match` is not merely unused here: it is **refused** if sent on either deletion route, rather than ignored, because a caller that sent one believes the request is conditional in the RFC 9110 §13.1.1 sense — and it is not, per the next paragraph. `expected_resource_version` is the same name the batch body uses, taken from the entity body rather than from any response header.
 
 **A precondition failure stays asynchronous.** The split is by mistake class, not by route:
 
@@ -1240,6 +1247,7 @@ The single-entity spelling: one item's worth of `:batchDelete`, with the item sp
 |---|---|
 | `expected_resource_version` absent, non-numeric, or `0` | synchronous `400` — a malformed precondition is an envelope error, and `0` expresses creation, which has no delete meaning |
 | The version does not match at admission | `202`, then the operation item reports `precondition_failed` |
+| The key names no entity, including a `gts_uuid` nothing resolves | `202`, then the operation item reports `precondition_failed` |
 
 Answering `412` would mean checking the version twice — once synchronously and again at admission, where it is the only check that can be authoritative — and would give one logical failure two shapes depending on which of the two deletion routes the caller used.
 
@@ -1306,7 +1314,7 @@ pub trait TypesRegistryClient: Send + Sync {
         ctx: &SecurityContext,
         key: IdempotencyKey,
         request: DeleteEntities,
-    ) -> Result<RegistrationOperation, CanonicalError>;
+    ) -> Result<DeletionOperation, CanonicalError>;
 
     /// Provided, not required: a one-item `delete_entities`, mirroring
     /// `DELETE /entities/{entity_key}`. One deletion model, two spellings.
@@ -1316,13 +1324,13 @@ pub trait TypesRegistryClient: Send + Sync {
         key: IdempotencyKey,
         entity: DeleteItem,
         dry_run: bool,
-    ) -> Result<RegistrationOperation, CanonicalError> { /* … */ }
+    ) -> Result<DeletionOperation, CanonicalError> { /* … */ }
 
     async fn get_operation(
         &self,
         ctx: &SecurityContext,
         operation_id: Uuid,
-    ) -> Result<RegistrationOperation, CanonicalError>;
+    ) -> Result<Operation, CanonicalError>;
 }
 
 #[async_trait]
@@ -1357,7 +1365,7 @@ pub trait PlatformTypesRegistryClient: Send + Sync {
         ctx: &PlatformSecurityContext,
         key: IdempotencyKey,
         request: DeleteEntities,
-    ) -> Result<RegistrationOperation, CanonicalError>;
+    ) -> Result<DeletionOperation, CanonicalError>;
 
     /// Provided, as on the tenant trait.
     async fn delete_entity(
@@ -1366,13 +1374,13 @@ pub trait PlatformTypesRegistryClient: Send + Sync {
         key: IdempotencyKey,
         entity: DeleteItem,
         dry_run: bool,
-    ) -> Result<RegistrationOperation, CanonicalError> { /* … */ }
+    ) -> Result<DeletionOperation, CanonicalError> { /* … */ }
 
     async fn get_operation(
         &self,
         ctx: &PlatformSecurityContext,
         operation_id: Uuid,
-    ) -> Result<RegistrationOperation, CanonicalError>;
+    ) -> Result<Operation, CanonicalError>;
 }
 ```
 
@@ -1392,7 +1400,7 @@ pub struct BatchGet {
 
 pub struct BatchGetItem {
     /// One value, one field — `EntityKey` is an enum, and the wire spells it
-    /// as the single string `key`, classified exactly as the path segment is.
+    /// as the single string `entity_key`, classified exactly as the path segment is.
     pub key: EntityKey,
     /// A validator makes the read conditional for that key alone; `None`
     /// reads it unconditionally.
@@ -1558,6 +1566,11 @@ pub struct RegisterItem {
     pub force: bool,
 }
 
+pub enum Operation {
+    Registration(RegistrationOperation),
+    Deletion(DeletionOperation),
+}
+
 pub struct RegistrationOperation {
     pub operation_id: Uuid,
     pub status: OperationStatus,
@@ -1567,7 +1580,20 @@ pub struct RegistrationOperation {
 pub struct RegistrationItemResult {
     pub gts_id: GtsId,
     pub status: CandidateStatus,
-    pub gts_uuid: Option<Uuid>,
+    pub resource_version: Option<u64>,
+    pub error: Option<CanonicalError>,
+}
+
+pub struct DeletionOperation {
+    pub operation_id: Uuid,
+    pub status: OperationStatus,
+    pub items: Vec<DeletionItemResult>,
+}
+
+pub struct DeletionItemResult {
+    /// The target's key as the request spelled it.
+    pub entity_key: EntityKey,
+    pub status: CandidateStatus,
     pub resource_version: Option<u64>,
     pub error: Option<CanonicalError>,
 }

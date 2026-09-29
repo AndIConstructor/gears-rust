@@ -176,7 +176,7 @@ fn item<'a>(outcome: &'a OperationOutcome, gts_id: &str) -> &'a ItemOutcome {
     outcome
         .items
         .iter()
-        .find(|item| item.gts_id == gts_id)
+        .find(|item| item.key.gts_id() == Some(gts_id))
         .unwrap_or_else(|| panic!("the operation owes {gts_id} an outcome"))
 }
 
@@ -639,7 +639,7 @@ async fn a_second_pass_over_a_partially_committed_batch_is_a_no_op() {
         let mut pairs: Vec<(String, String)> = outcome
             .items
             .iter()
-            .map(|item| (item.gts_id.clone(), format!("{:?}", item.status)))
+            .map(|item| (item.key.to_string(), format!("{:?}", item.status)))
             .collect();
         pairs.sort();
         pairs

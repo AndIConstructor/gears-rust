@@ -28,6 +28,7 @@ use types_registry::domain::enums::{
     DependencyKind, EntityKind, LifecycleStatus, OperationItemStatus, OperationKind,
     OwnershipScope, Plane,
 };
+use types_registry::domain::key::EntityKey;
 use types_registry::domain::ports::{ItemSuccess, NewEntity, NewOperation, NewOperationItem};
 use types_registry::infra::storage::entity::dependency;
 use types_registry::infra::storage::repo::{
@@ -948,7 +949,7 @@ async fn a_system_failure_fails_every_undecided_item_of_one_operation_and_no_oth
         .enumerate()
         .map(|(index, gts_id)| NewOperationItem {
             item_no: i32::try_from(index).expect("three items"),
-            gts_id: (*gts_id).to_owned(),
+            key: EntityKey::GtsId((*gts_id).to_owned()),
             precondition: Precondition::MustNotExist,
             compat_forced: false,
             request_payload: "{}".to_owned(),
@@ -963,7 +964,7 @@ async fn a_system_failure_fails_every_undecided_item_of_one_operation_and_no_oth
         .expect("read items");
     let decided = seeded
         .iter()
-        .find(|item| item.gts_id == CUSTOMER_V1)
+        .find(|item| item.key.gts_id() == Some(CUSTOMER_V1))
         .expect("the first candidate");
     assert!(
         OperationRepo::mark_item_succeeded(
@@ -998,7 +999,7 @@ async fn a_system_failure_fails_every_undecided_item_of_one_operation_and_no_oth
         .await
         .expect("reread items");
     for item in &after {
-        if item.gts_id == CUSTOMER_V1 {
+        if item.key.gts_id() == Some(CUSTOMER_V1) {
             assert_eq!(
                 item.status,
                 OperationItemStatus::Succeeded,
@@ -1006,12 +1007,12 @@ async fn a_system_failure_fails_every_undecided_item_of_one_operation_and_no_oth
             );
             assert_eq!(item.result_revision_no, Some(1));
         } else {
-            assert_eq!(item.status, OperationItemStatus::Failed, "{}", item.gts_id);
+            assert_eq!(item.status, OperationItemStatus::Failed, "{}", item.key);
             assert_eq!(
                 item.error_payload.as_deref(),
                 Some(SYSTEM_FAILURE),
                 "{}: every failed item carries the one system-failure reason",
-                item.gts_id,
+                item.key,
             );
         }
     }

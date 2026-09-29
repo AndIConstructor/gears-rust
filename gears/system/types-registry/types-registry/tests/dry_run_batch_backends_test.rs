@@ -193,7 +193,7 @@ fn verdicts(items: &[ItemOutcome]) -> Vec<Verdict> {
     items
         .iter()
         .map(|item| Verdict {
-            gts_id: item.gts_id.clone(),
+            gts_id: item.key.to_string(),
             status: item.status,
             reason: item.failure.as_ref().map(|failure| failure.reason.clone()),
         })

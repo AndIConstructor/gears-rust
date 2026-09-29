@@ -111,7 +111,7 @@ async fn assert_missing_dependency(
     let item = operation
         .items
         .iter()
-        .find(|item| item.gts_id == candidate_id)
+        .find(|item| item.key.gts_id() == Some(candidate_id))
         .expect("candidate has a result");
     assert_eq!(item.status, OperationItemStatus::Failed);
     assert_eq!(item.resource_version, None);
@@ -119,7 +119,7 @@ async fn assert_missing_dependency(
     let conn = db.conn().expect("connection");
     let stored = operation_item::Entity::find()
         .filter(operation_item::Column::OperationId.eq(operation_id))
-        .filter(operation_item::Column::GtsId.eq(candidate_id))
+        .filter(operation_item::Column::EntityKey.eq(candidate_id))
         .secure()
         .scope_with(&common::allow_all())
         .one(&conn)
@@ -144,7 +144,8 @@ async fn assert_missing_dependency(
         "the client explanation identifies the missing dependency: {error}",
     );
 
-    let wire = serde_json::to_value(OperationDto::from(operation)).expect("serialize polling DTO");
+    let wire = serde_json::to_value(OperationDto::try_from(operation).expect("identifier keys"))
+        .expect("serialize polling DTO");
     let wire_item = wire["items"]
         .as_array()
         .expect("items array")
@@ -238,7 +239,7 @@ async fn a_missing_dependency_does_not_prevent_an_independent_candidate_from_com
     let independent = operation
         .items
         .iter()
-        .find(|item| item.gts_id == INDEPENDENT)
+        .find(|item| item.key.gts_id() == Some(INDEPENDENT))
         .expect("independent result");
     assert_eq!(independent.status, OperationItemStatus::Succeeded);
     assert_eq!(independent.resource_version, Some(1));
@@ -296,7 +297,7 @@ async fn dry_run_missing_dependencies_keep_the_same_diagnostics_without_entity_w
         let independent = operation
             .items
             .iter()
-            .find(|item| item.gts_id == INDEPENDENT)
+            .find(|item| item.key.gts_id() == Some(INDEPENDENT))
             .expect("independent candidate has a result");
         assert_eq!(independent.status, OperationItemStatus::Succeeded);
         assert_eq!(independent.resource_version, None);
@@ -338,7 +339,7 @@ async fn an_instance_before_its_conforming_type_in_the_same_batch_succeeds() {
         let item = operation
             .items
             .iter()
-            .find(|item| item.gts_id == id)
+            .find(|item| item.key.gts_id() == Some(id))
             .expect("candidate has a result");
         assert_eq!(
             item.status,

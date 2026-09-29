@@ -84,6 +84,25 @@ def not_found(key):
     }
 
 
+def key_conflict(operation_id):
+    """The whole `409` for an `Idempotency-Key` bound to a different request."""
+    return {
+        "type": "gts://gts.cf.core.errors.err.v1~cf.core.err.already_exists.v1~",
+        "title": "Already Exists",
+        "status": 409,
+        "detail": (
+            "this Idempotency-Key is already bound to operation "
+            f"{operation_id} with a different request"
+        ),
+        "instance": "<request_path>",
+        "trace_id": TRACE_ID,
+        "context": {
+            "resource_type": "gts.cf.core.types_registry.operation.v1~",
+            "resource_name": operation_id,
+        },
+    }
+
+
 def timestamp(value):
     assert isinstance(value, str) and RFC3339.fullmatch(value), value
     return datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
@@ -360,9 +379,9 @@ def assert_batch(response, expected, *, known_etags=()):
             item["entity"] = _entity(item["entity"])
     expected = deepcopy(expected)
     for side in (actual, expected):
-        side["items"].sort(key=lambda item: item["key"])
+        side["items"].sort(key=lambda item: item["entity_key"])
     assert_json(actual, expected)
-    return {item["key"]: item.get("etag") for item in body["items"]}
+    return {item["entity_key"]: item.get("etag") for item in body["items"]}
 
 
 async def discover(client, api_path, params):
@@ -509,30 +528,126 @@ async def register_and_assert(
     return operation
 
 
+def target(document, expected_resource_version, *, key=None):
+    """A `:batchDelete` item naming `document` by GTS ID, or by `key` when given."""
+    return {
+        "entity_key": document["gts_id"] if key is None else key,
+        "expected_resource_version": expected_resource_version,
+    }
+
+
+async def post_batch_delete(
+    client, api_path, targets, *, idempotency_key=None, dry_run=False, headers=None
+):
+    """Submit `POST {api}/entities:batchDelete` and return the raw response."""
+    body = {"items": targets}
+    if dry_run:
+        body["dry_run"] = True
+    return await client.post(
+        f"{api_path}/entities:batchDelete",
+        headers={**_key_header(idempotency_key), **(headers or {})},
+        json=body,
+    )
+
+
+async def delete_one(
+    client,
+    api_path,
+    key,
+    expected_resource_version,
+    *,
+    idempotency_key=None,
+    dry_run=False,
+    headers=None,
+):
+    """Submit `DELETE {api}/entities/{key}` and return the raw response."""
+    params = {}
+    if expected_resource_version is not None:
+        params["expected_resource_version"] = expected_resource_version
+    if dry_run:
+        params["dry_run"] = "true"
+    return await client.delete(
+        f"{api_path}/entities/{key}",
+        headers={**_key_header(idempotency_key), **(headers or {})},
+        params=params,
+    )
+
+
+def _key_header(idempotency_key):
+    return {"Idempotency-Key": str(uuid.uuid4()) if idempotency_key is None else idempotency_key}
+
+
+async def await_deletion(client, response, expected_receipt=RECEIPT, *, dry_run=False):
+    """Accept a deletion receipt and poll its operation to completion."""
+    receipt, location = _accept(response, expected_receipt)
+    return await poll_operation(client, receipt, location, "deletion", dry_run=dry_run)
+
+
 async def delete_batch_and_poll(client, api_path, targets, expected_receipt):
     """Delete a batch through `POST {api}/entities:batchDelete`.
 
-    Each target is `{"key": ..., "expected_resource_version": ...}`; the key is
+    Each target is `{"entity_key": ..., "expected_resource_version": ...}`; the key is
     a canonical GTS identifier or a Registry Reference UUID.
     """
-    response = await client.post(
-        f"{api_path}/entities:batchDelete",
-        headers=_idempotency_key(),
-        json={"items": targets},
+    return await await_deletion(
+        client, await post_batch_delete(client, api_path, targets), expected_receipt
     )
-    receipt, location = _accept(response, expected_receipt)
-    return await poll_operation(client, receipt, location, "deletion")
 
 
 async def delete_one_and_poll(client, api_path, key, expected_resource_version, expected_receipt):
     """Delete one entity through `DELETE {api}/entities/{key}`."""
-    response = await client.delete(
-        f"{api_path}/entities/{key}",
-        headers=_idempotency_key(),
-        params={"expected_resource_version": expected_resource_version},
+    return await await_deletion(
+        client,
+        await delete_one(client, api_path, key, expected_resource_version),
+        expected_receipt,
     )
-    receipt, location = _accept(response, expected_receipt)
-    return await poll_operation(client, receipt, location, "deletion")
+
+
+async def delete_and_assert(
+    client, api_path, targets, *items, dry_run=False, idempotency_key=None, exact_messages=False
+):
+    """Batch-delete, poll and compare the whole operation in request order."""
+    operation = await await_deletion(
+        client,
+        await post_batch_delete(
+            client, api_path, targets, idempotency_key=idempotency_key, dry_run=dry_run
+        ),
+        dry_run=dry_run,
+    )
+    assert_operation(
+        operation,
+        completed("deletion", *items, dry_run=dry_run),
+        ordered=True,
+        exact_messages=exact_messages,
+    )
+    return operation
+
+
+def removal(subject, status, resource_version, reason=None, **error_fields):
+    """A complete deletion item; `subject` is a document, named by its GTS ID,
+    or the key exactly as the request spelled it, which the item echoes."""
+    key = subject["gts_id"] if isinstance(subject, dict) else subject
+    return {
+        "entity_key": key,
+        "status": status,
+        "resource_version": resource_version,
+        "error": None
+        if reason is None
+        else {"reason": reason, "message": "<message>", **error_fields},
+    }
+
+
+def blocked(document, count):
+    """A deletion refused for live direct dependants; the diagnostic states how
+    many and never which, so it is compared verbatim (`exact_messages=True`)."""
+    return removal(
+        document,
+        "failed",
+        None,
+        "has_registered_dependents",
+        message=f"'{document['gts_id']}' has {count} live direct registered "
+        "dependants; delete or revise them first",
+    )
 
 
 async def read_entity(client, api_path, key):
