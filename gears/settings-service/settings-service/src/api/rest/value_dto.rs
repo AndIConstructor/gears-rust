@@ -325,8 +325,8 @@ pub struct ImpactReportDto {
     pub total_changed: usize,
     /// How many descendants were examined.
     pub scanned: usize,
-    /// Whether the budget or `limit` cut the report short: it then reads as
-    /// "at least this many".
+    /// Whether the node budget, the time budget or `limit` cut the report
+    /// short: it then reads as "at least this many".
     pub truncated: bool,
 }
 

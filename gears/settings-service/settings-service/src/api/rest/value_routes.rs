@@ -364,7 +364,10 @@ pub fn register_routes(
             "Which descendants of the target would see a different effective value under the \
              candidate: the first `limit` in breadth-first order (default 100, at most 500), \
              the total, how many were scanned under the node budget of 5000, and whether the \
-             report was truncated. Standalone descendants are omitted from the list and the \
+             report was truncated - by that budget, by `limit`, or by the time budget of one \
+             second the walk runs under, in which case nothing was scanned. The subtree is \
+             resolved in one pass, a fixed number of round trips whatever its size. Standalone \
+             descendants are omitted from the list and the \
              count; each listed descendant's current value is masked by the setting's \
              classification. A POST because the candidate travels in the body, as it does \
              for `validate` - a value may run to 64 KiB. Read-only, informational, and never \
