@@ -34,9 +34,11 @@ Tenant isolation enforced at DB layer. User authentication required. No anonymou
 Fixed fields: `theme` and `language` up to `max_field_length` (default 100).
 Named settings: each value up to `named_value_max_bytes` as serialized JSON
 (default 4096, at most 65535 — the smallest backend column, MySQL `TEXT`), and
-up to `named_settings_per_user` keys per user and tenant (default 256). There is
-no aggregate per-user cap beyond the product of the two. The gear refuses to
-start with a limit of 0 or a value bound above 65535.
+up to `named_settings_per_user` keys per user and tenant (default 256, at most
+4096). The product of the two is capped at 16 MiB, because the list returns
+every key in one unpaged response: either maximum is reachable, but not both at
+once. The gear refuses to start with a limit of 0, a bound above its maximum,
+or a product above 16 MiB.
 <!-- fdd-id-content -->
 
 ### Schema

@@ -40,12 +40,17 @@ fn default_named_value_max_bytes() -> usize {
 /// smallest column any supported backend stores the value in.
 pub const MAX_NAMED_VALUE_BYTES: usize = 65_535;
 
-/// Upper bound on `named_settings_per_user`. The list endpoint returns every key
-/// of a user in one response, unpaged, so the count times the value bound is
-/// what one response can carry: 4096 keys at the default 4 KiB is 16 MiB. This
-/// is a store for small UI preferences, and 16 times the default key count is
-/// room enough for that.
+/// Upper bound on `named_settings_per_user`: 16 times the default, room enough
+/// for a store of small UI preferences.
 pub const MAX_NAMED_SETTINGS_PER_USER: usize = 4096;
+
+/// Upper bound on `named_settings_per_user` x `named_value_max_bytes`. The
+/// list endpoint returns every key of a user in one response, unpaged, so the
+/// product of the two bounds is what one response can carry. It is checked as
+/// a product because the bounds are not independent: each maximum is reachable
+/// (4096 keys of 4 KiB, or 256 keys of 64 KiB), but not both at once, which
+/// would be 256 MiB.
+pub const MAX_NAMED_BYTES_PER_USER: usize = 16 * 1024 * 1024;
 
 impl SettingsConfig {
     /// Reject limits that would break the gear at request time rather than at
@@ -54,8 +59,9 @@ impl SettingsConfig {
     /// # Errors
     ///
     /// When `named_settings_per_user` is 0 (every new key refused) or above
-    /// [`MAX_NAMED_SETTINGS_PER_USER`], or `named_value_max_bytes` is 0 or
-    /// above [`MAX_NAMED_VALUE_BYTES`].
+    /// [`MAX_NAMED_SETTINGS_PER_USER`], `named_value_max_bytes` is 0 or above
+    /// [`MAX_NAMED_VALUE_BYTES`], or their product is above
+    /// [`MAX_NAMED_BYTES_PER_USER`].
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.named_settings_per_user == 0
             || self.named_settings_per_user > MAX_NAMED_SETTINGS_PER_USER
@@ -70,6 +76,18 @@ impl SettingsConfig {
             anyhow::bail!(
                 "simple-user-settings: named_value_max_bytes must be between 1 and \
                  {MAX_NAMED_VALUE_BYTES}, got {}",
+                self.named_value_max_bytes
+            );
+        }
+        let per_user = self
+            .named_settings_per_user
+            .saturating_mul(self.named_value_max_bytes);
+        if per_user > MAX_NAMED_BYTES_PER_USER {
+            anyhow::bail!(
+                "simple-user-settings: named_settings_per_user x named_value_max_bytes \
+                 must be at most {MAX_NAMED_BYTES_PER_USER} bytes (one unpaged list \
+                 response), got {} x {} = {per_user}",
+                self.named_settings_per_user,
                 self.named_value_max_bytes
             );
         }
@@ -106,8 +124,21 @@ mod tests {
             "past TEXT"
         );
         with(1, 1).validate().expect("smallest usable");
-        with(MAX_NAMED_SETTINGS_PER_USER, MAX_NAMED_VALUE_BYTES)
+        with(MAX_NAMED_SETTINGS_PER_USER, 4096)
             .validate()
-            .expect("largest allowed");
+            .expect("the most keys, at the default value bound");
+        with(256, MAX_NAMED_VALUE_BYTES)
+            .validate()
+            .expect("the largest value, at the default key count");
+        assert!(
+            with(MAX_NAMED_SETTINGS_PER_USER, MAX_NAMED_VALUE_BYTES)
+                .validate()
+                .is_err(),
+            "both maxima at once: a 256 MiB list"
+        );
+        assert!(
+            with(2049, 8192).validate().is_err(),
+            "each bound in range, the product just over 16 MiB"
+        );
     }
 }
