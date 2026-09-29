@@ -17,6 +17,7 @@ use toolkit_odata::{ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
+use super::odata_filter::{resolve_type_filter, validate_filter};
 use crate::domain::error::DomainError;
 use crate::domain::repo::MembershipRepositoryTrait;
 use crate::infra::storage::FK_RGM_GROUP_ID;
@@ -53,17 +54,34 @@ impl MembershipRepositoryTrait for MembershipRepository {
     ) -> Result<Page<ResourceGroupMembership>, DomainError> {
         let scope = system_scope();
         let base_query = MembershipEntity::find().secure().scope_with(&scope);
+        let base_query = if let Some(ast) = query.filter.as_deref() {
+            let validated = validate_filter::<MembershipFilterField>(ast)?;
+            let resolved =
+                resolve_type_filter(db, &validated, MembershipFilterField::ResourceType).await?;
+            let condition = toolkit_db::odata::sea_orm_filter::filter_node_to_condition::<
+                MembershipFilterField,
+                MembershipODataMapper,
+            >(&resolved)
+            .map_err(|e| DomainError::validation(format!("invalid $filter: {e}")))?;
+            base_query.filter(condition)
+        } else {
+            base_query
+        };
+        // The resolved predicate is already applied; retain the original hash
+        // for cursor consistency checks and next-page cursor generation.
+        let mut query_no_filter = query.clone();
+        query_no_filter.filter = None;
 
         let page = paginate_odata::<MembershipFilterField, MembershipODataMapper, _, _, _, _>(
             base_query,
             db,
-            query,
+            &query_no_filter,
             ("group_id", SortDir::Desc),
             MEMBERSHIP_LIMIT_CFG,
             |m: membership_entity::Model| m,
         )
         .await
-        .map_err(|e| DomainError::database(e.to_string()))?;
+        .map_err(DomainError::from)?;
 
         // Batch-resolve type IDs to GTS paths (single query)
         let type_ids: Vec<i16> = page.items.iter().map(|m| m.gts_type_id).collect();

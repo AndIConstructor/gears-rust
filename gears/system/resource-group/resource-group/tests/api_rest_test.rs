@@ -2437,3 +2437,304 @@ async fn create_group_with_unadvertised_predicate_returns_403_without_leak() {
         );
     }
 }
+
+/// Fixture with two resource types, two groups, and UUID-looking resource IDs.
+async fn membership_filter_fixture() -> (Router, Uuid, Uuid, String, String, String) {
+    let (router, types, groups, memberships) = build_shared_router().await;
+    let tenant = Uuid::now_v7();
+    let ctx = make_ctx(tenant);
+    let first_type = rg_type_id!("test.filter._.first.v1~");
+    let second_type = rg_type_id!("test.filter._.second.v1~");
+    let group_type = rg_type_id!("test.filter._.group.v1~");
+    for code in [&first_type, &second_type, &group_type] {
+        types
+            .create_type(
+                &make_ctx(tenant),
+                resource_group_sdk::CreateTypeRequest {
+                    code: code.clone(),
+                    can_be_root: true,
+                    allowed_parent_types: vec![],
+                    allowed_membership_types: if code == &group_type {
+                        vec![first_type.clone(), second_type.clone()]
+                    } else {
+                        vec![]
+                    },
+                    metadata_schema: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let resource_id = Uuid::now_v7().to_string();
+    let mut group_id = Uuid::nil();
+    for name in ["matching", "other"] {
+        let group = groups
+            .create_group(
+                &ctx,
+                resource_group_sdk::CreateGroupRequest::new(group_type.clone(), name.to_owned()),
+                tenant,
+            )
+            .await
+            .unwrap();
+        if name == "matching" {
+            group_id = group.id;
+            memberships
+                .add_membership(&ctx, group.id, &first_type, &resource_id)
+                .await
+                .unwrap();
+            memberships
+                .add_membership(&ctx, group.id, &first_type, "second")
+                .await
+                .unwrap();
+            memberships
+                .add_membership(&ctx, group.id, &second_type, "third")
+                .await
+                .unwrap();
+        } else {
+            memberships
+                .add_membership(&ctx, group.id, &second_type, "other-group")
+                .await
+                .unwrap();
+        }
+    }
+    (
+        router,
+        tenant,
+        group_id,
+        first_type,
+        second_type,
+        resource_id,
+    )
+}
+
+fn encode_query_value(value: &str) -> String {
+    use std::fmt::Write;
+    value.bytes().fold(String::new(), |mut encoded, byte| {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            write!(encoded, "%{byte:02X}").unwrap();
+        }
+        encoded
+    })
+}
+
+async fn filtered_memberships(
+    router: &Router,
+    tenant: Uuid,
+    filter: &str,
+    extra: &str,
+) -> serde_json::Value {
+    let uri = format!(
+        "/resource-group/v1/memberships?$filter={}&{extra}",
+        encode_query_value(filter)
+    );
+    let response = router
+        .clone()
+        .oneshot(json_request("GET", &uri, None, tenant))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response_body(response).await;
+    assert_eq!(status, StatusCode::OK, "filter {filter}: {body}");
+    body
+}
+
+#[tokio::test]
+async fn membership_filters_accept_quoted_uuids_and_resolve_gts_paths() {
+    let (router, tenant, group, first, second, resource) = membership_filter_fixture().await;
+    for (filter, mut expected) in [
+        (
+            format!("group_id eq '{group}'"),
+            vec![resource.as_str(), "second", "third"],
+        ),
+        (
+            format!("group_id eq {group}"),
+            vec![resource.as_str(), "second", "third"],
+        ),
+        (format!("group_id ne '{group}'"), vec!["other-group"]),
+        (
+            format!("group_id in ('{group}')"),
+            vec![resource.as_str(), "second", "third"],
+        ),
+        (
+            format!("resource_type eq '{first}'"),
+            vec![resource.as_str(), "second"],
+        ),
+        (
+            format!("resource_type ne '{first}'"),
+            vec!["third", "other-group"],
+        ),
+        (
+            format!("resource_type in ('{first}', '{second}') and group_id eq '{group}'"),
+            vec![resource.as_str(), "second", "third"],
+        ),
+        (
+            format!(
+                "not (resource_type eq '{second}') and (group_id eq '{group}' or resource_id eq 'absent')"
+            ),
+            vec![resource.as_str(), "second"],
+        ),
+        (
+            format!("resource_id eq '{resource}'"),
+            vec![resource.as_str()],
+        ),
+    ] {
+        let body = filtered_memberships(&router, tenant, &filter, "limit=200").await;
+        let mut actual: Vec<_> = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["resource_id"].as_str().unwrap())
+            .collect();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "filter: {filter}");
+        assert_no_surrogate_ids(&body);
+    }
+}
+
+#[tokio::test]
+async fn membership_filters_reject_invalid_input_with_400() {
+    let (router, _, _, _) = build_shared_router().await;
+    let tenant = Uuid::now_v7();
+    for filter in [
+        "group_id eq 'invalid'",
+        "group_id eq 123",
+        "group_id in ('invalid')",
+        "resource_type eq 'invalid'",
+        "resource_type eq 'gts.test.filter._.missing.v1~'",
+        "resource_type eq 123",
+        "resource_type gt 'gts.test.filter._.member.v1~'",
+        "contains(resource_type, 'gts.test.filter._.member.v1~')",
+        "missing_field eq 'value'",
+    ] {
+        let uri = format!(
+            "/resource-group/v1/memberships?$filter={}",
+            encode_query_value(filter)
+        );
+        let response = router
+            .clone()
+            .oneshot(json_request("GET", &uri, None, tenant))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "filter {filter}: {body}");
+        assert_eq!(
+            body["type"],
+            gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~")
+        );
+    }
+}
+
+#[tokio::test]
+async fn membership_filter_cursor_preserves_the_original_filter() {
+    let (router, tenant, group, first, _, resource) = membership_filter_fixture().await;
+    let filter = format!("group_id eq '{group}' and resource_type eq '{first}'");
+    let first_page =
+        filtered_memberships(&router, tenant, &filter, "$orderby=resource_id&limit=1").await;
+    assert_eq!(first_page["items"][0]["resource_id"], resource);
+    let cursor = first_page["page_info"]["next_cursor"]
+        .as_str()
+        .expect("next page");
+    let extra = format!("cursor={}&limit=1", encode_query_value(cursor));
+    let second_page = filtered_memberships(&router, tenant, &filter, &extra).await;
+    assert_eq!(second_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(second_page["items"][0]["resource_id"], "second");
+
+    let changed_filter = format!("group_id eq '{group}'");
+    let uri = format!(
+        "/resource-group/v1/memberships?$filter={}&{extra}",
+        encode_query_value(&changed_filter)
+    );
+    let response = router
+        .oneshot(json_request("GET", &uri, None, tenant))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn group_filters_share_uuid_normalization_and_gts_resolution() {
+    let (router, tenant, group, _, _, _) = membership_filter_fixture().await;
+    let group_type = rg_type_id!("test.filter._.group.v1~");
+    let filter =
+        format!("id eq '{group}' and tenant_id eq '{tenant}' and type in ('{group_type}')");
+    let uri = format!(
+        "/resource-group/v1/groups?$filter={}",
+        encode_query_value(&filter)
+    );
+    let response = router
+        .oneshot(json_request("GET", &uri, None, tenant))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response_body(response).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["items"][0]["id"], group.to_string());
+    assert_eq!(body["items"][0]["type"], group_type);
+}
+
+/// Existing type codes are stored verbatim. Filtering must not redirect an
+/// exact stored identifier to another row with its normalized spelling.
+#[tokio::test]
+async fn group_type_filters_preserve_stored_identifier_spelling() {
+    let canonical = rg_type_id!("test.filter._.spelling.v1~");
+    for stored in [format!(" {canonical} "), canonical.to_uppercase()] {
+        let (router, types, groups, _) = build_shared_router().await;
+        let tenant = Uuid::now_v7();
+        let mut expected_id = Uuid::nil();
+        for code in [&canonical, &stored] {
+            types
+                .create_type(
+                    &make_ctx(tenant),
+                    resource_group_sdk::CreateTypeRequest {
+                        code: code.clone(),
+                        can_be_root: true,
+                        allowed_parent_types: vec![],
+                        allowed_membership_types: vec![],
+                        metadata_schema: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let group = groups
+                .create_group(
+                    &make_ctx(tenant),
+                    resource_group_sdk::CreateGroupRequest::new(
+                        code.clone(),
+                        "Stored spelling".to_owned(),
+                    ),
+                    tenant,
+                )
+                .await
+                .unwrap();
+            if code == &stored {
+                expected_id = group.id;
+            }
+        }
+        for filter in [
+            format!("type eq '{stored}'"),
+            format!("type in ('{stored}')"),
+        ] {
+            let uri = format!(
+                "/resource-group/v1/groups?$filter={}",
+                encode_query_value(&filter)
+            );
+            let response = router
+                .clone()
+                .oneshot(json_request("GET", &uri, None, tenant))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response_body(response).await;
+            assert_eq!(status, StatusCode::OK, "filter {filter}: {body}");
+            let items = body["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1, "filter {filter}: {body}");
+            assert_eq!(items[0]["id"], expected_id.to_string(), "filter {filter}");
+            assert_eq!(items[0]["type"], stored);
+        }
+    }
+}

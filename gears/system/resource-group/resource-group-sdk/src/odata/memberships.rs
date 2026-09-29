@@ -4,6 +4,9 @@
 //!
 //! Membership list `$filter` fields: `group_id` (eq, ne, in), `resource_type` (eq, ne, in),
 //! `resource_id` (eq, ne, in).
+//! RG accepts UUID literals with or without single quotes for `group_id`.
+//! `resource_type` uses a quoted, registered GTS type path; invalid filter values
+//! return Invalid Argument (HTTP 400).
 
 use toolkit_odata::filter::{FieldKind, FilterField};
 
