@@ -323,11 +323,24 @@ impl GithubClient {
         &self,
         cancel: &CancellationToken,
     ) -> Result<SemaphorePermit<'_>, DomainError> {
-        self.wait_out_cooldown(cancel).await?;
-        self.permits
-            .acquire()
-            .await
-            .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))
+        loop {
+            self.wait_out_cooldown(cancel).await?;
+            let permit = self
+                .permits
+                .acquire()
+                .await
+                .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?;
+            if !self.in_cooldown() {
+                return Ok(permit);
+            }
+        }
+    }
+
+    fn in_cooldown(&self) -> bool {
+        self.cooldown_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some_and(|until| until > Instant::now())
     }
 
     /// Sleep until the shared cooldown has passed, re-checking in case another
