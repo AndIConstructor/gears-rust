@@ -1065,7 +1065,8 @@ it. What the write path emits is therefore part of the contract, not a by-produc
   a decided-against one in the metrics, not only in the refusal reason — which is what makes
   §16.12 observable in a deployment.
 
-Refusals persist `{reason, message}`, returned unchanged by operation reads. `reason`
+Refusals persist `{reason, message}`, returned unchanged by operation reads beside the
+reason-specific `context` (DESIGN §3.3). `reason`
 is the stable machine-readable refusal category; `message` is for humans and is not
 a parsing contract. There is no separate `diagnostics` field (PRD, ADR-0003).
 

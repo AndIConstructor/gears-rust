@@ -56,7 +56,7 @@ def completed(kind, *items, dry_run=False):
     }
 
 
-def outcome(document, status, resource_version, reason=None, **error_fields):
+def outcome(document, status, resource_version, reason=None, *, message="<message>", **context):
     """A complete operation item; error messages alone are non-contractual."""
     return {
         "gts_id": document["gts_id"],
@@ -64,7 +64,7 @@ def outcome(document, status, resource_version, reason=None, **error_fields):
         "resource_version": resource_version,
         "error": None
         if reason is None
-        else {"reason": reason, "message": "<message>", **error_fields},
+        else {"reason": reason, "message": message, "context": context},
     }
 
 
@@ -623,7 +623,7 @@ async def delete_and_assert(
     return operation
 
 
-def removal(subject, status, resource_version, reason=None, **error_fields):
+def removal(subject, status, resource_version, reason=None, *, message="<message>", **context):
     """A complete deletion item; `subject` is a document, named by its GTS ID,
     or the key the item echoes: a GTS ID as sent, a UUID in canonical lowercase
     hyphenated form."""
@@ -634,7 +634,7 @@ def removal(subject, status, resource_version, reason=None, **error_fields):
         "resource_version": resource_version,
         "error": None
         if reason is None
-        else {"reason": reason, "message": "<message>", **error_fields},
+        else {"reason": reason, "message": message, "context": context},
     }
 
 

@@ -151,8 +151,16 @@ async fn assert_missing_dependency(
         .find(|item| item["gts_id"] == candidate_id)
         .expect("candidate is exposed to the client");
     assert_eq!(
-        wire_item["error"], error,
-        "polling preserves the stored diagnostic fields"
+        wire_item["error"],
+        json!({
+            "reason": error["reason"],
+            "message": error["message"],
+            "context": {
+                "dependency_id": dependency_id,
+                "dependency_kind": dependency_kind,
+            },
+        }),
+        "polling carries the stored dependency in context"
     );
     assert!(
         registry

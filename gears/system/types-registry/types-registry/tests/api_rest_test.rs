@@ -1214,10 +1214,12 @@ async fn a_candidate_refused_by_admission_surfaces_through_the_operation() {
         item["error"],
     );
     assert_eq!(
-        item["error"]["dependency_id"],
-        gts_id!("cf.core.absent.type.v1~")
+        item["error"]["context"],
+        json!({
+            "dependency_id": gts_id!("cf.core.absent.type.v1~"),
+            "dependency_kind": "ref",
+        })
     );
-    assert_eq!(item["error"]["dependency_kind"], "ref");
 }
 
 // ---------------------------------------------------------------------------
@@ -2001,7 +2003,7 @@ async fn an_unknown_registry_reference_fails_its_item_only() {
         "entity_key": reference.to_string(),
         "status": "failed",
         "resource_version": null,
-        "error": { "reason": "precondition_failed", "message": "<message>" },
+        "error": { "reason": "precondition_failed", "message": "<message>", "context": {} },
     });
     let items = operation["items"].as_array().expect("items");
     assert_eq!(items.len(), 1, "{items:?}");

@@ -1077,16 +1077,28 @@ RegistrationItemResult {
     gts_id,                // the submitted identifier: registration names nothing else
     status: pending | running | succeeded | unchanged | failed,
     resource_version?,
-    error?                 // structured error, including already_exists and precondition_failed
+    error?: ItemError      // including already_exists and precondition_failed
 }
 
 DeletionItemResult {
     entity_key,            // the key in canonical form: a GTS Identifier, or a lowercase hyphenated gts_uuid
     status: pending | running | succeeded | failed,
     resource_version?,
-    error?
+    error?: ItemError
+}
+
+ItemError {
+    reason,                // stable code, open set
+    message,               // for humans, not parsed
+    context                // reason-specific object, {} when none; unknown keys are ignored
 }
 ```
+
+| `reason` | `context` keys |
+|---|---|
+| `dependency_not_found`, `dependency_deleted` | `dependency_id`, `dependency_kind` (`base`, `conforming_type`, `ref`; open set) |
+| `system_failure` | `diagnostic_code` (open set) |
+| other current reasons | `{}` (currently) |
 
 Results preserve request order. A registration result names its identifier; a deletion result echoes its key, a GTS Identifier or a `gts_uuid`, whether or not it named an entity. A `gts_uuid` accepted in any UUID spelling is echoed lowercase and hyphenated: the operation stores the classified key, and a replay under another spelling of it is the same operation. `:batchGet` echoes a `gts_uuid` the same way, so every `entity_key` a response carries follows one rule. Real `succeeded` and `unchanged` results also contain `resource_version`.
 

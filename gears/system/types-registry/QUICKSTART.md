@@ -140,7 +140,9 @@ Deletion requires a positive `expected_resource_version`. Invalid values return
 is rejected.
 
 Batch deletion accepts either key form and returns outcomes in request order, each echoing
-its `entity_key`, a Registry Reference in lowercase hyphenated form:
+its `entity_key`, a Registry Reference in lowercase hyphenated form. Two keys of one entity
+are a duplicate and refuse the batch. This one deletes an Instance by its identifier and its
+Type Schema by its Registry Reference; the worker deletes the dependant first:
 
 ```bash
 curl -s -X POST "$BASE/types-registry/v2/entities:batchDelete" \
@@ -148,8 +150,8 @@ curl -s -X POST "$BASE/types-registry/v2/entities:batchDelete" \
   -H "Content-Type: application/json" \
   -d '{
         "items": [
-          { "entity_key": "gts.cf.core.example.event.v1~", "expected_resource_version": 1 },
-          { "entity_key": "d226dd5b-14c8-56da-a718-9cf29becaba1", "expected_resource_version": 2 }
+          { "entity_key": "gts.cf.core.example.event.v1~cf.core.example.first.v1", "expected_resource_version": 1 },
+          { "entity_key": "d226dd5b-14c8-56da-a718-9cf29becaba1", "expected_resource_version": 1 }
         ]
       }'
 ```

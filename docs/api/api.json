@@ -10582,24 +10582,15 @@
       "OperationItemErrorDto": {
         "description": "Why a candidate failed. `reason` is a stable code and may be one the client\ndoes not know; `message` is for humans and must not be parsed.",
         "properties": {
-          "dependency_id": {
-            "description": "The dependency, for `dependency_not_found` and `dependency_deleted`.",
-            "type": "string"
-          },
-          "dependency_kind": {
-            "description": "`base`, `conforming_type` or `ref`; newer writers may add kinds.",
-            "type": "string"
-          },
-          "error_code": {
-            "description": "Stable diagnostic code of a `system_failure`.",
-            "type": "string"
+          "context": {
+            "additionalProperties": {},
+            "description": "Reason-specific details, `{}` when there are none: `dependency_id` and\n`dependency_kind` for `dependency_*`, `diagnostic_code` for `system_failure`.\nClients ignore keys they do not know.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
           },
           "message": {
-            "type": "string"
-          },
-          "operation_id": {
-            "description": "The operation a `system_failure` terminalized.",
-            "format": "uuid",
             "type": "string"
           },
           "reason": {
@@ -10608,7 +10599,8 @@
         },
         "required": [
           "reason",
-          "message"
+          "message",
+          "context"
         ],
         "type": "object"
       },

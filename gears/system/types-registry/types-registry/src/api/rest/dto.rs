@@ -374,7 +374,14 @@ mod tests {
             },
             Uuid::nil(),
         );
-        assert_eq!(serde_json::to_value(dto)?["error"], payload);
+        assert_eq!(
+            serde_json::to_value(dto)?["error"],
+            serde_json::json!({
+                "reason": "incompatible_with_baseline",
+                "message": "PropertyAdded at $.payload",
+                "context": {},
+            })
+        );
         Ok(())
     }
 
@@ -401,7 +408,11 @@ mod tests {
                 "entity_key": "0f5c8e3a-0000-5000-8000-000000000001",
                 "status": "failed",
                 "resource_version": null,
-                "error": payload,
+                "error": {
+                    "reason": "precondition_failed",
+                    "message": "names no entity",
+                    "context": {},
+                },
             })
         );
         Ok(())
@@ -455,24 +466,48 @@ mod tests {
     }
 
     #[test]
-    fn operation_item_error_keeps_dependency_and_system_failure_details() {
-        for payload in [
-            serde_json::json!({
-                "reason": "dependency_not_found",
-                "message": "$ref target 'cf.core.absent.type.v1~' is not registered",
-                "dependency_id": "cf.core.absent.type.v1~",
-                "dependency_kind": "ref",
-            }),
-            serde_json::json!({
-                "reason": "system_failure",
-                "message": "admission could not complete because of a system failure",
-                "error_code": "delivery_exhausted",
-                "operation_id": "7f0c3a52-3f58-4c61-9f1e-2d4c2f6c1a10",
-            }),
-            // An unknown future reason passes through verbatim.
-            serde_json::json!({ "reason": "future_refusal", "message": "future details" }),
+    fn operation_item_error_moves_reason_details_into_context() {
+        for (stored, expected) in [
+            (
+                serde_json::json!({
+                    "reason": "dependency_not_found",
+                    "message": "$ref target 'cf.core.absent.type.v1~' is not registered",
+                    "dependency_id": "cf.core.absent.type.v1~",
+                    "dependency_kind": "ref",
+                }),
+                serde_json::json!({
+                    "reason": "dependency_not_found",
+                    "message": "$ref target 'cf.core.absent.type.v1~' is not registered",
+                    "context": {
+                        "dependency_id": "cf.core.absent.type.v1~",
+                        "dependency_kind": "ref",
+                    },
+                }),
+            ),
+            (
+                serde_json::json!({
+                    "reason": "system_failure",
+                    "message": "admission could not complete because of a system failure",
+                    "error_code": "delivery_exhausted",
+                    "operation_id": "7f0c3a52-3f58-4c61-9f1e-2d4c2f6c1a10",
+                }),
+                serde_json::json!({
+                    "reason": "system_failure",
+                    "message": "admission could not complete because of a system failure",
+                    "context": { "diagnostic_code": "delivery_exhausted" },
+                }),
+            ),
+            // An unknown future reason passes through, with an empty context.
+            (
+                serde_json::json!({ "reason": "future_refusal", "message": "future details" }),
+                serde_json::json!({
+                    "reason": "future_refusal",
+                    "message": "future details",
+                    "context": {},
+                }),
+            ),
         ] {
-            assert_eq!(item_error(Some(&payload.to_string())), payload);
+            assert_eq!(item_error(Some(&stored.to_string())), expected);
         }
     }
 
@@ -507,9 +542,10 @@ mod tests {
                 !message.contains("invalid_schema"),
                 "{stored} leaked: {message}"
             );
+            assert_eq!(error["context"], serde_json::json!({}), "{stored}");
             assert_eq!(
                 error.as_object().map(serde_json::Map::len),
-                Some(2),
+                Some(3),
                 "{stored}: {error}"
             );
         }
@@ -524,18 +560,25 @@ mod tests {
     fn the_operation_item_error_schema_is_a_typed_object() {
         let schema = schema_json::<OperationItemErrorDto>();
         assert_eq!(schema["type"], "object");
-        assert_eq!(schema["required"], serde_json::json!(["reason", "message"]));
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["reason", "message", "context"])
+        );
         let properties = &schema["properties"];
-        for field in [
-            "reason",
-            "message",
-            "dependency_id",
-            "dependency_kind",
-            "error_code",
-        ] {
+        assert_eq!(
+            properties.as_object().map(serde_json::Map::len),
+            Some(3),
+            "{properties}"
+        );
+        for field in ["reason", "message"] {
             assert_eq!(properties[field]["type"], "string", "{field}: {properties}");
         }
-        assert_eq!(properties["operation_id"]["format"], "uuid");
+        assert_eq!(properties["context"]["type"], "object", "{properties}");
+        assert_eq!(
+            properties["context"]["additionalProperties"],
+            serde_json::json!({}),
+            "{properties}"
+        );
 
         let registration = schema_json::<RegistrationItemDto>();
         let deletion = schema_json::<DeletionItemDto>();
@@ -916,22 +959,11 @@ pub struct DeletionItemDto {
 pub struct OperationItemErrorDto {
     pub reason: String,
     pub message: String,
-    /// The dependency, for `dependency_not_found` and `dependency_deleted`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub dependency_id: Option<String>,
-    /// `base`, `conforming_type` or `ref`; newer writers may add kinds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub dependency_kind: Option<String>,
-    /// Stable diagnostic code of a `system_failure`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub error_code: Option<String>,
-    /// The operation a `system_failure` terminalized.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub operation_id: Option<Uuid>,
+    /// Reason-specific details, `{}` when there are none: `dependency_id` and
+    /// `dependency_kind` for `dependency_*`, `diagnostic_code` for `system_failure`.
+    /// Clients ignore keys they do not know.
+    #[schema(value_type = std::collections::BTreeMap<String, serde_json::Value>)]
+    pub context: serde_json::Map<String, serde_json::Value>,
 }
 
 /// An operation as a caller polls it; `kind` selects the item shape.
@@ -1218,23 +1250,26 @@ impl OperationItemErrorDto {
         Self {
             reason: reason.as_str().to_owned(),
             message: "the recorded failure could not be read".to_owned(),
-            dependency_id: None,
-            dependency_kind: None,
-            error_code: None,
-            operation_id: None,
+            context: serde_json::Map::new(),
         }
     }
 }
 
 impl From<StoredFailure> for OperationItemErrorDto {
+    /// `operation_id` is not exposed: it is always the enclosing operation.
     fn from(failure: StoredFailure) -> Self {
+        let context = [
+            ("dependency_id", failure.dependency_id),
+            ("dependency_kind", failure.dependency_kind),
+            ("diagnostic_code", failure.error_code),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| Some((key.to_owned(), value?.into())))
+        .collect();
         Self {
             reason: failure.reason,
             message: failure.message,
-            dependency_id: failure.dependency_id,
-            dependency_kind: failure.dependency_kind,
-            error_code: failure.error_code,
-            operation_id: failure.operation_id,
+            context,
         }
     }
 }
