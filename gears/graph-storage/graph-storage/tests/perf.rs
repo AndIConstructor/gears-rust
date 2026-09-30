@@ -44,7 +44,7 @@ use graph_storage_sdk::models::{
     RemainingBudget, SearchMode, SearchRequest,
 };
 use graph_storage_sdk::plugin_api::{
-    EmbeddingPlan, ExpandRequest, GraphEngineV1, GraphStoreV1, StoreCtx, VectorArm,
+    EmbeddingPlan, ExpandRequest, GraphEngineV1, GraphStoreV1, HopBackend, StoreCtx, VectorArm,
 };
 use sea_orm_migration::MigratorTrait;
 use testcontainers::runners::AsyncRunner as _;
@@ -58,8 +58,30 @@ use uuid::Uuid;
 
 struct Stand {
     store: Arc<PgGraphStore>,
+    /// The SQL/PGQ hop, which `stand()` configures outright.
     engine: PgGraphEngine,
+    db: Arc<toolkit_db::secure::Db>,
+    pgq: bool,
     _container: ContainerAsync<Postgres>,
+}
+
+impl Stand {
+    /// A second engine over the same database and the same seeded graph,
+    /// configured for `hop`. ADR-0001 promises the traversal budget for both
+    /// backends, so both are timed on one seeding rather than the two-query
+    /// hop being assumed from the pattern's number.
+    fn engine_for(&self, hop: HopStrategy) -> PgGraphEngine {
+        PgGraphEngine::new(Arc::new(PgGraphStore::new(
+            Arc::clone(&self.db),
+            GraphStorageConfig {
+                traversal_hop: hop,
+                ..GraphStorageConfig::default()
+            }
+            .validated()
+            .expect("the perf configuration is valid"),
+            self.pgq,
+        )))
+    }
 }
 
 /// The graph the criteria name, scaled.
@@ -165,6 +187,8 @@ async fn stand() -> Option<Stand> {
     Some(Stand {
         store,
         engine,
+        db,
+        pgq,
         _container: container,
     })
 }
@@ -518,7 +542,13 @@ async fn the_retrieval_scenarios_answer_within_their_budgets() {
     .await;
     println!("criteria table (filter + page 50) {table}");
 
-    // --- scenario 3: bounded traversal with edge-type filtering ----------
+    // --- scenarios 3 and 4, on both hop backends ---------------------------
+    //
+    // ADR-0001 § Confirmation promises `nfr-traversal-latency` for both
+    // backends, and they are not one another's proxy: the two-query hop is
+    // what a server without SQL/PGQ serves, and on the development stand it
+    // was the slower of the two at depth 3. Same seeded graph, same seeds,
+    // same budgets; one engine per backend.
     let seeds: Vec<String> = (0..8).map(|i| format!("perf-{}", i * 977)).collect();
     let seed_ids: Vec<graph_storage_sdk::models::NodeId> = store
         .resolve_node_ids(&ctx, &seeds)
@@ -532,10 +562,67 @@ async fn the_retrieval_scenarios_answer_within_their_budgets() {
         .resolve_type_set(&ctx, &[conformance::LINK.to_owned()])
         .await
         .expect("the edge type resolves");
-    let engine = &stand.engine;
-    let reader = &ctx;
+    let root = store
+        .resolve_node_ids(&ctx, &["perf-1".to_owned()])
+        .await
+        .expect("the root resolves")
+        .first()
+        .expect("the root exists")
+        .1;
+    let two_query = stand.engine_for(HopStrategy::TwoQuery);
+    let mut hops: Vec<(&str, Measured, Measured)> = Vec::new();
+    for (backend, engine, served_by) in [
+        ("sql/pgq", &stand.engine, HopBackend::Pattern),
+        ("two-query", &two_query, HopBackend::TwoQuery),
+    ] {
+        let (traversal, neighborhood) =
+            time_hops(engine, served_by, store, &ctx, &seed_ids, &type_set, root).await;
+        println!("[{backend}] depth-3 typed traversal           {traversal}");
+        println!("[{backend}] depth-3 neighborhood (budget 1k)  {neighborhood}");
+        hops.push((backend, traversal, neighborhood));
+    }
+    println!();
+
+    // The thresholds, asserted only at full scale: a latency measured on a
+    // tenth of the graph is not evidence about the graph the criteria name,
+    // and asserting it there would be a green light nobody earned.
+    if (shape.scale - 1.0).abs() < f64::EPSILON {
+        assert!(
+            hybrid.p95 <= Duration::from_millis(500),
+            "nfr-search-latency: hybrid p95 {hybrid}"
+        );
+        for (backend, traversal, neighborhood) in &hops {
+            assert!(
+                neighborhood.p95 <= Duration::from_secs(1),
+                "nfr-traversal-latency [{backend}]: neighborhood p95 {neighborhood}"
+            );
+            assert!(
+                traversal.p95 <= Duration::from_secs(1),
+                "typed traversal [{backend}]: p95 {traversal}"
+            );
+        }
+    }
+}
+
+/// Scenarios 3 and 4 against one engine: the depth-3 typed traversal, and
+/// the depth-3 UI neighborhood with the hydration the UI needs, which is
+/// what `nfr-traversal-latency` actually budgets -- a neighborhood nobody can
+/// render is not the scenario.
+///
+/// `served_by` is asserted on every hop: the pattern backend declines by
+/// falling back, so without it a number printed under "sql/pgq" could be the
+/// two-query hop's, and the two backends would be measured as one.
+async fn time_hops(
+    engine: &PgGraphEngine,
+    served_by: HopBackend,
+    store: &PgGraphStore,
+    reader: &StoreCtx<'_>,
+    seed_ids: &[graph_storage_sdk::models::NodeId],
+    type_set: &graph_storage_sdk::models::TypeIdSet,
+    root: graph_storage_sdk::models::NodeId,
+) -> (Measured, Measured) {
     let traversal = measure(30, |_| {
-        let frontier = seed_ids.clone();
+        let frontier = seed_ids.to_vec();
         let edge_types = Some(type_set.clone());
         async move {
             let mut reached = frontier;
@@ -557,6 +644,10 @@ async fn the_retrieval_scenarios_answer_within_their_budgets() {
                     )
                     .await
                     .expect("the hop runs");
+                assert_eq!(
+                    response.served_by, served_by,
+                    "the backend under test answered"
+                );
                 reached = response.reached;
                 reached.sort_unstable();
                 reached.dedup();
@@ -568,20 +659,7 @@ async fn the_retrieval_scenarios_answer_within_their_budgets() {
         }
     })
     .await;
-    println!("depth-3 typed traversal           {traversal}");
 
-    // --- scenario 4: the depth-3 UI neighborhood -------------------------
-    //
-    // The same three hops plus the hydration the UI needs, which is what
-    // `nfr-traversal-latency` actually budgets: a neighborhood nobody can
-    // render is not the scenario.
-    let root = store
-        .resolve_node_ids(&ctx, &["perf-1".to_owned()])
-        .await
-        .expect("the root resolves")
-        .first()
-        .expect("the root exists")
-        .1;
     let neighborhood = measure(30, |_| async {
         let mut frontier = vec![root];
         let mut visited = vec![root];
@@ -603,6 +681,10 @@ async fn the_retrieval_scenarios_answer_within_their_budgets() {
                 )
                 .await
                 .expect("the hop runs");
+            assert_eq!(
+                response.served_by, served_by,
+                "the backend under test answered"
+            );
             frontier = response.reached;
             frontier.sort_unstable();
             frontier.dedup();
@@ -620,25 +702,7 @@ async fn the_retrieval_scenarios_answer_within_their_budgets() {
         assert!(!hydrated.is_empty(), "a neighborhood must have nodes in it");
     })
     .await;
-    println!("depth-3 neighborhood (budget 1k)  {neighborhood}\n");
-
-    // The thresholds, asserted only at full scale: a latency measured on a
-    // tenth of the graph is not evidence about the graph the criteria name,
-    // and asserting it there would be a green light nobody earned.
-    if (shape.scale - 1.0).abs() < f64::EPSILON {
-        assert!(
-            hybrid.p95 <= Duration::from_millis(500),
-            "nfr-search-latency: hybrid p95 {hybrid}"
-        );
-        assert!(
-            neighborhood.p95 <= Duration::from_secs(1),
-            "nfr-traversal-latency: neighborhood p95 {neighborhood}"
-        );
-        assert!(
-            traversal.p95 <= Duration::from_secs(1),
-            "typed traversal p95 {traversal}"
-        );
-    }
+    (traversal, neighborhood)
 }
 
 /// `nfr-ingest-throughput`: 10,000 nodes and 20,000 edges, embedding

@@ -106,7 +106,7 @@ The platform capability is now in review rather than merely requested: `toolkit-
 
 ### Confirmation
 
-- Integration benchmarks enforce `cpt-cf-graph-storage-nfr-traversal-latency` on the reference graph (100k nodes / 500k edges, depth 3, 1,000-node budget) for both backends.
+- Integration benchmarks enforce `cpt-cf-graph-storage-nfr-traversal-latency` on the reference graph (100k nodes / 500k edges, depth 3, 1,000-node budget) for both hop backends -- the SQL/PGQ pattern and the two-query hop -- timed on one seeding, with the budget asserted for each (`tests/perf.rs`, opt-in through `GEARS_GRAPH_PERF`; the iterative-CTE hop of this ADR is not shipped, README § Known limitations).
 - The PG19 spike report ([SPIKE-pg19-sqlpgq.md](../SPIKE-pg19-sqlpgq.md)) validated the stack ahead of implementation: pgvector on PG19 beta2, GRAPH_TABLE hop-chain vs. recursive CTE (p95 8.8 ms vs. 4.1 ms at reference shape), and single-statement KNN + graph + FTS composition; it is re-run at PG19 GA and PG20 beta.
 - The prototype (`studio-graph-storage`, PG19 branch) runs the same stack end to end: migrations, both traversal backends, and the full integration suite on PG19 beta2 + pgvector-from-source.
 - A Rust development stand for this gear runs the decision itself: the schema with composite keys, migrations through the platform runner (including `CREATE PROPERTY GRAPH`), scoped reads, and bounded traversal on PostgreSQL 19 beta2. On 200k nodes / 600k edges it measured one undirected hop at p95 0.37 ms (two scoped queries), 0.43 ms (single scoped CTE) and 0.65 ms (SQL/PGQ), all far inside `cpt-cf-graph-storage-nfr-traversal-latency`.
