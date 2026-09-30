@@ -101,6 +101,12 @@ pub struct GraphStorageConfig {
     // --- limits (graph-storage.limits.*) ----------------------------------
     pub ingest_max_nodes: u32,
     pub ingest_max_edges: u32,
+    /// Ceiling on one payload as the caller submits it, and on the other
+    /// JSON documents a caller submits outside an ingest: a type's schema and
+    /// a migration step's default value, each measured before it is analyzed
+    /// or written. The base ontology's widest schema is about 2.5 KiB, so a
+    /// ceiling below that refuses the gear's own types when a producer
+    /// re-registers them.
     pub payload_max_bytes: u32,
     /// Ceiling on a producer-supplied `node_key` and on a node's `name`.
     ///

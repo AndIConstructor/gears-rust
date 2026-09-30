@@ -2553,6 +2553,98 @@ async fn every_caller_supplied_identifier_is_bounded_before_it_reaches_the_store
     }
 }
 
+/// A type's schema and a migration step's default are the two JSON documents
+/// a caller submits that are not payloads, and they are bounded like one:
+/// `payload_max_bytes` refuses them before the schema is analyzed or the
+/// default written into every row. The identifiers beside them were bounded already;
+/// an unbounded document next to them was the one field admission did not
+/// measure.
+#[tokio::test]
+async fn a_schema_and_a_migration_default_are_bounded_like_an_item() {
+    use graph_storage_sdk::models::{
+        MigrationSpec, MigrationStep, TypeRegistration, TypeRegistrationOptions,
+    };
+
+    let harness = Harness::configured(
+        Arc::new(support::AllowInOwnTenant),
+        GraphStorageConfig {
+            // Above the base ontology's own schemas (the widest is ~2.5 KiB)
+            // and below the documents this case submits.
+            payload_max_bytes: 4 * 1024,
+            ..GraphStorageConfig::default()
+        },
+    );
+    let ctx = harness.ctx();
+    harness.seed_ontology(&ctx).await;
+
+    let type_id = "gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~acme.gs._.wide.v1~";
+    let schema = |description: &str| {
+        serde_json::json!({
+            "$id": format!("gts://{type_id}"),
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "description": description,
+            "properties": { "payload": { "type": "object" } }
+        })
+    };
+
+    let refused = harness
+        .services
+        .register_types(
+            &ctx,
+            vec![TypeRegistration {
+                type_id: type_id.to_owned(),
+                schema: schema(&"d".repeat(8 * 1024)),
+            }],
+        )
+        .await
+        .expect_err("a schema over payload_max_bytes is refused");
+    assert!(
+        matches!(&refused, DomainError::LimitExceeded { what } if what.contains("payload_max_bytes") && what.contains("types[0].schema")),
+        "the refusal names the bound and the field: {refused}"
+    );
+
+    harness
+        .services
+        .register_types(
+            &ctx,
+            vec![TypeRegistration {
+                type_id: type_id.to_owned(),
+                schema: schema("small"),
+            }],
+        )
+        .await
+        .expect("a schema inside the bound registers");
+
+    let refused = harness
+        .services
+        .register_types_with(
+            &ctx,
+            vec![TypeRegistration {
+                type_id: type_id.to_owned(),
+                schema: schema("small"),
+            }],
+            TypeRegistrationOptions {
+                on_existing: graph_storage_sdk::models::OnExisting::Update,
+                revalidate: false,
+                dry_run: false,
+                migrations: vec![MigrationSpec {
+                    type_id: type_id.to_owned(),
+                    steps: vec![MigrationStep::Default {
+                        path: "/payload/blob".to_owned(),
+                        value: serde_json::Value::String("v".repeat(8 * 1024)),
+                    }],
+                }],
+            },
+        )
+        .await
+        .expect_err("a migration default over payload_max_bytes is refused");
+    assert!(
+        matches!(&refused, DomainError::LimitExceeded { what } if what.contains("payload_max_bytes") && what.contains("steps[0].value")),
+        "the refusal names the bound and the field: {refused}"
+    );
+}
+
 /// A continuation cursor belongs to the listing that minted it, `$filter`
 /// included. Replaying one without its filter used to resume an unfiltered
 /// walk at a filtered position and answer an empty page with success, which a

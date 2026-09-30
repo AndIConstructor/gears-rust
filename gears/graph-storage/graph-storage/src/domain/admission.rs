@@ -731,6 +731,7 @@ pub fn admit_registration(
         let TypeRegistration { type_id, schema } = registration;
         admit_identifier(cfg, &format!("types[{index}].type_id"), type_id)?;
         refuse_nul_in_json(&format!("types[{index}].schema"), schema)?;
+        admit_json_bytes(cfg, &format!("types[{index}].schema"), schema)?;
     }
     for (index, migration) in migrations.iter().enumerate() {
         let MigrationSpec { type_id, steps } = migration;
@@ -745,12 +746,35 @@ pub fn admit_registration(
                 MigrationStep::Default { path, value } => {
                     admit_identifier(cfg, &what("path"), path)?;
                     refuse_nul_in_json(&what("value"), value)?;
+                    admit_json_bytes(cfg, &what("value"), value)?;
                 }
                 MigrationStep::Drop { path } => {
                     admit_identifier(cfg, &what("path"), path)?;
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// A caller-supplied JSON document that is not a payload -- a type's schema,
+/// a migration step's default -- is bounded by `payload_max_bytes` like one.
+/// A schema is walked, analyzed against its ancestors and compiled into a
+/// validator before anything is stored, and a step's default is written into
+/// every row of the type, so both do work in proportion to their size; the
+/// identifiers beside them are bounded, and an unbounded document next to
+/// them was the one field admission did not measure.
+fn admit_json_bytes(
+    cfg: &GraphStorageConfig,
+    what: &str,
+    value: &serde_json::Value,
+) -> Result<(), DomainError> {
+    let bytes = json_bytes(value);
+    if bytes > u64::from(cfg.payload_max_bytes) {
+        return Err(exceeded(format!(
+            "{what} is {bytes} bytes; payload_max_bytes is {}",
+            cfg.payload_max_bytes
+        )));
     }
     Ok(())
 }
