@@ -44,7 +44,7 @@
 
 ### 1.1 Purpose
 
-Construct is an open-source gear of Constructor Fabric. It keeps one living profile for each subject and serves it to the applications and AI agents of a tenant. A subject is anything with a lasting identity. In this release, every subject is a person.
+Construct is an open-source component of Constructor Fabric. It keeps one living profile for each subject and serves it to the applications and AI agents of a tenant. A subject is anything with a lasting identity. In this release, every subject is a person.
 
 Connectors are any systems that learn something about a subject. They send what they learn to Construct as typed records, under GTS (Global Type System) contracts that the connectors own. Construct checks each record against its type and turns it into facts. A record may add, replace or remove facts, and Construct decides which on its own. Applications and agents read the profile to personalize what they do. The subject can see, correct and erase what Construct knows about them.
 
@@ -67,12 +67,12 @@ flowchart LR
 
 A SaaS product wants to personalize what it does for each user. What it knows about a user is spread across many systems: a sign-up form, a chat, a learning system, a CRM, public web pages. Each system knows a part, and the parts often disagree.
 
-Every product that personalizes builds the same parts again. It collects signals from many sources. It resolves facts that contradict each other. It keeps the profile current. It respects privacy and the right to erasure. And now it must give the profile to AI agents without letting an agent read or change data it must not touch. Each team builds these parts on its own, and each copy has its own gaps, most often in privacy. Construct gives these parts once, as one gear, with the same rules for every product that uses it.
+Every product that personalizes builds the same parts again. It collects signals from many sources. It resolves facts that contradict each other. It keeps the profile current. It respects privacy and the right to erasure. And now it must give the profile to AI agents without letting an agent read or change data it must not touch. Each team builds these parts on its own, and each copy has its own gaps, most often in privacy. Construct gives these parts once, with the same rules for every product that uses it.
 
 ### 1.3 Goals (Business Outcomes)
 
 - **G1 — One profile per subject that any app in the tenant can use.** Success metric: in the acceptance test suite, two consumer applications of one tenant with the same permissions get the same facts for the same subject in 100 % of reads, and a new consumer application reads profiles with platform permissions only and zero changes to Construct.
-- **G2 — The profile stays current and has no contradictions.** Success metric: on the reference evaluation set shipped with the gear, at least 95 % of records give the expected add, replace or remove decision, and the final profiles hold zero pairs of contradicting facts.
+- **G2 — The profile stays current and has no contradictions.** Success metric: on the reference evaluation set shipped with Construct, at least 95 % of records give the expected add, replace or remove decision, and the final profiles hold zero pairs of contradicting facts.
 - **G3 — The subject controls their data: they can see it, correct it and erase it.** Success metric: 100 % of view, mark-as-incorrect, delete and erase requests in the acceptance test suite give the expected result, and every erasure completes within 30 days (`cpt-cf-construct-nfr-deletion-time`).
 - **G4 — AI agents can read and manage the profile through MCP.** Success metric: a standard MCP client reads facts, manages facts and sees question state with no Construct-specific code, and adversarial tests find zero MCP calls that reach a subject or tenant the caller is not authorized for.
 
@@ -381,7 +381,7 @@ A deleted fact, an erasure, the end of a retention period, or a tenant leaving *
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-nfr-guardrail-detection`
 
-The guardrails **MUST** find special-category content on the reference test set shipped with the gear.
+The guardrails **MUST** find special-category content on the reference test set shipped with Construct.
 
 - **Threshold**: At least 95 % of items found in each category; at least 99 % for authentication secrets
 - **Rationale**: A guardrail that misses content gives false safety.
