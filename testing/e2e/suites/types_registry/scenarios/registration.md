@@ -6,7 +6,7 @@ Every scenario has an e2e test; the [suite README](../README.md) lists the test 
 
 Unless stated otherwise, each mutation uses a fresh `Idempotency-Key`. Accepted requests return `202` with a JSON receipt and a `Location` for `GET /operations/{operation_id}`; polling reaches `completed`, and the items report success or failure. Synchronous refusals return Problem JSON without an operation `Location` and admit no item. Reads explicitly select the compared fields.
 
-Valid root Type Schema fixtures follow the GTS §4.4.1 closed-envelope pattern: the top level rejects undeclared properties and `payload` is the open extension point. The intentionally unresolved derived schema inherits no root constraints and is not closed locally. Instances always carry `payload`, even when empty.
+Valid root Type Schema fixtures follow the GTS §4.4.1 closed-envelope pattern: the top level rejects undeclared properties and `payload` is the open extension point. The intentionally unresolved derived schema inherits no root constraints and is not closed locally. Instances of object schemas always carry `payload`, even when empty. The `label_schema` fixture is the deliberate exception: a root Type Schema that describes strings rather than objects, so its Instances have string `content`.
 
 ## Contents
 
@@ -14,9 +14,11 @@ Valid root Type Schema fixtures follow the GTS §4.4.1 closed-envelope pattern: 
   - [TR-REG-001 — Create a Type Schema](#tr-reg-001--create-a-type-schema)
   - [TR-REG-002 — Register an Instance in a later operation](#tr-reg-002--register-an-instance-in-a-later-operation)
   - [TR-REG-003 — Register an Instance before its schema in one batch](#tr-reg-003--register-an-instance-before-its-schema-in-one-batch)
+  - [TR-REG-004 — Register a scalar Type Schema and a string Instance](#tr-reg-004--register-a-scalar-type-schema-and-a-string-instance)
 - [Partial success and refusals](#partial-success-and-refusals)
   - [TR-REG-101 — Preserve partial success and structured failures](#tr-reg-101--preserve-partial-success-and-structured-failures)
   - [TR-REG-102 — Refuse a Type Schema whose `$id` does not name its item](#tr-reg-102--refuse-a-type-schema-whose-id-does-not-name-its-item)
+  - [TR-REG-103 — Invalid Instance content fails against a scalar Type Schema](#tr-reg-103--invalid-instance-content-fails-against-a-scalar-type-schema)
 - [Request identity and idempotency](#request-identity-and-idempotency)
   - [TR-REG-201 — Replay returns the original operation after the entity changes](#tr-reg-201--replay-returns-the-original-operation-after-the-entity-changes)
   - [TR-REG-202 — Reusing a key for a different request is a conflict](#tr-reg-202--reusing-a-key-for-a-different-request-is-a-conflict)
@@ -112,6 +114,16 @@ Valid root Type Schema fixtures follow the GTS §4.4.1 closed-envelope pattern: 
 
 This checks batch-level ordering, not every graph-ordering case.
 
+### TR-REG-004 — Register a scalar Type Schema and a string Instance
+
+**Fixtures:** [label_schema](../fixtures/registration/label_schema.json), [label_instance](../fixtures/registration/label_instance.json).
+
+**Given:** a new root `label_schema` whose content defines `type: string` with `minLength: 1`, and its `label_instance` whose `content` is the JSON string `"primary"`. Both are absent.
+
+**When:** submit `[instance, schema]` in one batch and await completion.
+
+**Then:** both succeed at version 1. The schema reads back with a `resolved_schema` equal to its authored schema document. The Instance reads back with `content` equal to the JSON string `"primary"`: it is neither wrapped in an object nor re-encoded as a string.
+
 ## Partial success and refusals
 
 ### TR-REG-101 — Preserve partial success and structured failures
@@ -149,6 +161,16 @@ B also reports `dependency_kind=ref` and the missing ID. A is readable; B and C 
 1. The request is refused synchronously with `400` RFC-9457 `invalid_argument` naming the schema's `gts_id` as `resource_name`, with one field violation on `entity`, reason `VALIDATION_FAILED`, whose description names the expected `gts://<gts_id>`.
 2. No `202`, operation or `Location` is returned, so nothing is admitted.
 3. Neither the schema nor its valid batch neighbour, the Instance, is readable; both return `404`.
+
+### TR-REG-103 — Invalid Instance content fails against a scalar Type Schema
+
+**Fixtures:** [label_schema](../fixtures/registration/label_schema.json), [label_instance](../fixtures/registration/label_instance.json).
+
+**Given:** the `label_schema` is registered. Prepare a valid neighbour from `label_instance` with entity name `secondary` and content `"secondary"`, and six new Instances of the same type whose `content` is `{}`, `42`, `true`, `["primary"]`, `null` or `""`. The `null` is a present JSON value, not missing content. The empty string has the right JSON type but violates `minLength`.
+
+**When:** submit all seven Instances in one batch and await completion.
+
+**Then:** acceptance returns `202`; content that does not match the schema is not a synchronous refusal. The valid neighbour succeeds at version 1 and reads back with its string content. Each of the six others is `failed` with `error.reason=invalid_value` and `resource_version=null`, and its key returns `404`. The operation is `completed`, and one failure does not block the other items.
 
 ## Request identity and idempotency
 

@@ -1,10 +1,13 @@
 """Partial batch outcomes and synchronous authored-identity refusals."""
 
+from copy import deepcopy
+
 import pytest
 
 from .helpers import (
     assert_absent,
     assert_bad_request,
+    instance_entity,
     invalid_argument,
     outcome,
     post_registration,
@@ -94,3 +97,44 @@ async def test_register_batch_refuses_mismatched_schema_id(
     # Nothing was admitted, including the valid Instance beside the schema.
     await assert_absent(registry_http, registry_api_path, instance)
     await assert_absent(registry_http, registry_api_path, schema)
+
+
+@pytest.mark.scenario("TR-REG-103")
+async def test_register_batch_rejects_invalid_content_for_scalar_schema(
+    registry_http, registry_api_path, registration_fixture, given_registered
+):
+    """Content the string schema rejects fails as an item, beside a valid string Instance."""
+    schema = registration_fixture("label_schema")
+    template = registration_fixture("label_instance")
+    await given_registered(schema)
+
+    def label(entity_name, content):
+        document = deepcopy(template)
+        document["gts_id"] = document["gts_id"].replace(".primary.v1", f".{entity_name}.v1")
+        document["content"] = content
+        return document
+
+    valid = label("secondary", "secondary")
+    invalid = [
+        label("object", {}),
+        label("integer", 42),
+        label("boolean", True),
+        label("array", ["primary"]),
+        # Present as JSON null, not missing.
+        label("null", None),
+        # Right JSON type, but below `minLength`.
+        label("empty", ""),
+    ]
+
+    operation = await register_and_assert(
+        registry_http,
+        registry_api_path,
+        [valid, *invalid],
+        outcome(valid, "succeeded", 1),
+        *(outcome(document, "failed", None, "invalid_value") for document in invalid),
+    )
+    await read_created(
+        registry_http, registry_api_path, instance_entity(valid, 1), operation
+    )
+    for document in invalid:
+        await assert_absent(registry_http, registry_api_path, document)

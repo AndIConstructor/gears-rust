@@ -64,3 +64,24 @@ async def test_register_batch_with_instance_first(
     await read_created(
         registry_http, registry_api_path, instance_entity(instance, 1), operation
     )
+
+
+@pytest.mark.scenario("TR-REG-004")
+async def test_register_scalar_schema_and_string_instance(
+    registry_http, registry_api_path, registration_fixture
+):
+    """A non-object root schema admits an Instance whose content is a bare string."""
+    schema = registration_fixture("label_schema")
+    instance = registration_fixture("label_instance")
+    operation = await register_and_assert(
+        registry_http,
+        registry_api_path,
+        [instance, schema],
+        outcome(instance, "succeeded", 1),
+        outcome(schema, "succeeded", 1),
+    )
+    await read_created(registry_http, registry_api_path, schema_entity(schema, 1), operation)
+    # The whole-body comparison fails if the string comes back wrapped or re-encoded.
+    await read_created(
+        registry_http, registry_api_path, instance_entity(instance, 1), operation
+    )
