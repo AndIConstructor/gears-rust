@@ -264,6 +264,7 @@ impl MirrorWorker {
             return Ok(());
         }
         let run = &self.run;
+        run.options.telemetry.add_indexed(candidates.len());
         let items: Vec<(&str, &GateInputs)> = candidates
             .iter()
             .map(|candidate| (candidate.entity_id.as_str(), &candidate.inputs))
@@ -282,6 +283,7 @@ impl MirrorWorker {
             .await?;
         for (candidate, reason) in candidates.into_iter().zip(reasons) {
             let Some(reason) = reason else {
+                run.options.telemetry.add_skipped();
                 continue;
             };
             tracing::debug!(
@@ -311,7 +313,9 @@ impl MirrorWorker {
                 entity_id,
                 Utc::now(),
             )
-            .await
+            .await?;
+        run.options.telemetry.add_refined();
+        Ok(())
     }
 
     fn seed(

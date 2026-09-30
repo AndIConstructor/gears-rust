@@ -77,6 +77,9 @@ pub struct SessionTelemetry {
     tasks_running: AtomicU64,
     tasks_done: AtomicU64,
     tasks_failed: AtomicU64,
+    entities_indexed: AtomicU64,
+    entities_refined: AtomicU64,
+    entities_skipped: AtomicU64,
     log: Option<SessionLog>,
 }
 
@@ -157,6 +160,21 @@ impl SessionTelemetry {
         self.graphql_points.fetch_add(points, Ordering::Relaxed);
     }
 
+    pub fn add_indexed(&self, entities: usize) {
+        self.entities_indexed.fetch_add(
+            u64::try_from(entities).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn add_refined(&self) {
+        self.entities_refined.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn add_skipped(&self) {
+        self.entities_skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn set_task_counts(&self, counts: TaskCounts) {
         self.tasks_pending.store(counts.pending, Ordering::Relaxed);
         self.tasks_running.store(counts.running, Ordering::Relaxed);
@@ -182,6 +200,9 @@ impl SessionTelemetry {
             tasks_running: self.tasks_running.load(Ordering::Relaxed),
             tasks_done: self.tasks_done.load(Ordering::Relaxed),
             tasks_failed: self.tasks_failed.load(Ordering::Relaxed),
+            entities_indexed: self.entities_indexed.load(Ordering::Relaxed),
+            entities_refined: self.entities_refined.load(Ordering::Relaxed),
+            entities_skipped: self.entities_skipped.load(Ordering::Relaxed),
         }
     }
 }
@@ -204,6 +225,9 @@ pub struct TelemetrySnapshot {
     pub tasks_running: u64,
     pub tasks_done: u64,
     pub tasks_failed: u64,
+    pub entities_indexed: u64,
+    pub entities_refined: u64,
+    pub entities_skipped: u64,
 }
 
 #[cfg(test)]

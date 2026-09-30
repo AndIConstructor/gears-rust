@@ -1617,6 +1617,9 @@ pub struct SessionTelemetryDto {
     pub tasks_running: u64,
     pub tasks_done: u64,
     pub tasks_failed: u64,
+    pub entities_indexed: u64,
+    pub entities_refined: u64,
+    pub entities_skipped: u64,
 }
 
 fn share(part: u64, whole: u64) -> f64 {
@@ -1647,6 +1650,9 @@ impl From<TelemetrySnapshot> for SessionTelemetryDto {
             tasks_running: t.tasks_running,
             tasks_done: t.tasks_done,
             tasks_failed: t.tasks_failed,
+            entities_indexed: t.entities_indexed,
+            entities_refined: t.entities_refined,
+            entities_skipped: t.entities_skipped,
         }
     }
 }
