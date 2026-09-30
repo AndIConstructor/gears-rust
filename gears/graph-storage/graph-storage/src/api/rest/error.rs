@@ -85,10 +85,18 @@ fn client_correctable(error: DomainError) -> Result<CanonicalError, DomainError>
                 .with_reason(reasons::SERIALIZATION)
                 .create()
         }
+        // The recorded generation also travels on its own, as the whole of a
+        // second violation's description: a producer that fences per subject
+        // resumes from it, and should not have to parse it out of prose.
         DomainError::StaleGeneration { recorded, offered } => GraphNodeError::failed_precondition()
             .with_precondition_violation(
                 "source_generation",
                 format!("generation {offered} is older than the recorded {recorded}"),
+                reasons::STALE_GENERATION,
+            )
+            .with_precondition_violation(
+                "recorded_generation",
+                recorded.to_string(),
                 reasons::STALE_GENERATION,
             )
             .create(),
@@ -335,6 +343,21 @@ mod tests {
         assert!(
             format!("{error:?}").contains(super::reasons::SOURCE_NAMESPACE_FORBIDDEN),
             "the stable reason travels in the machine-readable slot: {error:?}"
+        );
+    }
+
+    /// A stale replacement names the generation it lost to in a slot of its
+    /// own, so the producer can resume from it without parsing the message.
+    #[test]
+    fn a_stale_generation_carries_the_recorded_one_by_itself() {
+        let error = CanonicalError::from(DomainError::StaleGeneration {
+            recorded: 7,
+            offered: 6,
+        });
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains(r#"subject: "recorded_generation", description: "7""#),
+            "the recorded generation is a violation of its own: {rendered}"
         );
     }
 

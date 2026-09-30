@@ -338,6 +338,11 @@ async fn readiness_reports_every_capability_and_only_some_block_service() {
 // --- scope replacement --------------------------------------------------------
 
 #[tokio::test]
+async fn an_empty_replacement_removes_the_whole_scope() {
+    conformance::an_empty_replacement_removes_the_whole_scope(&store(), Uuid::now_v7()).await;
+}
+
+#[tokio::test]
 async fn scope_replacement_removes_what_the_batch_no_longer_names() {
     conformance::scope_replacement_removes_what_the_batch_no_longer_names(&store(), Uuid::now_v7())
         .await;

@@ -867,7 +867,7 @@ GTS identifier parsing and UUIDv5 derivation; draft-07 schema validation across 
 
 ##### Responsibility boundaries
 
-Does not validate instance payloads at query time (ingest does), does not own permission checks (routes do), does not publish the gear's own base types to the platform types-registry (the gear lifecycle does, once, at startup).
+Does not validate instance payloads at query time (ingest does), does not own permission checks (routes do), does not publish the gear's own base types to the platform types-registry. **Status, found while integrating: that publication is not built.** The gear's type catalogue (`gts_type`) is the one ingest validates against, and the gear has no runtime dependency on the registry (`deps = [authz_resolver]`; readiness reports `types_registry` as `not_implemented`), so a producer registers its types with graph-storage only, and deployment has no order beyond authz-resolver.
 
 ##### Related components (by ID)
 
@@ -2630,7 +2630,7 @@ One authoritative chain classifies every failure: `DomainError -> CanonicalError
 | Value outside a documented hard range (depth, batch size, seed count) | `out_of_range` | `LIMIT_EXCEEDED` | Reduce the value; never retry unchanged |
 | Same-key different-type ingest, expected-version mismatch | `aborted` | `CAS_CONFLICT` | Re-read and retry |
 | Serialization failure, deadlock or a row lock not granted within the database's `lock_timeout` under concurrent ingest | `aborted` | `SERIALIZATION` | Retry unchanged |
-| Older source generation for a scope | `failed_precondition` | `STALE_GENERATION` | Drop the stale run; never retry |
+| Older source generation for a scope | `failed_precondition` | `STALE_GENERATION` | Drop the stale run; never retry. The recorded generation is also the whole description of a second violation with subject `recorded_generation`, so a producer resumes from it without parsing the message |
 | Idempotency key reused with a different request | `aborted` | `IDEMPOTENCY_MISMATCH` | New logical request |
 | Idempotency receipt expired for an uncertain key | `failed_precondition` | `IDEMPOTENCY_KEY_EXPIRED` | Reconcile, then issue a new logical request |
 | Transient quota, concurrency, queue, or memory pressure | `resource_exhausted` | `QUEUE_FULL`, `MEMORY_POOL_BUSY`, `TENANT_CONCURRENCY` | Wait for the retry-after hint, then retry |

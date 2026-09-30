@@ -3181,6 +3181,59 @@ pub async fn scope_replacement_removes_what_the_batch_no_longer_names(
     .expect("a later import re-adds the same key");
 }
 
+/// An empty replacement is the scope's erasure: a snapshot that names nothing
+/// removes every node and every static edge of the scope, and nothing of
+/// another. A consumer that erases one subject's data does it this way rather
+/// than by tombstoning, so the contract is pinned here, not inferred from the
+/// general case. What it does *not* remove -- a node a live analysis edge
+/// still references -- is the case below.
+pub async fn an_empty_replacement_removes_the_whole_scope(store: &dyn GraphStoreV1, tenant: Uuid) {
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = ctx(tenant, &scope, None);
+    store
+        .register_types(&ctx, ontology_batch())
+        .await
+        .expect("the ontology registers");
+
+    ingest_batch(
+        store,
+        &ctx,
+        batch_replacing(
+            vec![
+                scoped_node("subject-a", "acme/infra"),
+                scoped_node("subject-b", "acme/infra"),
+                scoped_node("someone-else", "acme/web"),
+            ],
+            vec![edge("subject-a", "subject-b")],
+            1,
+        ),
+    )
+    .await
+    .expect("the snapshot lands");
+
+    let outcome = ingest_batch(store, &ctx, batch_replacing(Vec::new(), Vec::new(), 2))
+        .await
+        .expect("an empty snapshot is a valid replacement");
+    assert_eq!(
+        (
+            outcome.counts.scope_removed_nodes,
+            outcome.counts.scope_removed_edges
+        ),
+        (2, 1),
+        "both nodes and their static edge are removed"
+    );
+    for gone in ["subject-a", "subject-b"] {
+        assert!(
+            store.get_node(&ctx, &gone.to_owned(), 10).await.is_err(),
+            "`{gone}` is gone"
+        );
+    }
+    store
+        .get_node(&ctx, &"someone-else".to_owned(), 10)
+        .await
+        .expect("another scope is untouched");
+}
+
 /// The other half of criterion 2, and the principle behind it
 /// (`principle-provenance-survives-resync`): a re-import removes what it
 /// re-derives and never what was concluded about it.
