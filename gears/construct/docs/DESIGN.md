@@ -554,7 +554,7 @@ Erasure and retention must remove data from graph storage and from Construct's o
 
 ##### Responsibility scope
 
-One component with two triggers. Retention is automatic, by age, with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader. Erasure is the subject's request to remove everything now. Both use the same code. They remove the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's own tables. Each delete in graph storage also writes the root node with its expected version. On a write conflict, Deletion reads the new root version and writes again, up to the same small limit. Erasure sets personalization off and writes an erasure log event without the erased content. Neither trigger removes log events; the log's retention period does. The Profile reader already stops serving an item once it is past the tenant's retention period. The job then deletes it.
+One component with two triggers. Retention is automatic, by age, with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader. Erasure is the subject's request to remove everything now. Both use the same code. They remove the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's own tables. Each delete in graph storage also writes the root node with its expected version. On a write conflict, Deletion reads the new root version and writes again, up to the same small limit. Erasure also soft-deletes the root node, the subject node, with the rest of the profile. Graph storage's purge removes it later, and a profile created after the erasure gets a new root key (see the constraint). Erasure sets personalization off and writes an erasure log event without the erased content. Neither trigger removes log events; the log's retention period does. The Profile reader already stops serving an item once it is past the tenant's retention period. The job then deletes it.
 
 Deletion also handles tenant exit. Construct follows the platform's tenant offboarding protocol, as [graph storage does](../../graph-storage/docs/DESIGN.md#tenant-offboarding-and-deletion-monotonicity). Deletion removes the leaving tenant's data from Construct's own tables. Graph storage removes the tenant's graph through its own offboarding.
 
@@ -928,7 +928,7 @@ sequenceDiagram
     SC->>DEL: erasure trigger
     DEL->>T: set personalization off
     Note over DEL,T: from now on the reader serves nothing and Admission drops open plans
-    DEL->>GS: soft delete the subject's entities
+    DEL->>GS: soft delete the subject's entities and the root node
     DEL->>T: remove review requests and record IDs
     DEL->>LS: erasure log event without content
     Note over DEL,LS: read events stay until the log's retention period ends
@@ -936,7 +936,7 @@ sequenceDiagram
     SC-->>SU: erasure accepted
 ```
 
-**Description**: The subject asks to erase everything. Deletion first sets personalization off, so nothing is served and records received before it store nothing. It then removes the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's tables. It writes an erasure log event without content. It does not remove read events; the log's retention period does. Retention runs the same code by age, as a job on the cluster leader. Removal from all storage within 30 days needs graph storage's purge (see Risks).
+**Description**: The subject asks to erase everything. Deletion first sets personalization off, so nothing is served and records received before it store nothing. It then removes the subject's entities and the root node from graph storage, and the subject's review requests and record IDs from Construct's tables. It writes an erasure log event without content. It does not remove read events; the log's retention period does. Retention runs the same code by age, as a job on the cluster leader. Removal from all storage within 30 days needs graph storage's purge (see Risks).
 
 ### 3.7 Database schemas & tables
 
@@ -1023,7 +1023,7 @@ flowchart LR
 - **Availability**: follows the platform's standard posture. The PRD sets no higher target.
 - **User interface**: none. Host applications build it.
 - **Cost**: every planner round carries the whole profile; the sensitive-data checks see only the values the plan would store (see Risks). The deployment chooses the endpoint.
-- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check and the write stay in step; where the profile GTS types live and which entity kinds and properties they define; backup and recovery of Construct's own tables, which follow the platform default; how source trust and the confidence floor apply to plans from a reviewer or an agent; how the root node is created for a new subject without a race between two first writes, and what happens to the root node on erasure.
+- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check and the write stay in step, so that a record received before personalization is turned off, or before an erasure request, stores nothing, also when personalization is turned off and on again; where the profile GTS types live and which entity kinds and properties they define; backup and recovery of Construct's own tables, which follow the platform default; how source trust and the confidence floor apply to plans from a reviewer or an agent; how the root node is created for a new subject so that two first writes never both succeed, because graph storage's compare-and-set covers only nodes that exist; how a profile created after an erasure finds its new root key.
 
 ## 5. Traceability
 
