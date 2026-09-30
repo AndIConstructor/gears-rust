@@ -5305,6 +5305,7 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
             sync_sessions::Column::CreatedAt,
             sync_sessions::Column::StartedAt,
             sync_sessions::Column::EndedAt,
+            sync_sessions::Column::UpdatedAt,
         ])
         .map_err(map_scope_error)?;
 
