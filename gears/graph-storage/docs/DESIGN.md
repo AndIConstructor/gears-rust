@@ -2431,6 +2431,8 @@ analytics output that clients may group by; anything user-driven is labels.
 
 Tenant scoping is the outer wall; the PDP-derived `AccessScope` is the inner, resource-level one, and it confines every path identically for REST and the in-process client.
 
+**Writes are the caller's tenant's.** A read is served under the scope the PDP returns, a tenant subtree included: a parent seeing its children is the platform's visibility rule. Every other action — write, delete, admin — is pinned to the caller's own tenant, by intersecting that scope with `owner_tenant_id = subject tenant` (`domain::authz::scope_for`). The write path looks rows up by key under its scope — the upsert's stored row, an edge's endpoints, a replacement's stale set, a delete's target — and under an unpinned `Subtree` scope a parent's write of key K rewrote its child's K, and a parent's replacement of `repository = R` hard-deleted the child's nodes of R, while every row a write inserts is the caller's. Found while integrating with a consumer that runs under tr-authz (2026-09-30).
+
 **Shared PEP.** Authorization decisions are made once, in a PolicyEnforcer-backed application service invoked by both adapters. REST handlers and the ClientHub local client both pass the caller's SecurityContext into that service; neither adapter owns permission checks. REST/ClientHub authorization-parity tests are part of the contract suite.
 
 **Authorization matrix.** Each operation group binds a ResourceType, an action, and the PDP properties it supports; composition rules define how a node-level constraint reaches dependent entities:

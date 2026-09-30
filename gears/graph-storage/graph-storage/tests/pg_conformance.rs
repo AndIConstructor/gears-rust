@@ -1293,6 +1293,101 @@ async fn a_stored_type_this_build_would_refuse_converges_when_offered_unchanged(
         .expect("the service converges the unchanged stored schema too");
 }
 
+/// A write is the caller's own tenant's, whatever a read may see.
+///
+/// Under the platform's default `Subtree` mode a parent tenant's compiled
+/// scope includes its children, and the store looks write-path rows up by key
+/// under that scope. A parent's upsert of key K found the child's K and
+/// rewrote it; a parent's replacement of `repository = R` hard-deleted the
+/// child's nodes of R. The PDP here answers the way a subtree does, and the
+/// child's node must come out of both exactly as it went in.
+#[tokio::test]
+async fn a_parent_tenants_writes_never_reach_its_child() {
+    let Some(stand) = stand(HopStrategy::Pgq).await else {
+        return;
+    };
+    let child = tenant_on(&stand).await;
+    let harness = support::Harness::configured_over_store(
+        Arc::clone(&stand.store) as Arc<dyn GraphStoreV1>,
+        Arc::new(graph_storage::infra::fake_store::FakeGraphStore::new()),
+        Arc::new(support::WithChildren(vec![child])),
+        GraphStorageConfig::default(),
+    );
+    let parent = harness.tenant;
+    graph_storage::infra::store::ingest::ensure_meta(
+        stand.store.as_ref(),
+        parent,
+        &AccessScope::for_tenant(parent),
+    )
+    .await
+    .expect("meta rows exist");
+    let as_parent = harness.ctx();
+    let as_child = toolkit_security::SecurityContext::builder()
+        .subject_id(Uuid::now_v7())
+        .subject_tenant_id(child)
+        .build()
+        .expect("a valid security context");
+    harness.seed_ontology(&as_child).await;
+    harness.seed_ontology(&as_parent).await;
+
+    let shared = |name: &str| graph_storage_sdk::models::NodeSpec {
+        payload: Some(serde_json::json!({ "repository": "acme/infra" })),
+        ..conformance::node("shared", name)
+    };
+    harness
+        .services
+        .ingest(
+            &as_child,
+            conformance::batch(vec![shared("the child's")], Vec::new()),
+        )
+        .await
+        .expect("the child writes its node");
+
+    harness
+        .services
+        .ingest(
+            &as_parent,
+            conformance::batch(vec![shared("the parent's")], Vec::new()),
+        )
+        .await
+        .expect("the parent writes the same key");
+    let child_scope = AccessScope::for_tenant(child);
+    let child_ctx = conformance::ctx(child, &child_scope, None);
+    let key = "shared".to_owned();
+    let after_upsert = stand
+        .store
+        .get_node(&child_ctx, &key, 10)
+        .await
+        .expect("the child's node is there");
+    assert_eq!(
+        after_upsert.name.as_deref(),
+        Some("the child's"),
+        "the parent's upsert did not rewrite the child's node"
+    );
+    harness
+        .services
+        .ingest(
+            &as_parent,
+            graph_storage_sdk::models::IngestRequest {
+                replace_scope: Some(graph_storage_sdk::models::ReplaceScope {
+                    attribute: "repository".to_owned(),
+                    value: "acme/infra".to_owned(),
+                    generation: 1,
+                }),
+                ..conformance::batch(Vec::new(), Vec::new())
+            },
+        )
+        .await
+        .expect("the parent erases its own scope");
+
+    let node = stand
+        .store
+        .get_node(&child_ctx, &key, 10)
+        .await
+        .expect("the parent's replacement did not remove the child's node");
+    assert_eq!(node.name.as_deref(), Some("the child's"));
+}
+
 /// Admission refuses a NUL before any statement; this is the net under it. A
 /// NUL that reaches the server anyway -- here through the store directly,
 /// which is where a path admission does not cover would put it -- is refused

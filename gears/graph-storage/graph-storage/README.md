@@ -124,7 +124,8 @@ Each is the shipped behaviour, with the contract that fixes it.
   payload does not carry the attribute is not the scope's and is never removed
   -- a replacement that "does nothing" is a payload without the field. The
   generation is monotonic per scope; an equal generation with different
-  content is a conflict.
+  content is a conflict. A replacement, like every write, touches the
+  caller's own tenant only, whatever subtree its reads may see.
 - **A tombstoned node key is not reusable before purge**, and purge is not
   built; a tombstoned edge is revived by the next upsert that names it
   (DESIGN § Soft Delete Contract, rules 4 and 6).

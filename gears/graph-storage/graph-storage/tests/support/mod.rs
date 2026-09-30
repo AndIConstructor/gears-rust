@@ -72,6 +72,41 @@ impl AuthZResolverApi for AllowInOwnTenant {
     }
 }
 
+/// A PDP that answers the way a tenant subtree does: the caller's tenant and
+/// the children it names, in one constraint, for every action.
+pub struct WithChildren(pub Vec<Uuid>);
+
+#[async_trait]
+impl AuthZResolverApi for WithChildren {
+    async fn evaluate(
+        &self,
+        _ctx: PlatformSecurityContext,
+        request: EvaluationRequest,
+    ) -> Result<EvaluationResponse, CanonicalError> {
+        let tenant = request
+            .subject
+            .properties
+            .get("tenant_id")
+            .and_then(|value| value.as_str())
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+            .unwrap_or_else(Uuid::nil);
+        let mut tenants = vec![tenant];
+        tenants.extend(self.0.iter().copied().filter(|child| *child != tenant));
+        Ok(EvaluationResponse {
+            decision: true,
+            context: EvaluationResponseContext {
+                constraints: vec![Constraint {
+                    predicates: vec![Predicate::In(InPredicate::new(
+                        pep_properties::OWNER_TENANT_ID,
+                        tenants,
+                    ))],
+                }],
+                deny_reason: None,
+            },
+        })
+    }
+}
+
 /// A PDP that grants `read` in the caller's own tenant and refuses every
 /// other action -- a producer team's permissions, not an ontology
 /// administrator's.
