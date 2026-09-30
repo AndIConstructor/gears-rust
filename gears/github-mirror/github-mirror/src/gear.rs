@@ -10,10 +10,13 @@ use toolkit::{Gear, GearCtx, Healthcheck, HealthcheckResult, RestApiCapability};
 use tracing::{info, warn};
 
 use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
+use credstore_sdk::{CredStoreClientV1, SecretRef};
 use github_mirror_sdk::GithubMirrorClientV1;
+use toolkit_security::SecurityContext;
+use uuid::Uuid;
 
 use crate::api::rest::routes;
-use crate::config::GithubMirrorConfig;
+use crate::config::{GithubMirrorConfig, GithubTokenSecret};
 use crate::domain::local_client::LocalClient;
 use crate::domain::ports::github::GithubPort;
 use crate::domain::service::{Service, ServiceConfig};
@@ -36,11 +39,50 @@ use crate::infra::telemetry_sink::JsonlTelemetrySink;
 
 type ConcreteService = Service;
 
+const GEAR_ACTOR_ID: Uuid = uuid::uuid!("00000000-0000-cf01-0000-676d73797374");
+const SERVICE_SUBJECT_TYPE: &str = "gts.cf.core.security.subject_service.v1~";
+
+async fn github_token(
+    ctx: &GearCtx,
+    secret: Option<&GithubTokenSecret>,
+) -> anyhow::Result<Option<String>> {
+    let Some(secret) = secret else {
+        return Ok(None);
+    };
+    let credstore = ctx
+        .client_hub()
+        .get::<dyn CredStoreClientV1>()
+        .map_err(|e| anyhow::anyhow!("failed to get the credential store: {e}"))?;
+    let key = SecretRef::new(secret.key.clone())
+        .map_err(|e| anyhow::anyhow!("invalid github_token_secret key: {e}"))?;
+    let system_ctx = SecurityContext::builder()
+        .subject_id(GEAR_ACTOR_ID)
+        .subject_type(SERVICE_SUBJECT_TYPE)
+        .subject_tenant_id(secret.tenant_id)
+        .build()?;
+    let found = credstore
+        .get(&system_ctx, &key)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("failed to read the GitHub token from the credential store: {e}")
+        })?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the credential store has no secret `{}` for tenant {}",
+                secret.key,
+                secret.tenant_id
+            )
+        })?;
+    let token = String::from_utf8(found.value.as_bytes().to_vec())
+        .map_err(|e| anyhow::anyhow!("the GitHub token secret is not UTF-8: {e}"))?;
+    Ok(Some(token).filter(|t| !t.is_empty()))
+}
+
 // This attribute is the one place the gear's name is written:
 // `service::GEAR_NAME` aliases the `MODULE_NAME` const it generates.
 #[toolkit::gear(
     name = "github-mirror",
-    deps = [authz_resolver],
+    deps = [authz_resolver, credstore],
     capabilities = [rest, db, stateful]
 )]
 #[derive(Default)]
@@ -106,8 +148,9 @@ impl Gear for GithubMirrorGear {
         // repeat sync into 304s, which GitHub does not charge against the rate
         // limit (#4630).
         let http_cache = Arc::new(SeaOrmHttpCache::new(Arc::clone(&db), cfg.cache_compression));
+        let token = github_token(ctx, cfg.github_token_secret.as_ref()).await?;
         let github: Arc<dyn GithubPort> = Arc::new(
-            GithubClient::with_cache(cfg.api_base_url.clone(), cfg.resolved_token()?, http_cache)?
+            GithubClient::with_cache(cfg.api_base_url.clone(), token, http_cache)?
                 .with_max_concurrent_requests(cfg.max_concurrent_requests),
         );
 

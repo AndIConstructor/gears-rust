@@ -2,8 +2,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use toolkit_utils::SecretString;
-use toolkit_utils::var_expand::ExpandVarsError;
+use uuid::Uuid;
 
 use crate::domain::scope::ScopeConfig;
 use crate::infra::github::compression::Compression;
@@ -12,18 +11,11 @@ use crate::infra::github::compression::Compression;
 pub struct GithubMirrorConfig {
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
-    /// Temporary shortcut until credstore integration (gears-rust#4534):
-    /// GitHub token used by sync. Unauthenticated requests work for public
-    /// repositories at a much lower rate limit.
-    ///
-    /// Supports `${VAR}` and `${VAR:-default}` so the token can live in the
-    /// environment instead of a checked-in config file; call
-    /// [`GithubMirrorConfig::resolved_token`] rather than reading the field.
-    /// `SecretString` keeps the value out of every `Debug`/`Display` of the
-    /// config - it prints as `[REDACTED]` - so a startup config dump cannot
-    /// leak a literally-configured PAT.
+    /// Where the GitHub token lives in the credential store; it is read once
+    /// at init. Without it the gear syncs unauthenticated, which works for
+    /// public repositories at a much lower rate limit.
     #[serde(default)]
-    pub github_token: Option<SecretString>,
+    pub github_token_secret: Option<GithubTokenSecret>,
     /// What a sync collects when the request does not say (PRD §5.4): the
     /// type's default, which leaves timeline events off until a deployment or
     /// a request turns them on (PRD §5.2).
@@ -92,21 +84,14 @@ fn default_sync_deadline_minutes() -> NonZeroU64 {
     NonZeroU64::new(360).unwrap_or(NonZeroU64::MIN)
 }
 
-impl GithubMirrorConfig {
-    /// The token with any `${VAR}` reference expanded from the environment.
-    ///
-    /// # Errors
-    /// Returns the expansion error when the config names a variable that is
-    /// not set and gives no default, so a typo fails loudly at startup
-    /// instead of silently syncing unauthenticated.
-    pub fn resolved_token(&self) -> Result<Option<String>, ExpandVarsError> {
-        self.github_token
-            .as_ref()
-            .map(|token| toolkit_utils::var_expand::expand_env_vars(token.expose()))
-            .transpose()
-            .map(|token| token.filter(|t| !t.is_empty()))
-    }
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubTokenSecret {
+    pub tenant_id: Uuid,
+    pub key: String,
+}
 
+impl GithubMirrorConfig {
     /// The configured GitHub API base URL, validated.
     ///
     /// Everything the gear fetches is built on this value, and it is echoed
@@ -144,7 +129,8 @@ impl GithubMirrorConfig {
         }
         // A token would travel in cleartext over plain `http`. Loopback is
         // allowed so a local mock server still works without TLS.
-        if parsed.scheme() == "http" && self.github_token.is_some() && !is_loopback(&parsed) {
+        if parsed.scheme() == "http" && self.github_token_secret.is_some() && !is_loopback(&parsed)
+        {
             return Err(crate::domain::error::DomainError::Validation {
                 field: "api_base_url".to_owned(),
                 message: format!(
@@ -175,7 +161,7 @@ impl Default for GithubMirrorConfig {
     fn default() -> Self {
         Self {
             api_base_url: default_api_base_url(),
-            github_token: None,
+            github_token_secret: None,
             scope: ScopeConfig::default(),
             cache_compression: Compression::default(),
             max_concurrent_syncs: default_max_concurrent_syncs(),
@@ -220,47 +206,6 @@ mod tests {
     }
 
     #[test]
-    fn a_literal_token_is_returned_as_is() {
-        let cfg: GithubMirrorConfig =
-            serde_json::from_str(r#"{"github_token":"ghp_literal"}"#).expect("config must parse");
-        assert_eq!(
-            cfg.resolved_token().unwrap().as_deref(),
-            Some("ghp_literal")
-        );
-    }
-
-    #[test]
-    fn no_token_stays_none() {
-        let cfg = GithubMirrorConfig::default();
-        assert_eq!(cfg.resolved_token().unwrap(), None);
-    }
-
-    #[test]
-    fn a_variable_reference_falls_back_to_its_default() {
-        let cfg: GithubMirrorConfig = serde_json::from_str(
-            r#"{"github_token":"${GH_MIRROR_UNSET_TOKEN:-ghp_from_default}"}"#,
-        )
-        .expect("config must parse");
-        assert_eq!(
-            cfg.resolved_token().unwrap().as_deref(),
-            Some("ghp_from_default"),
-            "the config must read the variable, not the literal text"
-        );
-    }
-
-    #[test]
-    fn an_unset_variable_with_an_empty_default_means_no_token() {
-        let cfg: GithubMirrorConfig =
-            serde_json::from_str(r#"{"github_token":"${GH_MIRROR_UNSET_TOKEN:-}"}"#)
-                .expect("config must parse");
-        assert_eq!(
-            cfg.resolved_token().unwrap(),
-            None,
-            "an empty expansion must sync unauthenticated, not send an empty header"
-        );
-    }
-
-    #[test]
     fn a_valid_base_url_passes_validation() {
         let cfg = GithubMirrorConfig::default();
         assert_eq!(
@@ -298,17 +243,6 @@ mod tests {
         assert!(
             serde_json::from_str::<GithubMirrorConfig>(r#"{"api_base_url":42}"#).is_err(),
             "a non-string api_base_url must be rejected at parse time"
-        );
-    }
-
-    #[test]
-    fn an_unset_variable_without_a_default_fails_loudly() {
-        let cfg: GithubMirrorConfig =
-            serde_json::from_str(r#"{"github_token":"${GH_MIRROR_MISSING_TOKEN}"}"#)
-                .expect("config must parse");
-        assert!(
-            cfg.resolved_token().is_err(),
-            "a typo in the variable name must not silently drop the token"
         );
     }
 }

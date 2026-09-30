@@ -76,7 +76,7 @@ A sync is designed to be stopped and started again. The task queue lives in memo
 | `cpt-cf-github-mirror-fr-log-redaction` | `p1` | Tokens and credential-shaped text are redacted before logging; GraphQL error bodies are logged, not stored on the session |
 | `cpt-cf-github-mirror-fr-sync-summary` | `p2` | A completed session stores a `SyncSummary` with one counter per table and any accepted drift |
 | `cpt-cf-github-mirror-fr-progress` | `p2` | `progress_percent` is weighted by phase, never goes down, and is written by the heartbeat |
-| `cpt-cf-github-mirror-fr-env-independence` | `p1` | All settings come from the gear config; the token may reference an environment variable (`${GITHUB_TOKEN}`) |
+| `cpt-cf-github-mirror-fr-env-independence` | `p1` | All settings come from the gear config; the GitHub token comes from the credential store |
 
 Not covered by this design yet: the CLI (`cpt-cf-github-mirror-fr-cli-*`), Python bindings (`cpt-cf-github-mirror-fr-python-bindings`), write-back (`cpt-cf-github-mirror-fr-write-back`), the token pool (`cpt-cf-github-mirror-fr-token-pool`) and security-alert collection (`cpt-cf-github-mirror-fr-security-sync`, refused by scope validation today).
 
@@ -87,7 +87,7 @@ Not covered by this design yet: the CLI (`cpt-cf-github-mirror-fr-cli-*`), Pytho
 | `cpt-cf-github-mirror-nfr-reliability` | Resumable runs; per-task transactions; claim and lock released on every exit path, including an aborted task |
 | `cpt-cf-github-mirror-nfr-rate-compliance` | Request semaphore, shared cooldown, conditional requests |
 | `cpt-cf-github-mirror-nfr-memory-efficiency` | Page-by-page writes; 64 MiB cap on any single response body; queue backpressure |
-| `cpt-cf-github-mirror-nfr-security` | Tenant scoping in storage, policy checks per operation, token only over HTTPS (or loopback) |
+| `cpt-cf-github-mirror-nfr-security` | Tenant scoping in storage, policy checks per operation, token read from the credential store and sent only over HTTPS (or loopback) |
 | `cpt-cf-github-mirror-nfr-parallel-sync` | Tenant-fair pool of `max_concurrent_syncs` workers |
 | `cpt-cf-github-mirror-nfr-data-governance` | Per-repository and per-owner cache clear; additive migrations with `down()` |
 
@@ -155,7 +155,7 @@ The gear is started and stopped by the framework. `stop()` cancels the pool and 
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-one-token`
 
-The gear is configured with one token (`github_token`). All tenants' syncs share its rate limit, so a cooldown pauses every request made with it. A token per tenant is future work.
+The gear is configured with one token: `github_token_secret` names its secret in the credential store, read once at init. All tenants' syncs share its rate limit, so a cooldown pauses every request made with it. A token per tenant is future work.
 
 #### Tenant Isolation in Storage
 
@@ -544,7 +544,7 @@ Configuration (`config` of the gear):
 | Setting | Default |
 |---|---|
 | `api_base_url` | `https://api.github.com` |
-| `github_token` | none; may be `${GITHUB_TOKEN}` |
+| `github_token_secret` | none (`tenant_id` and `key` of the token's secret in the credential store) |
 | `scope` | every family except security; actions and reactions `open`, timeline `none` |
 | `cache_compression` | `gzip` |
 | `max_concurrent_syncs` | 4 |
