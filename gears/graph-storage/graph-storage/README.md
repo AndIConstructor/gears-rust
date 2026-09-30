@@ -146,7 +146,11 @@ Each is the shipped behaviour, with the contract that fixes it.
   its `index` trait (`payload/severity`). Equality on a string, boolean or
   date-time value is served by one GIN over the payload; equality on a number,
   every range comparison and ordering over a payload path are admitted and
-  unindexed, which is a scan of the type's rows.
+  unindexed, which is a scan of the type's rows; `contains` is a `LIKE` and
+  scans too. A page carries no total and there is no offset: the platform
+  pages by cursor and refuses `$count` and `$skip` by design
+  (`toolkit::api::odata`), so a listing that needs either walks the pages
+  (#5108 records what a consumer asked for beyond this).
   A type that declares no `index` paths can be filtered by `node_key`, `name`,
   `created_at` and `updated_at` only, which is a scan of the tenant. The audit
   envelope's `updated_at` is when the gear last wrote the row, not when the
