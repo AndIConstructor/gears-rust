@@ -47,6 +47,7 @@ pub struct TelemetryEntry {
 pub struct TelemetryLine<'a> {
     pub session_id: Uuid,
     pub repository: &'a str,
+    pub tasks_pending: u64,
     #[serde(flatten)]
     pub entry: &'a TelemetryEntry,
 }
@@ -110,6 +111,7 @@ impl SessionTelemetry {
         let line = TelemetryLine {
             session_id: log.session_id,
             repository: &log.repository,
+            tasks_pending: self.tasks_pending.load(Ordering::Relaxed),
             entry,
         };
         if let Err(e) = log.sink.record(&log.file, &line)
