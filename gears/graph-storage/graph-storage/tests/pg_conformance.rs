@@ -1388,6 +1388,87 @@ async fn a_parent_tenants_writes_never_reach_its_child() {
     assert_eq!(node.name.as_deref(), Some("the child's"));
 }
 
+/// A replacement's membership predicate has an index to use.
+///
+/// The predicate is the store's own (`scope::membership`), rendered into the
+/// statement a replacement issues for its stale set, and planned with
+/// sequential scans off: the question is whether an index *can* serve it.
+/// `payload #>> '{repository}' = ...` could not, so every replacement read the
+/// tenant's managed nodes.
+#[tokio::test]
+async fn a_replacements_membership_is_served_by_the_payload_index() {
+    use graph_storage::infra::storage::entity::node;
+    use sea_orm::sea_query::{Expr, ExprTrait as _, PostgresQueryBuilder, Query};
+    use sea_orm::{ConnectionTrait as _, TransactionTrait as _};
+    let Some(stand) = stand(HopStrategy::Pgq).await else {
+        return;
+    };
+    let tenant = tenant_on(&stand).await;
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = conformance::ctx(tenant, &scope, None);
+    stand
+        .store
+        .register_types(&ctx, conformance::ontology_batch())
+        .await
+        .expect("ontology registers");
+    // A tenant with volume in it, of which the scope is a sliver: on an empty
+    // table the tenant's own index is as good as any, and the plan would say
+    // nothing about the predicate.
+    let nodes = (0..1000)
+        .map(|i| graph_storage_sdk::models::NodeSpec {
+            payload: Some(serde_json::json!({
+                "repository": if i % 100 == 0 { "acme/infra".to_owned() } else { format!("acme/r{i}") }
+            })),
+            ..conformance::node(&format!("n{i}"), "n")
+        })
+        .collect();
+    conformance::ingest_batch(
+        stand.store.as_ref(),
+        &ctx,
+        conformance::batch(nodes, Vec::new()),
+    )
+    .await
+    .expect("the tenant is seeded");
+    let (sql, values) = Query::select()
+        .column(node::Column::Id)
+        .from(node::Entity)
+        .and_where(Expr::col(node::Column::TenantId).eq(tenant))
+        .and_where(Expr::col(node::Column::DeletedAt).is_null())
+        .and_where(graph_storage::infra::store::scope::membership(
+            "repository",
+            "acme/infra",
+        ))
+        .build(PostgresQueryBuilder);
+
+    let raw = sea_orm::Database::connect(&stand.dsn)
+        .await
+        .expect("a plain connection to read plans");
+    raw.execute_unprepared("ANALYZE node")
+        .await
+        .expect("statistics are fresh");
+    let tx = raw.begin().await.expect("one session for the setting");
+    tx.execute_unprepared("SET LOCAL enable_seqscan = off")
+        .await
+        .expect("the planner setting applies");
+    let plan: Vec<String> = tx
+        .query_all_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            format!("EXPLAIN {sql}"),
+            values,
+        ))
+        .await
+        .expect("the statement plans")
+        .iter()
+        .map(|row| row.try_get_by_index::<String>(0).expect("a plan line"))
+        .collect();
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("Index Cond") && line.contains("payload @>")),
+        "the membership is an index condition on the payload:\n{}",
+        plan.join("\n")
+    );
+}
+
 /// Admission refuses a NUL before any statement; this is the net under it. A
 /// NUL that reaches the server anyway -- here through the store directly,
 /// which is where a path admission does not cover would put it -- is refused

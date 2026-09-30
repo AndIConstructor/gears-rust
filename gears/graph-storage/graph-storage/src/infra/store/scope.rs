@@ -26,7 +26,7 @@
 //! the opposite of what a replacement is for.
 
 use graph_storage_sdk::plugin_api::GraphStoreError;
-use sea_orm::sea_query::{Expr, ExprTrait};
+use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter};
 use std::collections::BTreeSet;
 use toolkit_db::secure::{DBRunner, SecureDeleteExt, SecureEntityExt};
@@ -49,6 +49,25 @@ fn plain(attribute: &str) -> bool {
         && attribute
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// A node's membership in the scope `attribute = value`.
+///
+/// Asked as containment so the payload GIN index (`idx_node_payload`,
+/// `jsonb_path_ops`) serves it: `payload #>> '{attr}' = value` has no index
+/// to use, and every replacement scanned the tenant's managed nodes -- one
+/// scan per record for a consumer that replaces per subject. The two agree
+/// for the string a scope value is; `#>>` also matched a number that renders
+/// the same, which is not membership in `attr = "42"`. Public so the plan
+/// test asks about this predicate, not a copy of it.
+#[must_use]
+pub fn membership(attribute: &str, value: &str) -> sea_orm::sea_query::SimpleExpr {
+    let mut probe = serde_json::Map::new();
+    probe.insert(
+        attribute.to_owned(),
+        serde_json::Value::String(value.to_owned()),
+    );
+    Expr::cust_with_values("payload @> $1", [serde_json::Value::Object(probe)])
 }
 
 /// Which interned type ids are scope-managed nodes, and which are static
@@ -125,11 +144,7 @@ pub(crate) async fn remove_stale(
     // happens to hold rather than one that must -- and the day a tenant can
     // hold edges without a managed node type, it would silently stop
     // removing them. The node half is skipped; the edge half never is.
-    // Membership is the payload attribute. The field name is a checked
-    // literal and the value is a bound parameter, the same shape the
-    // projection renders.
-    let member =
-        || Expr::cust(format!("(payload #>> '{{{attribute}}}')")).eq(Expr::val(value.to_owned()));
+    let member = || membership(attribute, value);
     let stale_ids: Vec<i64> = if types.managed_nodes.is_empty() {
         Vec::new()
     } else {
