@@ -10,8 +10,8 @@
 
 use toolkit_canonical_errors::{CanonicalError, resource_error};
 
+use crate::domain::diagnostics::logged;
 use crate::domain::error::{DomainError, reasons};
-use crate::infra::logged;
 
 /// Errors attributable to a graph node as a resource.
 ///

@@ -20,12 +20,12 @@ use toolkit_macros::domain_model;
 use toolkit_security::{AccessScope, SecurityContext};
 
 use crate::config::{GraphStorageConfig, ValidatedConfig};
+use crate::domain::diagnostics::logged;
 use crate::domain::embedding;
 use crate::domain::embedding::EmbeddingCoordinator;
 use crate::domain::error::DomainError;
 use crate::domain::traversal::{Retention, WalkPlan, walk};
 use crate::domain::{admission, authz, identity, ontology};
-use crate::infra::logged;
 
 #[domain_model]
 pub struct GraphServices {

@@ -4,6 +4,7 @@
 
 pub mod admission;
 pub mod authz;
+pub mod diagnostics;
 pub mod embedding;
 pub mod error;
 pub mod evolution;
