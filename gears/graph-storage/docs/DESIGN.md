@@ -2629,6 +2629,7 @@ One authoritative chain classifies every failure: `DomainError -> CanonicalError
 | Malformed payload, schema violation, a request the gear cannot interpret, inconsistent limits, a string carrying U+0000 (the store holds no NUL; admission names where it is) | `invalid_argument` | `SCHEMA_VIOLATION` (per-item and query-shape violations), `INVALID_ARGUMENT` (an unknown enumeration value, an unaccepted query option, a malformed migration step), `LIMIT_COMBINATION` (two bounds that cannot hold at once) | Fix the request |
 | Value outside a documented hard range (depth, batch size, seed count) | `out_of_range` | `LIMIT_EXCEEDED` | Reduce the value; never retry unchanged |
 | Same-key different-type ingest, expected-version mismatch | `aborted` | `CAS_CONFLICT` | Re-read and retry |
+| A payload migration's row rewritten by a concurrent ingest between its read and its compare-and-set write (`infra/store/evolution.rs`) | `aborted` | `CAS_CONFLICT` | The whole pass rolled back -- one transaction, no cursor to resume from -- and the gear does not retry it. Re-submit the same registration; if it conflicts again the type is under live ingest, and a migration is run with that ingest quiesced, as any schema migration is (ADR-0006 § 3). The branch is reached only by a concurrent commit inside one transaction and has no deterministic case (#5012, the interleaving seam) |
 | Serialization failure, deadlock or a row lock not granted within the database's `lock_timeout` under concurrent ingest | `aborted` | `SERIALIZATION` | Retry unchanged |
 | Older source generation for a scope | `failed_precondition` | `STALE_GENERATION` | Drop the stale run; never retry. The recorded generation is also the whole description of a second violation with subject `recorded_generation`, so a producer resumes from it without parsing the message |
 | Idempotency key reused with a different request | `aborted` | `IDEMPOTENCY_MISMATCH` | New logical request |
@@ -2742,7 +2743,7 @@ every signature.
 
 The same rules apply during shutdown.
 
-**Expired idempotency receipts.** Retention deletes the recorded response, not the guarantee: a compact tombstone (tenant, producer, key, request hash, committed revision) outlives the full record. A retry whose key matches only a tombstone is answered with `IDEMPOTENCY_KEY_EXPIRED` (`failed_precondition`) — the caller must reconcile and issue a new logical request. Absence of a full response record never by itself grants permission to re-execute an uncertain key.
+**Expired idempotency receipts.** **Status, found while building the prototype: specified, not built.** No cleanup runs (`idempotency_retention_days` exists as a key and is read by nothing) and no compact tombstone is written; a receipt lives until the source epoch changes (§ Capacity and Admission Contract, the note under the table; #4874). As specified: retention deletes the recorded response, not the guarantee: a compact tombstone (tenant, producer, key, request hash, committed revision) outlives the full record. A retry whose key matches only a tombstone is answered with `IDEMPOTENCY_KEY_EXPIRED` (`failed_precondition`) — the caller must reconcile and issue a new logical request. Absence of a full response record never by itself grants permission to re-execute an uncertain key.
 
 ### Readiness Matrix
 
@@ -2978,7 +2979,7 @@ Every bound the gear enforces is a named configuration key with a safe default a
 | Pending index/backfill jobs per tenant | `ddl_max_pending_per_tenant` | 4 | 1 – 64 | DDL queue admission |
 | Concurrently running index builds (deployment) | `ddl_max_running` | 1 | 1 – 8 | DDL queue dispatch |
 | Estimated index build disk footprint | `ddl_max_estimated_bytes` | 32 GiB | 1 – 1,024 GiB | DDL queue admission |
-| Idempotency record retention | `idempotency_retention` | 7 days | 1 – 90 days | Background cleanup |
+| Idempotency record retention | `idempotency_retention_days` | 7 days | 1 – 90 days | Background cleanup -- **not built**: the key exists and is read by no cleanup, so receipts expire only with the source epoch (#4874) |
 
 The analytics ceilings, job deadline, global memory pool, queue depth and metric-cache retention bounds move to the `graph-analytics` gear with the computation (graph-analytics ADR-0002); they are configuration of a different deployment unit, which is the point of the split.
 

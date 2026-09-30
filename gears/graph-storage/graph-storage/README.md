@@ -167,8 +167,12 @@ Each is the shipped behaviour, with the contract that fixes it.
   admitted paths come from the selected types. Without `$top` the page falls
   back to `projection_max_page`.
 - **Readiness for a probe is the platform's `/readyz`**, which runs this gear's
-  healthcheck and takes the pod out of traffic when a component is unhealthy;
-  the gear's own `GET /graph-storage/v1/health/ready` is the detailed state
+  healthcheck and takes the pod out of traffic when a fatal component is
+  unhealthy -- every row of the matrix but `embedding_space`: an embedding
+  identity mismatch is reported as degraded and the pod stays in rotation for
+  ingest, reads, traversal and lexical search, with the vector arm failing
+  (`ComponentReadiness::fatal`); the gear's own
+  `GET /graph-storage/v1/health/ready` is the detailed state
   document and answers `200` whatever the state, the same split the platform
   makes between `/readyz` and `/health`. Point a probe at the gateway's
   `/readyz`, not at the gear's route.
