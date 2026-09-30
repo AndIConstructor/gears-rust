@@ -3090,8 +3090,8 @@ step 1 and its no-op note; D-142.
 D-150–D-168 govern the PriceBook target in ADR-0008; D-159–D-168 (2026-09-30) pull each ask back
 onto the seam that already exists on `16705a243` where one does, and amend D-151, D-152, D-153 and
 D-157 as noted. Superseded entries below are retained as history; they do not authorize use of
-removed producer contracts. Counterpart status is tracked in
-[the reciprocal amendments](../../../../docs/reviews/2026-09-29-bss-seam-counterpart-amendments.md).
+removed producer contracts. Counterpart status is tracked per requirement in
+[`UPSTREAM_REQS.md`](UPSTREAM_REQS.md).
 
 | Decision | Orders-side rule | Counterpart status |
 |---|---|---|
@@ -3105,7 +3105,7 @@ removed producer contracts. Counterpart status is tracked in
 | D-157 | Subscriptions validates an accepted binding and protection at activation; preserve versioned creation keys, actual start, fee-free compensation and topology completeness. Rechecks are early aborts only. | SUB-O1/O2/O5/O9/O10 and topology/protection requirements remain open. |
 | D-158 | Expanded pins are obtained through authorized immutable-version reads; events carry bounded projections and a version reference. Submit/amendment require a bounded aggregate purchase and receipt contract. | Consumer/event and capacity validation required before runtime release. |
 
-**Alignment with existing seams (2026-09-30).** Source: [the existing-seams fix plan](../../../../docs/reviews/2026-09-30-orders-lifecycle-existing-seams-fix-plan.md).
+**Alignment with existing seams (2026-09-30).** Each row names the seam already built or decided on `16705a243` that the Orders rule adopts.
 
 | Decision | Orders-side rule | Existing seam adopted | Amends |
 |---|---|---|---|
@@ -3120,7 +3120,7 @@ removed producer contracts. Counterpart status is tracked in
 | D-167 | The Rating request is the accepted matrix in resolve's vocabulary (`lines[{line_id, plan_revision_id, items[{item_id, quantity, chains[]}]}]`, `assessment_id`, `resolve_date`); periods are `month` or `year`; an unsupported cycle refuses evaluation. Whole-order figures and TCV remain a Rating ask (no existing seam supplies them). | Pricing periods; T-D-36/37/38; D-415 | D-154 |
 | D-168 | The billing chain is not `gears/bss/ledger`: invoicing/at-sale valuation, indicative tax and Payments are unowned capabilities registered for whichever specification takes them; the Ledger is the GL posting and settlement target and generates no invoices. External references travel order → create → billable fact → invoice, snapshotted at the first handoff. | `LedgerClientV1` (ledger-sdk/src/api.rs) | UPSTREAM_REQS §4 |
 
-Round-2 review (2026-09-30, [record](../../../../docs/reviews/2026-09-30-orders-lifecycle-round-2-review.md)):
+Round-2 review (2026-09-30):
 D-160, D-161, D-162 and D-164 were amended as their rows now say; the pin cap of D-159 is 1,000
 **bound** slots per **line** (R2-10); the Subscriptions principal's `get_version` read at activation
 is granted through the same finite order-ID set as Workflow's (R2-8, 08 §4.3).

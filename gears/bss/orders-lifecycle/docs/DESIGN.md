@@ -5725,9 +5725,11 @@ external references or evidence can overflow even a projection. Before admission
 worst-case terminal-event capacity for the admitted roster, including fixed-width subscription IDs
 and bounded evidence/provenance. Administrative edits must preserve that reservation; do not discover
 an oversized completion only after subscriptions activated. The owning wire schemas, field limits
-and production-serializer checks are required before runtime release. Synthetic sizing examples in
-`docs/reviews/fixtures/orders-lifecycle-capacity.py` demonstrate this constraint, not conformance of
-an unimplemented serializer. No new event type or delivery guarantee is implied.
+and production-serializer checks are required before runtime release. Synthetic sizing (compact JSON,
+200 completion mappings, a 2 KiB envelope reserve) shows a 200-line completion with 64-byte external
+references at about 41 KiB and with 256-byte references at about 80 KiB, and one line of 200 items
+with five bound chain slots each at about 318 KiB; these illustrate the constraint, not conformance
+of an unimplemented serializer. No new event type or delivery guarantee is implied.
 
 
 <!-- /contract -->

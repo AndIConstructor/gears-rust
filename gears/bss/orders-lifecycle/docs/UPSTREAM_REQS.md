@@ -154,8 +154,8 @@ extensions until the counterpart records them. No change to the order's separate
 `16705a243`, Rating T-D-37/T-D-38 and Subscriptions SUB-D-29. Current Pricing REST resolve is
 not a purchase verdict, quote, initial-price hold or seller-scoped consumer SDK. Existing IDs are
 retained where the obligation survives; scope changes below supersede the old model explicitly.
-The [reciprocal amendments](../../../../docs/reviews/2026-09-29-bss-seam-counterpart-amendments.md)
-provide proposed producer-side DTOs, timing and acceptance cases. No counterpart acceptance is implied.
+Each requirement below states the proposed producer-side shape, timing and acceptance cases. No
+counterpart acceptance is implied.
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-pricing-read-sdk`
 

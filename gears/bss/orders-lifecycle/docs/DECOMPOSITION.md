@@ -876,9 +876,8 @@ platform event/authorization prerequisites remain open. Capture/engine developme
 may proceed, but successful production submit/activation requires producer implementation,
 deployed authorization and end-to-end evidence separately.
 
-P0–P7 of the [remediation plan](../../../../docs/reviews/2026-09-29-orders-lifecycle-seam-fix-plan.md)
-map the contract work. The [closure register](../../../../docs/reviews/2026-09-29-bss-seam-counterpart-amendments.md#closure-register)
-tracks all F1–F14 without equating an upstream ask with an implemented seam.
+The counterpart asks are registered one by one in [`UPSTREAM_REQS.md`](UPSTREAM_REQS.md); an
+upstream ask is never equated with an implemented seam.
 
 Phase 0/1 is the correctness core and is a prerequisite for everything else. Its event-producing
 runtime is additionally blocked until the Event Broker implementation exists: [docs/GEARS.md](../../../../docs/GEARS.md)

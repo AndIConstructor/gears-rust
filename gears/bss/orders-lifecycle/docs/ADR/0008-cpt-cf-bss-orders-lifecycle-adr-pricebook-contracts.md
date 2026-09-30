@@ -113,13 +113,13 @@ No runtime integration is claimed by this document change.
 
 ## More Information
 
-The source review and counterpart proposal are in `docs/reviews/2026-09-29-orders-lifecycle-seam-review.md`
-and `docs/reviews/2026-09-29-bss-seam-counterpart-amendments.md` at repository root. These cite the inspected
-Pricing/Products code, Subscriptions and Rating decisions, and Workflow `e0c24ba50`.
+The counterpart asks are registered in `UPSTREAM_REQS.md` §2.1, §2.2, §2.6 and §2.10, each citing the
+inspected Pricing/Products code at `16705a243`, the Subscriptions and Rating decisions, and Workflow
+`e0c24ba50`.
 
 ## Traceability
 
-- [DESIGN](../DESIGN.md#contract-03-4-3), [Decisions](../DECISIONS.md#pricebook-seam-remediation-2026-09-29), [existing-seams fix plan](../../../../../docs/reviews/2026-09-30-orders-lifecycle-existing-seams-fix-plan.md)
+- [DESIGN](../DESIGN.md#contract-03-4-3), [Decisions](../DECISIONS.md#pricebook-seam-remediation-2026-09-29)
 - [PRD](../PRD.md), [Upstream requirements](../UPSTREAM_REQS.md)
 - `cpt-cf-bss-orders-lifecycle-fr-order-submit`
 - `cpt-cf-bss-orders-lifecycle-nfr-order-snapshot-integrity`
