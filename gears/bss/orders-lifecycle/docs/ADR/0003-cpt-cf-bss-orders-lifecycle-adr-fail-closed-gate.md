@@ -28,8 +28,8 @@ decision-makers: BSS Orders team
 ## Context and Problem Statement
 
 The submit gate adopts the published pricing sellability gate **by reference** (PRD §6.1) and adds
-the Orders delta. Two of its inputs are not available in the platform as it stands: three of the
-six adopted pricing predicates cannot be evaluated from the built read model, and the
+the Orders delta. Under the PriceBook target (ADR-0008), the `PricingReadV1` trait, the Products SKU read grant, the residual
+`SellabilityV1` verdict and Subscriptions' pinned comparison at activation are unavailable, and the
 against-existing-subscriptions half of the overlap rule needs an occupancy read (`SUB-O5`, amended by D-126) that
 Subscriptions does not expose.
 
@@ -71,7 +71,7 @@ provisioning compensation, which is the path the two-phase fulfilment barrier ex
 
 ### Consequences
 
-* **No submit passes the gate until the missing upstream lanes land.** Three adopted predicates and half the overlap rule are unevaluable, so Phase 1 has no working submit path until `SUB-O5` and the three pricing lanes exist. This is the designed behaviour, not a defect, and `DECOMPOSITION.md`'s phase map must say so.
+* **No submit passes the gate until the missing upstream lanes land.** The purchase/accepted-binding, required Rating and overlap contracts are not all available, so Phase 1 has no working submit path until those owning interfaces and policies exist. This is the designed behaviour, not a defect, and `DECOMPOSITION.md`'s phase map must say so.
 * Operators see submits refused for predicates that are not yet implemented upstream, with a reason that distinguishes "not evaluable" from "evaluated and failed" — so the refusal is diagnosable rather than mysterious.
 * Every future late upstream inherits this posture by default. A capability that wants the other behaviour must argue for a tolerated-risk election explicitly, as payment authorization did.
 * The asymmetry with `05-preconditions` is deliberate and recorded here, so a later author does not "fix" one side into consistency with the other.
@@ -83,8 +83,8 @@ provisioning compensation, which is the path the two-phase fulfilment barrier ex
 verifiable today or planned.
 
 **Verifiable today, by reading the design set.** The reason registry contains exactly one
-unavailable reason for each of the nine operations — catalog predicates, catalog frontier,
-pin composition, catalog product key, identity, contract resolution, overlap presence, evaluation and
+unavailable reason for each of the nine operations — purchase predicates, seller-scoped revision facts,
+accepted-binding composition, authoritative overlap key, identity, contract resolution, overlap presence, evaluation and
 indicative tax — in [03 §3.3](../DESIGN.md#contract-03-3-3); the gate algorithm collects unevaluable inputs into the same all-failures report as
 evaluated failures (§3.6 *Run Gate and Submit* step 11); and §4.1 carries the normative
 prohibition on treating unevaluable as passed. Review must verify that each reason name has

@@ -110,7 +110,7 @@ The contract reference is recorded without resolution. An empty draft is valid. 
 4. The engine inserts identity and membership atomically and increments `draft_revision` once, retaining commercial version 1. Return identity and committed revision.
 5. Set a line external reference separately through administrative `PATCH`; mixing it into a commercial insert would violate one-request/one-trigger classification.
 
-Bundle plans remain one line; one-time plans represent setup fees, hardware and prepaid items as ordinary lines. Neither shape expands into components or a new line kind. No add-on selection is expressible this phase.
+A plan revision and its selected paid/optional items and included allowances remain one acquisition line. Optional selection is expressible; items never become additional order lines. Standalone one-time-only fulfillment remains a Subscriptions prerequisite. See [purchase shape](../DESIGN.md#contract-03-4-3).
 
 ### 2.3 Edit a header or edit/remove a line
 
@@ -142,7 +142,7 @@ Bundle plans remain one line; one-time plans represent setup fees, hardware and 
 
 | Class | Fields / behavior |
 |-------|-------------------|
-| Commercial | Membership, quantity, SKU/plan/price references, payer, category, line currency, three dates, term duration, billing cycle and contract reference; direct edits select `draft-mutate` |
+| Commercial | Membership, quantity, plan/revision references and selected item quantities/dimensions, payer, category, line currency, three dates, term duration, billing cycle and contract reference; direct edits select `draft-mutate` |
 | Commercial-frozen | Resource and seller tenant axes; seller is immutable from creation, resource from submit; direct edits still select `draft-mutate` |
 | Administrative | Order/line external references, display labels and internal notes; administrative-only edits select `administrative-edit` |
 | Never authored | Contract renewal election, term windows and notice ladder; surfaced by read-through, absent from line authoring |
@@ -308,7 +308,7 @@ capture and submit is caught where it matters.
 
 **Algorithm: Author Line**
 
-Input: order_id, sku_id, plan_id, price_id, qty, currency, dates, term_duration, billing_cycle, expected_version, expected_draft_revision, security_context, idempotency_key
+Input: order_id, plan_id, plan_revision_id, selected_items, currency, dates, term_duration, billing_cycle, expected_version, expected_draft_revision, security_context, idempotency_key
 Output: line_id, or a registered refusal
 
 1. [ ] - `p1` - Declare currency-consistency against the order's other lines and line-cap slice guards. The engine first applies authorization (`order × write`), idempotency resolution, state-table admissibility and the expected_version and expected_draft_revision checks ([01 §4.1](../DESIGN.md#contract-01-4-1)); line authoring is admissible only in draft - `inst-al-declare-guards`

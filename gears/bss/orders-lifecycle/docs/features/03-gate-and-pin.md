@@ -41,11 +41,11 @@
 
 ### 1.1 Overview
 
-Assess a basket against the adopted Pricing predicates and Orders-specific checks, then atomically submit it with catalog pins and received totals. Reuse that assessment for amendment and Preview; define the activation re-check executed by Workflow.
+Assess a basket against the adopted Pricing predicates and Orders-specific checks, then atomically submit it with accepted bindings and received totals. Reuse that assessment for amendment and Preview; define the activation re-check executed by Workflow.
 
 ### 1.2 Purpose
 
-Ensure admission has complete, explainable evidence and a consistent fixed catalog version without moving price calculation, approval policy or subscription activation into Lifecycle.
+Ensure admission has complete, explainable evidence and consistent per-line revisions and a common assessment without moving price calculation, approval policy or subscription activation into Lifecycle.
 
 **Requirements**: `cpt-cf-bss-orders-lifecycle-fr-order-submit`, `cpt-cf-bss-orders-lifecycle-fr-order-tenant-axes`, `cpt-cf-bss-orders-lifecycle-fr-order-atomic-fulfillment`, `cpt-cf-bss-orders-lifecycle-fr-orders-boundary-r4-no-price`, `cpt-cf-bss-orders-lifecycle-nfr-order-snapshot-integrity`, `cpt-cf-bss-orders-lifecycle-nfr-order-transition-latency`, `cpt-cf-bss-orders-lifecycle-interface-order-ops`.
 
@@ -58,7 +58,7 @@ Ensure admission has complete, explainable evidence and a consistent fixed catal
 | `cpt-cf-bss-orders-lifecycle-actor-orders-partner-admin` | Submits or previews authorized buyer arrangements |
 | `cpt-cf-bss-orders-lifecycle-actor-orders-direct-customer` | Submits or previews authorized self-service arrangements |
 | `cpt-cf-bss-orders-lifecycle-actor-orders-seller-operator` | Seller role grants neither submit nor Preview; either action requires an independently complete Partner Admin or Direct Customer authorization path |
-| `cpt-cf-bss-orders-lifecycle-actor-orders-catalog-pricing` | Supplies catalog predicate, frontier, price and pin facts through owning contracts |
+| `cpt-cf-bss-orders-lifecycle-actor-orders-catalog-pricing` | Supplies revision, purchase-predicate, price and accepted-binding facts through owning contracts |
 | `cpt-cf-bss-orders-lifecycle-actor-orders-idp-ams` | Supplies tenant validity and payer commercial profile |
 | `cpt-cf-bss-orders-lifecycle-actor-orders-contracts` | Supplies contract status and party eligibility |
 | `cpt-cf-bss-orders-lifecycle-actor-orders-workflow` | Executes the pre-activation re-check and handles its outcomes |
@@ -70,8 +70,8 @@ Ensure admission has complete, explainable evidence and a consistent fixed catal
 - **Architecture**: [DESIGN.md](../DESIGN.md), including [03 models](../DESIGN.md#contract-03-3-1), [03 interfaces](../DESIGN.md#contract-03-3-3), and [03 persistence](../DESIGN.md#contract-03-3-7). Complete behavior is in [§7](#7-detailed-behavior-contracts).
 - **Decomposition**: [DECOMPOSITION.md](../DECOMPOSITION.md).
 - **Dependencies**: [Foundation](01-foundation.md), `cpt-cf-bss-orders-lifecycle-feature-foundation`; [Capture](02-capture.md), `cpt-cf-bss-orders-lifecycle-feature-capture`.
-- **Upstream blockers**: [UPSTREAM_REQS.md](../UPSTREAM_REQS.md) retains unexposed seller-scoped fixed-version Pricing predicates/pins and full bundle coverage, product-key lookup, Rating evaluation/TCV, payer profile, Contracts, indicative tax, Subscriptions occupancy and atomic activation enforcement. Missing contracts remain unevaluable/unavailable; no local substitute is authorized.
-- **Open decisions**: [DECISIONS.md](../DECISIONS.md) retains latency/budget ratification, partner overlap-key dimension, pin staleness and quote coverage (Q-29). No hard pin-age bound or priced-offer capability is introduced here.
+- **Upstream blockers**: [UPSTREAM_REQS.md](../UPSTREAM_REQS.md) retains the unexposed `PricingReadV1` trait, the `bss-orders.system` grant, the residual purchase verdict, Subscriptions' compare-at-activation step and complete item coverage, the SUB-G1 overlap-key answer, Rating evaluation/TCV, payer profile, Contracts, indicative tax, Subscriptions occupancy and atomic activation enforcement. Missing contracts remain unevaluable/unavailable; no local substitute is authorized.
+- **Open decisions**: [DECISIONS.md](../DECISIONS.md) retains latency/budget ratification, partner overlap-key dimension, activation-duration policy and quote coverage (Q-29). The new initial-binding deadline is specified in DESIGN §4.3; its producer capability and Product duration policy remain open.
 
 **UI applicability**: UI layout, keyboard navigation, screen-reader behavior and visual accessibility are not applicable because this feature specifies backend contracts, not a user interface. API usability, actionable errors and non-disclosing diagnostics remain applicable; consuming consoles own their UI requirements.
 
@@ -92,9 +92,9 @@ Ensure admission has complete, explainable evidence and a consistent fixed catal
 **Steps**:
 1. Receive `POST /bss-orders-lifecycle/v1/orders/{orderId}/submit` with key and expected version/draft revision. Let the engine authorize current/proposed relationships and resolve replay before external guard work.
 2. Snapshot the authorized authored basket under its lock with `prepared_draft_revision`; declare the non-empty guard and snapshot effective resource-tenant date policy. Prepare the exact proposed dates before dependent resolution.
-3. Resolve identity once, including the payer profile, and derive market from the payer. Read the seller's pin-eligibility frontier once and fix the catalog tenant/version for the entire run.
+3. Resolve identity once, including the payer profile, and derive market from the payer. Fix the seller scope, common assessment date and revision per line; no latest-revision substitution.
 4. Resolve each line's catalog product key at that version in one batched call; build the payer/product claim tuple from that result, never from line labels or guessed identifiers.
-5. Resolve independent catalog predicates, referenced-contract facts, batched occupancy, evaluation and pin composition in parallel under §3.3. Pin composition depends on the frontier and runs even when another check fails. Skip only operations whose prerequisite input is missing.
+5. Resolve independent catalog predicates, referenced-contract facts, batched occupancy and accepted-binding composition under §3.3; Rating evaluation follows composition. Independent checks run in parallel, and composition still records its outcome when an independent check fails. Skip only operations whose prerequisite input is missing.
 6. Assess the adopted predicates and all nine Orders predicates (§3.1), retaining passed, failed and unevaluable results. Include each line's pin outcome. Keep the failure list separate and avoid duplicate reference/pin or date failures.
 7. Pass the complete assessment and admission/refusal contribution to the engine. Locked state/version/client/prepared-revision and pre-gate structural checks retain precedence. Check the date defaults against the engine timestamp before accepting date-dependent evidence.
 8. On refusal after assessment, atomically persist complete diagnostic rows, audit and owned idempotency response; write no commercial version, pin, total or event. Replace advisory overlap predicate 9 with any authoritative claim collision before settlement.
@@ -113,7 +113,7 @@ Ensure admission has complete, explainable evidence and a consistent fixed catal
 
 **Steps**:
 1. Receive `POST /bss-orders-lifecycle/v1/orders/preview` with the basket. Enforce axis-specific authorization/delegation before resolving facts about foreign parties; seller choice is a permitted selling relationship, not representation of that seller.
-2. Allocate a new run identity and stable run-local line IDs; invoke the same fixed-version seller-scoped assessment and date preparation as submit, including pin resolvability, without committing pins.
+2. Allocate a new run identity and stable run-local line IDs; invoke the same revision-fixed seller-scoped assessment and date preparation as submit, including pin resolvability, without committing pins.
 3. Invoke indicative tax only here through its owning port. Return per-line results, received pre-tax totals, indicative tax and expected fulfillment time/per-line deferral; return no approval-requirement verdict.
 4. When any line lacks term duration or billing cycle, return success with `tcv` absent and `tcvWithheld: {reason: "preview-term-or-cycle-missing", lineIds: [...]}`. Preserve all other response fields; never assume a term.
 5. Commit the complete authorized diagnostic vector before returning its assessment ID. Persist neither order nor Preview totals/TCV/tax. Each repeated Preview is a new run with seven-day diagnostic retention, not an idempotent quote or an offer with validity.
@@ -132,7 +132,7 @@ Ensure admission has complete, explainable evidence and a consistent fixed catal
 1. Read the authorized current order/version and stored payer, market and overlap keys. If held, terminal or superseded, return `not-dispatchable` with observed state/version; stop dispatch and do not acknowledge failure just for that result.
 2. Read the current payer profile. Unavailability returns `defer(identity-party-unavailable)`; an actual market difference returns per-line `reject(market-divergence)`.
 3. Read occupancy in one batch using stored keys, never a new registry lookup. Missing count/limit returns `defer(overlap-presence-unevaluable)`.
-4. For each key, compare active count plus this order's pending lines with the effective maximum. Exceeding it returns affected-line `reject(overlap-collision)`; otherwise return `proceed`.
+4. Compare active count plus pending lines with the effective maximum, returning `reject(overlap-collision)` on excess. Also reject an elapsed stored activation deadline as `order-binding-expired`; otherwise return `proceed`, subject to Subscriptions' pinned comparison at activation (DESIGN §4.3, D-162).
 5. Workflow handles `reject` by voiding wave-1 drafts and acknowledging failure with reasons and compensation evidence. It handles `not-dispatchable` by rereading/waiting/following supersession or ending terminal work. On `defer`, retry from step 1 under the design baseline of three attempts over at most 60 seconds; dispatch remains stopped. Exhaustion voids drafts and acknowledges failure with the unavailable-port reason.
 
 This is a Workflow integration algorithm, not a Lifecycle endpoint or begin-fulfillment guard. A passing read is only an early-abort check: Subscriptions must enforce concurrent-active cardinality at its own active commit. A collision after active commit is a fulfillment failure requiring rollback evidence, not a fictitious rejected inactive line. That upstream enforcement remains open.
@@ -143,19 +143,19 @@ This is a Workflow integration algorithm, not a Lifecycle endpoint or begin-fulf
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-algo-gate-and-pin-assessment`
 
-**Input**: Authorized basket, fixed seller catalog/version, date/policy basis and resolved port values.
+**Input**: Authorized basket, fixed seller/revision inputs, date/policy basis and resolved port values.
 
 **Output**: Complete ordered outcome vector and separate ordered failures.
 
-Adopt the owning Pricing predicate set by reference. Normalize `satisfied` to `passed`, `failed` to `failed` with `catalog-predicate-failed`, and `not_evaluable` to `unevaluable` with `catalog-predicate-unevaluable`, preserving original predicate/component/key identity and `detail`/`owed_to`. Transport failure is an operation outcome, not a fabricated predicate answer. Missing/unknown required results or incomplete bundle coverage make the response unusable; never fork component evaluation locally.
+Evaluate the nine catalog rows of [DESIGN §4.1](../DESIGN.md#contract-03-4-1): six from the `PricingReadV1` answers (`current_revision`, `resolve`) and the Products `get_sku` flags, recorded locally as `passed`, `failed` with `catalog-predicate-failed`, or `unevaluable` with `catalog-predicate-unevaluable`; the residual rows (market applicability, the owner's further rule) from `SellabilityV1` when it exists, normalizing its `satisfied`/`failed`/`not_evaluable` the same way and preserving its predicate/item/slot identity and `detail`/`owed_to`, and `unevaluable` until then. Transport failure is an operation outcome, not a fabricated predicate answer. A truncated roster or a missing required answer makes the response unusable (`catalog-predicates-unavailable`).
 
 | Orders predicate | Check and refusal behavior |
 |------------------|----------------------------|
 | 1. Axis validity | All three tenants resolve; `axis-invalid` or owning input unavailability |
 | 2. Contract | Only if referenced: active and payer party-eligible through Contracts; `contract-not-active`, `contract-party-ineligible` or `contract-resolution-unavailable` |
-| 3. Quantity | Price-row purchase floor and one-time bounds; `quantity-below-floor`; no plan maximum or add-on selection bounds |
-| 4. Market | Line currency and resolved price-row region match payer market; `market-inconsistent`; missing price scope is unevaluable |
-| 5. References | SKU/plan/price resolve without collision/duplication; `reference-unresolvable` / `reference-duplicated` |
+| 3. Quantity | Owning per-item quantity floors and selection bounds; `quantity-below-floor`; no local monetary arithmetic |
+| 4. Market | Book currency and explicit producer market applicability match payer market; `market-inconsistent`; missing price scope is unevaluable |
+| 5. References | Plan/revision/item references resolve without collision/duplication; `reference-unresolvable` / `reference-duplicated` |
 | 6. Single currency | All lines share currency; reuse `currency-mixed` |
 | 7. Subscription overlap | For each resolved key, `activeCount + proposed <= maxConcurrentActive`, preserving supported unbounded semantics; missing count/limit is `overlap-presence-unevaluable`, never default one; excess is `overlap-cardinality-exceeded` |
 | 8. Required dates | Apply Capture's snapshot/cascade; reuse `date-cascade-invalid` |
@@ -167,16 +167,16 @@ Evaluate every independent predicate even after a failure; a single failure bloc
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-algo-gate-and-pin-fixed-catalog`
 
-**Input**: Seller tenant, payer profile, basket and one frontier result.
+**Input**: Seller tenant, payer profile, basket and revision facts per line.
 
 **Output**: Version-consistent catalog facts/pins, received total and stable overlap keys.
 
-1. Read the seller catalog explicitly. Until explicit-tenant SDK operations exist, caller-scoped frontier is usable only when caller tenant equals seller. PEP denial is the port's unavailable outcome with an operator diagnostic, never buyer-facing 403.
-2. Distinguish a successful absent frontier (`catalog-frontier-absent`) from unavailable frontier. Fix one committed catalog version for predicates, product keys, evaluation and composition; a mid-run advance is ignored.
+1. Read the revision facts through `PricingReadV1` (`current_revision`, `resolve`) as the configured `bss-orders.system` subject in the order's seller tenant (D-160). There is no caller-tenant fallback. PEP denial is unavailable with an operator-only diagnostic.
+2. Distinguish a successful missing revision (`pricing-revision-absent`) from unavailable revision reads. Fix one revision per line and a common assessment date. Rating must use the exact composition result; no mid-run latest-price substitution.
 3. Distinguish an answered missing product key (`overlap-key-unresolvable`) from operation outage. Use the same resolved key for occupancy, predicates, persisted lines and claim tuples.
-4. Store only the catalog-written pin segment: committed version, resolved price identifiers including cohort and evaluation-policy version. Exclude composed snapshot references, overlays, coupon, FX lock and commitment.
-5. Persist evaluation's gross/net, explicit discount and promotion, separate recurring/usage/one-time/setup components and computed net pre-tax TCV verbatim. Lifecycle performs no money arithmetic. Usage is flagged/excluded; tax and subscription-context overlays, including brand, are excluded and disclosed on surfaces.
-6. Re-pin and re-evaluate on amendment. No new refresh worker or pin validity window is introduced; existing state TTL gaps and Q-06/Q-17/Q-27 remain.
+4. Store only the catalog-written pin segment: assessment identity, revision per line, selected items and exact price/descriptor bindings, with the activation deadline. Exclude composed snapshot references, overlays, coupon, FX lock and commitment.
+5. Persist evaluation's gross/net, explicit discount and promotion, separate recurring/usage/one-time components and computed net pre-tax TCV verbatim. Lifecycle performs no money arithmetic. Usage is flagged/excluded; tax and subscription-context overlays, including brand, are excluded and disclosed on surfaces.
+6. Re-pin and re-evaluate on amendment. No refresh worker is introduced. The absolute acceptance deadline is independent of state TTLs; see DESIGN §4.3.
 
 ### 3.3 Bound upstream resolution
 
@@ -188,12 +188,12 @@ Evaluate every independent predicate even after a failure; a single failure bloc
 
 | Port | Deadline per run |
 |------|------------------|
-| Catalog predicates, seller frontier, pin composition, product key | 250 ms each |
+| `PricingReadV1::current_revision`, `PricingReadV1::resolve`, `ProductsClient::get_sku`, Subscriptions SUB-G1 key | 250 ms each |
 | Identity/profile, contract, overlap occupancy | 250 ms each |
 | Price evaluation | 500 ms |
 | Indicative tax, Preview only | 250 ms |
 
-Batch basket-dependent operations once per port per run, not once per line. Identity precedes market use; frontier precedes product keys and composition; product keys precede occupancy. Retry transient failures at most two attempts inside the deadline, never retry a deadline. Use the design baseline breaker (0.5 failure ratio/30 seconds, open 10 seconds), bulkhead (32 concurrent calls/port), and caller limits (submit 10/minute, Preview 60/minute) through shared platform facilities. Unavailable required shared breaker capability remains a prerequisite.
+Use one logical batched port operation per run; bounded adapter splitting follows DESIGN §4.3. Identity precedes market use; revision facts precede assessment/composition; exact bindings precede Rating; authoritative keys precede occupancy. Retry transient failures at most two attempts inside the deadline, never retry a deadline. Use the design baseline breaker (0.5 failure ratio/30 seconds, open 10 seconds), bulkhead (32 concurrent calls/port), and caller limits (submit 10/minute, Preview 60/minute) through shared platform facilities. Unavailable required shared breaker capability remains a prerequisite.
 
 The conservative resolution ceilings are 2.25 seconds for submit and 2.5 seconds for Preview. These are external-resolution baselines, separate from commit latency and PRD durable-write-plus-publication latency; none proves an end-to-end subsecond submit. Keep unratified budgets and latency reconciliation open.
 
@@ -205,8 +205,8 @@ The conservative resolution ceilings are 2.25 seconds for submit and 2.5 seconds
 
 **Output**: Durable assessment identity/vector bound to the response, or infrastructure failure.
 
-1. Retain every evaluated result, including passed outcomes, identified by run, line, predicate, component plan and canonical catalog scope key. Preserve distinct bundle components/keys without expanding order lines; reject duplicate identities or incomplete coverage.
-2. Order by declared predicate order, then binary line ID, binary component ID and scope-key UTF-8 bytes, with NULL first. Persist trusted run metadata atomically with the complete vector.
+1. Retain every evaluated result, including passed outcomes, identified by run, line, predicate, resolve `item_id` and the slot's `dim_value` (token `default` for the null slot, D-159). Preserve distinct item/slot results without expanding order lines; reject duplicate identities or incomplete coverage.
+2. Order by declared predicate order, then binary line ID, binary item ID and slot-key UTF-8 bytes, with NULL first. Persist trusted run metadata atomically with the complete vector.
 3. For submit/amendment, use the engine transaction and bind `assessmentId=run_id` to its immutable settled response. Engine-only/state/version/date-basis refusals discard provisional stale results and carry no assessment ID.
 4. Choose the first unavailable result as primary Problem if any is unevaluable; otherwise choose the first failed result, preserving the complete authorized report. Canonical reason/domain/code mapping remains Foundation's contract.
 5. Preview commits a standalone diagnostic transaction; repeated calls create new runs. Operational lookup requires current diagnostic grants scoped by subject tenant; possession of an assessment ID is never authority. No public diagnostic endpoint is added.
@@ -221,7 +221,7 @@ The conservative resolution ceilings are 2.25 seconds for submit and 2.5 seconds
 
 | From / context | Condition | Result |
 |----------------|-----------|--------|
-| `draft` | All engine, structural, assessment, date-basis and claim checks pass | `submitted`, appended version 2, atomic pins/totals/evidence/event |
+| `draft` | All engine, structural, assessment, date-basis, capacity, binding-deadline and claim checks pass | `submitted`, appended version 2, atomic pins/totals/evidence/event |
 | `draft` | Admission refused | Remain `draft`; no commercial admission; reached diagnostics settle as defined above |
 | Amendment | Assessment passes | Versioning appends/re-pins and follows its declared transition; this feature adds no edge |
 | Preview | Assessment completed | Diagnostic-only run, no order transition or pin persistence |
@@ -234,7 +234,7 @@ Each predicate outcome is exactly `passed`, `failed` or `unevaluable`. These are
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-dod-gate-and-pin-assessment`
 
-The system **MUST** implement one authorized, seller-scoped, fixed-version assessment for submit, amendment and Preview, preserving tri-state diagnostics, every applicable predicate and independently evaluated pin outcomes under operation budgets.
+The system **MUST** implement one authorized, seller-scoped, revision-fixed assessment for submit, amendment and Preview, preserving tri-state diagnostics, every applicable predicate and independently evaluated pin outcomes under operation budgets.
 
 **Implements**: `cpt-cf-bss-orders-lifecycle-flow-gate-and-pin-submit`, `cpt-cf-bss-orders-lifecycle-algo-gate-and-pin-assessment`, `cpt-cf-bss-orders-lifecycle-algo-gate-and-pin-fixed-catalog`, `cpt-cf-bss-orders-lifecycle-algo-gate-and-pin-port-budgets`.
 
@@ -272,8 +272,8 @@ The implementation MUST expose the [design §3.8](../DESIGN.md#contract-03-3-8) 
 
 - [ ] A fully evaluable authorized basket admits one version with a resolvable pin per line and verbatim totals; a failed/unevaluable line prevents all commercial admission.
 - [ ] Mixed failed/unevaluable predicates return all independent failures, persisted passed results and pin outcomes. An unresolvable reference creates no duplicate pin failure; primary Problem follows unavailable-first ordering.
-- [ ] Frontier absence/outage, product-key absence/outage, composition timeout and incomplete bundle component/key coverage produce distinct declared diagnostics and no pin/version admission.
-- [ ] Partner callers use seller catalog/version for every catalog-facing operation; denied catalog access yields unavailable diagnostics, never a buyer-facing 403. Frontier changes mid-run do not mix versions.
+- [ ] Revision absence/outage, overlap-key absence/outage, composition timeout and incomplete bundle component/key coverage produce distinct declared diagnostics and no pin/version admission.
+- [ ] Partner callers use seller/revision inputs for every catalog-facing operation; denied catalog access yields unavailable diagnostics, never a buyer-facing 403. Revision or price publication mid-run does not mix the assessed bindings and totals.
 - [ ] A 200-line basket invokes each basket-dependent port once per run; validate deadline, bounded retry, breaker, bulkhead and caller-rate behavior through shared facilities.
 - [ ] Concurrent draft change, stale UTC basis and in-transaction claim collision preserve engine precedence, exact refusal evidence and zero commercial effects. Same-key replay performs no upstream calls and returns the same assessment/vector.
 - [ ] Missing occupancy count/limit refuses unevaluable without assuming one; concurrent distinct submits cannot acquire one claim. Partner key collisions remain the adopted rule until the upstream dimension decision changes it.
@@ -319,27 +319,27 @@ Output: submitted order with pin and total, or a refusal listing every failure
 
 1. [ ] - `p1` - Declare the at-least-one-line guard; after engine authorization/idempotency preparation, snapshot the authored basket with its server `prepared_draft_revision`, snapshot the resource tenant's effective `orders_date_policy` row (switches, scope, revision) and prepare all proposed dates under capture §4.2 before any date-dependent external call. Bind resolved results to this basket/date basis and carry both revisions into the engine; its locked revision check precedes using any result, including a gate refusal, and returns `version-conflict` for stale input - `inst-gs-declare-lines-guard`
 2. [ ] - `p1` - Resolve the identity operation once under its deadline, including tenant-axis validity and the payer's commercial profile; derive the order market from that result before market-dependent calls. Party eligibility is not an identity answer: it belongs to the contract-resolution port alone - `inst-gs-derive-market`
-3. [ ] - `p1` - Read the **seller's** catalog **pin-eligibility frontier** once under its operation deadline and fix the run's `catalog_version`. The frontier **MUST** be the seller's catalog frontier (`seller_tenant_id`), read through an operation that takes the catalog-owner tenant explicitly (D-122); every catalog-facing resolution below — product key, predicates, evaluation and pin — **MUST** use that one version of that one catalog. `None` contributes `catalog-frontier-absent`; outage/deadline contributes `catalog-frontier-unavailable`. A PEP denial maps to `catalog-frontier-unavailable` with an operator diagnostic and is never surfaced to the buyer as 403. Skip dependent operations without a frontier, still evaluate independent inputs and route every refusal through the engine - `inst-gs-fix-catalog-version`
-4. [ ] - `p1` - Resolve each line's **`catalogSubscriptionProductKey`** from the catalog registry **at the `catalog_version` fixed in step 3**, in the seller's catalog, in one call batched for the whole basket under its own §2.2 deadline, and build each line's overlap key `(payer_tenant_id, catalogSubscriptionProductKey)` from it: the resolved product key is the line's `overlap_scope_key` and the payer is the claim tuple's `payer_tenant_id` ([01-foundation — Database Schemas and Tables](../DESIGN.md#contract-01-3-7)). Every later use of an overlap key — the overlap-occupancy read, predicates 7 and 9 and the claim set of step 15 — consumes this resolved key; none derives its own. A line the registry answers with no key contributes `overlap-key-unresolvable`; outage/deadline contributes `catalog-product-key-unavailable`; without a frontier the operation is skipped as a dependent one. Skip only the overlap-dependent inputs of an unkeyed line, still evaluate independent inputs and route every refusal through the engine - `inst-gs-resolve-overlap-key`
-5. [ ] - `p1` - **PARALLEL** resolve the independent port inputs, each **batched into one call per port** for the whole basket and each catalog-facing one scoped to the seller's catalog at the fixed version: - `inst-gs-parallel-resolve`
-   - [ ] - `p1` - adopted catalog predicates over every line's scope key, at the fixed version, returning for each line the market scope (currency and region) of its resolved price row - `inst-gs-resolve-catalog`
+3. [ ] - `p1` - Fix the assessment identity, UTC resolve date and explicitly seller-scoped revision per line through the revision SDK. Require each supplied revision to belong to its plan/seller. Do not choose a later revision implicitly. Missing revision is `pricing-revision-absent`; outage/denial/deadline is `pricing-revision-unavailable`. Retain independent diagnostic results when dependent inputs are unavailable - `inst-gs-fix-catalog-version`
+4. [ ] - `p1` - Request each proposed line's SUB-G1 `catalogSubscriptionProductKey` from Subscriptions' key operation for every proposed line/revision under the same assessment in one logical batched request (proposed PriceBook derivation: the SKU of the line's paid `recurring` item(s), D-163); store the key(s) and provenance as answered and never compute them. `plan_id` is not a key. A missing key is `overlap-key-unresolvable`; unavailable owner contract is `overlap-key-unavailable`. All claims and occupancy checks reuse these exact keys - `inst-gs-resolve-overlap-key`
+5. [ ] - `p1` - Resolve the following dependency graph under per-port shared deadlines; only independent branches run in parallel. Purchase assessment/composition precedes evaluation, key resolution precedes occupancy, and neither failed independent check suppresses another evaluable result - `inst-gs-parallel-resolve`
+   - [ ] - `p1` - `PricingReadV1::current_revision` and `PricingReadV1::resolve` over each fixed revision (the roster, the chain matrix, SKU versions and descriptors), `ProductsClient::get_sku` for each consumed SKU, and, when it exists, `SellabilityV1` for the residual rows - `inst-gs-resolve-catalog`
    - [ ] - `p1` - reuse step 2's tenant-axis validity and payer-profile result without a second identity call - `inst-gs-resolve-identity`
    - [ ] - `p1` - contract status and party eligibility, only where a contract reference is present - `inst-gs-resolve-contract`
    - [ ] - `p1` - overlap occupancy `(activeCount, maxConcurrentActive, provenance)` for each distinct `(payer_tenant_id, overlap_scope_key)` **as resolved in step 4**, in one batched call, skipped for a line without one; an answer missing `activeCount` or `maxConcurrentActive` is `overlap-presence-unevaluable` (D-126) - `inst-gs-resolve-overlap`
-   - [ ] - `p1` - the resolved total from the evaluation contract, **at the fixed version** - `inst-gs-resolve-total`
-   - [ ] - `p1` - the catalog price pin for each line, composed **at the version fixed in step 3** under its §2.2 deadline, and its resolvability; composition depends only on the fixed frontier, so it runs whatever the other inputs answer (D-123) - `inst-gs-compose-pin`
+   - [ ] - `p1` - the resolved total and TCV from Rating over exactly the returned accepted bindings; this depends on composition and never runs against independently resolved prices - `inst-gs-resolve-total`
+   - [ ] - `p1` - the accepted order pin for each line under [DESIGN §4.3](../DESIGN.md#contract-03-4-3), complete with descriptor provenance and absolute deadline; record its result even when an independent predicate fails - `inst-gs-compose-pin`
 6. [ ] - `p1` - Retain step 1's policy snapshot, resolved cascade and proposed UTC date basis for engine validation under [02-capture — The date cascade (normative)](02-capture.md#contract-02-4-2); every date-dependent predicate/evaluation uses those same proposed dates - `inst-gs-resolve-cascade`
 7. [ ] - `p1` - Initialize the complete per-predicate outcome vector and a separate empty failure list - `inst-gs-init-failures`
-8. [ ] - `p1` - **FOR EACH** adopted predicate result: normalize its tri-state outcome under §4.1 and record every passed/failed/unevaluable result in the outcome vector and collect failures separately, preserving upstream detail - `inst-gs-collect-adopted`
+8. [ ] - `p1` - **FOR EACH** catalog row of §4.1 and each consumed item/slot: evaluate the six read rows from the `PricingReadV1` and `get_sku` answers, take the residual rows from `SellabilityV1` or record them `unevaluable`, and record every passed/failed/unevaluable result in the outcome vector and collect failures separately, preserving upstream detail - `inst-gs-collect-adopted`
 9. [ ] - `p1` - **FOR EACH** of the nine delta predicates: evaluate, record its outcome including passed, and add any failure to the separate failure list; predicates 7 and 9 evaluate over step 4's resolved overlap keys - `inst-gs-collect-delta`
-10. [ ] - `p1` - **FOR EACH** line: record its pin-composition outcome in the vector. An unavailable or deadline-exhausted composition contributes `catalog-pin-composition-unavailable`; an invalid returned pin contributes `pin-unresolvable`. Where the line's reference is unresolvable (predicate 5), record the pin outcome as `unevaluable` carrying that same `reference-unresolvable` reason and add **no second failure**; without a frontier it is `unevaluable` with the frontier's reason - `inst-gs-collect-pin`
+10. [ ] - `p1` - **FOR EACH** line: compose its `OrderPin` locally from the resolve answer (the matrix as answered, the consumed slot per item, the locally derived `activation_deadline`) and record the outcome in the vector. A resolve answer missing, truncated or deadline-exhausted contributes `catalog-pin-composition-unavailable`; an unset seller `max_acceptance_interval` contributes `order-binding-policy-missing`; an uncovered or absent consumed slot contributes `pin-unresolvable`. Where the line's reference is unresolvable (predicate 5), record the pin outcome as `unevaluable` carrying that same `reference-unresolvable` reason and add **no second failure**; without a valid revision input it is `unevaluable` with that input's reason - `inst-gs-collect-pin`
 11. [ ] - `p1` - **IF** any other port was unresolvable: add its unevaluable reason (absence is a refusal); pin composition's was recorded at step 10 and is not added twice - `inst-gs-collect-unevaluable`
 12. [ ] - `p1` - Predicate 8's `date-cascade-invalid` failure was recorded by step 9 and is not added again - `inst-gs-collect-cascade-invalid`
 13. [ ] - `p1` - **IF** the failure list is non-empty: - `inst-gs-if-failures`
     1. [ ] - `p1` - Pass the complete outcome vector and failure set as the contribution so the engine persists the gate outcome, audits the refusal and settles the idempotency record in one transaction - `inst-gs-contribute-refusal-outcome`
     2. [ ] - `p1` - **RETURN** the engine's settled response, including every gate failure when gate guards were reached; engine authorization/admissibility/version checks retain precedence - `inst-gs-return-all-failures`
 14. [ ] - `p1` - Assemble the resolved total rows and the TCV figure per §4.4 - `inst-gs-assemble-total`
-15. [ ] - `p1` - Request the submit transition with both draft revisions, pin, total, market, proposed dates/date basis and policy snapshot, gate outcome, each line's resolved `overlap_scope_key` from step 4 (persisted on `orders_order_line`), the complete resolved `(payer_tenant_id, overlap_scope_key)` claim set built from it and the **submitting principal as the initiating actor**. Before accepting date-dependent results, the engine checks defaults against the UTC date of its single pre-write transition timestamp `t`; a changed date basis refuses with `date-cascade-invalid`. On admission it persists the validated dates and snapshot atomically with the version. The transition carries `05`'s automatic acceptance contribution only where [05-preconditions — Acceptance on the two paths (normative)](05-preconditions.md#contract-05-4-2)'s submit-request rule holds — the allowed submit carried no delegation proof reference and the submitting principal's subject tenant equals the order's `resourceTenantId` (D-146) — never on `orders_order.sales_path` alone; otherwise it carries none - `inst-gs-request-transition`
+15. [ ] - `p1` - Request the submit transition with both draft revisions, pin, total, market, proposed dates/date basis and policy snapshot, gate outcome, each line's resolved `overlap_scope_key` from step 4 (persisted on `orders_order_line`), the complete resolved `(payer_tenant_id, overlap_scope_key)` claim set built from it and the **submitting principal as the initiating actor**. Before accepting date-dependent results, the engine checks the accepted-binding deadline and aggregate capacity, then checks defaults and assessment date against the UTC date of its single pre-write transition timestamp `t`; a changed date basis refuses with `date-cascade-invalid`. On admission it persists the validated dates and snapshot atomically with the version. The transition carries `05`'s automatic acceptance contribution only where [05-preconditions — Acceptance on the two paths (normative)](05-preconditions.md#contract-05-4-2)'s submit-request rule holds — the allowed submit carried no delegation proof reference and the submitting principal's subject tenant equals the order's `resourceTenantId` (D-146) — never on `orders_order.sales_path` alone; otherwise it carries none - `inst-gs-request-transition`
 16. [ ] - `p1` - **RETURN** the submitted order - `inst-gs-return-submitted`
 
 **Description**: Steps 7 through 13 are the all-failures contract, and pin composition is one of
@@ -347,12 +347,12 @@ its checks rather than a step reached only on success. Every input is resolved b
 *Run Gate and Submit* step 15, so the transaction that commits `submitted` performs no network call and the pin lands
 in the same commit as the state.
 
-Verification includes frontier `None`, frontier outage, a line with no registry product key,
-product-key operation outage, composition timeout after passing
+Verification includes missing revision, revision-read outage, a line with no authoritative overlap key,
+overlap-key operation outage, composition timeout after passing
 predicates, a failing predicate whose run still persists every line's pin outcome, an unresolvable
 reference yielding one failure and an `unevaluable` pin outcome rather than two failures, a
-frontier read for a caller tenant that is not the seller (the seller's catalog is read, and a PEP
-denial refuses `catalog-frontier-unavailable`, never 403), mixed failed/unevaluable Pricing answers, and concurrent draft mutation during
+seller-scoped revision read for a caller tenant that is not the seller (the seller's catalog is read, and a PEP
+denial refuses `pricing-revision-unavailable`, never 403), mixed failed/unevaluable Pricing answers, and concurrent draft mutation during
 resolution. Each refuses through the engine with the specified reason and no admitted pin or
 version; a settled idempotent replay performs no upstream calls. Date-policy verification starts
 from an authored draft with no versioned line row, changes configuration after the snapshot,
@@ -423,7 +423,7 @@ Output: exactly one of `proceed` | `reject` (per-line reasons) | `not-dispatchab
    1. [ ] - `p1` - **RETURN** `defer` carrying `overlap-presence-unevaluable`; never default the limit to one and never fabricate a collision - `inst-rc-return-defer-occupancy`
 8. [ ] - `p1` - **IF** for any key `activeCount + pending > maxConcurrentActive`, where `pending` is the number of this order's lines carrying the key that are not yet activated (all of them, before the first activation): - `inst-rc-if-overlap-collision`
    1. [ ] - `p1` - **RETURN** `reject` with overlap-collision for the affected lines - `inst-rc-return-overlap-collision`
-9. [ ] - `p1` - **RETURN** `proceed`, which is an **early-abort pass and not an admission guarantee**: the caller **MUST NOT** treat it as one, and **MUST** be able to handle an `overlap-collision` raised later by Subscriptions on the failure-acknowledgement path of [06-workflow-seam — Acknowledgement (normative)](06-workflow-seam.md#contract-06-4-4) - `inst-rc-return-proceed`
+9. [ ] - `p1` - Check each stored accepted-binding deadline against the live Workflow clock; if elapsed return `reject(order-binding-expired)`. Pass the exact version reference to Subscriptions, which resolves with the accepted consumed slots as pins on the activation date and compares the answer with the accepted `chains[]` before committing `active` under DESIGN §4.3 (D-162). No current-price resolution occurs here. **RETURN** `proceed`, which is an **early-abort pass and not an admission guarantee**: the caller **MUST NOT** treat it as one, and **MUST** be able to handle an `overlap-collision` raised later by Subscriptions on the failure-acknowledgement path of [06-workflow-seam — Acknowledgement (normative)](06-workflow-seam.md#contract-06-4-4) - `inst-rc-return-proceed`
 
 **What Workflow does with each outcome** (normative; the transitions are those of
 [06-workflow-seam — Begin fulfillment and the spawn signal (normative)](06-workflow-seam.md#contract-06-4-3) and §4.4):
@@ -473,9 +473,9 @@ Nine predicates are this gear's own. Each **MUST** carry its own machine-readabl
 
 1. **Axis validity** — all three tenant axes resolve against IdP/Account Management.
 2. **Contract active** — where a contract reference is present it resolves to an **active** contract (`contract-not-active`) under which the payer is party-eligible (`contract-party-ineligible`). Party-eligibility policy is owned by Contracts and consulted only when a contract is referenced, through the contract-resolution port alone — never the identity port; its unevaluability there is a refusal (`contract-resolution-unavailable`). This is a predicate of its own because it carries its own registered reason, and folding it into axis validity was what made the predicate count and the reason count disagree.
-3. **Purchase-quantity floor** — `qty` satisfies the floor the price row declares, and the declared bounds on one-time plans. There is **no plan-level maximum**: upper bounds are resource quotas enforced at fulfillment, not here.
-4. **Order-market consistency** — each line's currency and region are consistent with the market derived from the **payer's** profile, which in the partner path is not the calling tenant's. No line stores a region: a line's region is the **market scope of its resolved price row at the fixed catalog version**, returned by the reference-resolution/predicate port (`§3.6` *Run Gate and Submit* step 5), and the gate compares it with the version's `market_region`; a line's currency is compared with `market_currency` the same way. A missing market scope in the port's answer makes the predicate `unevaluable` with `catalog-predicates-unavailable` ([`../DECISIONS.md`](../DECISIONS.md) D-124).
-5. **Reference resolution** — every `skuId`, `planId` and `priceId` resolves, with no collision or duplication across lines.
+3. **Purchase-quantity floor** — each selected item quantity satisfies the owning item's `qty_min` and applicable selection rule. No implicit line multiplier or legacy one-time-plan bound is assumed. Resource quota ceilings remain a fulfillment concern.
+4. **Order-market consistency** — compare the book currency and producer-declared market applicability with the payer profile. An arbitrary selected dimension is not inherently region. Market applicability is a residual owner row (DESIGN §4.1): while its owner is missing the predicate is `unevaluable` with `catalog-predicate-unevaluable`; preserve the producer mapping and policy identity once answered (D-156, D-161).
+5. **Reference resolution** — every plan/revision/item reference and selected binding resolves, with no collision or duplication across lines.
 6. **Single currency** — all lines share one currency. Authoring already refuses a mixed basket; this predicate is the backstop for a basket assembled before the rule existed.
 7. **Overlap uniqueness** — projected activation does not violate the configured concurrent-active cardinality per `overlapScopeKey`, evaluated **within the basket** and **against existing subscriptions**.
 
@@ -526,8 +526,8 @@ fulfillment time plus a per-line deferral where a quoted date is earlier.
 `payerTenantId` or `resourceTenantId` requires PDP-validated authority/delegation for that axis
 before upstream facts are resolved. `sellerTenantId` selects the permitted seller/catalog
 relationship; selecting a different seller does not mean representing that seller. Preview
-reads that seller's catalog frontier and catalog data exactly as submit does, through operations
-naming the catalog tenant explicitly; a PEP denial on those reads is `catalog-frontier-unavailable`
+reads that seller's revision and purchase facts exactly as submit does, through operations
+called as the `bss-orders.system` subject in that tenant (D-160); a PEP denial on those reads is `pricing-revision-unavailable`
 (or the port's own unavailable reason) with an operator diagnostic, never a 403 to the buyer
 ([`../DECISIONS.md`](../DECISIONS.md) D-122). A direct
 customer T may preview `resource=T, payer=T, seller=S` when that selling relationship is
@@ -580,7 +580,7 @@ bound — is routed as [`../DECISIONS.md`](../DECISIONS.md) **Q-29**.
 - **Engine**: [`01-foundation`](../DESIGN.md#contract-01-1-1) — transition contract, reason registry, resolved-total schema
 - **Producers**: [`02-capture`](../DESIGN.md#contract-02-1-1) authors the lines and the policy-switch state this gate reads
 - **Consumers**: [`04-versioning`](../DESIGN.md#contract-04-1-1) re-runs this gate on amendment; [`05-preconditions`](../DESIGN.md#contract-05-1-1) contributes the self-service acceptance instant to the submit transition this slice owns; [`06-workflow-seam`](../DESIGN.md#contract-06-1-1) consumes the activation re-check outcome (specified by 03, executed by Workflow)
-- **Upstream asks**: `SUB-O5` overlap occupancy (amended from presence, D-126); `cpt-cf-bss-orders-lifecycle-upreq-catalog-subscription-product-key` (the registry's `catalogSubscriptionProductKey`, `SUB-G1` / PR #4177); `cpt-cf-bss-orders-lifecycle-upreq-pricing-catalog-tenant-reads` (seller-scoped frontier and catalog reads, each line's price-row market scope); `cpt-cf-bss-orders-lifecycle-upreq-rating-evaluation`; `cpt-cf-bss-orders-lifecycle-upreq-payer-commercial-profile`; `cpt-cf-bss-orders-lifecycle-upreq-contract-party-eligibility`; `cpt-cf-bss-orders-lifecycle-upreq-contract-acceptance-declaration` (the port's `acceptance_required` output, read by `05`, D-132); the overlap **dimension** binding for the partner path
+- **Upstream asks**: `SUB-O5` overlap occupancy (amended from presence, D-126); `cpt-cf-bss-orders-lifecycle-upreq-catalog-subscription-product-key` (legacy requirement ID for authoritative overlap derivation, D-153); `cpt-cf-bss-orders-lifecycle-upreq-pricing-read-sdk` (`PricingReadV1` over the existing reads, D-161); `cpt-cf-bss-orders-lifecycle-upreq-pricing-catalog-tenant-reads` (the `bss-orders.system` grant, D-160); `cpt-cf-bss-orders-lifecycle-upreq-pricing-purchase-assessment` (the residual market-applicability verdict); `cpt-cf-bss-orders-lifecycle-upreq-rating-evaluation`; `cpt-cf-bss-orders-lifecycle-upreq-payer-commercial-profile`; `cpt-cf-bss-orders-lifecycle-upreq-contract-party-eligibility`; `cpt-cf-bss-orders-lifecycle-upreq-contract-acceptance-declaration` (the port's `acceptance_required` output, read by `05`, D-132); the overlap **dimension** binding for the partner path
 - **ADRs**: [`ADR/0001`](../ADR/0001-cpt-cf-bss-orders-lifecycle-adr-transition-through-engine.md) transition through the engine; [`ADR/0002`](../ADR/0002-cpt-cf-bss-orders-lifecycle-adr-slice-decomposition.md) the foundation-plus-seven-slices decomposition; [`ADR/0003`](../ADR/0003-cpt-cf-bss-orders-lifecycle-adr-fail-closed-gate.md) fail closed on an unevaluable gate input; [`ADR/0007`](../ADR/0007-cpt-cf-bss-orders-lifecycle-adr-in-transaction-concurrency.md) concurrency enforced by the in-transaction overlap constraint behind predicate 9
 
 <!-- /contract -->

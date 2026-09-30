@@ -37,6 +37,11 @@
 
 <!-- /toc -->
 
+**Accepted-binding rule (D-152):** [03 §4.3](../DESIGN.md#contract-03-4-3) defines a separate
+absolute activation deadline. State TTLs, hold/resume and payment-tolerance elections neither extend
+it nor authorize renewal/repricing. A fresh amendment reassesses and reapproves; an expiry during
+fulfillment stops dispatch and follows evidence-gated compensation, not a new expiry edge.
+
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -114,7 +119,7 @@ DESIGN owns schemas and architectural rationale; this feature owns the complete 
 2. [ ] Enforce the finite amendment cap (baseline 20, never unlimited). An inadmissible state still refuses `not-admissible` before this guard; cap exhaustion is `amendment-cap-exhausted` with cap and count.
 3. [ ] Carry forward every unnamed commercial field and apply the delta. Reject any administrative field, including mixed deltas, with `administrative-field-in-amendment`; reject resource/seller axis fields with `tenant-axis-immutable`.
 4. [ ] For a payer change, resolve the commercial profile through Gate and Pin once and reuse it in the gate. A non-confirmed seller relationship refuses `payer-rebinding-requires-seller`; an unavailable identity input refuses `identity-party-unavailable`. Seller remains immutable; no paired rebinding is offered.
-5. [ ] Skip external work precluded by earlier failing local guards, preserving ordered engine refusal precedence. Otherwise first prepare the policy snapshot, proposed dates and date basis under Capture §4.2, before any date-dependent external calls. Then resolve all proposed lines against one seller catalog frontier, recomposing every pin, market, resolved total and TCV. Retain full gate/pin outcomes when any input fails.
+5. [ ] Skip external work precluded by earlier failing local guards, preserving ordered engine refusal precedence. Otherwise first prepare the policy snapshot, proposed dates and date basis under Capture §4.2, before any date-dependent external calls. Then resolve all proposed lines against a fixed revision per line in one seller-scoped assessment, recomposing every pin, market, resolved total and TCV. Retain full gate/pin outcomes when any input fails.
 6. [ ] Carry the prepared dates, date basis and policy snapshot into the contribution. Contribute the entire distinct `(proposed payer_tenant_id, overlap_scope_key)` claim set, including retained lines; never treat absent claims as permission to bypass maintenance.
 7. [ ] Let the engine validate the final date basis and expected version, replace claims and append the version atomically. On a partial claim collision, release only the exact fresh claim IDs returned by this attempt, retain pre-existing claims and commercial content, then commit the released reservation history with the refusal audit and settlement. A cleanup-count mismatch or persistence failure instead rolls back the transaction under Foundation’s contract.
 8. [ ] Persist the explanation as `amendment_reason` on the version and `caller_reason` on audit; machine reason remains `amendment`. Only the engine assigns `supersedes_version` and moves the current pointer.
@@ -184,7 +189,7 @@ The system **MUST** preserve the immutable chain, separately audit mutable admin
 ## 6. Acceptance Criteria
 
 - [ ] Each of the three admitted amendment states appends exactly one version and event; `pending_approval` and `approved` land in `submitted` without a policy-owner call.
-- [ ] Untouched content is carried forward while all pins, market and totals are re-resolved at one seller frontier; old versions remain byte-for-byte unchanged.
+- [ ] Untouched content is carried forward while all pins, market and totals are re-resolved under one new seller-scoped assessment; old versions remain byte-for-byte unchanged.
 - [ ] Empty delta, invalid explanation, mixed administrative/commercial delta, frozen axis and cap exhaustion return the documented ordered reasons; an inadmissible state plus exhausted cap returns `not-admissible`.
 - [ ] A same-seller payer change updates claim tuples even for unchanged textual overlap keys. Cross-seller changes refuse; identity outage is not misreported as a commercial denial.
 - [ ] Adding/removing lines replaces the complete claim set. A late claim collision preserves the old version and pointer, commits only exact-ID releases of fresh reservations with refusal evidence, and leaves all pre-existing claims intact. Cleanup failure rolls back the transaction; a settled business refusal retains released reservation history.
@@ -239,9 +244,9 @@ Output: the new version, or a registered refusal
 2. [ ] - `p1` - Resolve those guards' inputs: classify every delta field through the shared declaration, and determine whether a `payer_tenant_id` change crosses seller scope (§2.2, D-128) from the payer's commercial profile returned by the identity operation, resolved through [`03-gate-and-pin`](../DESIGN.md#contract-03-1-1) ([03 §3.6](03-gate-and-pin.md#contract-03-3-6) *Run Gate and Submit* step 2) once per run and reused by step 5's gate run rather than read again; that operation's unavailability or deadline contributes `identity-party-unavailable`. Do not treat a paired seller change as permission: `sellerTenantId` is commercial-frozen and its guard has precedence inside the engine. When a local guard already fails on its resolved inputs, skip dependent external work and contribute the failing input to step 11 for the engine to decide and audit (§2.2, §4.1); the skipped inputs are **precluded** as defined in [01 §4.1](../DESIGN.md#contract-01-4-1) *Precluded inputs* (D-113). A precluded input is never unresolvable, so the engine reports the earlier guard's reason — e.g. `amendment-cap-exhausted`, not a 503 — and, even where another input is genuinely unavailable, its step 3.1 settles an earlier-registered failing guard first - `inst-am-resolve-guard-inputs`
 3. [ ] - `p1` - Carry forward the current version's commercial content - `inst-am-carry-forward`
 4. [ ] - `p1` - Apply the delta over the carried-forward content - `inst-am-apply-delta`
-5. [ ] - `p1` - Resolve the full shared gate over the amended content outside the transaction, preparing its policy snapshot and proposed dates before date-dependent calls under capture §4.2, re-deriving the market and fixing one catalog frontier for the entire run — the **seller's** catalog frontier, read for `seller_tenant_id` through the operation taking the catalog tenant explicitly, a PEP denial refusing `catalog-frontier-unavailable` rather than 403 (D-122). The gate's parallel resolve step also re-composes every line's pin at that frontier whatever the other inputs answer ([03 §3.6](03-gate-and-pin.md#contract-03-3-6) *Run Gate and Submit* step 5, D-123). Resolve every proposed line's overlap key through the gate's catalog product-key operation at that fixed frontier ([03 §3.6](03-gate-and-pin.md#contract-03-3-6) *Run Gate and Submit* step 4), and the proposed payer; persist the key with the proposed line and include the complete distinct `(proposed payer_tenant_id, overlap_scope_key)` claim set, including retained lines, in the contribution - `inst-am-rerun-gate`
+5. [ ] - `p1` - Run the complete shared gate over amended content with a new assessment/time, seller scope and revision per line. Resolve every proposed line's authoritative overlap key, accepted binding/deadline and then Rating totals, preserving independent diagnostics. Reuse no old gate outputs. Carry the complete distinct proposed payer/key claims, including retained lines, into the engine - `inst-am-rerun-gate`
 6. [ ] - `p1` - **IF** the gate refuses or any input is unevaluable: retain its complete outcome — including every line's pin outcome — and failures as declared guard inputs; skip only total assembly that depends on unavailable inputs and continue to step 11. Never return before the engine audits and settles the refusal - `inst-am-if-gate-refuses`
-7. [ ] - `p1` - Take every line's catalog price pin re-composed by step 5's gate resolution at the same frontier; its failures are already in the gate outcome carried to step 11, and a line whose reference is unresolvable carries an `unevaluable` pin outcome with that reason, not a second failure - `inst-am-repin`
+7. [ ] - `p1` - Take every line's accepted order pin re-composed by step 5's gate resolution under the same new assessment; its failures are already in the gate outcome carried to step 11, and a line whose reference is unresolvable carries an `unevaluable` pin outcome with that reason, not a second failure - `inst-am-repin`
 8. [ ] - `p1` - Re-capture the resolved total and the TCV figure - `inst-am-recapture-total`
 9. [ ] - `p1` - **IF** the current state is `pending_approval` or `approved`: the transition target is `submitted`, and no verdict is read - `inst-am-target-submitted`
 10. [ ] - `p1` - **ELSE** the current state is `submitted` and the target is the current state - `inst-am-target-unchanged`
@@ -427,15 +432,15 @@ rebinding the resource recipient or the selling party would have committed
 ### Versioning: Carry forward and re-resolve (normative)
 
 The new version **MUST** inherit every commercial field the delta does not name, and **MUST
-NOT** inherit any gate output. Specifically, the catalog price pin, the resolved total, the TCV
+NOT** inherit any gate output. Specifically, the accepted order pin, the resolved total, the TCV
 figure and the order market **MUST** be re-resolved in full as part of the amendment commit.
 
 The rejected alternative was requiring the caller to resubmit the whole document. It was
 rejected because a caller reconstructing an unchanged five-line basket to alter one quantity
 will eventually reconstruct it wrongly, and because the diff between versions is then the
 caller's artefact rather than the store's. The rejected shortcut in the other direction —
-inheriting the pin to avoid a catalog round trip — is worse: it would carry a stale catalog
-version into a version the buyer believes is current, defeating the pin's only purpose.
+inheriting the pin to avoid a catalog round trip — is worse: it would carry a stale accepted binding
+from an older assessment into a version the buyer believes is current, defeating the pin's only purpose.
 
 An amendment **MUST** publish `OrderAmended` carrying the new version, **even when the order's
 state does not change**, so a consumer never has to infer that a version bumped from the absence

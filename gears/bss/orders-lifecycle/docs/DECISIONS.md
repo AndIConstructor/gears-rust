@@ -20,9 +20,9 @@
   - [D-09 (H) Slice pre-checks become registered guards *(autonomous, fixes R-04)*](#d-09-h-slice-pre-checks-become-registered-guards-autonomous-fixes-r-04)
   - [D-10 (H) Slice writes become document contributions *(autonomous, fixes R-05)*](#d-10-h-slice-writes-become-document-contributions-autonomous-fixes-r-05)
   - [D-11 (H) Five transition rows are added *(autonomous, fixes R-07)*](#d-11-h-five-transition-rows-are-added-autonomous-fixes-r-07)
-  - [D-12 (H) Rows disambiguated and the PRD's two approved edges restored *(autonomous, fixes R-08 and R-09)*](#d-12-h-rows-disambiguated-and-the-prds-two-approved-edges-restored-autonomous-fixes-r-08-and-r-09)
+  - [D-12 (H) Rows disambiguated and the PRD's two `approved` edges restored *(autonomous, fixes R-08 and R-09)*](#d-12-h-rows-disambiguated-and-the-prds-two-approved-edges-restored-autonomous-fixes-r-08-and-r-09)
   - [D-13 (M) The spawn signal is permanent *(autonomous, fixes R-10)*](#d-13-m-the-spawn-signal-is-permanent-autonomous-fixes-r-10)
-  - [D-14 (M) Draft auto-void targets expired and is called auto-void *(autonomous, fixes R-11; carries ADR-0004)*](#d-14-m-draft-auto-void-targets-expired-and-is-called-auto-void-autonomous-fixes-r-11-carries-adr-0004)
+  - [D-14 (M) Draft auto-void targets `expired` and is called auto-void *(autonomous, fixes R-11; carries ADR-0004)*](#d-14-m-draft-auto-void-targets-expired-and-is-called-auto-void-autonomous-fixes-r-11-carries-adr-0004)
 - [C. Event contract — resolves R-12…R-19](#c-event-contract--resolves-r-12r-19)
   - [D-15 (H) The event set stays at eleven; six row classes are event-less *(autonomous, fixes R-12, R-13, R-14, R-16; carries ADR-0004)*](#d-15-h-the-event-set-stays-at-eleven-six-row-classes-are-event-less-autonomous-fixes-r-12-r-13-r-14-r-16-carries-adr-0004)
   - [D-16 (H) Self-service acceptance is a fact in the submit commit, not a second event *(autonomous, fixes R-15; carries ADR-0004)*](#d-16-h-self-service-acceptance-is-a-fact-in-the-submit-commit-not-a-second-event-autonomous-fixes-r-15-carries-adr-0004)
@@ -54,8 +54,8 @@
   - [D-73 (H) Every stored verdict records its deciding authority *(autonomous)*](#d-73-h-every-stored-verdict-records-its-deciding-authority-autonomous)
   - [D-74 (M) The per-line result is a projection, not a state machine *(autonomous)*](#d-74-m-the-per-line-result-is-a-projection-not-a-state-machine-autonomous)
 - [I. Slice-local calls — each declared by its slice as warranting an entry](#i-slice-local-calls--each-declared-by-its-slice-as-warranting-an-entry)
-  - [D-82 (M) The version reason vocabulary is {create, submit, amendment}](#d-82-m-the-version-reason-vocabulary-is-create-submit-amendment)
-  - [D-83 (H) The in-flight order cap stays at one; route (b) does not resolve Q-05 *(carries ADR/0007)*](#d-83-h-the-in-flight-order-cap-stays-at-one-route-b-does-not-resolve-q-05-carries-adr0007)
+  - [D-82 (M) The version reason vocabulary is `{create, submit, amendment}`](#d-82-m-the-version-reason-vocabulary-is-create-submit-amendment)
+  - [D-83 (H) The in-flight order cap stays at one; route (b) does not resolve Q-05 *(carries `ADR/0007`)*](#d-83-h-the-in-flight-order-cap-stays-at-one-route-b-does-not-resolve-q-05-carries-adr0007)
   - [D-84 (H) One order line produces one subscription — Q-02 answered no](#d-84-h-one-order-line-produces-one-subscription--q-02-answered-no)
   - [D-85 (H) The cross-gear contract surface is GTS-typed *(closes the review's GTS findings)*](#d-85-h-the-cross-gear-contract-surface-is-gts-typed-closes-the-reviews-gts-findings)
   - [D-86 (H) The overlap collision is taken first, and detected as a row shortfall *(closes a CodeRabbit finding on PR #4775)*](#d-86-h-the-overlap-collision-is-taken-first-and-detected-as-a-row-shortfall-closes-a-coderabbit-finding-on-pr-4775)
@@ -111,17 +111,18 @@
   - [D-136 (M) A fulfillment acknowledgement carries the correlation identifier and a closed failure reason](#d-136-m-a-fulfillment-acknowledgement-carries-the-correlation-identifier-and-a-closed-failure-reason)
   - [D-137 (M) Seller-scope TTL overrides sit behind a default-off gear flag](#d-137-m-seller-scope-ttl-overrides-sit-behind-a-default-off-gear-flag)
   - [D-138 (M) The hold record is the stored pre-hold state plus the hold transition's audit entry](#d-138-m-the-hold-record-is-the-stored-pre-hold-state-plus-the-hold-transitions-audit-entry)
-  - [D-139 (M) An invalid cursor is cursor-invalid, under one cursor contract for all five paged collections](#d-139-m-an-invalid-cursor-is-cursor-invalid-under-one-cursor-contract-for-all-five-paged-collections)
-  - [D-140 (H) sales_path is partner_placed iff the allowed create carried a delegation proof reference](#d-140-h-sales_path-is-partner_placed-iff-the-allowed-create-carried-a-delegation-proof-reference)
-  - [D-141 (M) A targeted request answers order-not-found on a delegation-proof denial; only untargeted requests disclose the reason](#d-141-m-a-targeted-request-answers-order-not-found-on-a-delegation-proof-denial-only-untargeted-requests-disclose-the-reason)
-  - [D-142 (M) A boundary validation failure with no more specific reason is request-invalid; a no-op administrative edit is refused](#d-142-m-a-boundary-validation-failure-with-no-more-specific-reason-is-request-invalid-a-no-op-administrative-edit-is-refused)
-  - [D-143 (M) Caller-supplied explanations go in a nullable audit caller_reason, covered by audit hash v2](#d-143-m-caller-supplied-explanations-go-in-a-nullable-audit-caller_reason-covered-by-audit-hash-v2)
+  - [D-139 (M) An invalid cursor is `cursor-invalid`, under one cursor contract for all five paged collections](#d-139-m-an-invalid-cursor-is-cursor-invalid-under-one-cursor-contract-for-all-five-paged-collections)
+  - [D-140 (H) `sales_path` is `partner_placed` iff the allowed create carried a delegation proof reference](#d-140-h-sales_path-is-partner_placed-iff-the-allowed-create-carried-a-delegation-proof-reference)
+  - [D-141 (M) A targeted request answers `order-not-found` on a delegation-proof denial; only untargeted requests disclose the reason](#d-141-m-a-targeted-request-answers-order-not-found-on-a-delegation-proof-denial-only-untargeted-requests-disclose-the-reason)
+  - [D-142 (M) A boundary validation failure with no more specific reason is `request-invalid`; a no-op administrative edit is refused](#d-142-m-a-boundary-validation-failure-with-no-more-specific-reason-is-request-invalid-a-no-op-administrative-edit-is-refused)
+  - [D-143 (M) Caller-supplied explanations go in a nullable audit `caller_reason`, covered by audit hash v2](#d-143-m-caller-supplied-explanations-go-in-a-nullable-audit-caller_reason-covered-by-audit-hash-v2)
   - [D-144 (M) The composed read carries the activation re-check's fulfillment inputs](#d-144-m-the-composed-read-carries-the-activation-re-checks-fulfillment-inputs)
-  - [D-145 (M) A PATCH selects its trigger from field classes alone; a commercial edit outside draft is not-admissible](#d-145-m-a-patch-selects-its-trigger-from-field-classes-alone-a-commercial-edit-outside-draft-is-not-admissible)
+  - [D-145 (M) A `PATCH` selects its trigger from field classes alone; a commercial edit outside draft is `not-admissible`](#d-145-m-a-patch-selects-its-trigger-from-field-classes-alone-a-commercial-edit-outside-draft-is-not-admissible)
   - [D-146 (H) The submit-time automatic acceptance keys on the submit request, and the recording-party bar also keys on stored actor tenants](#d-146-h-the-submit-time-automatic-acceptance-keys-on-the-submit-request-and-the-recording-party-bar-also-keys-on-stored-actor-tenants)
-  - [D-147 (M) expected_draft_revision is optional at the boundary for draft-mutate and compared only after admissibility](#d-147-m-expected_draft_revision-is-optional-at-the-boundary-for-draft-mutate-and-compared-only-after-admissibility)
-  - [D-148 (M) A committed audit entry's reason is one closed token per trigger](#d-148-m-a-committed-audit-entrys-reason-is-one-closed-token-per-trigger)
-  - [D-149 (M) An administrative edit that changes nothing refuses administrative-edit-unchanged, keeping request-invalid boundary-only](#d-149-m-an-administrative-edit-that-changes-nothing-refuses-administrative-edit-unchanged-keeping-request-invalid-boundary-only)
+  - [D-147 (M) `expected_draft_revision` is optional at the boundary for `draft-mutate` and compared only after admissibility](#d-147-m-expected_draft_revision-is-optional-at-the-boundary-for-draft-mutate-and-compared-only-after-admissibility)
+  - [D-148 (M) A committed audit entry's `reason` is one closed token per trigger](#d-148-m-a-committed-audit-entrys-reason-is-one-closed-token-per-trigger)
+  - [D-149 (M) An administrative edit that changes nothing refuses `administrative-edit-unchanged`, keeping `request-invalid` boundary-only](#d-149-m-an-administrative-edit-that-changes-nothing-refuses-administrative-edit-unchanged-keeping-request-invalid-boundary-only)
+- [PriceBook seam remediation (2026-09-29)](#pricebook-seam-remediation-2026-09-29)
 - [High-register reconciliation (2026-09-23)](#high-register-reconciliation-2026-09-23)
 - [Medium-register reconciliation (2026-09-23)](#medium-register-reconciliation-2026-09-23)
 - [Open questions](#open-questions)
@@ -784,6 +785,8 @@ that for acceptance.
 
 ### D-67 (M) Every event carries a common order-summary block *(autonomous)*
 
+**D-158 supersedes the no-commercial-content-read assumption for the PriceBook target. Common provenance remains; expanded bindings and totals use authorized immutable-version reads. Historical rationale follows.**
+
 **Decision**: [01 §4.4](DESIGN.md#contract-01-4-4) declares one common summary block — `orderId`, `orderVersion`,
 `category`, resulting `state`, the three tenant axes, the contract reference and the external
 reference where present — carried by **every** event; the per-event table lists only what each
@@ -1407,6 +1410,8 @@ than state.
 
 ### D-93 (H) One catalog version governs a whole submit *(closes a defect found in the 2026-09-11 buildability review)*
 
+**Superseded for the PriceBook target by D-150–D-158 / ADR-0008. Historical rationale follows.**
+
 **Decision**: the catalog **pin-eligibility frontier** is read once, at [03 §3.6](features/03-gate-and-pin.md#contract-03-3-6) *Run Gate and
 Submit* step 3, and the resulting `catalog_version` governs every catalog-facing resolution in that
 run — the adopted predicates, the price evaluation producing the resolved total, and the pin. No
@@ -1828,6 +1833,8 @@ slice-lens review finding H-6 (2026-09-23).
 
 ### D-108 (H) The gate resolves the overlap key from the catalog registry at the fixed version
 
+**Superseded for the PriceBook target by D-150–D-158 / ADR-0008. Historical rationale follows.**
+
 **Decision**: [03 §3.6](features/03-gate-and-pin.md#contract-03-3-6) *Run Gate and Submit* gains step 4, between fixing the catalog version and
 the parallel port resolution: resolve each line's `catalogSubscriptionProductKey` from the catalog
 registry (Product & SKU) **at the run's fixed `catalog_version`**, in one call batched for the
@@ -2231,6 +2238,8 @@ finding M-3 (2026-09-23).
 
 ### D-122 (M) The gate reads the seller's catalog, named explicitly
 
+**Superseded for the PriceBook target by D-150–D-158 / ADR-0008. Historical rationale follows.**
+
 **Decision**: the pin-eligibility frontier the gate fixes at [03 §3.6](features/03-gate-and-pin.md#contract-03-3-6) *Run Gate and Submit*
 step 3 **MUST** be the **seller's** catalog frontier (`seller_tenant_id`), read through a Pricing
 operation that takes the catalog-owner tenant explicitly — `pin_frontier_for(ctx,
@@ -2257,6 +2266,8 @@ Closes slice-lens review finding M-7 (2026-09-23).
 `§4.3`, `§4.6`, `§5`; [04 §3.6](features/04-versioning.md#contract-04-3-6) *Append Amendment* step 5; `UPSTREAM_REQS.md §2.2`, `§1.2`, `§3`.
 
 ### D-123 (M) Pin composition runs in every gate run
+
+**Superseded for the PriceBook target by D-150–D-158 / ADR-0008. Historical rationale follows.**
 
 **Decision**: catalog pin composition moves into the **parallel** resolve step of [03 §3.6](features/03-gate-and-pin.md#contract-03-3-6) *Run
 Gate and Submit* (step 5): it depends only on the fixed frontier, so it runs whatever the
@@ -3074,6 +3085,53 @@ re-review finding RR-M5 (2026-09-24).
 `§4.1` transition contract, `§4.7` registry; [04 §3.3](DESIGN.md#contract-04-3-3) reasons, `§3.6` *Apply Administrative Edit*
 step 1 and its no-op note; D-142.
 
+## PriceBook seam remediation (2026-09-29)
+
+D-150–D-168 govern the PriceBook target in ADR-0008; D-159–D-168 (2026-09-30) pull each ask back
+onto the seam that already exists on `16705a243` where one does, and amend D-151, D-152, D-153 and
+D-157 as noted. Superseded entries below are retained as history; they do not authorize use of
+removed producer contracts. Counterpart status is tracked in
+[the reciprocal amendments](../../../../docs/reviews/2026-09-29-bss-seam-counterpart-amendments.md).
+
+| Decision | Orders-side rule | Counterpart status |
+|---|---|---|
+| D-150 | Adopt PriceBook at `16705a243`; revision per line, common assessment date, seller-scoped facts. Supersedes D-93's single catalog version and D-122/D-123's frontier mechanism. | Rating T-D-37 / Subscriptions SUB-D-29 adopted the model; adapters deferred. |
+| D-151 | Pricing owns a shared prospective-purchase assessment with complete per-item tri-state verdicts and selected bindings. Orders adds its nine local checks, never forks the commercial gate. | New owning SDK and seller authorization are required, not built here. |
+| D-152 | Initial binding is an accepted order-version snapshot, never a renewal resolve call. It carries an absolute activation deadline and price/descriptor boundaries; no hold/resume extends it. Supersedes the TTL-based price-hold interpretation. | Joint initial-binding, clock/protection and first-period contract proposed; Product duration unset means no submit. |
+| D-153 | Consume an opaque overlap key and active-count/limit/provenance. Preserve the one-in-flight-order rule; enforce subscription cardinality at Subscriptions' active commit. Supersedes D-108's removed Product-key lookup. | Key derivation/namespace and SUB-O5 amendment unagreed; `plan_id` is not a default. |
+| D-154 | Rating supplies whole-order/per-line figures and net pre-tax annualized TCV over the exact selected prices. Three charge kinds; no local money arithmetic. D-40's ownership and required-evaluation failure posture remain. | Rating pre-purchase DTO/aggregation and exact-price mode require amendment. |
+| D-155 | Lifecycle SDK preserves all verdict authorities, explicit per-line completion mappings, version/idempotency/correlation and compensation evidence. REST and SDK enter the same application service. | Local design fixed; SDK implementation and Workflow consumer still pending. |
+| D-156 | Resolve item quantities/optional selections, own/default dimension pins, descriptor versions and currency/rounding evidence explicitly. One acquisition line still spawns one subscription. | Mirrored in proposed producer DTOs and provisioning contract. |
+| D-157 | Subscriptions validates an accepted binding and protection at activation; preserve versioned creation keys, actual start, fee-free compensation and topology completeness. Rechecks are early aborts only. | SUB-O1/O2/O5/O9/O10 and topology/protection requirements remain open. |
+| D-158 | Expanded pins are obtained through authorized immutable-version reads; events carry bounded projections and a version reference. Submit/amendment require a bounded aggregate purchase and receipt contract. | Consumer/event and capacity validation required before runtime release. |
+
+**Alignment with existing seams (2026-09-30).** Source: [the existing-seams fix plan](../../../../docs/reviews/2026-09-30-orders-lifecycle-existing-seams-fix-plan.md).
+
+| Decision | Orders-side rule | Existing seam adopted | Amends |
+|---|---|---|---|
+| D-159 | The stored pin nests `items[].chains[]` exactly as resolve answers the matrix: one slot per `(item_id, dim_value)`, each `{dim_value, uncovered, binding?}` with the binding's DTO fields verbatim; `selected_dim_value` stays at item scope and selects the consumed slot. 1,000 bound slots per line is an added admission cap (Pricing's pin cap is per request, one revision); a matrix is never truncated. | `PricingResolveItemDto.chains[]` (dto.rs:66–119); SUB-D-29 stores one binding per `(item, chain)`; `MAX_PINS = 1_000` | D-156, D-158 |
+| D-160 | Pricing access follows D-424: a `bss-orders.system` subject with `plan:read` and `price:read`, the adapter building that subject's context for the order's seller tenant (Pricing's `reference_ticker::system_actor` pattern, in-process only). No seller parameter on the Pricing API, no delegation proof to Pricing. The `get_sku` row needs its own Products SKU read grant (round 2, R2-7). | Pricing D-424; `read_contract.rs` door (`subject_tenant_id`, `PolicyEnforcer`); `reference_ticker.rs` | D-151 |
+| D-161 | Catalog predicates are evaluated from `PricingReadV1 { resolve, price, current_revision }` over the three existing reads; currentness is the `revisions[]` entry with `id == plan_revision_id` having `state == published` and `rev_no == published_rev` (round 2, R2-5); the consumed slot is the chain whose `dim_value` equals `selected_dim_value` (R2-4); only market applicability and the residual owner rule remain the `…-pricing-purchase-assessment` ask. `PricingPurchaseV1::assess` is withdrawn; the deadline is local (D-162). | `GET /resolve`, `GET /prices/{id}`, `GET /plans/{id}` (`PricingPlanDto.published_rev: Option<i32>`, `revisions[]`); the 15 golden files (resolve, price); `Sku.sellable`/`Sku.lifecycle` in products-sdk | D-151 |
+| D-162 | The accepted prices are verified by a **pinned** comparison at activation (round 2, R2-2): Subscriptions encodes the accepted consumed slots as pins, runs the ordinary `resolve(revision, activation date, pins)`, and compares `binding.price_id` per consumed slot; the walk keeps the accepted price across `new` successors and moves only for an `all` successor or an ended price, so refusal (`accepted-price-mismatch` → `order-binding-expired`) happens exactly when the promise cannot be kept. A signup resolve is not used. No initial-acceptance mode, no receipt, no determinism claim (R2-6); `activation_deadline` is derived locally from `min(ends_on, temporary_until)` and a seller-scoped Orders `max_acceptance_interval` (R2-1). The comparison runs at the `applied` commit and its bindings are the first period's pins; SUB-P5 must admit a superseded accepted revision at `create`. | Pricing D-420 rules 2–4 (`resolve.rs` `walk`, `binds_on`, `keep_for_bound`); D-422; T-D-37 | D-152 |
+| D-163 | The overlap key stays Subscriptions' registry-owned `catalogSubscriptionProductKey` (SUB-G1); the PriceBook derivation proposed to that owner is the SKU of the line's paid `recurring` item(s). `plan_id` is not proposed. Orders stores the key as answered. "Never derived from plan/SKU IDs" is withdrawn. | SUB-G1, SUB-O5/SUB-P8 shape; resolve `items[].sku_id`, `charge_kind` | D-153 |
+| D-164 | SKU protection is inherited from the accepted revision's `plan_item` references; Orders reserves nothing and asks for no owner, kind or receipt. The residual ask is that Pricing's revision-reference release report counts non-terminal orders that accepted the revision. `ReferenceKind::OrderLine` is withdrawn. | Pricing D-414 (references outlive the revision), D-410; Products P-D-189/P-D-194, `SKU_REFERENCED`; registry owner check | D-157 |
+| D-165 | Provisioning maps onto Subscriptions' existing contract: acceptance instant → `customerAcceptedAt`, actual activation → `serviceActivatedAt`, `contractEffectiveAt` from the Contract; `activated` in the completion acknowledgement means `applied`, not `approved`; `oss_unconfirmed` is a provisioning failure; a stalled `active → cancelled` compensation is escalated by Workflow while the order stays `in_fulfillment`. | 01-foundation-lifecycle.md (create key, OSS-async activate, three instants); SUB-O3; Workflow PRD "escalates rather than a third leg" | D-157 |
+| D-166 | The approval policy owner is Workflow's approval adapter, which may embed `cf-gears-bss-approval`; "Generic Approval service" is withdrawn from PRD and DESIGN. Lifecycle still only reflects verdicts with their authority. | `gears/bss/libs/approval` as used by Pricing and Products | D-73, Q-09 |
+| D-167 | The Rating request is the accepted matrix in resolve's vocabulary (`lines[{line_id, plan_revision_id, items[{item_id, quantity, chains[]}]}]`, `assessment_id`, `resolve_date`); periods are `month` or `year`; an unsupported cycle refuses evaluation. Whole-order figures and TCV remain a Rating ask (no existing seam supplies them). | Pricing periods; T-D-36/37/38; D-415 | D-154 |
+| D-168 | The billing chain is not `gears/bss/ledger`: invoicing/at-sale valuation, indicative tax and Payments are unowned capabilities registered for whichever specification takes them; the Ledger is the GL posting and settlement target and generates no invoices. External references travel order → create → billable fact → invoice, snapshotted at the first handoff. | `LedgerClientV1` (ledger-sdk/src/api.rs) | UPSTREAM_REQS §4 |
+
+Round-2 review (2026-09-30, [record](../../../../docs/reviews/2026-09-30-orders-lifecycle-round-2-review.md)):
+D-160, D-161, D-162 and D-164 were amended as their rows now say; the pin cap of D-159 is 1,000
+**bound** slots per **line** (R2-10); the Subscriptions principal's `get_version` read at activation
+is granted through the same finite order-ID set as Workflow's (R2-8, 08 §4.3).
+
+Commercial questions still **unagreed**, not silently defaulted: the activation-duration policy
+behind `activation_deadline`, the partner/customer dimension of the overlap key (Q-05),
+forced-retirement treatment, the `ends_on` cut owner between Subscriptions and Rating, and the
+approval-policy host inside Workflow. The implementation must fail closed at the affected seam
+until the owning contract is supplied. A concrete draft is available in the reciprocal amendments;
+no team has been contacted or represented as accepting it.
+
 ## High-register reconciliation (2026-09-23)
 
 The 2026-09-23 High-finding disposition maps all 33
@@ -3160,7 +3218,7 @@ Not decided here. Each carries a named owner and the design position taken in th
 | Q-06 | Per-state TTL defaults and whether seller scope may override platform scope | Product | No code default; an unconfigured state is not swept. The override mechanism is specified and ships disabled behind the gear-level `ttl_seller_override_enabled` flag, default off (D-137), so the override-scope answer becomes configuration: a yes turns the flag on, a no leaves it off, and neither needs a design change |
 | Q-07 | **PRD §15 row 5 carries two values and this row tracks both.** (a) The program retention period for completed and cancelled orders. (b) The **`draft` auto-void TTL**, which [07 §4.5](DESIGN.md#contract-07-4-5) routes here and which is the more urgent half: while it is unset the draft sweep does no work, basket accumulation is **unbounded**, and there is **no fallback** — the absolute-lifetime backstop that previously supplied one was withdrawn by D-90. `draft` therefore has the largest exposure of any state to an unanswered value, and unlike the §15 row-7 TTLs it bounds storage rather than a commercial promise | Product | (a) Append-only with no destructive path; retention deferred to the policy. (b) No code default, per [07 §2.2](DESIGN.md#contract-07-2-2) — a default would become the platform answer. The condition is visible on the draft-age distribution ([02 §3.8](DESIGN.md#contract-02-3-8)) and the no-configured-TTL alert ([07 §3.8](DESIGN.md#contract-07-3-8)) |
 | Q-08 | The minimum payment-outcome surface: a declined instrument's exit (currently expiry only) and refund-as-reversal after capture | Architecture with Product | Authorization-only, stated as a limitation in [05 §4.4](DESIGN.md#contract-05-4-4) |
-| Q-09 | Is the Generic Approval service specified by its own PRD, or by a transitional module-local pattern? | Architecture | Stand-in behind the expectations contract; every verdict carries its deciding authority (D-73) |
+| Q-09 | Where does the approval policy live, given that no approval service exists and `cf-gears-bss-approval` is a library Pricing and Products embed? | Architecture | Workflow's approval adapter is the owner and may embed the library (D-166); stand-in behind the expectations contract until it does; every verdict carries its deciding authority (D-73) |
 | Q-10 | The durable-execution engine for the sibling Workflow gear | Architecture | Out of scope for this gear; nothing in the engine depends on it |
 | Q-11 | **End-to-end submit latency needs boundary clarification and validation.** The PRD requires durable write plus event publish at p95 < 1 s (§7.1, §12), while [03 §2.2](DESIGN.md#contract-03-2-2) allows up to **2.25 s** for pre-transaction submit port resolution (2.5 s on Preview, which also calls the tax port; both raised by 250 ms for the catalog product-key operation, D-108). Those timeout budgets do not prove achieved p95 and do not exempt guard resolution from caller-visible latency | Product with Architecture | Measure request-to-commit and the complete request-to-broker path per `DESIGN.md §4.1`; attribute guard-resolution time as required by [03 §1.2](DESIGN.md#contract-03-1-2). Resolve the governing boundary jointly with Q-16. The design claims neither sub-second buyer response nor PRD compliance from commit-only measurements. |
 | Q-12 | PRD §6.1 says amendments from `submitted` and `pending_approval` **do not change order state**, yet D-61 transitions a `pending_approval` amendment to `submitted`; its diagram also declares a direct `approved → pending_approval` edge while this design reaches that state in two steps because the direct edge's guard is unobtainable. Separately §10 UC-002 step 3 and §12 AC-5 require an amendment from `pending_approval` to return to its pre-approval state, while §5.1 and §6.2 scope that clause to `approved` only | Product with Architecture | The two-step shape and the `pending_approval → submitted` divergence are disclosed in [01 §4.3](features/01-foundation.md#contract-01-4-3) and [04 §4.3](features/04-versioning.md#contract-04-4-3); the PRD state rule, diagram and §12 AC-5 need reconciling, or a verdict port must be specified and AC-11a relaxed |

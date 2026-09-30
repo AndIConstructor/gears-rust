@@ -37,6 +37,11 @@
 
 <!-- /toc -->
 
+**SDK parity (D-155):** [Workflow SDK contract](../DESIGN.md#orders-lifecycle-workflow-sdk)
+is normative for in-process consumers and immutable-version reads. All SDK methods enter the same
+authorized application service as REST, preserving authorities, explicit line mappings and engine
+replay/concurrency semantics. An SDK method is not an authorization bypass.
+
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -499,7 +504,11 @@ Output: cancelled, or a registered refusal
 evidence lists the voided wave-1 drafts (possibly none), an empty `activated_rolled_back` and
 `activation_dispatched = false`; after it, the rolled-back subscriptions as well. Either way
 `no_active_subscription_remains` must be true, which is what row 16 and PRD's compensation
-contract both require.
+contract both require. Subscriptions' `active → cancelled` is Policy-gated and fails closed on
+unavailability (SUB-O3), so a compensation can stall; the Workflow PRD escalates such a
+compensation rather than inventing a third leg, and while it is escalated the order stays
+`in_fulfillment`, expiry-exempt, until evidence with `no_active_subscription_remains = true`
+exists (D-165). No acknowledgement with a weaker assertion is accepted.
 
 
 <!-- /contract -->
@@ -627,6 +636,7 @@ signal as after it (D-134).
 | Value | Raised when |
 |-------|-------------|
 | `market-divergence` | the activation re-check returned `reject` for a line's market ([03 §3.6](03-gate-and-pin.md#contract-03-3-6)) |
+| `order-binding-expired` | An accepted binding expired before initial activation (the local deadline elapsed), or Subscriptions refused the activation-time pinned comparison (`accepted-price-mismatch`: a consumed slot's price moved); Workflow stops dispatch and compensates all created subscriptions before reporting. No renewal/reprice fallback; 03 §4.3, D-162. |
 | `overlap-collision` | the re-check returned `reject` for an overlap collision, or Subscriptions raised one after the re-check (§4.3) |
 | `identity-party-unavailable` | a re-check `defer` on the identity port (whose unavailable reason is `identity-party-unavailable`) exhausted `activation-recheck-retry-budget` (D-127) |
 | `overlap-presence-unevaluable` | a re-check `defer` on the overlap-occupancy port exhausted the same budget (D-127) |
@@ -642,7 +652,7 @@ recorded on the committed audit entry as its `caller_reason`, not its registered
 never interprets it; adding a value is a contract change to this table and the event schema.
 
 A failed acknowledgement driven by the activation re-check carries, as its failure reason, either
-a `reject` line reason (`market-divergence`, `overlap-collision`) or — after an exhausted `defer` —
+a `reject` line reason (`market-divergence`, `overlap-collision`, `order-binding-expired`) or — after an exhausted `defer` —
 the unavailable port's reason (`identity-party-unavailable`, `overlap-presence-unevaluable`). A
 `not-dispatchable` re-check outcome **MUST NOT** produce an acknowledgement at all: the held,
 terminal or superseded order is re-read, not failed ([03 §3.6](03-gate-and-pin.md#contract-03-3-6), D-127).

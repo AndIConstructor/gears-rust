@@ -36,6 +36,11 @@
 
 <!-- /toc -->
 
+**Accepted-binding rule (D-152):** [03 §4.3](../DESIGN.md#contract-03-4-3) defines a separate
+absolute activation deadline. State TTLs, hold/resume and payment-tolerance elections neither extend
+it nor authorize renewal/repricing. A fresh amendment reassesses and reapproves; an expiry during
+fulfillment stops dispatch and follows evidence-gated compensation, not a new expiry edge.
+
 ## 1. Feature Context
 
 ### 1.1 Overview

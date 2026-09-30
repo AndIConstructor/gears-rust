@@ -306,7 +306,7 @@ change.
 - **Depends On**: `cpt-cf-bss-orders-lifecycle-feature-foundation`, `cpt-cf-bss-orders-lifecycle-feature-capture`
 
 - **Scope**:
-  - The submit gate: the published pricing sellability predicates adopted by reference plus the Orders delta — tenant-axis validity, contract-active where referenced, purchase-quantity floor, order-market consistency against the payer's profile, reference resolution, single currency, overlap-rule uniqueness and the one-in-flight-order rule. Capture of the catalog price pin on every line and of the non-authoritative resolved total. The Preview operation, which creates no order or commercial artifact, persists bounded-retention gate outcomes and returns no approval verdict.
+  - The submit gate: the published pricing sellability predicates adopted by reference plus the Orders delta — tenant-axis validity, contract-active where referenced, purchase-quantity floor, order-market consistency against the payer's profile, reference resolution, single currency, overlap-rule uniqueness and the one-in-flight-order rule. Capture of the accepted order pin on every line and of the non-authoritative resolved total. The Preview operation, which creates no order or commercial artifact, persists bounded-retention gate outcomes and returns no approval verdict.
 
 - **Out of scope**:
   - It does not author the adopted predicates and must never fork them. It computes no price — the total arrives from the price-evaluation contract and is stored as received. It returns no approval-requirement verdict, in Preview or at submit.
@@ -856,33 +856,29 @@ one `p1` obligation; delivery phases express sequencing rather than weakening pr
 
 **Phase 1's successful submit path has open upstream prerequisites.** The gate fails closed
 on an unevaluable input ([`ADR/0003`](ADR/0003-cpt-cf-bss-orders-lifecycle-adr-fail-closed-gate.md)).
-Pricing's current [`domain/sellability.rs`](../../pricing/pricing/src/domain/sellability.rs)
-implements four predicate families: active-window coverage/horizon, committed catalog version,
-availability dates and plan lifecycle. The GA/prepaid-execution flags and registry sellability
-families remain `NotEvaluable`; the registry flag is owned by `products`. The older claim that
-active-window coverage is unimplemented is superseded by Pricing's window-linkage implementation.
+The PriceBook target is ADR-0008 / D-150–D-168. Pricing's resolve, pinned-price and plan reads
+are built and golden-tested on the inspected branch; what Orders needs from Pricing is the
+`PricingReadV1` trait over those reads, a `bss-orders.system` subject with `plan:read` and
+`price:read` (the D-424 pattern), and the residual purchase verdict for market applicability
+(D-160, D-161); from Products, a SKU read grant for that subject. The activation deadline is
+derived locally from the stored bindings and a seller-scoped Orders setting (D-162, round 2). Rating has adopted PriceBook but its pre-purchase/TCV adapter is pending. Subscriptions
+has adopted period bindings; it still needs the pinned comparison at activation over the ordinary
+resolve (D-162), the SUB-G1 key answer for a PriceBook line and the SUB-O5 count amendment (D-163),
+`order_compensation` (SUB-O1), the order reference (SUB-O2), the start instant (SUB-O10) and atomic
+activation. SKU protection is inherited from the revision's references (D-164); the only Products/
+Pricing ask is that the release report counts in-flight orders. Workflow needs complete topology and
+the approval/payment owner contracts. The reciprocal amendments specify the missing shapes.
 
-Implemented predicates are not yet a consumable Orders interface: the public
-[`pricing-sdk/src/api.rs`](../../pricing/pricing-sdk/src/api.rs) exposes only `pin_frontier`.
-Batched fixed-version predicates and pin composition still require public SDK publication.
-Bundles additionally require frozen component/key composition and wiring of Pricing's component
-conjunction into that SDK. Its current own-price path omits component evaluation; publishing
-that path unchanged would not satisfy Orders' gate. The dedicated bundle requirement in
-[UPSTREAM_REQS.md §2.2](UPSTREAM_REQS.md#22-rating--price-evaluation) remains open, with fail-closed bundle assessment until complete
-pinned coverage is supplied.
-`pin_frontier` also reads the caller's tenant rather than the seller's catalog, so the
-explicit catalog-tenant reads (`cpt-cf-bss-orders-lifecycle-upreq-pricing-catalog-tenant-reads`, D-122) are a prerequisite
-too. No Rating SDK crate exists (`cpt-cf-bss-orders-lifecycle-upreq-rating-evaluation`), Account Management exposes
-`get_tenant` for tenant-axis validity but no payer commercial profile
-(`cpt-cf-bss-orders-lifecycle-upreq-payer-commercial-profile`), and Contracts has no implementation for contract status and
-party eligibility (`cpt-cf-bss-orders-lifecycle-upreq-contract-party-eligibility`); until they land the gate refuses
-`evaluation-unavailable`, `identity-party-unavailable` and `contract-resolution-unavailable`.
-Subscriptions' occupancy/cardinality read (`SUB-O5`) and activation enforcement are separate
-open prerequisites. See [03 §2.2](DESIGN.md#contract-03-2-2) and `UPSTREAM_REQS.md` for owners and acceptance contracts.
-Capture and engine development can proceed against doubles, subject to the authorization
-integration prerequisite in [01 §3.6](features/01-foundation.md#contract-01-3-6); this is not a production-readiness claim. Product-visible
-fail-closed behavior remains routed as `DECISIONS.md` Q-15. Runtime implementation, public
-interface availability and deployed authorization/integration evidence must be tracked separately.
+`activation_deadline` needs a finite Product-owned acceptance interval; an unset policy cannot be
+replaced by state TTLs, and the deadline is an early check, not the admission authority. Optional
+totals and renewal-as-hold fallbacks are forbidden. Account Management payer-profile, Contracts and
+platform event/authorization prerequisites remain open. Capture/engine development against doubles
+may proceed, but successful production submit/activation requires producer implementation,
+deployed authorization and end-to-end evidence separately.
+
+P0–P7 of the [remediation plan](../../../../docs/reviews/2026-09-29-orders-lifecycle-seam-fix-plan.md)
+map the contract work. The [closure register](../../../../docs/reviews/2026-09-29-bss-seam-counterpart-amendments.md#closure-register)
+tracks all F1–F14 without equating an upstream ask with an implemented seam.
 
 Phase 0/1 is the correctness core and is a prerequisite for everything else. Its event-producing
 runtime is additionally blocked until the Event Broker implementation exists: [docs/GEARS.md](../../../../docs/GEARS.md)
@@ -967,7 +963,7 @@ explicit cross-contract citations name their namespace. These addresses are not 
 | 03 §3.8 | [Deployment Topology](DESIGN.md#contract-03-3-8) |
 | 03 §4.1 | [The adopted predicate set (normative)](DESIGN.md#contract-03-4-1) |
 | 03 §4.2 | [The Orders delta (normative)](features/03-gate-and-pin.md#contract-03-4-2) |
-| 03 §4.3 | [The catalog price pin (normative)](DESIGN.md#contract-03-4-3) |
+| 03 §4.3 | [The accepted order pin (normative)](DESIGN.md#contract-03-4-3) |
 | 03 §4.4 | [The resolved total and TCV (normative)](DESIGN.md#contract-03-4-4) |
 | 03 §4.5 | [What the order-time total excludes (normative)](DESIGN.md#contract-03-4-5) |
 | 03 §4.6 | [Preview (normative)](features/03-gate-and-pin.md#contract-03-4-6) |

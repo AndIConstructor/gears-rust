@@ -38,6 +38,11 @@
 
 <!-- /toc -->
 
+**SDK parity (D-155):** [Workflow SDK contract](../DESIGN.md#orders-lifecycle-workflow-sdk)
+is normative for in-process consumers and immutable-version reads. All SDK methods enter the same
+authorized application service as REST, preserving authorities, explicit line mappings and engine
+replay/concurrency semantics. An SDK method is not an authorization bypass.
+
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -325,6 +330,16 @@ stale draft contribution. Matching settled outcomes replay first and are not inv
 later edit. Step 12 includes these comparisons. No automatic rebase or reuse of old external
 results is permitted. Server snapshot tokens are not part of the client request fingerprint.
 
+**PriceBook admission guards (D-152, D-158).** For a new submit/amendment, the
+registered gate guards validate the pin's presence and supported shape, the locally derived
+exclusive activation deadline against the engine transaction timestamp, and the 200-consumed-item,
+1,000-bound-slots-per-line and 1 MiB version limits (`purchase-capacity-exceeded`) before
+version persistence. Begin-fulfillment also checks the current binding deadline. These checks
+run after authorized settled replay and version/admissibility checks, in the existing guard
+settlement path; they use `order-binding-expired` or `purchase-capacity-exceeded` as applicable.
+They do not replace Subscriptions' atomic compare-at-activation (D-162) and occupancy checks on each
+activation. Failure during fulfillment uses the existing compensation acknowledgement path.
+
 Required tests race submit with header/quantity edits and line addition/removal, race two draft
 edits at the same revision, and repeat with failed external resolution. Exactly one competing
 draft revision may be consumed; stale execution changes no commercial data, claims or events.
@@ -404,7 +419,7 @@ refusal. The common infrastructure-error mapping applies, without target-specifi
 slice guard over the prepared complete vector, not a series of early returns on individual
 predicates. Register it after all non-gate slice guards on submit/amendment; those earlier
 guards retain their engine-only refusal behavior. Evaluate the vector in declared predicate order,
-then binary line ID, binary component plan ID and canonical catalog-scope-key UTF-8 bytes, NULL
+then binary line ID, binary resolve item ID and slot-key (`dim_value`, token `default`) UTF-8 bytes, NULL
 first at each level, as specified in [03 §3.7](../DESIGN.md#contract-03-3-7). Preserve both component/key identity fields in
 the stored assessment, public report and replay; the failure list retains this same order.
 §4.7 selects its primary Problem while retaining every failed/unevaluable result.
