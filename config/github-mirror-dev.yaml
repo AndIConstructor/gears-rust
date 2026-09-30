@@ -242,6 +242,7 @@ gears:
       max_concurrent_requests: 4
       # Tasks (list pages, single entities) in flight inside one sync.
       max_concurrent_tasks: 4
+      telemetry_dir: "/tmp/gm-telemetry"
 
 # OpenTelemetry configuration (resource identity, tracing, metrics)
 opentelemetry:
