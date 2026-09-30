@@ -222,6 +222,7 @@ mod tests {
             scope: ScopeConfig::default(),
             force: false,
             since: None,
+            telemetry_file: None,
             claim: None,
         }
     }

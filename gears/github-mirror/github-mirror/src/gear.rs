@@ -32,6 +32,7 @@ use crate::infra::storage::sea_orm_repo::{
     SeaOrmSyncWatermarkRepository, SeaOrmSyncWriter, SeaOrmTagRepository,
     SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
 };
+use crate::infra::telemetry_sink::JsonlTelemetrySink;
 
 type ConcreteService = Service;
 
@@ -159,7 +160,9 @@ impl Gear for GithubMirrorGear {
                 sync_deadline: std::time::Duration::from_secs(
                     cfg.sync_deadline_minutes.get().saturating_mul(60),
                 ),
+                telemetry_dir: cfg.telemetry_dir,
             },
+            Arc::new(JsonlTelemetrySink),
         ));
 
         self.service

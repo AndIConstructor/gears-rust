@@ -1,4 +1,5 @@
 use std::num::{NonZeroU64, NonZeroUsize};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use toolkit_utils::SecretString;
@@ -63,6 +64,8 @@ pub struct GithubMirrorConfig {
     /// GitHub's hourly rate limit rather than working.
     #[serde(default = "default_sync_deadline_minutes")]
     pub sync_deadline_minutes: NonZeroU64,
+    #[serde(default)]
+    pub telemetry_dir: Option<PathBuf>,
 }
 
 /// Repositories synced at once when the config says nothing: enough to keep
@@ -179,6 +182,7 @@ impl Default for GithubMirrorConfig {
             max_concurrent_tasks: default_max_concurrent_tasks(),
             max_concurrent_requests: default_max_concurrent_requests(),
             sync_deadline_minutes: default_sync_deadline_minutes(),
+            telemetry_dir: None,
         }
     }
 }

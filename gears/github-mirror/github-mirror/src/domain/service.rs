@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -21,6 +22,7 @@ use uuid::Uuid;
 
 use super::error::DomainError;
 use super::ports::github::{FetchOptions, GithubPort};
+use super::ports::telemetry_sink::TelemetrySink;
 use super::repo::{
     BranchRecord, BranchRepository, CheckRunRecord, CheckRunRepository, CommentRecord,
     CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
@@ -43,7 +45,10 @@ use super::sync::{
     ChangeGate, Family, MirrorWorker, RepoPhaseRunner, RunState, SessionTelemetry, SweepWatermark,
     TaskFailure, TaskKind, Worker,
 };
-use super::validate::{repo_full_name, validate_commit_sha, validate_owner, validate_repo_path};
+use super::validate::{
+    repo_full_name, validate_commit_sha, validate_owner, validate_repo_path,
+    validate_telemetry_file,
+};
 
 /// The gear's name, taken from the `#[toolkit::gear]` attribute so the
 /// literal exists in exactly one place.
@@ -457,6 +462,7 @@ pub struct SyncJob {
     pub force: bool,
     /// Oldest closed entity worth collecting, from the request.
     pub since: Option<DateTime<Utc>>,
+    pub telemetry_file: Option<String>,
     #[expect(
         dead_code,
         reason = "held for its drop: a job that goes away, run or not, gives its claim back"
@@ -496,6 +502,7 @@ pub struct ServiceConfig {
     pub max_concurrent_tasks: NonZeroUsize,
     /// How long one repository's sync may run before it is stopped.
     pub sync_deadline: std::time::Duration,
+    pub telemetry_dir: Option<PathBuf>,
 }
 
 #[domain_model]
@@ -535,6 +542,7 @@ pub struct Service {
     github: Arc<dyn GithubPort>,
     policy_enforcer: PolicyEnforcer,
     config: ServiceConfig,
+    telemetry_sink: Arc<dyn TelemetrySink>,
     sync_tx: mpsc::Sender<SyncJob>,
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
     in_flight: InFlight,
@@ -714,6 +722,7 @@ impl Clone for Service {
             github: Arc::clone(&self.github),
             policy_enforcer: self.policy_enforcer.clone(),
             config: self.config.clone(),
+            telemetry_sink: Arc::clone(&self.telemetry_sink),
             sync_tx: self.sync_tx.clone(),
             sync_rx: Arc::clone(&self.sync_rx),
             in_flight: Arc::clone(&self.in_flight),
@@ -766,6 +775,7 @@ impl Service {
         github: Arc<dyn GithubPort>,
         policy_enforcer: PolicyEnforcer,
         config: ServiceConfig,
+        telemetry_sink: Arc<dyn TelemetrySink>,
     ) -> Self {
         let (sync_tx, sync_rx) = mpsc::channel(SYNC_QUEUE_DEPTH);
         Self {
@@ -804,6 +814,7 @@ impl Service {
             github,
             policy_enforcer,
             config,
+            telemetry_sink,
             sync_tx,
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -3708,10 +3719,15 @@ impl Service {
         ctx: &SecurityContext,
         owner: &str,
         name: &str,
+        telemetry_file: Option<String>,
     ) -> Result<SyncSummary, DomainError> {
         validate_repo_path(owner, name)?;
+        telemetry_file
+            .as_deref()
+            .map(validate_telemetry_file)
+            .transpose()?;
         let scopes = self.enqueue_scopes(ctx).await?;
-        let job = match self
+        let mut job = match self
             .prepare_sync(ctx, &scopes, owner, name, None, false, None)
             .await?
         {
@@ -3724,6 +3740,7 @@ impl Service {
             }
             PreparedSync::Claimed { job, .. } => job,
         };
+        job.telemetry_file = telemetry_file;
         self.run_and_record(&job, &self.shutdown_token()).await?
     }
 
@@ -3835,6 +3852,7 @@ impl Service {
             scope: sync_scope,
             force,
             since,
+            telemetry_file: None,
             claim: Some(claim),
         };
         Ok(PreparedSync::Claimed {
@@ -3986,7 +4004,22 @@ impl Service {
             .await?;
 
         let progress = SyncProgress::new();
-        let telemetry = Arc::new(SessionTelemetry::default());
+        let telemetry_file = self.config.telemetry_dir.as_ref().map(|dir| {
+            dir.join(tenant_id.to_string()).join(&job.owner).join(
+                job.telemetry_file
+                    .clone()
+                    .unwrap_or_else(|| format!("{}.jsonl", job.name)),
+            )
+        });
+        let telemetry = Arc::new(match telemetry_file {
+            Some(file) => SessionTelemetry::logging_to(
+                Arc::clone(&self.telemetry_sink),
+                file,
+                job.session_id,
+                format!("{}/{}", job.owner, job.name),
+            ),
+            None => SessionTelemetry::default(),
+        });
         let outcome = self
             .sync_within_deadline(job, &progress, &telemetry, cancel)
             .await;

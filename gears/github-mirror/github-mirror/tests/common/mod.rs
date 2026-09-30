@@ -516,7 +516,9 @@ pub fn service_with_deadline(
             max_concurrent_syncs: std::num::NonZeroUsize::MIN,
             max_concurrent_tasks: std::num::NonZeroUsize::MIN,
             sync_deadline,
+            telemetry_dir: None,
         },
+        std::sync::Arc::new(github_mirror::infra::telemetry_sink::JsonlTelemetrySink),
     ))
 }
 

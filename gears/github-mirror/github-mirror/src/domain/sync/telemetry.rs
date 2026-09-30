@@ -1,20 +1,62 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use crate::domain::ports::telemetry_sink::TelemetrySink;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GithubApi {
     Rest,
     Graphql,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RequestOutcome {
     Fresh,
     NotModified,
     RateLimited,
     Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TelemetryEntry {
+    pub api: GithubApi,
+    pub method: &'static str,
+    pub url: String,
+    pub status: u16,
+    pub outcome: RequestOutcome,
+    pub duration_ms: u64,
+    pub rate_limit_remaining: Option<u32>,
+    pub rate_limit_reset: Option<DateTime<Utc>>,
+    pub cache_hit: bool,
+    pub etag_used: bool,
+    pub response_bytes: u64,
+    pub graphql_points: Option<u64>,
+    pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TelemetryLine<'a> {
+    pub session_id: Uuid,
+    pub repository: &'a str,
+    #[serde(flatten)]
+    pub entry: &'a TelemetryEntry,
+}
+
+#[derive(Debug)]
+struct SessionLog {
+    sink: Arc<dyn TelemetrySink>,
+    file: PathBuf,
+    session_id: Uuid,
+    repository: String,
+    failed: AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -30,9 +72,49 @@ pub struct SessionTelemetry {
     rate_limit_waits: AtomicU64,
     rate_limit_wait_ms: AtomicU64,
     graphql_points: AtomicU64,
+    log: Option<SessionLog>,
 }
 
 impl SessionTelemetry {
+    #[must_use]
+    pub fn logging_to(
+        sink: Arc<dyn TelemetrySink>,
+        file: PathBuf,
+        session_id: Uuid,
+        repository: String,
+    ) -> Self {
+        Self {
+            log: Some(SessionLog {
+                sink,
+                file,
+                session_id,
+                repository,
+                failed: AtomicBool::new(false),
+            }),
+            ..Self::default()
+        }
+    }
+
+    pub fn record(&self, entry: &TelemetryEntry) {
+        let Some(log) = &self.log else {
+            return;
+        };
+        let line = TelemetryLine {
+            session_id: log.session_id,
+            repository: &log.repository,
+            entry,
+        };
+        if let Err(e) = log.sink.record(&log.file, &line)
+            && !log.failed.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                session_id = %log.session_id,
+                error = %e,
+                "could not write the telemetry file; the sync goes on without it"
+            );
+        }
+    }
+
     pub fn count_request(&self, api: GithubApi, outcome: RequestOutcome) {
         let calls = match api {
             GithubApi::Rest => &self.rest_calls,

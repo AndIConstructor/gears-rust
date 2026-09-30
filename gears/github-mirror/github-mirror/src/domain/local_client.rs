@@ -48,7 +48,7 @@ impl GithubMirrorClientV1 for LocalClient {
         let service = Arc::clone(&self.service);
         let ctx = ctx.clone();
         let (owner, name) = (owner.to_owned(), name.to_owned());
-        tokio::spawn(async move { service.sync_now(&ctx, &owner, &name).await })
+        tokio::spawn(async move { service.sync_now(&ctx, &owner, &name, None).await })
             .await
             .map_err(|e| DomainError::internal(format!("the sync task did not finish: {e}")))?
             .map_err(CanonicalError::from)

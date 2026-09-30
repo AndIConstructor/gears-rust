@@ -35,6 +35,12 @@ pub fn validate_owner(owner: &str) -> Result<(), DomainError> {
     validate_segment("owner", owner)
 }
 
+/// # Errors
+/// `Validation` naming the `telemetry_file` field.
+pub fn validate_telemetry_file(file_name: &str) -> Result<(), DomainError> {
+    validate_segment("telemetry_file", file_name)
+}
+
 fn validate_segment(field: &str, value: &str) -> Result<(), DomainError> {
     let well_formed = !value.is_empty()
         && value != "."

@@ -1612,6 +1612,16 @@ pub struct SessionTelemetryDto {
     pub rate_limit_waits: u64,
     pub rate_limit_wait_ms: u64,
     pub graphql_points: u64,
+    pub cache_hit_ratio: f64,
+}
+
+fn share(part: u64, whole: u64) -> f64 {
+    let as_f64 = |n: u64| f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+    if whole == 0 {
+        0.0
+    } else {
+        as_f64(part) / as_f64(whole)
+    }
 }
 
 impl From<TelemetrySnapshot> for SessionTelemetryDto {
@@ -1628,6 +1638,7 @@ impl From<TelemetrySnapshot> for SessionTelemetryDto {
             rate_limit_waits: t.rate_limit_waits,
             rate_limit_wait_ms: t.rate_limit_wait_ms,
             graphql_points: t.graphql_points,
+            cache_hit_ratio: share(t.not_modified, t.rest_calls),
         }
     }
 }

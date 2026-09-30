@@ -710,6 +710,7 @@ The system **MUST** emit structured logs via `tracing`, organized into independe
 - Cache keys **MUST NOT** embed credentials; the canonical key is derived from method, URL and `Accept` (DESIGN §3.5).
 - **Production defaults MUST be `info`** with bodies and bind values off. A deployment raising verbosity beyond `debug` **MUST** be a deliberate, temporary act.
 - Log **retention MUST be bounded** by the platform's own log policy; the gear **MUST NOT** write logs to its own files outside the runtime's logging configuration, so that policy is the single place retention is enforced.
+- The one exception is the telemetry file of `cpt-cf-github-mirror-fr-telemetry`: it is written only when the operator sets its path, holds request metadata only (method, URL without query string, status, size, duration, rate-limit and cache fields, never bodies or headers), and its retention is the operator's.
 
 - **Rationale**: Layered logging lets operators dial in the right verbosity for their use case, but the mirror's `trace` layer would otherwise carry private repository content and personal data into whatever collects logs.
 - **Actors**: `cpt-cf-github-mirror-actor-lib-consumer`, `cpt-cf-github-mirror-actor-cli-operator`
@@ -744,14 +745,9 @@ The library **MUST** collect structured telemetry per synchronization session an
 - Overall progress: tasks pending/running/completed/failed, entities indexed/refined/skipped, queue depth snapshots
 - Session summary: total API calls, total 304s, bytes downloaded/saved, cache hit ratio, elapsed time, final report
 
-Telemetry **MUST** leave the gear in two ways, and the gear **MUST NOT** write telemetry files of its own (see `cpt-cf-github-mirror-fr-log-redaction`):
+The library **MUST** support writing telemetry to a caller-specified file (append-only, JSON Lines) and **MUST** expose telemetry via the public API so that the CLI tool can print it and the REST API service can attach it to synchronization job status responses.
 
-- **Process-wide metrics** through the platform's OpenTelemetry meter provider: request counts by method, status and outcome (fresh, not modified, rate limited, failed), request duration, response bytes and rate-limit headroom. Metric labels **MUST** stay low-cardinality: URLs, repository names, tenant ids and session ids **MUST NOT** be labels. Per-request detail such as the URL and the ETag used goes to `debug` logs instead.
-- **Per-session totals** stored with the synchronization session and returned by the session status API (`GET /github-mirror/v1/sessions/{id}`) and the SDK: REST calls, GraphQL calls and points, 304s, bytes downloaded and saved, cache hit ratio, rate-limit waits and failed requests. They **MUST** be updated while the run is in flight, not only when it ends.
-
-The CLI tool, when it exists, prints the per-session totals from the same API.
-
-- **Rationale**: Telemetry is essential for cost analysis, diagnostics, and optimization. Gears push telemetry over OTLP only and expose no scrape endpoint or telemetry file (`docs/TRACING_SETUP.md`), and job-level numbers live on the job, as in the other gears; a caller-specified JSON Lines file is therefore left out.
+- **Rationale**: Telemetry is essential for cost analysis, diagnostics, and optimization. Programmatic access enables both CLI rendering and REST API job status enrichment.
 - **Actors**: `cpt-cf-github-mirror-actor-lib-consumer`, `cpt-cf-github-mirror-actor-cli-operator`, `cpt-cf-github-mirror-actor-api-consumer`
 
 ### 5.17 Environment Independence

@@ -551,6 +551,9 @@ Configuration (`config` of the gear):
 | `max_concurrent_tasks` | 4 |
 | `max_concurrent_requests` | 8 |
 | `sync_deadline_minutes` | 360 |
+| `telemetry_dir` | none; no telemetry file is written |
+
+With `telemetry_dir` set, every GitHub call of a sync, retries included, appends one JSON line to `<telemetry_dir>/<tenant_id>/<owner>/<name>.jsonl`: `session_id`, `repository`, `api`, `method`, `url` (query string removed), `status`, `outcome`, `duration_ms`, `rate_limit_remaining`, `rate_limit_reset`, `cache_hit`, `etag_used`, `response_bytes`, `graphql_points`, `requested_at`. An in-process caller of `Service::sync_now` may pass its own file name in place of `<name>.jsonl`. It stays in the same folder, must be 1-100 characters from `[A-Za-z0-9._-]`, and nothing is written without `telemetry_dir`; a REST request cannot name a file. The gear only appends; rotating and deleting the files is the operator's. A write that fails is logged once per session and the sync goes on. The session's own totals, `cache_hit_ratio` included, are on `GET /github-mirror/v1/sessions/{id}`.
 
 The database pool should allow at least `max_concurrent_syncs` × `max_concurrent_tasks` connections plus one per sync for its heartbeat and session writes (20 with the defaults).
 

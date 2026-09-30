@@ -24,7 +24,7 @@ use crate::domain::repo::{
     ReviewCommentRecord, ReviewRecord, ReviewThreadRecord, TagRecord, WorkflowJobRecord,
     WorkflowRunRecord,
 };
-use crate::domain::sync::telemetry::{GithubApi, RequestOutcome, SessionTelemetry};
+use crate::domain::sync::telemetry::{GithubApi, RequestOutcome, SessionTelemetry, TelemetryEntry};
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
 use crate::infra::github::compression::MAX_BODY_BYTES;
 use crate::infra::github::metrics::{GithubRequestMetrics, Outcome};
@@ -437,7 +437,7 @@ impl GithubClient {
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
-        api: GithubApi,
+        sent: &Sent<'_>,
         telemetry: &SessionTelemetry,
         cancel: &CancellationToken,
     ) -> Result<(reqwest::Result<reqwest::Response>, Duration), DomainError> {
@@ -450,7 +450,7 @@ impl GithubClient {
         if outcome.is_err() {
             self.count(
                 telemetry,
-                api,
+                sent,
                 0,
                 Outcome::Failed,
                 took,
@@ -460,18 +460,37 @@ impl GithubClient {
         Ok((outcome, took))
     }
 
-    fn count(
+    fn count<'t>(
         &self,
-        telemetry: &SessionTelemetry,
-        api: GithubApi,
+        telemetry: &'t SessionTelemetry,
+        sent: &Sent<'_>,
         status: u16,
         outcome: Outcome,
         took: Duration,
         seen: &RateLimitHeaders,
-    ) {
+    ) -> PendingLine<'t> {
         self.metrics
-            .request(http_method(api), status, outcome, took, seen);
-        telemetry.count_request(api, request_outcome(outcome));
+            .request(http_method(sent.api), status, outcome, took, seen);
+        telemetry.count_request(sent.api, request_outcome(outcome));
+        PendingLine {
+            telemetry,
+            entry: TelemetryEntry {
+                api: sent.api,
+                method: http_method(sent.api),
+                url: redacted_word(sent.url),
+                status,
+                outcome: request_outcome(outcome),
+                duration_ms: u64::try_from(took.as_millis()).unwrap_or(u64::MAX),
+                rate_limit_remaining: seen.remaining,
+                rate_limit_reset: seen.reset_at,
+                cache_hit: outcome == Outcome::NotModified,
+                etag_used: sent.etag_used,
+                response_bytes: 0,
+                graphql_points: None,
+                requested_at: Utc::now()
+                    - chrono::Duration::from_std(took).unwrap_or_else(|_| chrono::Duration::zero()),
+            },
+        }
     }
 
     /// Feed a response's rate-limit headers to the token's controller.
@@ -576,6 +595,11 @@ impl GithubClient {
         self.check_origin(url)?;
         let key = CacheKey::compute("GET", url, ACCEPT_JSON);
         let cached = self.cached_entry(options, url, &key).await;
+        let sent = Sent {
+            api: GithubApi::Rest,
+            url,
+            etag_used: cached.as_ref().is_some_and(|c| c.etag.is_some()),
+        };
 
         let mut attempt: u32 = 0;
         let mut upstream_attempt: u32 = 0;
@@ -583,12 +607,12 @@ impl GithubClient {
         // request counts against both ceilings until its body has been read.
         // A retry gives them up first: a request asleep on a backoff is not
         // in flight.
-        let (response, rate_limited, _admission, _permit) = loop {
+        let (response, rate_limited, _admission, _permit, mut line) = loop {
             let (admission, permit) = self.admit(&options.telemetry, &options.cancel).await?;
             let (outcome, took) = self
                 .send(
                     self.conditional_request(url, cached.as_ref()),
-                    GithubApi::Rest,
+                    &sent,
                     &options.telemetry,
                     &options.cancel,
                 )
@@ -613,7 +637,7 @@ impl GithubClient {
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
                 self.count(
                     &options.telemetry,
-                    GithubApi::Rest,
+                    &sent,
                     status.as_u16(),
                     Outcome::Failed,
                     took,
@@ -631,7 +655,7 @@ impl GithubClient {
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
                 self.count(
                     &options.telemetry,
-                    GithubApi::Rest,
+                    &sent,
                     status.as_u16(),
                     Outcome::RateLimited,
                     took,
@@ -652,15 +676,15 @@ impl GithubClient {
                 attempt += 1;
                 continue;
             }
-            self.count(
+            let line = self.count(
                 &options.telemetry,
-                GithubApi::Rest,
+                &sent,
                 status.as_u16(),
                 outcome_of(status),
                 took,
                 &seen,
             );
-            break (response, rate_limited, admission, permit);
+            break (response, rate_limited, admission, permit, line);
         };
 
         let status = response.status();
@@ -707,6 +731,7 @@ impl GithubClient {
         };
         self.metrics.response_bytes("GET", entry.body.len());
         options.telemetry.add_downloaded(entry.body.len());
+        line.entry.response_bytes = u64::try_from(entry.body.len()).unwrap_or(u64::MAX);
 
         let parsed = serde_json::from_str(&entry.body)
             .map_err(|e| DomainError::internal(format!("GitHub response decode failed: {e}")))?;
@@ -877,12 +902,17 @@ impl GithubClient {
         let url = graphql_url(&self.api_base_url);
         let cancel = &options.cancel;
         let telemetry = &options.telemetry;
+        let sent = Sent {
+            api: GithubApi::Graphql,
+            url: &url,
+            etag_used: false,
+        };
 
         let mut attempt: u32 = 0;
         let mut upstream_attempt: u32 = 0;
         // GraphQL shares the REST ceilings: both spend the same token's
         // budget, though the controller only reads the core budget headers.
-        let (response, _admission, _permit) = loop {
+        let (response, _admission, _permit, mut line) = loop {
             let (admission, permit) = self.admit(telemetry, cancel).await?;
             let mut request = self
                 .http
@@ -891,9 +921,7 @@ impl GithubClient {
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
-            let (outcome, took) = self
-                .send(request, GithubApi::Graphql, telemetry, cancel)
-                .await?;
+            let (outcome, took) = self.send(request, &sent, telemetry, cancel).await?;
             let response = match outcome {
                 Ok(response) => response,
                 Err(e) if upstream_attempt < UPSTREAM_RETRIES => {
@@ -916,7 +944,7 @@ impl GithubClient {
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
                 self.count(
                     telemetry,
-                    GithubApi::Graphql,
+                    &sent,
                     status.as_u16(),
                     Outcome::Failed,
                     took,
@@ -934,7 +962,7 @@ impl GithubClient {
             if rate_limited && attempt < RATE_LIMIT_RETRIES {
                 self.count(
                     telemetry,
-                    GithubApi::Graphql,
+                    &sent,
                     status.as_u16(),
                     Outcome::RateLimited,
                     took,
@@ -954,15 +982,15 @@ impl GithubClient {
                 attempt += 1;
                 continue;
             }
-            self.count(
+            let line = self.count(
                 telemetry,
-                GithubApi::Graphql,
+                &sent,
                 status.as_u16(),
                 outcome_of(status),
                 took,
                 &seen,
             );
-            break (response, admission, permit);
+            break (response, admission, permit, line);
         };
 
         let status = response.status();
@@ -975,11 +1003,30 @@ impl GithubClient {
         let bytes = read_capped(response).await?;
         self.metrics.response_bytes("POST", bytes.len());
         telemetry.add_downloaded(bytes.len());
+        line.entry.response_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         let answer = graphql_answer(&bytes)?;
         if let Some(cost) = answer["data"]["rateLimit"]["cost"].as_u64() {
             telemetry.add_graphql_points(cost);
+            line.entry.graphql_points = Some(cost);
         }
         Ok(answer)
+    }
+}
+
+struct Sent<'a> {
+    api: GithubApi,
+    url: &'a str,
+    etag_used: bool,
+}
+
+struct PendingLine<'t> {
+    telemetry: &'t SessionTelemetry,
+    entry: TelemetryEntry,
+}
+
+impl Drop for PendingLine<'_> {
+    fn drop(&mut self) {
+        self.telemetry.record(&self.entry);
     }
 }
 

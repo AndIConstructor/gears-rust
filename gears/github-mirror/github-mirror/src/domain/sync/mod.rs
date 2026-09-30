@@ -35,6 +35,8 @@ pub use sweep_watermark::SweepWatermark;
 pub use task::{
     Entity, ExtractionTask, Family, Lane, NewTask, TaskKind, TaskPhase, TaskPriority, TaskStatus,
 };
-pub use telemetry::{GithubApi, RequestOutcome, SessionTelemetry, TelemetrySnapshot};
+pub use telemetry::{
+    GithubApi, RequestOutcome, SessionTelemetry, TelemetryEntry, TelemetryLine, TelemetrySnapshot,
+};
 pub use verification::{CountGap, GapOutcome, MAX_REPAIR};
 pub use worker::{Worker, WorkerContext, WorkerDispatcher};
