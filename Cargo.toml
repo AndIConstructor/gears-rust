@@ -67,6 +67,7 @@ members = [
     "libs/toolkit-gts",
     "libs/toolkit-gts-macros",
     "libs/toolkit-http",
+    "libs/toolkit-trace-context",
     "libs/toolkit-http-middleware",
     "libs/toolkit-gateway",
     "libs/toolkit-k8s-auth",
@@ -307,6 +308,7 @@ verbose_file_reads = "deny"
 # libs
 toolkit = { package = "cf-gears-toolkit", version = "0.10.0", path = "libs/toolkit" }
 toolkit-http = { package = "cf-gears-toolkit-http", version = "0.6.18", path = "libs/toolkit-http" }
+toolkit-trace-context = { package = "cf-gears-toolkit-trace-context", version = "0.1.0", path = "libs/toolkit-trace-context" }
 toolkit-http-middleware = { package = "cf-gears-toolkit-http-middleware", version = "0.3.2", path = "libs/toolkit-http-middleware" }
 toolkit-gateway = { package = "cf-gears-toolkit-gateway", version = "0.2.8", path = "libs/toolkit-gateway" }
 toolkit-k8s-auth = { package = "cf-gears-toolkit-k8s-auth", version = "0.3.0", path = "libs/toolkit-k8s-auth" }
