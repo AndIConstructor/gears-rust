@@ -11,6 +11,7 @@
 use toolkit_canonical_errors::{CanonicalError, resource_error};
 
 use crate::domain::error::{DomainError, reasons};
+use crate::infra::logged;
 
 /// Errors attributable to a graph node as a resource.
 ///
@@ -180,7 +181,7 @@ fn corrupt(reason: String) -> CanonicalError {
 }
 
 fn unexpected(error: &DomainError) -> CanonicalError {
-    tracing::error!(detail = %error, "unexpected graph-storage failure");
+    tracing::error!(detail = %logged(error), "unexpected graph-storage failure");
     GraphNodeError::unknown("internal error").create()
 }
 

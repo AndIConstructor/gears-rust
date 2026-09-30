@@ -81,7 +81,7 @@ pub async fn probe_pgq(db: &toolkit_db::secure::Db) -> bool {
         Ok(_) => true,
         Err(error) => {
             warn!(
-                %error,
+                error = %logged(&error),
                 "this server does not serve SQL/PGQ over the declared property graph; \
                  every hop will use the two-query backend"
             );

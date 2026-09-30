@@ -25,6 +25,7 @@ use crate::domain::embedding::EmbeddingCoordinator;
 use crate::domain::error::DomainError;
 use crate::domain::traversal::{Retention, WalkPlan, walk};
 use crate::domain::{admission, authz, identity, ontology};
+use crate::infra::logged;
 
 #[domain_model]
 pub struct GraphServices {
@@ -345,7 +346,10 @@ impl GraphServices {
         match self.embedding.health().await {
             Ok(()) => rows.push(Row::healthy(EMBEDDING_PROVIDER)),
             Err(error) => {
-                tracing::warn!(%error, "readiness: the embedding provider reports itself unavailable");
+                tracing::warn!(
+                    error = %logged(&error),
+                    "readiness: the embedding provider reports itself unavailable"
+                );
                 rows.push(Row::new(
                     EMBEDDING_PROVIDER,
                     State::Degraded,
@@ -1088,7 +1092,7 @@ impl GraphServices {
         // Releasing the snapshot must never mask the walk's own outcome, so a
         // failure to close is logged rather than returned.
         if let Err(error) = self.store.end_read(snapshot).await {
-            tracing::warn!(%error, "could not release the read snapshot");
+            tracing::warn!(error = %logged(&error), "could not release the read snapshot");
         }
         result
     }
