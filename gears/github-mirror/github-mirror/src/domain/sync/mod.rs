@@ -29,7 +29,7 @@ pub mod worker;
 pub use change_gate::{ChangeGate, GateInputs, GateReason};
 pub use mirror_worker::{MirrorWorker, RunState};
 pub use pool::SyncPoolRunner;
-pub use queue::TaskQueue;
+pub use queue::{TaskCounts, TaskQueue};
 pub use runner::{RepoPhaseRunner, RunReport, TaskFailure};
 pub use sweep_watermark::SweepWatermark;
 pub use task::{

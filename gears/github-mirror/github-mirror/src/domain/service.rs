@@ -4491,7 +4491,8 @@ impl Service {
             self.config.max_concurrent_tasks,
             cancel.child_token(),
             progress.handle(),
-        );
+        )
+        .with_telemetry(Arc::clone(&run.options.telemetry));
         let mut report = runner.run().await;
         let contributors = run.take_contributors();
         let contributors_synced = if contributors.is_empty() {

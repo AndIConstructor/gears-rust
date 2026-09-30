@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::queue::TaskQueue;
 use super::task::{ExtractionTask, Lane, NewTask, RunIdentity, TaskKind, TaskPhase, TaskPriority};
+use super::telemetry::SessionTelemetry;
 use super::worker::{Worker, WorkerContext, WorkerDispatcher};
 use crate::domain::error::DomainError;
 
@@ -122,6 +123,7 @@ pub struct RepoPhaseRunner {
     max_concurrent_tasks: usize,
     cancel: CancellationToken,
     progress: Arc<AtomicU8>,
+    telemetry: Option<Arc<SessionTelemetry>>,
 }
 
 impl RepoPhaseRunner {
@@ -144,7 +146,14 @@ impl RepoPhaseRunner {
             max_concurrent_tasks: max_concurrent_tasks.get(),
             cancel,
             progress,
+            telemetry: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_telemetry(mut self, telemetry: Arc<SessionTelemetry>) -> Self {
+        self.telemetry = Some(telemetry);
+        self
     }
 
     /// Work out the current percentage and publish it, keeping the published
@@ -152,6 +161,9 @@ impl RepoPhaseRunner {
     fn publish_progress(&self) {
         let percent = u8::try_from(self.estimate_permille().div_euclid(10).min(100)).unwrap_or(100);
         self.progress.fetch_max(percent, Ordering::Relaxed);
+        if let Some(telemetry) = &self.telemetry {
+            telemetry.set_task_counts(self.queue.status_counts(self.run.session_id));
+        }
     }
 
     /// Where the run is, in permille, from the live queue counts.

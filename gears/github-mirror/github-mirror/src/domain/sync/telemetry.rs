@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::queue::TaskCounts;
 use crate::domain::ports::telemetry_sink::TelemetrySink;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -72,6 +73,10 @@ pub struct SessionTelemetry {
     rate_limit_waits: AtomicU64,
     rate_limit_wait_ms: AtomicU64,
     graphql_points: AtomicU64,
+    tasks_pending: AtomicU64,
+    tasks_running: AtomicU64,
+    tasks_done: AtomicU64,
+    tasks_failed: AtomicU64,
     log: Option<SessionLog>,
 }
 
@@ -152,6 +157,13 @@ impl SessionTelemetry {
         self.graphql_points.fetch_add(points, Ordering::Relaxed);
     }
 
+    pub fn set_task_counts(&self, counts: TaskCounts) {
+        self.tasks_pending.store(counts.pending, Ordering::Relaxed);
+        self.tasks_running.store(counts.running, Ordering::Relaxed);
+        self.tasks_done.store(counts.done, Ordering::Relaxed);
+        self.tasks_failed.store(counts.failed, Ordering::Relaxed);
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> TelemetrySnapshot {
         TelemetrySnapshot {
@@ -166,6 +178,10 @@ impl SessionTelemetry {
             rate_limit_waits: self.rate_limit_waits.load(Ordering::Relaxed),
             rate_limit_wait_ms: self.rate_limit_wait_ms.load(Ordering::Relaxed),
             graphql_points: self.graphql_points.load(Ordering::Relaxed),
+            tasks_pending: self.tasks_pending.load(Ordering::Relaxed),
+            tasks_running: self.tasks_running.load(Ordering::Relaxed),
+            tasks_done: self.tasks_done.load(Ordering::Relaxed),
+            tasks_failed: self.tasks_failed.load(Ordering::Relaxed),
         }
     }
 }
@@ -184,6 +200,10 @@ pub struct TelemetrySnapshot {
     pub rate_limit_waits: u64,
     pub rate_limit_wait_ms: u64,
     pub graphql_points: u64,
+    pub tasks_pending: u64,
+    pub tasks_running: u64,
+    pub tasks_done: u64,
+    pub tasks_failed: u64,
 }
 
 #[cfg(test)]

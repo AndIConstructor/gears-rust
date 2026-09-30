@@ -86,6 +86,15 @@ struct Inner {
     /// Tasks ever enqueued per phase. Only ever grows: it is the denominator
     /// the progress estimate divides by.
     enqueued: HashMap<BucketKey, u64>,
+    failed: HashMap<Uuid, u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TaskCounts {
+    pub pending: u64,
+    pub running: u64,
+    pub done: u64,
+    pub failed: u64,
 }
 
 impl Inner {
@@ -244,8 +253,38 @@ impl TaskQueue {
             }
             TaskStatus::Done | TaskStatus::Failed => {}
         }
+        if status == TaskStatus::Failed
+            && matches!(task.status, TaskStatus::Pending | TaskStatus::Running)
+        {
+            *inner.failed.entry(task.run.session_id).or_insert(0) += 1;
+        }
         if let Some(stored) = inner.by_id.get_mut(&task_id) {
             stored.status = status;
+        }
+    }
+
+    #[must_use]
+    pub fn status_counts(&self, session_id: Uuid) -> TaskCounts {
+        let inner = self.lock();
+        let per_phase = |counts: &HashMap<BucketKey, u64>| -> u64 {
+            TaskPhase::iter()
+                .filter_map(|phase| counts.get(&(session_id, phase)))
+                .sum()
+        };
+        let pending = TaskPhase::iter()
+            .map(|phase| inner.pending_in(session_id, phase))
+            .sum();
+        let running = per_phase(&inner.running);
+        let failed = inner.failed.get(&session_id).copied().unwrap_or(0);
+        let done = per_phase(&inner.enqueued)
+            .saturating_sub(pending)
+            .saturating_sub(running)
+            .saturating_sub(failed);
+        TaskCounts {
+            pending,
+            running,
+            done,
+            failed,
         }
     }
 

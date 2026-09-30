@@ -1613,6 +1613,10 @@ pub struct SessionTelemetryDto {
     pub rate_limit_wait_ms: u64,
     pub graphql_points: u64,
     pub cache_hit_ratio: f64,
+    pub tasks_pending: u64,
+    pub tasks_running: u64,
+    pub tasks_done: u64,
+    pub tasks_failed: u64,
 }
 
 fn share(part: u64, whole: u64) -> f64 {
@@ -1639,6 +1643,10 @@ impl From<TelemetrySnapshot> for SessionTelemetryDto {
             rate_limit_wait_ms: t.rate_limit_wait_ms,
             graphql_points: t.graphql_points,
             cache_hit_ratio: share(t.not_modified, t.rest_calls),
+            tasks_pending: t.tasks_pending,
+            tasks_running: t.tasks_running,
+            tasks_done: t.tasks_done,
+            tasks_failed: t.tasks_failed,
         }
     }
 }
