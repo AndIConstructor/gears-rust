@@ -2744,3 +2744,79 @@ async fn group_type_filters_preserve_registered_identifiers() {
         }
     }
 }
+
+/// Repository pagination failures must retain the invalid-argument HTTP contract.
+#[tokio::test]
+async fn types_pagination_rejects_unknown_orderby_with_400() {
+    let (router, tenant, _, _, _, _) = membership_filter_fixture().await;
+    let response = router
+        .oneshot(json_request(
+            "GET",
+            "/types-registry/v1/types?$orderby=unknown_field",
+            None,
+            tenant,
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response_body(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["type"],
+        gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~")
+    );
+}
+
+/// Resolved group filters preserve cursor binding to the original public filter.
+#[tokio::test]
+async fn group_filter_cursor_preserves_the_original_filter() {
+    let (router, tenant, _, _, _, _) = membership_filter_fixture().await;
+    let group_type = rg_type_id!("test.filter._.group.v1~");
+    let filter = format!("type eq '{group_type}' and tenant_id eq '{tenant}'");
+    let uri = format!(
+        "/resource-group/v1/groups?$filter={}&$orderby=id&limit=1",
+        encode_query_value(&filter)
+    );
+    let response = router
+        .clone()
+        .oneshot(json_request("GET", &uri, None, tenant))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first_page = response_body(response).await;
+    assert_eq!(first_page["items"].as_array().unwrap().len(), 1);
+    let cursor = first_page["page_info"]["next_cursor"]
+        .as_str()
+        .expect("next page");
+    let extra = format!("cursor={}&limit=1", encode_query_value(cursor));
+    let uri = format!(
+        "/resource-group/v1/groups?$filter={}&{extra}",
+        encode_query_value(&filter)
+    );
+    let response = router
+        .clone()
+        .oneshot(json_request("GET", &uri, None, tenant))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let second_page = response_body(response).await;
+    assert_eq!(second_page["items"].as_array().unwrap().len(), 1);
+    assert_ne!(first_page["items"][0]["id"], second_page["items"][0]["id"]);
+
+    let changed_filter = format!("type eq '{group_type}'");
+    let uri = format!(
+        "/resource-group/v1/groups?$filter={}&{extra}",
+        encode_query_value(&changed_filter)
+    );
+    let response = router
+        .oneshot(json_request("GET", &uri, None, tenant))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response_body(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["type"],
+        gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~")
+    );
+}

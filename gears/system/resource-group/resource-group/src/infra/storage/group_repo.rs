@@ -19,7 +19,7 @@ use toolkit_odata::{CursorV1, ODataQuery, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
-use super::odata_filter::{resolve_type_filter, validate_filter};
+use super::odata_filter::prepare_filter;
 use crate::domain::error::DomainError;
 use crate::domain::repo::GroupRepositoryTrait;
 use crate::infra::storage::FK_RESOURCE_GROUP_PARENT;
@@ -430,31 +430,15 @@ impl GroupRepositoryTrait for GroupRepository {
         scope: &AccessScope,
         query: &ODataQuery,
     ) -> Result<Page<ResourceGroup>, DomainError> {
-        // Validate filter (String kind for `type`) and resolve string values
-        // to SMALLINT IDs in the typed FilterNode — BEFORE paginate_odata.
-        let resolved_filter = if let Some(ast) = query.filter.as_deref() {
-            let validated = validate_filter::<GroupFilterField>(ast)?;
-            Some(resolve_type_filter(db, &validated, GroupFilterField::Type).await?)
-        } else {
-            None
-        };
-
-        // Build base query with resolved filter applied manually
         let base_query = ResourceGroupEntity::find().secure().scope_with(scope);
-        let base_query = if let Some(ref node) = resolved_filter {
-            let cond = toolkit_db::odata::sea_orm_filter::filter_node_to_condition::<
-                GroupFilterField,
-                GroupODataMapper,
-            >(node)
-            .map_err(|e| DomainError::validation(format!("invalid $filter: {e}")))?;
-            base_query.filter(cond)
-        } else {
-            base_query
-        };
-
-        // Strip filter from query — already applied above
-        let mut query_no_filter = query.clone();
-        query_no_filter.filter = None;
+        let (base_query, query_no_filter) =
+            prepare_filter::<GroupFilterField, GroupODataMapper, _>(
+                db,
+                base_query,
+                query,
+                GroupFilterField::Type,
+            )
+            .await?;
 
         let page = paginate_odata::<GroupFilterField, GroupODataMapper, _, _, _, _>(
             base_query,
