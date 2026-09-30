@@ -396,32 +396,38 @@ impl GithubClient {
 
     /// Admission for one outbound request: the token's controller first, then
     /// a shared permit, both held until the response body has been read. A
+    /// backoff another request set while this one waited for its permit sends
+    /// it back to the controller, so it does not go out inside that backoff. A
     /// cancelled run gives up the wait instead of holding the shutdown.
     async fn admit(
         &self,
         telemetry: &SessionTelemetry,
         cancel: &CancellationToken,
     ) -> Result<(Admission<'_>, SemaphorePermit<'_>), DomainError> {
-        let asked = Instant::now();
-        tokio::select! {
-            admitted = self.controller.admit() => {
-                let parked = admitted
-                    .map_err(|e| DomainError::internal(format!("GitHub rate limit: {e}")))?;
-                if parked {
-                    telemetry.add_rate_limit_wait(asked.elapsed());
+        loop {
+            let asked = Instant::now();
+            tokio::select! {
+                admitted = self.controller.admit() => {
+                    let parked = admitted
+                        .map_err(|e| DomainError::internal(format!("GitHub rate limit: {e}")))?;
+                    if parked {
+                        telemetry.add_rate_limit_wait(asked.elapsed());
+                    }
                 }
+                () = cancel.cancelled() => return Err(DomainError::Cancelled),
             }
-            () = cancel.cancelled() => return Err(DomainError::Cancelled),
+            let admission = Admission {
+                controller: &self.controller,
+            };
+            let permit = self
+                .permits
+                .acquire()
+                .await
+                .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?;
+            if !self.controller.backing_off().await {
+                return Ok((admission, permit));
+            }
         }
-        let admission = Admission {
-            controller: &self.controller,
-        };
-        let permit = self
-            .permits
-            .acquire()
-            .await
-            .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?;
-        Ok((admission, permit))
     }
 
     /// Send `request`, timing it, and give up as soon as the run is cancelled.

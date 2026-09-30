@@ -21,6 +21,12 @@
   - [3.7 Database Schemas & Tables](#37-database-schemas--tables)
   - [3.8 Core Algorithms](#38-core-algorithms)
 - [4. Additional Context](#4-additional-context)
+  - [Sync Phases](#sync-phases)
+  - [Priority Tiers](#priority-tiers)
+  - [Consistency Model](#consistency-model)
+  - [Security](#security)
+  - [Operations](#operations)
+  - [Future Work](#future-work)
 - [5. Traceability](#5-traceability)
 
 <!-- /toc -->
@@ -42,7 +48,7 @@ A sync is designed to be stopped and started again. The task queue lives in memo
 | Requirement | Phase | Design Response |
 |---|---|---|
 | `cpt-cf-github-mirror-fr-session-init` | `p1` | `POST /github-mirror/v1/repos/{owner}/{name}/sync` writes a `queued` session and answers `202` with its id; see [Queued Sync](#queued-sync) |
-| `cpt-cf-github-mirror-fr-session-resume` | `p1` | `gm_repo_sync_status` keeps `in_progress` until a run completes; `POST /sync/resume` re-queues those repositories (up to 500 per call) |
+| `cpt-cf-github-mirror-fr-session-resume` | `p1` | `gm_repo_sync_status` keeps `in_progress` until a run completes; `POST /sync/resume` re-queues those repositories (up to 64 per call, the depth of the sync queue) |
 | `cpt-cf-github-mirror-fr-sync-scope` | `p1` | `include` picks the object families; `actions_scope`, `reactions_scope`, `timeline_scope` pick `all` / `open` / `none`; see [Collection Scopes](#386-collection-scopes) |
 | `cpt-cf-github-mirror-fr-issue-pr-detection` | `p1` | Pull requests come from `/pulls`, issues from `/issues` with pull requests left out |
 | `cpt-cf-github-mirror-fr-cost-efficiency` | `p1` | Conditional requests with stored `ETag` / `Last-Modified`; watermark sweeps; the change gate; see [3.8](#38-core-algorithms) |
@@ -141,19 +147,27 @@ Unlike repotap, raw bodies are kept only as the HTTP cache. Reads are answered f
 
 #### Runs as a ToolKit Gear
 
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-toolkit-gear`
+
 The gear is started and stopped by the framework. `stop()` cancels the pool and waits for running syncs; when the framework's hard-stop deadline fires first, the pool task is aborted. A job cut short gives its claim back through a drop guard, and its session is closed out as `interrupted` by the next start-up sweep.
 
 #### One GitHub Token
+
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-one-token`
 
 The gear is configured with one token (`github_token`). All tenants' syncs share its rate limit, so a cooldown pauses every request made with it. A token per tenant is future work.
 
 #### Tenant Isolation in Storage
 
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-tenant-isolation`
+
 Every table has `tenant_id`, and every query is built through the secure ORM with the caller's `AccessScope`. A handler cannot forget the tenant filter, because storage adds it.
 
 #### Storage Engines
 
-SeaORM through toolkit-db, with SQLite and PostgreSQL in the migrations. The migration runner applies migrations in name order; names are `m0001_…` to `m0043_…`, so name order is number order and a new migration takes the next number.
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-storage-engines`
+
+SeaORM through toolkit-db, with SQLite and PostgreSQL in the migrations. The migration runner applies migrations in name order; names are `m0001_…` to `m0044_…`, so name order is number order and a new migration takes the next number.
 
 ## 3. Technical Architecture
 
@@ -184,7 +198,7 @@ SeaORM through toolkit-db, with SQLite and PostgreSQL in the migrations. The mig
 ┌────────────────────────────── Service ──────────────────────────────┐
 │ policy enforcer · claims (in_flight) · claim gates · sessions        │
 │ prepare_sync ──► enqueue_sync_scoped ──► sync channel (64)           │
-│             └──► sync_now ──► run_and_record (on the caller's task)  │
+│             └──► sync_now ──► run_and_record (on its own task)       │
 └──────────────────────────────────────────────────────────────────────┘
                  │ channel
                  ▼
@@ -201,16 +215,53 @@ SeaORM through toolkit-db, with SQLite and PostgreSQL in the migrations. The mig
    (semaphore, cooldown, HttpCache)
 ```
 
-| Component | Responsibility |
-|---|---|
-| `Service` | Authorization, sessions, claims, the queue, resume, cache clear, reads |
-| `SyncPoolRunner` | Takes queued jobs, keeps one queue per tenant and serves tenants in turn, runs up to `max_concurrent_syncs` |
-| `RepoPhaseRunner` | Drives one repository through the phases; claims tasks round-robin across three lanes |
-| `MirrorWorker` | Executes every task kind: fetches through `GithubPort`, writes through `SyncWriter` |
-| `ChangeGate` | Decides whether an entity needs a detail fetch; records fingerprints |
-| `SweepWatermark` | Per-family high-water mark for incremental listing sweeps |
-| `GithubClient` | REST and GraphQL calls with conditional requests, pagination, retries, the rate-limit cooldown and the body cap |
-| `HttpCache` | Tenant-scoped response store with compression and a content hash |
+#### Service
+
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-component-service`
+
+Authorization, sessions, claims, the queue, resume, cache clear, reads.
+
+#### SyncPoolRunner
+
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-component-sync-pool-runner`
+
+Takes queued jobs, keeps one queue per tenant and serves tenants in turn, runs up to `max_concurrent_syncs`.
+
+#### RepoPhaseRunner
+
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-component-repo-phase-runner`
+
+Drives one repository through the phases; claims tasks round-robin across three lanes.
+
+#### MirrorWorker
+
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-component-mirror-worker`
+
+Executes every task kind: fetches through `GithubPort`, writes through `SyncWriter`.
+
+#### ChangeGate
+
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-component-change-gate`
+
+Decides whether an entity needs a detail fetch; records fingerprints.
+
+#### SweepWatermark
+
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-component-sweep-watermark`
+
+Per-family high-water mark for incremental listing sweeps.
+
+#### GithubClient
+
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-component-github-client`
+
+REST and GraphQL calls with conditional requests, pagination, retries, the rate-limit cooldown and the body cap.
+
+#### HttpCache
+
+- [x] `p1` - **ID**: `cpt-cf-github-mirror-component-http-cache`
+
+Tenant-scoped response store with compression and a content hash.
 
 ### 3.3 API Contracts
 
@@ -235,7 +286,7 @@ Errors use the platform's canonical problem body; a validation error names the p
 
 #### SDK
 
-`GithubMirrorClientV1` in `github-mirror-sdk`: `status`, `list_repos`, `sync_repository`. `LocalClient` serves it in process; `sync_repository` runs a sync on the caller's task and returns its `SyncSummary` (see [In-Process Sync](#in-process-sync)).
+`GithubMirrorClientV1` in `github-mirror-sdk`: `status`, `list_repos`, `sync_repository`. `LocalClient` serves it in process; `sync_repository` runs a sync on a task of its own, waits for it and returns its `SyncSummary` (see [In-Process Sync](#in-process-sync)).
 
 #### Ports
 
@@ -296,7 +347,7 @@ A second request for the same repository while the first is queued or running ge
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-seq-in-process-sync`
 
-`LocalClient::sync_repository` calls `Service::sync_now`: the same `prepare_sync` (claim, session row, repository status), then the run itself on the caller's task, then the run's `SyncSummary` or its own error. It gets the deadline, the heartbeat and a `/sessions` row; it does not take a pool slot. A sync of the same repository already in flight answers `Conflict`.
+`LocalClient::sync_repository` calls `Service::sync_now`: the same `prepare_sync` (claim, session row, repository status), then the run itself on a task of its own that `LocalClient` spawns and awaits, so a caller that drops the call does not stop it, then the run's `SyncSummary` or its own error. It gets the deadline, the heartbeat and a `/sessions` row; it does not take a pool slot. A sync of the same repository already in flight answers `Conflict`.
 
 #### Resume
 
@@ -388,19 +439,15 @@ Tasks have no table: the queue is in memory.
 
 #### Migrations
 
-`m0001_initial` to `m0043_review_comment_review_id`, applied in name order by the toolkit migration runner. A change to a table that already holds rows is additive, and every migration has a `down()` (see the PRD's schema-change rule). A new migration takes the next number.
+`m0001_initial` to `m0044_session_telemetry`, applied in name order by the toolkit migration runner. A change to a table that already holds rows is additive, and every migration has a `down()` (see the PRD's schema-change rule). A new migration takes the next number.
 
 ### 3.8 Core Algorithms
 
 #### 3.8.1 Incremental Listing Sweep
 
-- [x] `p1` - **ID**: `cpt-cf-github-mirror-alg-watermark-sweep`
-
 Issues, pull requests and commits are listed newest first. A sweep starts from the family's `last_seen_updated_at` minus a five-minute overlap and stops at the first page whose rows are all older. The newest `updated_at` seen is staged as the candidate; it is promoted only when the whole family, including its refinements, has finished. A run that stops early promotes nothing, so the next run walks the listing again and the gate re-seeds whatever was left `pending`. `force` ignores the watermark.
 
 #### 3.8.2 Change Gate
-
-- [x] `p1` - **ID**: `cpt-cf-github-mirror-alg-change-gate`
 
 An entity is refined when it is new, its fingerprint or child-counts hash changed, its last refinement did not complete, its refresh TTL ran out, or the run is forced. TTLs:
 
@@ -415,25 +462,17 @@ After a refinement the entity is marked `complete`. A pull whose review threads 
 
 #### 3.8.3 Deletion Reconciliation
 
-- [x] `p1` - **ID**: `cpt-cf-github-mirror-alg-reconciliation`
-
 Rows are hard-deleted, not tombstoned. After a listing fetched to completion, rows of that family whose `extracted_at` predates the run's start were not seen and are removed. A truncated listing, or a family left out of the scope, proves nothing and deletes nothing. A pull's reviews, files and commits are replaced as a whole on each refinement; its review threads only when the thread fetch was complete.
 
 #### 3.8.4 Scheduler
-
-- [x] `p1` - **ID**: `cpt-cf-github-mirror-alg-scheduler`
 
 One in-memory `TaskQueue` per run. Discovery runs alone; indexing, change detection and refinement drain together (indexing seeds refinement as pages arrive); verification runs last. Tasks are claimed by priority, then age, round-robin across three lanes (pull requests, issues, everything else) so a long pull-request backlog cannot starve issues. While 10,000 tasks are pending, a new task is claimed only after a running one finishes. A task that fails on database contention is retried up to three times with a growing delay, counted in `retries`, apart from its repair pass in `attempt`.
 
 #### 3.8.5 Verification
 
-- [x] `p1` - **ID**: `cpt-cf-github-mirror-alg-verification`
-
 For every pull request the declared commit and file counts are compared with what was stored. A shortfall seeds a repair pass (`Verify`, priority `HIGH`) that fetches the pull again. After three passes, or when a pass does not shrink the gap, the gap is accepted: logged as a warning and recorded in the summary's `accepted_drift`, and the session still ends `complete`.
 
 #### 3.8.6 Collection Scopes
-
-- [x] `p1` - **ID**: `cpt-cf-github-mirror-alg-collection-scopes`
 
 | Scope | `all` | `open` (default for actions and reactions) | `none` (default for timeline) |
 |---|---|---|---|
@@ -444,8 +483,6 @@ An issue is refined when either its reactions or its timeline scope wants it.
 
 #### 3.8.7 Claims, Locks and Liveness
 
-- [x] `p1` - **ID**: `cpt-cf-github-mirror-alg-claims-locks`
-
 | Mechanism | Scope | Purpose |
 |---|---|---|
 | Claim (`in_flight`) | this process, per tenant and repository | One queued or running sync per repository; a request is joined or refused against it. Released by a guard carried in the job, so a job that ends, is dropped from the queue or is aborted gives it back |
@@ -455,13 +492,9 @@ An issue is refined when either its reactions or its timeline scope wants it.
 
 #### 3.8.8 Deadline
 
-- [x] `p1` - **ID**: `cpt-cf-github-mirror-alg-deadline`
-
 A run races `sync_deadline_minutes`. When the deadline wins, the run's own cancellation token is cancelled, the run winds down (tasks in flight finish their writes, the lock is released), and the session ends `failed` with "ran past its deadline of N minutes and was stopped; the next sync carries on from what it had already stored". The repository stays `in_progress`, so resume picks it up.
 
 #### 3.8.9 GitHub Client
-
-- [x] `p1` - **ID**: `cpt-cf-github-mirror-alg-github-client`
 
 | Behaviour | Value |
 |---|---|

@@ -255,6 +255,14 @@ impl RateLimitController {
         snapshot
     }
 
+    pub async fn backing_off(&self) -> bool {
+        self.inner
+            .lock()
+            .await
+            .backoff_until
+            .is_some_and(|until| until > Utc::now())
+    }
+
     /// Gate 1: if a backoff window is active, park until it elapses. Returns
     /// `true` when the caller parked (and should re-evaluate), `false` otherwise.
     async fn honour_backoff(&self, backoff_until: Option<DateTime<Utc>>) -> bool {

@@ -205,9 +205,9 @@ fn now_rfc3339() -> String {
 /// Release the per-repo sync lock, logging a failed release rather than
 /// turning it into the sync's outcome: the guard's `Drop` has already queued
 /// a best-effort release, and the sync succeeded or failed on its own merits.
-async fn release_sync_lock(lock: toolkit_db::DbLockGuard, lock_key: &str) {
+async fn release_sync_lock(lock: toolkit_db::DbLockGuard, owner: &str, name: &str) {
     if let Err(e) = lock.release().await {
-        tracing::warn!(lock_key, error = %e, "sync advisory lock release failed");
+        tracing::warn!(owner, name, error = %e, "sync advisory lock release failed");
     }
 }
 
@@ -357,8 +357,10 @@ const HEARTBEAT_SECS: u64 = 2;
 /// keep its lock.
 const ABANDONED_AFTER_SECS: i64 = 300;
 
-/// Most repositories one resume call will re-queue.
-const RESUME_LIMIT: u64 = 500;
+/// Most repositories one resume call will re-queue: what the sync channel
+/// holds, so a call never queues more than fits; the rest stay `in_progress`
+/// for the next call.
+const RESUME_LIMIT: usize = SYNC_QUEUE_DEPTH;
 
 /// Phase progress of one sync, published through a shared atomic so the
 /// heartbeat can read it without touching the running fetch (DESIGN §4
@@ -3531,7 +3533,12 @@ impl Service {
         let Some(slug) = only else {
             return self
                 .repo_sync_status
-                .list(&scope, Some(RepoRunStatus::InProgress), None, RESUME_LIMIT)
+                .list(
+                    &scope,
+                    Some(RepoRunStatus::InProgress),
+                    None,
+                    u64::try_from(RESUME_LIMIT).unwrap_or(u64::MAX),
+                )
                 .await;
         };
 
@@ -3686,11 +3693,12 @@ impl Service {
         })
     }
 
-    /// Sync `owner/name` on the caller's own task and hand back what it
-    /// collected. It takes the claim, the session row and the repository
-    /// status a queued sync takes, so it shows in `/sessions`, keeps its lock
-    /// alive with a heartbeat and stops at the deadline; only the queue and
-    /// the pool are skipped.
+    /// Sync `owner/name` on the task that calls this and hand back what it
+    /// collected; `LocalClient` calls it on a task of its own, so a caller that
+    /// drops the SDK call does not stop the run. It takes the claim, the
+    /// session row and the repository status a queued sync takes, so it shows
+    /// in `/sessions`, keeps its lock alive with a heartbeat and stops at the
+    /// deadline; only the queue and the pool are skipped.
     ///
     /// # Errors
     /// `Conflict` when a sync of this repository is already in flight, the
@@ -4420,7 +4428,7 @@ impl Service {
         // Deterministic unlock on the way out; a failed release is only
         // logged — the guard's Drop already queued a best-effort release,
         // and the sync itself succeeded or failed on its own merits.
-        release_sync_lock(sync_lock, &lock_key).await;
+        release_sync_lock(sync_lock, owner, name).await;
         outcome
     }
 
