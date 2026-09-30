@@ -5,8 +5,10 @@ use github_mirror::domain::ports::github::{
     CommitListing, FetchOptions, FetchedRepository, GithubPort, IssueDetailWants, IssueListing,
     ListCursor, Listing, ListingCompleteness, PullListing, RepoRef,
 };
+use github_mirror::domain::ports::telemetry_sink::TelemetrySink;
 use github_mirror::domain::repo::ContributorRecord;
 use github_mirror::domain::scope::{CollectionMode, ScopeConfig};
+use github_mirror::domain::sync::{SessionTelemetry, TelemetryLine};
 use github_mirror::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use github_mirror::infra::github::client::GithubClient;
 use github_mirror::infra::github::compression::MAX_BODY_BYTES;
@@ -1487,6 +1489,105 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
         .await
         .expect("forced fetch");
     first.assert_calls_async(2).await;
+}
+
+/// Keeps every telemetry line the client hands it, as JSON.
+#[derive(Debug, Default)]
+struct RecordingSink {
+    lines: std::sync::Mutex<Vec<serde_json::Value>>,
+}
+
+impl TelemetrySink for RecordingSink {
+    fn record(&self, _file: &std::path::Path, line: &TelemetryLine<'_>) -> Result<(), DomainError> {
+        self.lines
+            .lock()
+            .unwrap()
+            .push(serde_json::to_value(line).unwrap());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn every_call_leaves_a_telemetry_line_with_its_status_size_and_validator() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust")
+                .is_true(|req| {
+                    !req.headers()
+                        .iter()
+                        .any(|(k, _)| k.as_str() == "if-none-match")
+                });
+            then.status(200)
+                .header("etag", "W/\"deadbeef\"")
+                .header("x-ratelimit-remaining", "4870")
+                .json_body(gh_repo_json());
+        })
+        .await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/repos/rust-lang/rust")
+                .header("if-none-match", "W/\"deadbeef\"");
+            then.status(304).header("x-ratelimit-remaining", "4870");
+        })
+        .await;
+
+    let cache = std::sync::Arc::new(MemCache::default());
+    let client =
+        GithubClient::with_cache(server.base_url(), None, cache).expect("client must build");
+    let sink = std::sync::Arc::new(RecordingSink::default());
+    let session_id = uuid::Uuid::new_v4();
+    let options = FetchOptions {
+        telemetry: std::sync::Arc::new(SessionTelemetry::logging_to(
+            std::sync::Arc::clone(&sink) as std::sync::Arc<dyn TelemetrySink>,
+            std::path::PathBuf::from("rust.jsonl"),
+            session_id,
+            "rust-lang/rust".to_owned(),
+        )),
+        ..opts(repo_only_scope())
+    };
+
+    client
+        .fetch_repository_metadata("rust-lang", "rust", &options)
+        .await
+        .expect("first fetch");
+    client
+        .fetch_repository_metadata("rust-lang", "rust", &options)
+        .await
+        .expect("second fetch");
+
+    let lines = sink.lines.lock().unwrap();
+    assert_eq!(lines.len(), 2, "one line per call: {lines:?}");
+    let (fresh, revalidated) = (&lines[0], &lines[1]);
+
+    assert_eq!(fresh["session_id"], session_id.to_string());
+    assert_eq!(fresh["repository"], "rust-lang/rust");
+    assert_eq!(fresh["api"], "rest");
+    assert_eq!(fresh["method"], "GET");
+    assert!(
+        fresh["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/repos/rust-lang/rust"),
+        "{fresh}"
+    );
+    assert_eq!(fresh["status"], 200);
+    assert_eq!(fresh["outcome"], "fresh");
+    assert_eq!(fresh["cache_hit"], false);
+    assert_eq!(fresh["etag_used"], false);
+    assert_eq!(fresh["rate_limit_remaining"], 4870);
+    assert!(
+        fresh["response_bytes"].as_u64().unwrap() > 0,
+        "a 200 line must carry the body size: {fresh}"
+    );
+
+    assert_eq!(revalidated["status"], 304);
+    assert_eq!(revalidated["outcome"], "not_modified");
+    assert_eq!(revalidated["cache_hit"], true);
+    assert_eq!(revalidated["etag_used"], true);
+    assert_eq!(revalidated["response_bytes"], 0);
 }
 
 #[tokio::test]

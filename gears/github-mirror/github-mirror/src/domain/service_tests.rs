@@ -2,11 +2,14 @@
 //! repository or the API: the liveness gate that decides whether one process
 //! may take another's sync lock.
 
+use std::path::{Path, PathBuf};
+
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
-use super::{ABANDONED_AFTER_SECS, abandoned};
+use super::{ABANDONED_AFTER_SECS, SyncJob, abandoned, telemetry_file_path};
 use crate::domain::repo::{SessionStatus, SyncSessionRecord};
+use crate::domain::scope::ScopeConfig;
 
 fn at(seconds_ago: i64, now: DateTime<Utc>) -> String {
     (now - Duration::seconds(seconds_ago)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -113,5 +116,63 @@ fn an_unreadable_heartbeat_is_not_passed_over_for_an_older_start() {
     assert!(
         !abandoned(&row, now),
         "the heartbeat is present, so it is the stamp read, and an unreadable one counts as alive"
+    );
+}
+
+fn job(telemetry_file: Option<&str>) -> SyncJob {
+    SyncJob {
+        session_id: Uuid::new_v4(),
+        ctx: toolkit_security::SecurityContext::anonymous(),
+        owner: "rust-lang".to_owned(),
+        name: "rust".to_owned(),
+        scope: ScopeConfig::default(),
+        force: false,
+        since: None,
+        telemetry_file: telemetry_file.map(ToOwned::to_owned),
+        claim: None,
+    }
+}
+
+#[test]
+fn the_telemetry_file_defaults_to_the_repository_name_under_its_tenant_and_owner() {
+    let tenant = Uuid::new_v4();
+
+    let path = telemetry_file_path(Path::new("/var/lib/gm"), tenant, &job(None));
+
+    assert_eq!(
+        path,
+        PathBuf::from("/var/lib/gm")
+            .join(tenant.to_string())
+            .join("rust-lang")
+            .join("rust.jsonl")
+    );
+}
+
+#[test]
+fn a_caller_named_telemetry_file_stays_in_the_same_folder() {
+    let tenant = Uuid::new_v4();
+
+    let path = telemetry_file_path(
+        Path::new("/var/lib/gm"),
+        tenant,
+        &job(Some("rust-run.jsonl")),
+    );
+
+    assert_eq!(
+        path,
+        PathBuf::from("/var/lib/gm")
+            .join(tenant.to_string())
+            .join("rust-lang")
+            .join("rust-run.jsonl")
+    );
+}
+
+#[test]
+fn two_tenants_never_share_a_telemetry_file() {
+    let dir = Path::new("/var/lib/gm");
+
+    assert_ne!(
+        telemetry_file_path(dir, Uuid::new_v4(), &job(None)),
+        telemetry_file_path(dir, Uuid::new_v4(), &job(None))
     );
 }

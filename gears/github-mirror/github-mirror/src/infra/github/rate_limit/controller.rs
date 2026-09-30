@@ -574,6 +574,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backing_off_holds_from_a_retry_after_until_the_next_good_answer() {
+        let ctrl = RateLimitController::new();
+        assert!(!ctrl.backing_off().await);
+
+        let limited = RateLimitHeaders {
+            retry_after_secs: Some(60),
+            ..Default::default()
+        };
+        ctrl.observe(&limited, 429, 20).await;
+        assert!(ctrl.backing_off().await);
+
+        ctrl.observe(&RateLimitHeaders::default(), 200, 20).await;
+        assert!(!ctrl.backing_off().await);
+    }
+
+    #[tokio::test]
+    async fn a_backoff_already_past_is_not_backing_off() {
+        let ctrl = RateLimitController::new();
+        let limited = RateLimitHeaders {
+            retry_after_secs: Some(0),
+            ..Default::default()
+        };
+        ctrl.observe(&limited, 429, 20).await;
+
+        assert!(!ctrl.backing_off().await);
+    }
+
+    #[tokio::test]
     async fn observe_success_increases_soft_cap() {
         let ctrl = RateLimitController::with_limits(5, 5000);
         let hdrs = RateLimitHeaders {

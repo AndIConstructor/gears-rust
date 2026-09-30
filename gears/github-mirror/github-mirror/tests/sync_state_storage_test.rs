@@ -113,6 +113,34 @@ async fn a_session_is_created_updated_and_listed_newest_first() {
 }
 
 #[tokio::test]
+async fn an_upsert_saves_the_new_updated_at() {
+    let db = common::inmem_db().await;
+    let provider = Arc::new(DBProvider::<DbError>::new(db));
+    let ctx = common::caller_in(Uuid::new_v4());
+    let tenant = ctx.subject_tenant_id();
+    let scope = scope_for(&ctx).await;
+    let repo = SeaOrmSyncSessionRepository::new(Arc::clone(&provider));
+    let id = Uuid::new_v4();
+
+    let mut running = session_record(id, SessionStatus::InProgress, "2026-09-25T15:23:28Z");
+    running.updated_at = Some("2026-09-25T16:39:08Z".to_owned());
+    repo.upsert(&scope, tenant, running).await.expect("insert");
+
+    let mut swept = session_record(id, SessionStatus::Interrupted, "2026-09-25T15:23:28Z");
+    swept.ended_at = Some("2026-09-30T14:07:14Z".to_owned());
+    swept.updated_at.clone_from(&swept.ended_at);
+    repo.upsert(&scope, tenant, swept).await.expect("update");
+
+    let loaded = repo
+        .find_by_id(&scope, id)
+        .await
+        .expect("find")
+        .expect("the session must exist");
+    assert_eq!(loaded.updated_at.as_deref(), Some("2026-09-30T14:07:14Z"));
+    assert_eq!(loaded.ended_at, loaded.updated_at);
+}
+
+#[tokio::test]
 async fn sessions_are_tenant_scoped() {
     let db = common::inmem_db().await;
     let provider = Arc::new(DBProvider::<DbError>::new(db));

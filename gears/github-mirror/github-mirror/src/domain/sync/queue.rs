@@ -390,6 +390,78 @@ mod tests {
     }
 
     #[test]
+    fn status_counts_follow_each_task_from_pending_to_done_or_failed() {
+        let session = Uuid::new_v4();
+        let queue = TaskQueue::new();
+        for id in ["1", "2", "3", "4"] {
+            queue.enqueue_task(&refinement_task(session, id, TaskPriority::NORMAL));
+        }
+        assert_eq!(
+            queue.status_counts(session),
+            TaskCounts {
+                pending: 4,
+                ..TaskCounts::default()
+            }
+        );
+
+        let first = queue
+            .claim_next_task_in(session, &all_phases())
+            .expect("a pending task must be claimable");
+        let second = queue
+            .claim_next_task_in(session, &all_phases())
+            .expect("a pending task must be claimable");
+        assert_eq!(
+            queue.status_counts(session),
+            TaskCounts {
+                pending: 2,
+                running: 2,
+                ..TaskCounts::default()
+            }
+        );
+
+        queue.complete_task(first.id);
+        queue.fail_task(second.id);
+        assert_eq!(
+            queue.status_counts(session),
+            TaskCounts {
+                pending: 2,
+                running: 0,
+                done: 1,
+                failed: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_task_finished_twice_is_counted_once() {
+        let session = Uuid::new_v4();
+        let queue = TaskQueue::new();
+        queue.enqueue_task(&discovery_task(session));
+        let task = queue
+            .claim_next_task_in(session, &all_phases())
+            .expect("the discovery task must be claimable");
+
+        queue.fail_task(task.id);
+        queue.fail_task(task.id);
+
+        assert_eq!(
+            queue.status_counts(session),
+            TaskCounts {
+                failed: 1,
+                ..TaskCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn status_counts_of_another_session_are_zero() {
+        let queue = TaskQueue::new();
+        queue.enqueue_task(&discovery_task(Uuid::new_v4()));
+
+        assert_eq!(queue.status_counts(Uuid::new_v4()), TaskCounts::default());
+    }
+
+    #[test]
     fn the_same_task_for_one_tenant_is_enqueued_once() {
         let session = Uuid::new_v4();
         let tenant = Uuid::new_v4();

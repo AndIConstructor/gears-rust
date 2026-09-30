@@ -234,4 +234,9 @@ pub struct TelemetrySnapshot {
 
 #[cfg(test)]
 #[path = "telemetry_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
 mod telemetry_tests;

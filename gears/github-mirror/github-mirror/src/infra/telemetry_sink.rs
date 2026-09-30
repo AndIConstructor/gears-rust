@@ -29,3 +29,12 @@ impl TelemetrySink for JsonlTelemetrySink {
             .map_err(|e| DomainError::internal(format!("telemetry file {}: {e}", file.display())))
     }
 }
+
+#[cfg(test)]
+#[path = "telemetry_sink_tests.rs"]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod telemetry_sink_tests;

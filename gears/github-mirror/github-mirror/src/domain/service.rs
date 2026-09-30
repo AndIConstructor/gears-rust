@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -167,6 +167,14 @@ fn past_deadline(
          sync carries on from what it had already stored",
         job.owner, job.name
     ))
+}
+
+fn telemetry_file_path(dir: &Path, tenant_id: Uuid, job: &SyncJob) -> PathBuf {
+    dir.join(tenant_id.to_string()).join(&job.owner).join(
+        job.telemetry_file
+            .clone()
+            .unwrap_or_else(|| format!("{}.jsonl", job.name)),
+    )
 }
 
 /// Whether the process that was running `session` is gone.
@@ -4004,13 +4012,11 @@ impl Service {
             .await?;
 
         let progress = SyncProgress::new();
-        let telemetry_file = self.config.telemetry_dir.as_ref().map(|dir| {
-            dir.join(tenant_id.to_string()).join(&job.owner).join(
-                job.telemetry_file
-                    .clone()
-                    .unwrap_or_else(|| format!("{}.jsonl", job.name)),
-            )
-        });
+        let telemetry_file = self
+            .config
+            .telemetry_dir
+            .as_deref()
+            .map(|dir| telemetry_file_path(dir, tenant_id, job));
         let telemetry = Arc::new(match telemetry_file {
             Some(file) => SessionTelemetry::logging_to(
                 Arc::clone(&self.telemetry_sink),

@@ -100,6 +100,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_plain_telemetry_file_name_passes() {
+        assert!(validate_telemetry_file("rust-run.jsonl").is_ok());
+        assert!(validate_telemetry_file("rust_2026-09-30.jsonl").is_ok());
+    }
+
+    #[test]
+    fn a_telemetry_file_name_that_leaves_its_folder_is_rejected() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../x.jsonl",
+            "a/b.jsonl",
+            "a\\b.jsonl",
+            "/etc/cron.d/x",
+        ] {
+            let err = validate_telemetry_file(name).unwrap_err();
+            assert!(
+                matches!(&err, DomainError::Validation { field, .. } if field == "telemetry_file"),
+                "`{name}` must be refused, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn ordinary_segments_pass() {
         assert!(validate_repo_path("rust-lang", "rust.git_1").is_ok());
         assert_eq!(
