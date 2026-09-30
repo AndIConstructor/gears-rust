@@ -103,3 +103,7 @@ pub struct TelemetrySnapshot {
     pub rate_limit_wait_ms: u64,
     pub graphql_points: u64,
 }
+
+#[cfg(test)]
+#[path = "telemetry_tests.rs"]
+mod telemetry_tests;
