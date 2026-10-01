@@ -44,9 +44,11 @@
 
 ### 1.1 Purpose
 
-Construct is an open-source component of Constructor Fabric. It keeps one living profile for each subject and serves it to the applications and AI agents of a tenant. A subject is anything with a lasting identity. In this release, every subject is a person.
+Construct is an open-source component of Constructor Fabric. It keeps one living profile for each subject and serves it to the applications and AI agents of a tenant. A subject is anything with a lasting identity: a person, an organization, a partner, a competitor, a product, a project, a team or a process. Each kind of subject has its own profile types. A new kind of subject is a new set of registered types and needs no Construct code. This release ships the person types.
 
-Connectors are any systems that learn something about a subject. They send what they learn to Construct as typed records, under GTS (Global Type System) contracts that the connectors own. Construct checks each record against its type and turns it into facts. A record may add, replace or remove facts, and Construct decides which on its own. Applications and agents read the profile to personalize what they do. The subject can see, correct and erase what Construct knows about them.
+Connectors are any systems that learn something about a subject. They send what they learn to Construct as typed records, under GTS (Global Type System) contracts that the connectors own. Construct checks each record against its type and turns it into facts. A record may add, replace or remove facts, and Construct decides which on its own. Applications and agents read the profile to personalize what they do. The profile's owner can see, correct and erase what Construct knows.
+
+All kinds of subjects use the same intake, decisions, guardrails, read path and MCP tools. They differ in two ways. First, each kind has its own categories; a person has identity, roles, skills and preferences. Second, the owner controls the profile. A person owns their own profile and has the rights of a data subject. For any other subject, the user who creates the profile owns it and controls it the same way. Where this document says the subject controls their data, for a subject that is not a person, the owner does. Facts about people can appear in any profile, such as a partner's contact person, so the guardrails run on every profile.
 
 A team that builds a SaaS product can add Construct as a component instead of building its own profile store, privacy controls and agent access. The picture shows who talks to Construct, not how it is built.
 
@@ -69,7 +71,7 @@ flowchart LR
 
 ### 1.2 Background / Problem Statement
 
-A SaaS product wants to personalize what it does for each user. What it knows about a user is spread across many systems: a sign-up form, a chat, a learning system, a CRM, public web pages. Each system knows a part, and the parts often disagree.
+A SaaS product wants to know the people, organizations, products and processes it works with, and to personalize what it does for each user. What it knows about each of them is spread across many systems: a sign-up form, a chat, a learning system, a CRM, public web pages. Each system knows a part, and the parts often disagree.
 
 Every product that personalizes builds the same parts again. It collects signals from many sources. It resolves facts that contradict each other. It keeps the profile current. It respects privacy and the right to erasure. And now it must give the profile to AI agents without letting an agent read or change data it must not touch. Each team builds these parts on its own, and each copy has its own gaps, most often in privacy. Construct gives these parts once, with the same rules for every product that uses it.
 
@@ -84,7 +86,8 @@ Every product that personalizes builds the same parts again. It collects signals
 
 | Term | Definition |
 |------|------------|
-| Subject | The entity a profile is about: anything with a lasting identity. In this release, every subject is a person |
+| Subject | Who or what a profile is about: anything with a lasting identity, such as a person, an organization, a product or a process. Each kind of subject has its own profile types |
+| Owner | Who controls a profile. A person owns their own profile; for any other subject, the user who creates the profile owns it |
 | Tenant | One customer organization in a deployment. Its data is kept apart from every other tenant's data |
 | Fact | One statement about a subject, with its origin and the time it was stored |
 | Category | A named group of facts of one kind, for example skills or preferences. Construct's GTS types define the categories |
@@ -108,11 +111,11 @@ The tenant is the data controller for its subjects' data: it decides why and how
 
 ### 2.1 Human Actors
 
-#### Subject
+#### Subject or Owner
 
 **ID**: `cpt-cf-construct-actor-subject`
 
-- **Role**: The person a profile describes. Views their facts, marks a fact as incorrect, deletes a fact, erases everything, and sets their personalization settings, through an application or an agent that acts for them. Data-protection role: data subject.
+- **Role**: The person a profile describes, or the owner of a profile about anything else. Views the facts, marks a fact as incorrect, deletes a fact, erases everything, and sets the personalization settings, through an application or an agent that acts for them. Data-protection role: data subject, when the subject is a person.
 - **Needs**: A profile that works for them in every application; a simple way to fix wrong data; erasure that really removes their data, except the subject's personalization setting, which stays off, and log events, which follow the log's retention period.
 
 #### Tenant Administrator
@@ -202,7 +205,7 @@ None beyond the project defaults.
 - Batches: connectors send records one at a time
 - Version history of facts: Construct keeps the current value only
 - Subscribe and notify on profile changes, until graph storage ships its change events (see the [graph storage PRD](../../graph-storage/docs/PRD.md))
-- Group subjects, such as teams or organizations
+- Profile types for subjects other than a person. Organizations, partners, competitors, products, projects, teams and processes get their types later, with no change to Construct's code
 - Course or learning content
 - Weights or ranking of facts
 - A Construct setting to hide a category: the platform's permissions decide who reads which category
@@ -444,7 +447,7 @@ The guardrails **MUST** find special-category content on the reference test set 
 - [ ] `p1` - **ID**: `cpt-cf-construct-contract-person-types`
 
 - **Direction**: provided by Construct
-- **Protocol/Format**: GTS types for the categories of a person's profile and the facts in them, registered in the types registry and with graph storage
+- **Protocol/Format**: GTS types for the categories of each kind of subject's profile and the facts in them, registered in the types registry and with graph storage. This release ships the person types
 - **Compatibility**: A published GTS version never changes; facts stored under earlier versions stay readable and servable
 
 ## 8. Use Cases

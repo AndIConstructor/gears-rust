@@ -31,7 +31,7 @@
 
 ### 1.1 Architectural Vision
 
-Construct is a gear. Connectors stay simple: they send typed records and know nothing else. Construct is the one place that decides what a record means for a subject. It asks: is the source trusted, is personalization on, is the record worth keeping, and how does it change the subject's profile? The profile is a graph: a subject linked to entities that carry properties. Construct writes the profile to graph storage. It is the only way applications and agents read it. The profile is read only for its owner, the subject: by the subject, and by applications and agents that act for the subject under platform permissions.
+Construct is a gear. Connectors stay simple: they send typed records and know nothing else. Construct is the one place that decides what a record means for a subject. It asks: is the source trusted, is personalization on, is the record worth keeping, and how does it change the subject's profile? The profile is a graph: a subject linked to entities that carry properties. Construct writes the profile to graph storage. It is the only way applications and agents read it. The profile is read only for its owner: by the owner, and by applications and agents that act for the owner under platform permissions. A person owns their own profile.
 
 A language model proposes how a record changes the profile and flags sensitive data. Construct runs that model step itself. The step is a small agent loop: the model calls a fixed set of tools in rounds. Then deterministic code decides what is stored. The model proposes; code decides.
 
@@ -51,7 +51,7 @@ Requirements that significantly influence architecture decisions.
 | `cpt-cf-construct-fr-fact-decisions` | Planner runs the agent loop over the record and the subject's current profile. Its plan adds, replaces or removes entities of that subject only; a replace removes the old value in the same plan. The reference evaluation set measures that no contradicting pair remains (see Risks, "Quality lives in the prompts") |
 | `cpt-cf-construct-fr-deterministic-storage` | Profile writer applies the admitted plan in one write with the profile version the plan was built on. Graph storage rejects the write if the profile changed; the planner runs again, up to a small limit. Each write carries graph storage's idempotency key, and a plan's node keys are fixed when the plan is built. So storing the same changes again gives the same facts. Profile reader serves from graph storage, so the next read returns the stored value |
 | `cpt-cf-construct-fr-fact-origin` | Each plan carries its origin from the record envelope, the MCP call or the reviewer. Profile writer stores it and the storing time with each entity. Profile reader and Subject control return it |
-| `cpt-cf-construct-fr-profile-read` | Profile reader serves the profile only for its owner: to the subject, and to applications and agents that act for the subject. It groups entities by entity kind, which is the PRD's category. It lists only permitted categories with at least one readable fact, and names the subject. Permissions come from the platform on each read |
+| `cpt-cf-construct-fr-profile-read` | Profile reader serves the profile only for its owner: to the owner, and to applications and agents that act for the owner. A person owns their own profile. It groups entities by entity kind, which is the PRD's category. It lists only permitted categories with at least one readable fact, and names the subject. Permissions come from the platform on each read |
 | `cpt-cf-construct-fr-subject-access` | Subject control shows all facts with origin, the settings and the review requests. Each read is a log event without content in the platform's log storage. The subject's own view and the export also write read log events. The data protection officer finds read events there per subject and per application, and gives them to the subject with the export |
 | `cpt-cf-construct-fr-review-request` | Subject control creates a review request keyed by the graph node key. Profile reader hides the fact from applications and agents while the request is open. The assigned reviewers are a tenant setting in the settings service. Reviewers resolve a request as corrected, deleted or rejected. A corrected value becomes a plan with one replace step, which passes the sensitive-data checks and Admission. If they block or drop it, nothing is stored and the request stays open. Each correction and each resolution is a log event without content |
 | `cpt-cf-construct-fr-subject-delete` | Subject control deletes one fact in graph storage; each fact delete is a log event without content. Deletion erases everything on request: the subject's entities, review requests and record IDs. It sets personalization off and writes an erasure log event without content. Results API refuses a repeat of a deleted fact's record by its identity in `record_ids`. A deleted entity that returns gets a new node key |
@@ -102,7 +102,6 @@ flowchart TD
             MT["MCP tools"]
             DEL["Deletion"]
             PR["Profile reader"]
-            RJ["Retention job"]
         end
         subgraph Domain
             PL["Planner"]
@@ -144,8 +143,7 @@ flowchart TD
     PR -->|"subject settings, review requests"| DB
     SC --> DB
     DEL --> DB
-    RJ -->|"retention trigger"| DEL
-    RJ -->|"runs on the leader"| CL["Cluster leader election"]
+    DEL -->|"retention job runs on the leader"| CL["Cluster leader election"]
     MC --> EXT["Model endpoint"]
     GSC --> GS["Graph storage"]
 ```
@@ -249,11 +247,11 @@ Graph storage only soft-deletes in its v1. A soft delete leaves a tombstone: a m
 
 **Core Entities**:
 
-The profile is a tree. The subject node is its root, and the subject's entities hang from it. Each entity has an entity kind, such as identity, roles, skills or preferences, and carries properties. An entity linked to the subject is what the PRD calls a fact, and its entity kind is the PRD's category. This document says "entity" for the graph and "fact" where it follows the PRD.
+The profile is a tree. The subject node is its root, and the subject's entities hang from it. Each entity has an entity kind, such as a person's identity, roles, skills or preferences, and carries properties. Each kind of subject has its own entity kinds. An entity linked to the subject is what the PRD calls a fact, and its entity kind is the PRD's category. This document says "entity" for the graph and "fact" where it follows the PRD.
 
 The PRD's "guardrails" are the sensitive-data checks. This document never says a bare "kind". An "entity kind" is the PRD's category. A "sensitive-data kind" is the PRD's special category.
 
-The profile is read only for its owner, the subject: by the subject, and by applications and agents that act for the subject under platform permissions. A separate ADR will decide sharing with other people, organizations or contexts.
+The profile is read only for its owner: by the owner, and by applications and agents that act for the owner under platform permissions. A person owns their own profile. For any other subject, the user who creates the profile owns it and takes the subject's place in Subject control. A separate ADR will decide sharing with other people, organizations or contexts.
 
 #### Record
 
@@ -333,7 +331,6 @@ flowchart LR
         PR["Profile reader"]
         SC["Subject control"]
         DEL["Deletion"]
-        RJ["Retention job"]
         MC["Model client"]
     end
     RA --> PL
@@ -358,8 +355,7 @@ flowchart LR
     PR -->|"subject settings, review requests"| T
     SC --> T
     DEL --> T
-    RJ -->|"retention trigger"| DEL
-    RJ -->|"runs on the leader"| CL["Cluster leader election"]
+    DEL -->|"retention job runs on the leader"| CL["Cluster leader election"]
     MC --> ME["Model endpoint"]
     RA -->|"record types"| TR["Types registry"]
     RA -->|"connectors on or off"| SS["Settings service"]
@@ -488,7 +484,7 @@ Graph storage cannot enforce Construct's read rules, so Construct needs one read
 
 ##### Responsibility scope
 
-The only read path for applications and agents. Applies owner only, platform permissions per category, personalization off, and hidden-while-under-review. Owner only means the profile is served only for its owner, the subject: to the subject, and to applications and agents that act for the subject. It reads the subject settings and the review requests from Construct's own tables. It does not serve an item past the tenant's retention period, even before the retention job removes it. Groups entities by entity kind and lists only categories with at least one readable fact. Names the subject in every response. Each read is a log event without content: which application or agent, which subject, which categories, and when.
+The only read path for applications and agents. Applies owner only, platform permissions per category, personalization off, and hidden-while-under-review. Owner only means the profile is served only for its owner: to the owner, and to applications and agents that act for the owner. A person owns their own profile. It reads the subject settings and the review requests from Construct's own tables. It does not serve an item past the tenant's retention period, even before the retention job removes it. Groups entities by entity kind and lists only categories with at least one readable fact. Names the subject in every response. Each read is a log event without content: which application or agent, which subject, which categories, and when.
 
 ##### Responsibility boundaries
 
@@ -980,7 +976,7 @@ flowchart LR
         GW["API gateway"]
         subgraph CG["Construct gear, each node"]
             C["REST, MCP endpoint, components"]
-            RJ["Retention job, leader only"]
+            RJ["Deletion's retention job, leader only"]
         end
         CL["Cluster leader election"]
         DB[("Construct tables, toolkit-db")]
