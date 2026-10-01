@@ -95,7 +95,7 @@ Construct uses graph storage's v1 write, compare-and-set and soft delete, and as
 
 - Graph storage's own design: [graph storage DESIGN](../../../graph-storage/docs/DESIGN.md) and [graph storage PRD](../../../graph-storage/docs/PRD.md).
 - Construct's use of it: [DESIGN.md](../DESIGN.md), section 3.5, and the sequences in section 3.6.
-- Construct owns the profile graph: `cpt-cf-construct-adr-construct-is-a-gear`.
+- Construct is the only writer and read path of the profile graph: `cpt-cf-construct-adr-construct-is-a-gear`.
 - Data and compliance: the 30-day removal and tenant offboarding depend on graph storage, as the Consequences say.
 - Reliability: a plan lands whole or not at all; a conflict reruns the planner.
 - Security: this decision does not change who may call graph storage.

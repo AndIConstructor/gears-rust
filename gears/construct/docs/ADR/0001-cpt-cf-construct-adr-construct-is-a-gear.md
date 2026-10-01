@@ -37,7 +37,7 @@ Where should this logic live, and who should serve the profile?
 - **Construct owns data no other gear holds.** This is subject settings, review requests and record IDs.
 - **Graph storage cannot enforce the read rules.** These rules are who may read the profile, personalization off, and hidden while under review. So applications must read through Construct.
 - **Sensitive data must be blocked or redacted before storing.** Graph storage embeds text on ingest. An embedding is a vector made from the text for search.
-- **Erasure spans two places.** It covers graph storage and Construct's own tables, so one owner must coordinate it.
+- **Erasure spans two places.** It covers graph storage and Construct's own tables, so one gear must coordinate it.
 - **The model step is small.** It is a few tools that edit a plan in memory, and one check per sensitive-data kind. A gear can run such an agent loop on its own. An agent loop is a model that calls tools in rounds. The platform needs no agent engine for it.
 
 ## Considered Options
@@ -76,7 +76,7 @@ Construct is a gear with its own tables. It runs the model step, applies the rul
 - Good, because its own tables hold subject settings, review requests and record IDs.
 - Good, because one read path can apply every read rule.
 - Good, because it enforces the sensitive-data verdicts before any write, so graph storage never embeds blocked text.
-- Good, because one owner coordinates erasure across graph storage and its own tables.
+- Good, because one gear coordinates erasure across graph storage and its own tables.
 - Good, because it reuses existing platform parts, including graph storage and OAGW.
 - Neutral, because it runs its own agent loop; the loop is small, so no agent engine is needed.
 - Bad, because it is one more gear, with its own tables to keep.
@@ -84,14 +84,14 @@ Construct is a gear with its own tables. It runs the model step, applies the rul
 
 ### A thin stateless facade
 
-A gear that runs the model step and forwards the result to graph storage. It keeps no state of its own, so reads and settings would need another owner.
+A gear that runs the model step and forwards the result to graph storage. It keeps no state of its own, so reads and settings would need another gear to hold their state.
 
 - Good, because it has fewer parts: no tables of its own.
 - Good, because connectors stay simple.
 - Neutral, because it can still run the model step and the checks before it writes.
 - Bad, because no other gear holds subject settings, review requests or record IDs, so a stateless facade has nowhere to keep them.
 - Bad, because without them it cannot apply the read rules that need stored state: personalization off, and hidden while under review.
-- Bad, because erasure would span graph storage and whichever gear holds settings, review requests and record IDs, so no single owner coordinates it.
+- Bad, because erasure would span graph storage and whichever gear holds settings, review requests and record IDs, so no single gear coordinates it.
 
 ### No gear
 
@@ -101,7 +101,7 @@ The platform parts work together without a Construct gear. Records pass through 
 - Good, because connectors still send only typed records.
 - Bad, because graph storage cannot enforce the read rules, so each product adapter would have to apply them.
 - Bad, because sensitive data must be enforced before graph storage embeds it, which spreads that duty across external workers.
-- Bad, because erasure has no single owner.
+- Bad, because no single gear coordinates erasure.
 - Bad, because subject settings, review requests and record IDs have no gear to hold them.
 
 ## More Information
@@ -110,7 +110,7 @@ The platform parts work together without a Construct gear. Records pass through 
 - Graph storage is used as it is: `cpt-cf-construct-adr-graph-storage-as-is`.
 - Model calls go through one small interface: `cpt-cf-construct-adr-one-model-interface`.
 - Security and data: the read rules and the sensitive-data verdicts sit in one gear.
-- Compliance: one owner coordinates erasure. Its 30-day removal depends on graph storage; see `cpt-cf-construct-adr-graph-storage-as-is`.
+- Compliance: one gear coordinates erasure. Its 30-day removal depends on graph storage; see `cpt-cf-construct-adr-graph-storage-as-is`.
 - Operations: the retention job runs on the cluster leader.
 - Reliability: Construct is the only read and write path for a profile. It follows the platform's standard availability posture; PRD section 6.2 sets no higher target.
 - Performance: not covered here; this decision sets no performance targets.
@@ -130,11 +130,11 @@ This decision directly addresses the following requirements or design elements:
 - `cpt-cf-construct-fr-profile-read` — every read goes through Construct, which applies the read rules.
 - `cpt-cf-construct-fr-review-request` — Construct holds review requests and hides a fact while under review.
 - `cpt-cf-construct-fr-settings` — Construct holds subject settings and applies personalization off.
-- `cpt-cf-construct-fr-subject-delete` — one owner coordinates erasure across graph storage and its own tables.
-- `cpt-cf-construct-fr-retention` — the same owner runs retention.
+- `cpt-cf-construct-fr-subject-delete` — one gear coordinates erasure across graph storage and its own tables.
+- `cpt-cf-construct-fr-retention` — the same gear runs retention.
 - `cpt-cf-construct-fr-sensitive-data-guardrails` — Construct enforces the verdicts before any write.
-- `cpt-cf-construct-nfr-deletion-time` — one owner makes deleted data stop being served at once.
-- `cpt-cf-construct-usecase-delete-all` — the subject's erasure has one owner.
+- `cpt-cf-construct-nfr-deletion-time` — one gear makes deleted data stop being served at once.
+- `cpt-cf-construct-usecase-delete-all` — one gear coordinates the subject's erasure.
 - `cpt-cf-construct-design-construct-gear` — the design this decision shapes.
 - `cpt-cf-construct-principle-single-profile-owner` — Construct is the only writer and the only read path.
 - `cpt-cf-construct-principle-model-proposes-code-decides` — the model proposes; Admission decides.

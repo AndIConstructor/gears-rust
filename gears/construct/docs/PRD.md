@@ -48,7 +48,7 @@ Construct is an open-source component of Constructor Fabric. It keeps one living
 
 Connectors are any systems that learn something about a subject. They send what they learn to Construct as typed records, under GTS (Global Type System) contracts that the connectors own. Construct checks each record against its type and turns it into facts. A record may add, replace or remove facts, and Construct decides which on its own. Applications and agents read the profile to personalize what they do. The profile's owner can see, correct and erase what Construct knows.
 
-All kinds of subjects use the same intake, decisions, guardrails, read path and MCP tools. They differ in two ways. First, each kind has its own categories; a person has identity, roles, skills and preferences. Second, the owner controls the profile. A person owns their own profile and has the rights of a data subject. For any other subject, the user who creates the profile owns it and controls it the same way. Where this document says the subject controls their data, for a subject that is not a person, the owner does. Facts about people can appear in any profile, such as a partner's contact person, so the guardrails run on every profile.
+All kinds of subjects use the same intake, decisions, guardrails, read path and MCP tools. They differ in three ways. First, each kind has its own categories; a person has identity, roles, skills and preferences. Second, the owner controls the profile. A person owns their own profile and has the rights of a data subject. For any other subject, the user who creates the profile owns it and controls it the same way. Where this document says the subject acts, states something or controls their data, for a subject that is not a person, the owner does. Third, the special categories of sensitive data, the data that must stay secret because of the law, security, safety, industry standards or contracts, can differ by kind of subject. This release implements them for a person.
 
 A team that builds a SaaS product can add Construct as a component instead of building its own profile store, privacy controls and agent access. The picture shows who talks to Construct, not how it is built.
 
@@ -56,7 +56,7 @@ A team that builds a SaaS product can add Construct as a component instead of bu
 flowchart LR
     CN["Connector"] -->|"sends records"| C(("Construct"))
     APP["Consumer application or agent"] -->|"reads and manages facts"| C
-    S["Subject"] -->|"views, corrects, erases"| C
+    S["Subject or owner"] -->|"views, corrects, erases"| C
     TA["Tenant administrator"] -->|"resolves review requests"| C
     TA -->|"sets tenant rules"| SS["Settings service"]
     C -->|"reads tenant settings"| SS
@@ -102,7 +102,7 @@ Every product that personalizes builds the same parts again. It collects signals
 | Dropped | A received record that Construct ends, for one of the causes listed in `cpt-cf-construct-fr-record-intake`, without storing its result. A record that changes nothing, or whose items are all blocked or redacted, is stored, not dropped |
 | Admission rules | The tenant's rules for which changes Construct may store: the sources it trusts, a confidence floor (the lowest confidence a change must have), the categories it may add to, and limits on how much one record may write |
 | Guardrails | The checks for special categories that run before a fact is stored |
-| Special category | One of the groups of sensitive data listed in `cpt-cf-construct-fr-sensitive-data-guardrails`, such as health data or authentication secrets |
+| Special category | One of the groups of sensitive data that must stay secret: the law, security, safety, industry standards or contracts require it. Listed in `cpt-cf-construct-fr-sensitive-data-guardrails`, such as health data or authentication secrets |
 | Log event | An event that Construct writes to the platform's log storage. It holds the tenant, the subject, the application or agent, the event type, the categories or the special category involved, and the time. It never holds a fact value or record content. It is kept for the log's retention period |
 
 ## 2. Actors
@@ -350,7 +350,7 @@ Every MCP call **MUST** be bound to the caller identity the platform authenticat
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-fr-sensitive-data-guardrails`
 
-Before it stores any fact, Construct **MUST** check the content for these special categories: personal identifiers (PII) such as national ID, passport or tax numbers; health data; biometric data; financial data; authentication secrets; contact details; precise geolocation; political opinions; sex life or sexual orientation; and other protected categories (trade-union membership, religious or philosophical beliefs, criminal records). For each special-category item the check finds, Construct **MUST** block or redact it: block for authentication secrets, health, biometric data, political opinions, sex life or sexual orientation and other protected categories, and redact for personal identifiers, financial data, contact details and precise geolocation. Blocking removes the item and stores the rest of the record's facts; redacting stores the fact with the item removed. Blocked or redacted content **MUST NOT** be served or kept after the record is processed. `cpt-cf-construct-nfr-guardrail-detection` sets how much the check must find. It **MUST NOT** be possible to turn the checks off. Construct **MUST** log every block and redaction with its category and without the content, and the data protection officer **MUST** be able to count them.
+Before it stores any fact, Construct **MUST** check the content for these special categories: personal identifiers (PII) such as national ID, passport or tax numbers; health data; biometric data; financial data; authentication secrets; contact details; precise geolocation; political opinions; sex life or sexual orientation; and other protected categories (trade-union membership, religious or philosophical beliefs, criminal records). For each special-category item the check finds, Construct **MUST** block or redact it: block for authentication secrets, health, biometric data, political opinions, sex life or sexual orientation and other protected categories, and redact for personal identifiers, financial data, contact details and precise geolocation. Blocking removes the item and stores the rest of the record's facts; redacting stores the fact with the item removed. Blocked or redacted content **MUST NOT** be served or kept after the record is processed. `cpt-cf-construct-nfr-guardrail-detection` sets how much the check must find. This list is for a person's profile; other kinds of subjects may have other special categories, defined with their profile types. It **MUST NOT** be possible to turn the checks off. Construct **MUST** log every block and redaction with its category and without the content, and the data protection officer **MUST** be able to count them.
 
 - **Rationale**: Chats and public pages often hold sensitive data; the profile must not become a store of it.
 - **Actors**: `cpt-cf-construct-actor-connector`, `cpt-cf-construct-actor-dpo`, `cpt-cf-construct-actor-llm-gateway`
@@ -370,7 +370,7 @@ Every operation **MUST** be confined to the caller's tenant. A read, count, sear
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-fr-access-control`
 
-Every request **MUST** carry a caller identity and a tenant that the platform has authenticated, and Construct **MUST** refuse a request without them. Construct **MUST** take the caller and the tenant only from the platform, never from the content of a record or request. The platform **MUST** authorize every operation. Sending records, reading profiles, managing facts, controlling one's own data, resolving review requests, changing tenant settings and exporting a subject's data **MUST** be separate permissions. Log events are read in the platform's log storage, under its own permissions.
+Every request **MUST** carry a caller identity and a tenant that the platform has authenticated, and Construct **MUST** refuse a request without them. Construct **MUST** take the caller and the tenant only from the platform, never from the content of a record or request. The platform **MUST** authorize every operation. Sending records, reading profiles, managing facts, controlling the profiles one owns, resolving review requests, changing tenant settings and exporting a subject's data **MUST** be separate permissions. Log events are read in the platform's log storage, under its own permissions.
 
 - **Rationale**: Each actor needs a different level of access; separate permissions let the tenant grant exactly what each needs.
 - **Actors**: `cpt-cf-construct-actor-platform-auth`, `cpt-cf-construct-actor-connector`, `cpt-cf-construct-actor-consumer-app`
@@ -573,7 +573,7 @@ The guardrails **MUST** find special-category content on the reference test set 
 
 - The tenant, as data controller, has a legal basis for processing its subjects' data, and collects consent in its own product where the law requires it.
 - Connectors give a record the same identity when they resend it because they did not get the answer.
-- The platform identifies the subject behind every call from an application or agent.
+- The platform identifies the caller behind every call from an application or agent, and decides whether the caller may act for the subject the call names: as that person, or as the profile's owner.
 - Host applications build the screens through which subjects and administrators use Construct.
 - The deployment operator chooses a model service that the tenant's contracts and data-transfer rules allow.
 
@@ -593,6 +593,7 @@ The guardrails **MUST** find special-category content on the reference test set 
 ## 13. Open Questions
 
 1. Does Construct need its own way to mark a subject as under the digital age of consent, and to refuse their records until a parent or guardian agrees? Proposed answer: no; the tenant's consent flow and the personalization setting cover it. Owner: Anastasia Berseneva (Construct product owner). Target date: 2026-10-30.
+2. How does a person named in another subject's profile, such as a partner's contact person, see, correct or erase the facts about them? This release ships only person profiles, so the question comes with the first other kind of subject. Proposed answer: the data protection officer handles their request as for any subject, and removes those facts from every profile in the tenant. Owner: Anastasia Berseneva (Construct product owner). Target date: before the first profile types for another kind of subject.
 
 ## 14. Traceability
 
