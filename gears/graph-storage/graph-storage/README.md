@@ -65,8 +65,8 @@ make test-graph-storage
 # a server can answer (the SQL/PGQ hop, its parity with the fallback, the
 # cross-tenant trap). It needs a server with SQL/PGQ *and* pgvector, which no
 # published image carries yet, so build the one this gear pins:
-docker build -f gears/graph-storage/docker/pg19-pgvector.Dockerfile \
-  -t pg19-pgvector:latest gears/graph-storage/docker
+docker build -f gears/graph-storage/deploy/docker/pg19-pgvector.Dockerfile \
+  -t pg19-pgvector:latest gears/graph-storage/deploy/docker
 GEARS_TEST_PG_GRAPH_IMAGE=pg19-pgvector:latest make test-graph-storage-pg
 ```
 
@@ -272,7 +272,7 @@ independently developed implementation can reach the service yet; #4873).
   path*: an edit to a base schema does not reach a database that already
   published it.
 - *No published image carries both PostgreSQL 19 and pgvector*, so the lane
-  builds its own from [`docker/pg19-pgvector.Dockerfile`](../docker/pg19-pgvector.Dockerfile);
+  builds its own from [`deploy/docker/pg19-pgvector.Dockerfile`](../deploy/docker/pg19-pgvector.Dockerfile);
   `test-containers` should publish one. PostgreSQL 16, the documented
   baseline, has no lane at all.
 - *Vector search needs two session parameters the gear cannot set for itself.*

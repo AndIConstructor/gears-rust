@@ -623,9 +623,9 @@ jobs:
       - name: Build the PostgreSQL 19 + pgvector image
         run: |
           docker build \
-            -f gears/graph-storage/docker/pg19-pgvector.Dockerfile \
+            -f gears/graph-storage/deploy/docker/pg19-pgvector.Dockerfile \
             -t pg19-pgvector:ci \
-            gears/graph-storage/docker
+            gears/graph-storage/deploy/docker
 
       # REQUIRED turns a skip into a failure: this lane exists to run against
       # a real server, and a green run that quietly skipped it proves nothing.
