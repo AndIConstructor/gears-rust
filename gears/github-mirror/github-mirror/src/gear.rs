@@ -16,21 +16,22 @@ use crate::api::rest::routes;
 use crate::config::GithubMirrorConfig;
 use crate::domain::local_client::LocalClient;
 use crate::domain::ports::github::GithubPort;
-use crate::domain::service::{SWEEP_AGAIN_AFTER, Service, ServiceConfig};
+use crate::domain::service::{ACTIVE_SYNC_TOUCH_EVERY, SWEEP_AGAIN_AFTER, Service, ServiceConfig};
 use crate::domain::sync::SyncPoolRunner;
 use crate::infra::github::client::GithubClient;
 use crate::infra::storage::sea_orm_repo::{
-    SeaOrmBranchRepository, SeaOrmCheckRunRepository, SeaOrmCommentRepository,
-    SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository, SeaOrmCommitRepository,
-    SeaOrmCommitStatusRepository, SeaOrmContributorRepository, SeaOrmDeploymentRepository,
-    SeaOrmEntityFingerprintRepository, SeaOrmHttpCache, SeaOrmIssueEventRepository,
-    SeaOrmIssueReactionRepository, SeaOrmIssueRepository, SeaOrmIssueTimelineRepository,
-    SeaOrmLabelRepository, SeaOrmMilestoneRepository, SeaOrmPullRequestCommitRepository,
-    SeaOrmPullRequestFileRepository, SeaOrmPullRequestRepository, SeaOrmReleaseRepository,
-    SeaOrmRepoRepository, SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository,
-    SeaOrmReviewRepository, SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository,
-    SeaOrmSyncWatermarkRepository, SeaOrmSyncWriter, SeaOrmTagRepository,
-    SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
+    SeaOrmActiveSyncRepository, SeaOrmBranchRepository, SeaOrmCheckRunRepository,
+    SeaOrmCommentRepository, SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository,
+    SeaOrmCommitRepository, SeaOrmCommitStatusRepository, SeaOrmContributorRepository,
+    SeaOrmDeploymentRepository, SeaOrmEntityFingerprintRepository, SeaOrmHttpCache,
+    SeaOrmIssueEventRepository, SeaOrmIssueReactionRepository, SeaOrmIssueRepository,
+    SeaOrmIssueTimelineRepository, SeaOrmLabelRepository, SeaOrmMilestoneRepository,
+    SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
+    SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
+    SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
+    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmSyncWatermarkRepository,
+    SeaOrmSyncWriter, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
+    SeaOrmWorkflowRunRepository,
 };
 
 type ConcreteService = Service;
@@ -146,6 +147,7 @@ impl Gear for GithubMirrorGear {
             issue_timeline,
             sync_sessions,
             repo_sync_status,
+            Arc::new(SeaOrmActiveSyncRepository::new(Arc::clone(&db))),
             Arc::new(SeaOrmSyncWriter::new(Arc::clone(&db))),
             Arc::new(SeaOrmEntityFingerprintRepository::new(Arc::clone(&db))),
             Arc::new(SeaOrmSyncWatermarkRepository::new(Arc::clone(&db))),
@@ -229,6 +231,8 @@ impl RunnableCapability for GithubMirrorGear {
         let max_concurrent = service.max_concurrent_syncs();
         let late_sweep = Arc::clone(&service);
         let late_cancel = new_cancel_token.clone();
+        let toucher = Arc::clone(&service);
+        let touch_cancel = new_cancel_token.clone();
         let runner = SyncPoolRunner::new(service, jobs, max_concurrent, new_cancel_token.clone());
         let handle = tokio::spawn(runner.run());
 
@@ -249,6 +253,20 @@ impl RunnableCapability for GithubMirrorGear {
                 () = late_cancel.cancelled() => {}
                 () = tokio::time::sleep(SWEEP_AGAIN_AFTER) => {
                     sweep_interrupted_sessions(&late_sweep).await;
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(ACTIVE_SYNC_TOUCH_EVERY);
+            loop {
+                tokio::select! {
+                    () = touch_cancel.cancelled() => break,
+                    _ = every.tick() => {
+                        if let Err(e) = toucher.touch_active_syncs().await {
+                            warn!(error = %e, "could not refresh this process's active sync rows");
+                        }
+                    }
                 }
             }
         });

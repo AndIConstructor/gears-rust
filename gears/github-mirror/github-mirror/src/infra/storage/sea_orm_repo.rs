@@ -36,6 +36,11 @@ use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::repo::{
+    ActiveSyncRecord, ActiveSyncRepository, EntityFingerprintRecord, EntityFingerprintRepository,
+    RepoRunStatus, RepoSyncStatusRecord, RepoSyncStatusRepository, SessionStatus,
+    SyncSessionRecord, SyncSessionRepository, SyncWatermarkRecord, SyncWatermarkRepository,
+};
+use crate::domain::repo::{
     BranchRecord, BranchRepository, CheckRunRecord, CheckRunRepository, CommentRecord,
     CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
     CommitFileRepository, CommitRecord, CommitRepository, CommitStatusRecord,
@@ -50,11 +55,6 @@ use crate::domain::repo::{
     ReviewThreadRecord, ReviewThreadRepository, TagRecord, TagRepository, WorkflowJobRecord,
     WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
-use crate::domain::repo::{
-    EntityFingerprintRecord, EntityFingerprintRepository, RepoRunStatus, RepoSyncStatusRecord,
-    RepoSyncStatusRepository, SessionStatus, SyncSessionRecord, SyncSessionRepository,
-    SyncWatermarkRecord, SyncWatermarkRepository,
-};
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use crate::infra::github::compression::{Compression, content_hash};
 
@@ -63,6 +63,7 @@ use super::mapper::{
     timeline_payload,
 };
 
+use super::entity::active_syncs::{self, Entity as ActiveSyncEntity};
 use super::entity::branches::{self, Entity as BranchEntity};
 use super::entity::check_runs::{self, Entity as CheckRunEntity};
 use super::entity::comments::{self, Entity as CommentEntity};
@@ -5418,6 +5419,208 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
         rows.into_iter()
             .map(|m| Ok((m.tenant_id, m.try_into()?)))
             .collect()
+    }
+}
+
+pub struct SeaOrmActiveSyncRepository {
+    db: Arc<DbProvider>,
+}
+
+impl SeaOrmActiveSyncRepository {
+    #[must_use]
+    pub fn new(db: Arc<DbProvider>) -> Self {
+        Self { db }
+    }
+}
+
+fn stored_scope_json(r: &ActiveSyncRecord) -> Result<String, DomainError> {
+    serde_json::to_string(&r.scope)
+        .map_err(|e| DomainError::internal(format!("the sync scope could not be stored: {e}")))
+}
+
+fn active_sync_model(
+    tenant_id: Uuid,
+    r: &ActiveSyncRecord,
+) -> Result<active_syncs::ActiveModel, DomainError> {
+    Ok(active_syncs::ActiveModel {
+        tenant_id: ActiveValue::Set(tenant_id),
+        repo_full_name: ActiveValue::Set(r.repo_full_name.clone()),
+        session_id: ActiveValue::Set(r.session_id),
+        owner_id: ActiveValue::Set(r.owner_id),
+        scope_json: ActiveValue::Set(stored_scope_json(r)?),
+        since: ActiveValue::Set(r.since.map(|at| at.to_rfc3339())),
+        updated_at: ActiveValue::Set(r.updated_at.clone()),
+    })
+}
+
+impl TryFrom<active_syncs::Model> for ActiveSyncRecord {
+    type Error = DomainError;
+
+    fn try_from(m: active_syncs::Model) -> Result<Self, DomainError> {
+        let scope = serde_json::from_str(&m.scope_json).map_err(|e| {
+            DomainError::internal(format!("a stored sync scope does not parse: {e}"))
+        })?;
+        let since = m
+            .since
+            .as_deref()
+            .map(|raw| {
+                chrono::DateTime::parse_from_rfc3339(raw)
+                    .map(|at| at.with_timezone(&Utc))
+                    .map_err(|e| {
+                        DomainError::internal(format!("a stored sync bound does not parse: {e}"))
+                    })
+            })
+            .transpose()?;
+        Ok(Self {
+            repo_full_name: m.repo_full_name,
+            session_id: m.session_id,
+            owner_id: m.owner_id,
+            scope,
+            since,
+            updated_at: m.updated_at,
+        })
+    }
+}
+
+#[async_trait]
+impl ActiveSyncRepository for SeaOrmActiveSyncRepository {
+    async fn find(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+    ) -> Result<Option<ActiveSyncRecord>, DomainError> {
+        let conn = self.db.conn()?;
+        let row = ActiveSyncEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(active_syncs::Column::RepoFullName.eq(repo_full_name)),
+            )
+            .one(&conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    async fn insert(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: &ActiveSyncRecord,
+    ) -> Result<bool, DomainError> {
+        let model = active_sync_model(tenant_id, record)?;
+        {
+            let conn = self.db.conn()?;
+            let mut on_conflict = SecureOnConflict::<ActiveSyncEntity>::columns([
+                active_syncs::Column::TenantId,
+                active_syncs::Column::RepoFullName,
+            ]);
+            on_conflict.inner_mut().do_nothing();
+            match ActiveSyncEntity::insert(model.clone())
+                .secure()
+                .scope_with_model(scope, &model)
+                .map_err(map_scope_error)?
+                .on_conflict(on_conflict)
+                .exec(&conn)
+                .await
+            {
+                Ok(_) | Err(ScopeError::Db(sea_orm::DbErr::RecordNotInserted)) => {}
+                Err(e) => return Err(map_scope_error(e)),
+            }
+        }
+        let stored = self.find(scope, &record.repo_full_name).await?;
+        Ok(stored.is_some_and(|stored| stored.session_id == record.session_id))
+    }
+
+    async fn replace(
+        &self,
+        scope: &AccessScope,
+        record: &ActiveSyncRecord,
+        previous_session_id: Uuid,
+    ) -> Result<bool, DomainError> {
+        let conn = self.db.conn()?;
+        let result = ActiveSyncEntity::update_many()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(active_syncs::Column::RepoFullName.eq(record.repo_full_name.as_str()))
+                    .add(active_syncs::Column::SessionId.eq(previous_session_id)),
+            )
+            .col_expr(
+                active_syncs::Column::SessionId,
+                Expr::value(record.session_id),
+            )
+            .col_expr(active_syncs::Column::OwnerId, Expr::value(record.owner_id))
+            .col_expr(
+                active_syncs::Column::ScopeJson,
+                Expr::value(stored_scope_json(record)?),
+            )
+            .col_expr(
+                active_syncs::Column::Since,
+                Expr::value(record.since.map(|at| at.to_rfc3339())),
+            )
+            .col_expr(
+                active_syncs::Column::UpdatedAt,
+                Expr::value(record.updated_at.clone()),
+            )
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(result.rows_affected == 1)
+    }
+
+    async fn delete(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        session_id: Uuid,
+    ) -> Result<(), DomainError> {
+        let conn = self.db.conn()?;
+        ActiveSyncEntity::delete_many()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(active_syncs::Column::RepoFullName.eq(repo_full_name))
+                    .add(active_syncs::Column::SessionId.eq(session_id)),
+            )
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(())
+    }
+
+    async fn touch(
+        &self,
+        scope: &AccessScope,
+        owner_id: Uuid,
+        updated_at: &str,
+    ) -> Result<(), DomainError> {
+        let conn = self.db.conn()?;
+        ActiveSyncEntity::update_many()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(active_syncs::Column::OwnerId.eq(owner_id)))
+            .col_expr(active_syncs::Column::UpdatedAt, Expr::value(updated_at))
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(())
+    }
+
+    async fn list(&self, scope: &AccessScope) -> Result<Vec<ActiveSyncRecord>, DomainError> {
+        let conn = self.db.conn()?;
+        let rows = ActiveSyncEntity::find()
+            .secure()
+            .scope_with(scope)
+            .all(&conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 }
 

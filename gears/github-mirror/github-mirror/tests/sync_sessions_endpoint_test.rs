@@ -10,8 +10,10 @@ use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
 use github_mirror::api::rest::routes::{ConcreteService, register_routes};
 use github_mirror::domain::ports::github::{FetchedRepository, ListingCompleteness};
-use github_mirror::domain::repo::{RepoRecord, SyncSessionRepository};
-use github_mirror::infra::storage::sea_orm_repo::SeaOrmSyncSessionRepository;
+use github_mirror::domain::repo::{ActiveSyncRepository, RepoRecord, SyncSessionRepository};
+use github_mirror::infra::storage::sea_orm_repo::{
+    SeaOrmActiveSyncRepository, SeaOrmSyncSessionRepository,
+};
 use toolkit::api::OpenApiRegistryImpl;
 use toolkit_db::{DBProvider, DbError};
 use toolkit_security::AccessScope;
@@ -213,11 +215,26 @@ async fn a_restart_closes_out_sessions_left_in_flight() {
         .expect("the session must exist");
     let long_ago = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
     row.created_at.clone_from(&long_ago);
-    row.updated_at = Some(long_ago);
+    row.updated_at = Some(long_ago.clone());
     sessions
         .upsert(&scope, tenant, row)
         .await
         .expect("the session must write");
+
+    let active_syncs =
+        SeaOrmActiveSyncRepository::new(Arc::new(DBProvider::<DbError>::new(db.clone())));
+    let mut active = active_syncs
+        .find(&scope, "acme/widget")
+        .await
+        .expect("the active sync must read")
+        .expect("the active sync must exist");
+    active.updated_at = long_ago;
+    assert!(
+        active_syncs
+            .replace(&scope, &active, active.session_id)
+            .await
+            .expect("the active sync must write")
+    );
 
     let restarted = common::service_with_github(
         db,

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -22,19 +22,19 @@ use uuid::Uuid;
 use super::error::DomainError;
 use super::ports::github::{FetchOptions, GithubPort};
 use super::repo::{
-    BranchRecord, BranchRepository, CheckRunRecord, CheckRunRepository, CommentRecord,
-    CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
-    CommitFileRepository, CommitRecord, CommitRepository, CommitStatusRecord,
-    CommitStatusRepository, ContributorRecord, ContributorRepository, DeploymentRecord,
-    DeploymentRepository, EntityFingerprintRepository, IssueEventRecord, IssueEventRepository,
-    IssueReactionRecord, IssueReactionRepository, IssueRecord, IssueRepository,
-    IssueTimelineEventRecord, IssueTimelineRepository, LabelRecord, LabelRepository, ListingFilter,
-    MilestoneRecord, MilestoneRepository, PageWindow, PullRequestCommitRecord,
-    PullRequestCommitRepository, PullRequestFileRecord, PullRequestFileRepository,
-    PullRequestRecord, PullRequestRepository, ReleaseRecord, ReleaseRepository, RepoRecord,
-    RepoRepository, RepoRunStatus, RepoSyncStatusRecord, RepoSyncStatusRepository,
-    ReviewCommentRecord, ReviewCommentRepository, ReviewRecord, ReviewRepository,
-    ReviewThreadRecord, ReviewThreadRepository, SessionStatus, SyncSessionRecord,
+    ActiveSyncRecord, ActiveSyncRepository, BranchRecord, BranchRepository, CheckRunRecord,
+    CheckRunRepository, CommentRecord, CommentRepository, CommitCommentRecord,
+    CommitCommentRepository, CommitFileRecord, CommitFileRepository, CommitRecord,
+    CommitRepository, CommitStatusRecord, CommitStatusRepository, ContributorRecord,
+    ContributorRepository, DeploymentRecord, DeploymentRepository, EntityFingerprintRepository,
+    IssueEventRecord, IssueEventRepository, IssueReactionRecord, IssueReactionRepository,
+    IssueRecord, IssueRepository, IssueTimelineEventRecord, IssueTimelineRepository, LabelRecord,
+    LabelRepository, ListingFilter, MilestoneRecord, MilestoneRepository, PageWindow,
+    PullRequestCommitRecord, PullRequestCommitRepository, PullRequestFileRecord,
+    PullRequestFileRepository, PullRequestRecord, PullRequestRepository, ReleaseRecord,
+    ReleaseRepository, RepoRecord, RepoRepository, RepoRunStatus, RepoSyncStatusRecord,
+    RepoSyncStatusRepository, ReviewCommentRecord, ReviewCommentRepository, ReviewRecord,
+    ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, SessionStatus, SyncSessionRecord,
     SyncSessionRepository, SyncWatermarkRepository, SyncWriter, TagRecord, TagRepository,
     WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
@@ -177,7 +177,11 @@ fn abandoned(session: &SyncSessionRecord, now: DateTime<Utc>) -> bool {
         .as_deref()
         .or(session.started_at.as_deref())
         .unwrap_or(&session.created_at);
-    DateTime::parse_from_rfc3339(last_seen)
+    silent_too_long(last_seen, now)
+}
+
+fn silent_too_long(stamp: &str, now: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(stamp)
         .is_ok_and(|at| (now - at.with_timezone(&Utc)).num_seconds() > ABANDONED_AFTER_SECS)
 }
 
@@ -353,6 +357,10 @@ const HEARTBEAT_SECS: u64 = 2;
 /// is wide enough for a run stalled on a slow write or a rate-limit wait to
 /// keep its lock.
 const ABANDONED_AFTER_SECS: i64 = 300;
+
+pub(crate) const ACTIVE_SYNC_TOUCH_EVERY: std::time::Duration = std::time::Duration::from_mins(1);
+
+const TAKE_ACTIVE_SYNC_ATTEMPTS: usize = 3;
 
 pub(crate) const SWEEP_AGAIN_AFTER: std::time::Duration =
     std::time::Duration::from_secs(ABANDONED_AFTER_SECS.unsigned_abs() + HEARTBEAT_SECS);
@@ -538,7 +546,8 @@ pub struct Service {
     config: ServiceConfig,
     sync_tx: mpsc::Sender<SyncJob>,
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
-    in_flight: InFlight,
+    active_syncs: Arc<dyn ActiveSyncRepository>,
+    instance_id: Uuid,
     /// One gate per repository, so the look, the write and the claim that a
     /// queue request makes are serialised for that repository alone rather than
     /// for the whole gear.
@@ -564,18 +573,17 @@ enum PreparedSync {
     },
 }
 
-type InFlight = Arc<std::sync::Mutex<HashMap<InFlightKey, Claim>>>;
-
 pub(crate) struct ClaimRelease {
-    in_flight: InFlight,
-    key: InFlightKey,
+    active_syncs: Arc<dyn ActiveSyncRepository>,
+    scope: AccessScope,
+    repo_full_name: String,
     session_id: Uuid,
 }
 
 impl std::fmt::Debug for ClaimRelease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClaimRelease")
-            .field("key", &self.key)
+            .field("repo_full_name", &self.repo_full_name)
             .field("session_id", &self.session_id)
             .finish_non_exhaustive()
     }
@@ -583,16 +591,26 @@ impl std::fmt::Debug for ClaimRelease {
 
 impl Drop for ClaimRelease {
     fn drop(&mut self) {
-        let mut in_flight = self
-            .in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if in_flight
-            .get(&self.key)
-            .is_some_and(|claim| claim.session_id == self.session_id)
-        {
-            in_flight.remove(&self.key);
-        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let active_syncs = Arc::clone(&self.active_syncs);
+        let scope = self.scope.clone();
+        let repo_full_name = std::mem::take(&mut self.repo_full_name);
+        let session_id = self.session_id;
+        runtime.spawn(async move {
+            if let Err(e) = active_syncs
+                .delete(&scope, &repo_full_name, session_id)
+                .await
+            {
+                tracing::warn!(
+                    repository = %repo_full_name,
+                    session_id = %session_id,
+                    error = %e,
+                    "could not remove the repository's active sync row"
+                );
+            }
+        });
     }
 }
 
@@ -717,7 +735,8 @@ impl Clone for Service {
             config: self.config.clone(),
             sync_tx: self.sync_tx.clone(),
             sync_rx: Arc::clone(&self.sync_rx),
-            in_flight: Arc::clone(&self.in_flight),
+            active_syncs: Arc::clone(&self.active_syncs),
+            instance_id: self.instance_id,
             claim_gates: self.claim_gates.clone(),
             shutdown: Arc::clone(&self.shutdown),
         }
@@ -761,6 +780,7 @@ impl Service {
         issue_timeline: Arc<dyn IssueTimelineRepository>,
         sync_sessions: Arc<dyn SyncSessionRepository>,
         repo_sync_status: Arc<dyn RepoSyncStatusRepository>,
+        active_syncs: Arc<dyn ActiveSyncRepository>,
         sync_writer: Arc<dyn SyncWriter>,
         fingerprints: Arc<dyn EntityFingerprintRepository>,
         watermark_store: Arc<dyn SyncWatermarkRepository>,
@@ -807,7 +827,8 @@ impl Service {
             config,
             sync_tx,
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
-            in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            active_syncs,
+            instance_id: Uuid::new_v4(),
             claim_gates: gate::ClaimGates::default(),
             shutdown: Arc::new(OnceLock::new()),
         }
@@ -3695,12 +3716,15 @@ impl Service {
             PreparedSync::Claimed { job, session } => (job, session),
         };
         let id = session.id;
-        let key = (ctx.subject_tenant_id(), session.repo_full_name.clone());
         if let Err(e) = self.sync_tx.try_send(*job) {
-            self.release_in_flight(&key);
             let reason = format!("sync could not be queued: {e}");
-            self.fail_session(&scopes.session, key.0, *session, reason.clone())
-                .await;
+            self.fail_session(
+                &scopes.session,
+                ctx.subject_tenant_id(),
+                *session,
+                reason.clone(),
+            )
+            .await;
             return Err(DomainError::internal(reason));
         }
 
@@ -3776,7 +3800,7 @@ impl Service {
             created_at: now.clone(),
             started_at: None,
             ended_at: None,
-            updated_at: Some(now),
+            updated_at: Some(now.clone()),
         };
         self.release_lock_left_by_a_dead_run(scopes, tenant_id, &key.1)
             .await;
@@ -3784,47 +3808,37 @@ impl Service {
         let claim = {
             // Held for this repository only, so two concurrent requests for it
             // cannot both decide they are the first while a request for
-            // another repository waits on nothing. The row is written before
-            // the claim goes in, so the id a collapsing request is handed
-            // always names a session it can read.
+            // another repository waits on nothing. The session row is written
+            // before the gate is let go, so the id a collapsing request of
+            // this process is handed always names a session it can read.
             let lease = self.claim_gates.lease(&key);
             let claimed = lease.lock().await;
 
-            let running = self
-                .in_flight
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&key)
-                .copied();
-            if let Some(running) = running {
-                // Released first: the claim is already copied out, and reading
-                // the running session's status is a database round trip no
-                // other request for this repository needs to wait behind.
+            let active = ActiveSyncRecord {
+                repo_full_name: key.1.clone(),
+                session_id: id,
+                owner_id: self.instance_id,
+                scope: sync_scope,
+                since,
+                updated_at: now,
+            };
+            if let Some(running) = self.take_active_sync(scopes, tenant_id, &active).await? {
                 drop(claimed);
                 return self
                     .join_or_refuse(scope, &key.1, running, sync_scope, since)
                     .await
                     .map(PreparedSync::Joined);
             }
+            let claim = ClaimRelease {
+                active_syncs: Arc::clone(&self.active_syncs),
+                scope: scopes.repo_status.clone(),
+                repo_full_name: key.1,
+                session_id: id,
+            };
             self.sync_sessions
                 .upsert(scope, tenant_id, session.clone())
                 .await?;
-            self.in_flight
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    key.clone(),
-                    Claim {
-                        session_id: id,
-                        scope: sync_scope,
-                        since,
-                    },
-                );
-            ClaimRelease {
-                in_flight: Arc::clone(&self.in_flight),
-                key,
-                session_id: id,
-            }
+            claim
         };
         if let Err(e) = self
             .mark_repo_status_in(
@@ -3952,12 +3966,70 @@ impl Service {
         Ok(session.map_or(SessionStatus::InProgress, |session| session.status))
     }
 
-    /// Give up a repository's claim so the next request queues a fresh sync.
-    fn release_in_flight(&self, key: &InFlightKey) {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(key);
+    async fn take_active_sync(
+        &self,
+        scopes: &EnqueueScopes,
+        tenant_id: Uuid,
+        mine: &ActiveSyncRecord,
+    ) -> Result<Option<Claim>, DomainError> {
+        for _ in 0..TAKE_ACTIVE_SYNC_ATTEMPTS {
+            let held = self
+                .active_syncs
+                .find(&scopes.repo_status, &mine.repo_full_name)
+                .await?;
+            let taken = match held {
+                None => {
+                    self.active_syncs
+                        .insert(&scopes.repo_status, tenant_id, mine)
+                        .await?
+                }
+                Some(held) if self.active_sync_is_live(&scopes.session, &held).await? => {
+                    return Ok(Some(Claim {
+                        session_id: held.session_id,
+                        scope: held.scope,
+                        since: held.since,
+                    }));
+                }
+                Some(held) => {
+                    self.active_syncs
+                        .replace(&scopes.repo_status, mine, held.session_id)
+                        .await?
+                }
+            };
+            if taken {
+                return Ok(None);
+            }
+        }
+        Err(DomainError::Conflict(format!(
+            "another request is starting a sync of {} right now; try again",
+            mine.repo_full_name
+        )))
+    }
+
+    async fn active_sync_is_live(
+        &self,
+        scope: &AccessScope,
+        held: &ActiveSyncRecord,
+    ) -> Result<bool, DomainError> {
+        if silent_too_long(&held.updated_at, Utc::now()) {
+            return Ok(false);
+        }
+        let session = self
+            .sync_sessions
+            .find_by_id(scope, held.session_id)
+            .await?;
+        Ok(session.is_none_or(|session| {
+            matches!(
+                session.status,
+                SessionStatus::Queued | SessionStatus::InProgress
+            )
+        }))
+    }
+
+    pub(crate) async fn touch_active_syncs(&self) -> Result<(), DomainError> {
+        self.active_syncs
+            .touch(&AccessScope::allow_all(), self.instance_id, &now_rfc3339())
+            .await
     }
 
     /// Take sole ownership of the job stream. The gear's background task calls
@@ -4156,11 +4228,11 @@ impl Service {
     /// long ago. What is left is what one process had in flight, which the
     /// pool width bounds.
     ///
-    /// Only a row [`abandoned`] says is dead, and that this process holds no
-    /// claim for, is closed: during a rolling deploy or with two replicas the
-    /// other process's runs keep their heartbeat, so they are left alone. A
-    /// row from a process that died moments before this one started is not
-    /// abandoned yet, which is why start-up calls this again after
+    /// Only a row [`abandoned`] says is dead, and whose `gm_active_syncs` row
+    /// has gone as long without a refresh, is closed: during a rolling deploy
+    /// or with two replicas the other process keeps both fresh, so its runs
+    /// are left alone. A row from a process that died moments before this one
+    /// started is not abandoned yet, which is why start-up calls this again after
     /// [`SWEEP_AGAIN_AFTER`]. Across every tenant — hence the unconstrained
     /// scope, which is why this takes no [`SecurityContext`] and is not
     /// reachable from the API.
@@ -4177,11 +4249,20 @@ impl Service {
             .await?;
 
         let now = Utc::now();
+        let live: HashSet<Uuid> = self
+            .active_syncs
+            .list(scope)
+            .await?
+            .into_iter()
+            .filter(|active| !silent_too_long(&active.updated_at, now))
+            .map(|active| active.session_id)
+            .collect();
         let mut count = 0;
         for (tenant_id, mut session) in stale {
-            if !abandoned(&session, now) || self.session_in_flight(session.id) {
+            if !abandoned(&session, now) || live.contains(&session.id) {
                 continue;
             }
+            let (repo_full_name, session_id) = (session.repo_full_name.clone(), session.id);
             self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
                 .await;
             count += 1;
@@ -4191,17 +4272,12 @@ impl Service {
             session.updated_at.clone_from(&session.ended_at);
             session.error = Some("the server restarted while this sync was in flight".to_owned());
             self.sync_sessions.upsert(scope, tenant_id, session).await?;
+            self.active_syncs
+                .delete(scope, &repo_full_name, session_id)
+                .await?;
         }
 
         Ok(count)
-    }
-
-    fn session_in_flight(&self, session_id: Uuid) -> bool {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .any(|claim| claim.session_id == session_id)
     }
 
     /// Drop the per-repo sync lock marker left for `repo` by a run whose

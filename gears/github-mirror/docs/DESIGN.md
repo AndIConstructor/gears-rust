@@ -196,7 +196,7 @@ SeaORM through toolkit-db, with SQLite and PostgreSQL in the migrations. The mig
                  │                                   │
                  ▼                                   ▼
 ┌────────────────────────────── Service ──────────────────────────────┐
-│ policy enforcer · claims (in_flight) · claim gates · sessions        │
+│ policy enforcer · active syncs · claim gates · sessions              │
 │ prepare_sync ──► enqueue_sync_scoped ──► sync channel (64)           │
 │             └──► sync_now ──► run_and_record (on its own task)       │
 └──────────────────────────────────────────────────────────────────────┘
@@ -392,7 +392,7 @@ sequenceDiagram
 | `summary_json` | The `SyncSummary` of a `complete` run |
 | `created_at`, `started_at`, `ended_at`, `updated_at` | `updated_at` is the heartbeat |
 
-Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the run; `in_progress` → `complete`, `failed` (an error, or the deadline) or `interrupted` (cancelled by a shutdown). A `queued` or `in_progress` row whose `updated_at` has not moved for five minutes, and that this process holds no claim for, has nobody behind it and is set to `interrupted`: at start-up, and once more five minutes later, for a process that died just before this one started. Another replica's live runs keep their heartbeat, so they are left alone. A run that starts clears `ended_at` and `error`.
+Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the run; `in_progress` → `complete`, `failed` (an error, or the deadline) or `interrupted` (cancelled by a shutdown). A `queued` or `in_progress` row whose `updated_at` has not moved for five minutes, and whose `gm_active_syncs` row has gone as long without a refresh, has nobody behind it and is set to `interrupted`: at start-up, and once more five minutes later, for a process that died just before this one started. Another replica keeps both fresh, so its live runs are left alone. A run that starts clears `ended_at` and `error`.
 
 #### Table: gm_repo_sync_status
 
@@ -403,6 +403,15 @@ Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the
 | `status` | `in_progress` or `complete` |
 | `last_session_id` | The session that last touched it; used to tell whether its holder is still alive |
 | `last_synced_at` | When a run last completed |
+
+#### Table: gm_active_syncs
+
+| Column | Description |
+|---|---|
+| `tenant_id`, `repo_full_name` | Primary key: at most one queued or running sync per repository, across every process |
+| `session_id` | The session holding the repository |
+| `scope_json`, `since` | The terms it runs on; a request on the same terms joins it, others get `409` |
+| `owner_id`, `updated_at` | The process that holds it, which refreshes `updated_at` every minute |
 
 #### Table: gm_http_cache
 
@@ -488,7 +497,7 @@ An issue is refined when either its reactions or its timeline scope wants it.
 
 | Mechanism | Scope | Purpose |
 |---|---|---|
-| Claim (`in_flight`) | this process, per tenant and repository | One queued or running sync per repository; a request is joined or refused against it. Released by a guard carried in the job, so a job that ends, is dropped from the queue or is aborted gives it back |
+| Active sync (`gm_active_syncs`) | the database, per tenant and repository | One queued or running sync per repository, across every process; a request is joined or refused against it. Inserted before the session row; deleted by a guard carried in the job, so a job that ends, is dropped from the queue or is aborted gives it back. A row whose owner has not refreshed it for 300 seconds, or whose session has ended, is taken over |
 | Claim gate | this process, per repository | Serializes the check, the session write and the claim of concurrent requests for one repository; dropped when nobody holds it |
 | Advisory lock `sync/{tenant}/{owner}/{name}` | toolkit-db, across processes | One run per repository; held for the whole run; a held lock answers `409` |
 | Heartbeat | the session row | `updated_at` every 2 seconds; a row silent for 300 seconds is abandoned, and its lock may be taken |
