@@ -679,7 +679,7 @@ async fn fetch_repository(
             )
             .await?;
         issue_reactions.extend(detail.reactions);
-        issue_timeline.extend(detail.timeline);
+        issue_timeline.extend(detail.timeline.into_iter().flatten());
     }
 
     let mut pull_requests = Vec::new();

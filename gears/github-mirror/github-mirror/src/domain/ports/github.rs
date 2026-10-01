@@ -154,7 +154,7 @@ pub struct IssueDetailWants {
 pub struct IssueDetail {
     pub issue_number: i64,
     pub reactions: Vec<IssueReactionRecord>,
-    pub timeline: Vec<IssueTimelineEventRecord>,
+    pub timeline: Option<Vec<IssueTimelineEventRecord>>,
 }
 
 /// What indexing the pull-request family lists.

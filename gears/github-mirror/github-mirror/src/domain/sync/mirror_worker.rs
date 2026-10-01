@@ -492,7 +492,10 @@ impl MirrorWorker {
             .github
             .refine_issue(run.repo_ref()?, number, wants, &run.options)
             .await?;
-        let (reactions, timeline) = (count(&detail.reactions), count(&detail.timeline));
+        let (reactions, timeline) = (
+            count(&detail.reactions),
+            count(detail.timeline.as_deref().unwrap_or_default()),
+        );
         self.writer
             .write_issue_detail(&run.scope, run.tenant_id, repo_id, detail)
             .await?;

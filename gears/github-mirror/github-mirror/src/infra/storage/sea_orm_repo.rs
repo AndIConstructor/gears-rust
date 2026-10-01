@@ -4676,18 +4676,19 @@ impl SyncWriter for SeaOrmSyncWriter {
                         issue_reaction_upsert_in,
                         detail.reactions
                     );
-                    // Rows are keyed by position, so a shorter timeline would
-                    // leave the old tail behind: clear the issue before
-                    // rewriting it.
-                    issue_timeline_delete_by_issues_in(tx, &scope, repo_id, &[detail.issue_number])
+                    if let Some(timeline) = detail.timeline {
+                        // Rows are keyed by position, so a shorter timeline would
+                        // leave the old tail behind: clear the issue before
+                        // rewriting it.
+                        issue_timeline_delete_by_issues_in(
+                            tx,
+                            &scope,
+                            repo_id,
+                            &[detail.issue_number],
+                        )
                         .await?;
-                    sync_table!(
-                        tx,
-                        &scope,
-                        tenant_id,
-                        issue_timeline_upsert_in,
-                        detail.timeline
-                    );
+                        sync_table!(tx, &scope, tenant_id, issue_timeline_upsert_in, timeline);
+                    }
                     Ok(())
                 })
             })

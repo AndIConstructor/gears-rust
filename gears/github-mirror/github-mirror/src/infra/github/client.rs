@@ -2224,11 +2224,15 @@ impl GithubPort for GithubClient {
                     options,
                 )
                 .await?;
-            detail.timeline = entries
-                .iter()
-                .enumerate()
-                .map(|(position, entry)| issue_timeline_record(repo_id, number, position, entry))
-                .collect();
+            detail.timeline = Some(
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(position, entry)| {
+                        issue_timeline_record(repo_id, number, position, entry)
+                    })
+                    .collect(),
+            );
         }
         Ok(detail)
     }

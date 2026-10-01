@@ -200,15 +200,13 @@ impl GithubPort for FakeGithub {
             } else {
                 Vec::new()
             },
-            timeline: if wants.timeline {
+            timeline: wants.timeline.then(|| {
                 f.issue_timeline
                     .iter()
                     .filter(|e| e.issue_number == number)
                     .cloned()
                     .collect()
-            } else {
-                Vec::new()
-            },
+            }),
         })
     }
 
