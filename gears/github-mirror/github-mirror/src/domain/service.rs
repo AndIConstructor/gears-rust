@@ -362,6 +362,8 @@ pub(crate) const ACTIVE_SYNC_TOUCH_EVERY: std::time::Duration = std::time::Durat
 
 const TAKE_ACTIVE_SYNC_ATTEMPTS: usize = 3;
 
+const QUEUE_FULL_RETRY_AFTER_SECS: u64 = 30;
+
 pub(crate) const SWEEP_AGAIN_AFTER: std::time::Duration =
     std::time::Duration::from_secs(ABANDONED_AFTER_SECS.unsigned_abs() + HEARTBEAT_SECS);
 
@@ -3663,7 +3665,7 @@ impl Service {
     ///
     /// # Errors
     /// `Conflict` when a sync of this repository is running on other terms,
-    /// `Forbidden`/`Database` as usual, or `Internal` when the queue is full
+    /// `Forbidden`/`Database` as usual, or `Unavailable` when the queue is full
     /// or the background worker is not running; in the last case the session
     /// is left behind in `failed` rather than silently dropped.
     pub async fn enqueue_sync(
@@ -3717,15 +3719,24 @@ impl Service {
         };
         let id = session.id;
         if let Err(e) = self.sync_tx.try_send(*job) {
-            let reason = format!("sync could not be queued: {e}");
+            let error = match e {
+                mpsc::error::TrySendError::Full(_) => DomainError::Unavailable {
+                    message: "the sync queue is full; try again shortly".to_owned(),
+                    retry_after_secs: Some(QUEUE_FULL_RETRY_AFTER_SECS),
+                },
+                mpsc::error::TrySendError::Closed(_) => DomainError::Unavailable {
+                    message: "the sync worker is not running".to_owned(),
+                    retry_after_secs: None,
+                },
+            };
             self.fail_session(
                 &scopes.session,
                 ctx.subject_tenant_id(),
                 *session,
-                reason.clone(),
+                error.public_text(),
             )
             .await;
-            return Err(DomainError::internal(reason));
+            return Err(error);
         }
 
         Ok(QueuedSync {
@@ -3835,13 +3846,7 @@ impl Service {
                 repo_full_name: key.1,
                 session_id: id,
             };
-            self.sync_sessions
-                .upsert(scope, tenant_id, session.clone())
-                .await?;
-            claim
-        };
-        if let Err(e) = self
-            .mark_repo_status_in(
+            self.mark_repo_status_in(
                 &scopes.repo_status,
                 ctx,
                 &session.repo_full_name,
@@ -3849,13 +3854,12 @@ impl Service {
                 RepoRunStatus::InProgress,
                 None,
             )
-            .await
-        {
-            drop(claim);
-            self.fail_session(scope, tenant_id, session, e.public_text())
-                .await;
-            return Err(e);
-        }
+            .await?;
+            self.sync_sessions
+                .upsert(scope, tenant_id, session.clone())
+                .await?;
+            claim
+        };
 
         let job = SyncJob {
             session_id: id,

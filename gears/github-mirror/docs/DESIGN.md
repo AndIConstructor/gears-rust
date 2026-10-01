@@ -341,7 +341,7 @@ sequenceDiagram
     S-->>C: status, progress, summary
 ```
 
-A second request for the same repository while the first is queued or running gets the same session on the same terms, and `409` on other terms. A full queue or a stopped pool fails the new session at once and answers with an internal error.
+A second request for the same repository while the first is queued or running gets the same session on the same terms, and `409` on other terms. A full queue or a stopped pool fails the new session at once and answers `503`; a full queue adds `Retry-After: 30`.
 
 #### In-Process Sync
 

@@ -191,7 +191,11 @@ impl SyncPoolRunner {
                 break;
             }
             let event = self.next_event(queue.len(), &mut in_flight, draining).await;
+            let was_draining = draining;
             draining = Self::handle_event(event, &mut queue, in_flight.len(), draining);
+            if draining && !was_draining {
+                self.jobs.close();
+            }
         }
         info!("github-mirror sync pool stopped");
     }

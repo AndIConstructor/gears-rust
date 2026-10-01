@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS gm_sync_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_gm_sync_sessions_tenant_created
     ON gm_sync_sessions (tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_gm_sync_sessions_status
+    ON gm_sync_sessions (status);
                 "
             }
             sea_orm::DatabaseBackend::MySql => {
@@ -48,7 +50,8 @@ CREATE TABLE IF NOT EXISTS gm_sync_sessions (
     ended_at VARCHAR(64),
     updated_at VARCHAR(64),
     PRIMARY KEY (tenant_id, id),
-    KEY idx_gm_sync_sessions_tenant_created (tenant_id, created_at)
+    KEY idx_gm_sync_sessions_tenant_created (tenant_id, created_at),
+    KEY idx_gm_sync_sessions_status (status)
 );
                 "
             }
@@ -71,6 +74,8 @@ CREATE TABLE IF NOT EXISTS gm_sync_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_gm_sync_sessions_tenant_created
     ON gm_sync_sessions (tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_gm_sync_sessions_status
+    ON gm_sync_sessions (status);
                 "
             }
             other => {

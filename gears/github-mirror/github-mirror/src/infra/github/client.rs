@@ -152,22 +152,51 @@ fn graphql_refused(errors: &[serde_json::Value]) -> DomainError {
     ))
 }
 
-async fn read_capped(mut response: reqwest::Response) -> Result<Vec<u8>, DomainError> {
+enum ReadFailure {
+    Transport(reqwest::Error),
+    TooLarge,
+}
+
+impl ReadFailure {
+    fn into_error(self) -> DomainError {
+        match self {
+            Self::Transport(e) => {
+                DomainError::internal(format!("GitHub response read failed: {e}"))
+            }
+            Self::TooLarge => DomainError::internal(format!(
+                "GitHub response is larger than {MAX_BODY_BYTES} bytes"
+            )),
+        }
+    }
+}
+
+async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, ReadFailure> {
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(ReadFailure::Transport)? {
         let size = body.len().saturating_add(chunk.len());
         if u64::try_from(size).unwrap_or(u64::MAX) > MAX_BODY_BYTES {
-            return Err(DomainError::internal(format!(
-                "GitHub response is larger than {MAX_BODY_BYTES} bytes"
-            )));
+            return Err(ReadFailure::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+#[cfg(test)]
+async fn read_capped(response: reqwest::Response) -> Result<Vec<u8>, DomainError> {
+    read_body(response).await.map_err(ReadFailure::into_error)
+}
+
+fn graphql_rate_limited(body: &serde_json::Value) -> bool {
+    body.get("data").is_none_or(serde_json::Value::is_null)
+        && body
+            .get("errors")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|errors| {
+                errors.iter().any(|error| {
+                    error.get("type").and_then(serde_json::Value::as_str) == Some("RATE_LIMITED")
+                })
+            })
 }
 
 /// Whether the URL points at this machine, where plain `http` carries no token
@@ -407,7 +436,7 @@ impl GithubClient {
         match self.cache.get(&options.access_scope, key).await {
             Ok(entry) => entry,
             Err(e) => {
-                tracing::warn!(%url, error = %e, "cache read failed; fetching fresh");
+                tracing::warn!(url = %redacted_word(url), error = %e, "cache read failed; fetching fresh");
                 None
             }
         }
@@ -502,7 +531,7 @@ impl GithubClient {
         // `_permit` lives until this function returns, so a request counts
         // against the ceiling until its body has been read. A retry gives its
         // permit up first: a request asleep on a backoff is not in flight.
-        let (response, rate_limited, _permit) = loop {
+        let (body, etag, last_modified, next_page, _permit) = loop {
             let permit = self.request_permit(&options.cancel).await?;
             let response = match Self::send_cancellable(
                 self.conditional_request(url, cached.as_ref()),
@@ -548,39 +577,49 @@ impl GithubClient {
                 attempt += 1;
                 continue;
             }
-            break (response, rate_limited, permit);
+
+            if status == reqwest::StatusCode::NOT_MODIFIED {
+                return Self::serve_from_cache(url, cached.as_ref(), response.headers());
+            }
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Err(DomainError::NotFound);
+            }
+            if rate_limited {
+                return Err(DomainError::internal(format!(
+                    "GitHub rate limit persisted through {RATE_LIMIT_RETRIES} retries for {url}"
+                )));
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                // Not a rate limit (checked above): the mirror's own token no
+                // longer sees this resource - the repo went private, the token
+                // was revoked, or its scopes shrank.
+                return Err(DomainError::AccessLost(format!(
+                    "GitHub answered {status} for {url}"
+                )));
+            }
+            if !status.is_success() {
+                return Err(DomainError::internal(format!(
+                    "GitHub responded with {status} for {url}"
+                )));
+            }
+
+            let etag = header_string(response.headers(), "etag");
+            let last_modified = header_string(response.headers(), "last-modified");
+            let next_page = next_link(response.headers());
+            match read_body(response).await {
+                Ok(body) => break (body, etag, last_modified, next_page, permit),
+                Err(ReadFailure::Transport(e)) if upstream_attempt < UPSTREAM_RETRIES => {
+                    drop(permit);
+                    self.back_off_upstream(url, &e.to_string(), upstream_attempt, &options.cancel)
+                        .await?;
+                    upstream_attempt += 1;
+                }
+                Err(failure) => return Err(failure.into_error()),
+            }
         };
 
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_MODIFIED {
-            return Self::serve_from_cache(url, cached.as_ref(), response.headers());
-        }
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(DomainError::NotFound);
-        }
-        if rate_limited {
-            return Err(DomainError::internal(format!(
-                "GitHub rate limit persisted through {RATE_LIMIT_RETRIES} retries for {url}"
-            )));
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            // Not a rate limit (checked above): the mirror's own token no
-            // longer sees this resource - the repo went private, the token
-            // was revoked, or its scopes shrank.
-            return Err(DomainError::AccessLost(format!(
-                "GitHub answered {status} for {url}"
-            )));
-        }
-        if !status.is_success() {
-            return Err(DomainError::internal(format!(
-                "GitHub responded with {status} for {url}"
-            )));
-        }
-
-        let etag = header_string(response.headers(), "etag");
-        let last_modified = header_string(response.headers(), "last-modified");
-        let next_page = next_link(response.headers());
-        let body = read_capped(response).await?;
         let entry = CachedResponse {
             body: String::from_utf8(body)
                 .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?,
@@ -610,7 +649,7 @@ impl GithubClient {
         let entry = cached.ok_or_else(|| {
             DomainError::internal(format!("GitHub answered 304 for {url} with nothing cached"))
         })?;
-        tracing::debug!(%url, "304 Not Modified - served from cache, no quota spent");
+        tracing::debug!(url = %redacted_word(url), "304 Not Modified - served from cache, no quota spent");
 
         let parsed = serde_json::from_str(&entry.body).map_err(|e| {
             DomainError::internal(format!(
@@ -743,7 +782,7 @@ impl GithubClient {
             .put(&options.access_scope, options.tenant_id, key, url, entry)
             .await
         {
-            tracing::warn!(%url, error = %e, "cache write failed; the next sync will re-fetch");
+            tracing::warn!(url = %redacted_word(url), error = %e, "cache write failed; the next sync will re-fetch");
         }
     }
 
@@ -758,7 +797,7 @@ impl GithubClient {
         let mut attempt: u32 = 0;
         let mut upstream_attempt: u32 = 0;
         // GraphQL shares the REST ceiling: both spend the same token's budget.
-        let (response, _permit) = loop {
+        let body = loop {
             let permit = self.request_permit(cancel).await?;
             let mut request = self
                 .http
@@ -807,25 +846,73 @@ impl GithubClient {
                 attempt += 1;
                 continue;
             }
-            break (response, permit);
+            if !status.is_success() {
+                return Err(DomainError::internal(format!(
+                    "GitHub GraphQL responded with {status}"
+                )));
+            }
+
+            match read_graphql(response, attempt).await? {
+                GraphqlRead::Unread(e) if upstream_attempt < UPSTREAM_RETRIES => {
+                    drop(permit);
+                    self.back_off_upstream(&url, &e.to_string(), upstream_attempt, cancel)
+                        .await?;
+                    upstream_attempt += 1;
+                }
+                GraphqlRead::Unread(e) => return Err(ReadFailure::Transport(e).into_error()),
+                GraphqlRead::RateLimited { delay, .. } if attempt < RATE_LIMIT_RETRIES => {
+                    report_graphql_budget(attempt, delay);
+                    drop(permit);
+                    self.extend_cooldown(delay);
+                    attempt += 1;
+                }
+                GraphqlRead::RateLimited { body, .. } | GraphqlRead::Answer(body) => break body,
+            }
         };
 
-        let status = response.status();
-        if !status.is_success() {
-            return Err(DomainError::internal(format!(
-                "GitHub GraphQL responded with {status}"
-            )));
-        }
-
-        graphql_answer(response).await
+        graphql_answer(body)
     }
 }
 
-async fn graphql_answer(response: reqwest::Response) -> Result<serde_json::Value, DomainError> {
-    let bytes = read_capped(response).await?;
+enum GraphqlRead {
+    Answer(serde_json::Value),
+    Unread(reqwest::Error),
+    RateLimited {
+        delay: std::time::Duration,
+        body: serde_json::Value,
+    },
+}
+
+async fn read_graphql(
+    response: reqwest::Response,
+    attempt: u32,
+) -> Result<GraphqlRead, DomainError> {
+    let headers = response.headers().clone();
+    let bytes = match read_body(response).await {
+        Ok(bytes) => bytes,
+        Err(ReadFailure::Transport(e)) => return Ok(GraphqlRead::Unread(e)),
+        Err(failure) => return Err(failure.into_error()),
+    };
     let body: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| DomainError::internal(format!("GitHub GraphQL decode failed: {e}")))?;
+    if graphql_rate_limited(&body) {
+        return Ok(GraphqlRead::RateLimited {
+            delay: retry_delay(&headers, attempt),
+            body,
+        });
+    }
+    Ok(GraphqlRead::Answer(body))
+}
 
+fn report_graphql_budget(attempt: u32, delay: std::time::Duration) {
+    tracing::warn!(
+        attempt,
+        delay_secs = delay.as_secs(),
+        "GitHub GraphQL budget exhausted; backing off before retrying"
+    );
+}
+
+fn graphql_answer(body: serde_json::Value) -> Result<serde_json::Value, DomainError> {
     if let Some(errors) = body.get("errors").and_then(serde_json::Value::as_array)
         && !errors.is_empty()
     {
@@ -2191,7 +2278,7 @@ impl GithubPort for GithubClient {
                 if continue_from.is_none() {
                     listing.page1_etag.clone_from(&page.etag);
                     if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
-                        tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                        tracing::debug!(url = %redacted_word(&url), "page one is unchanged; the sweep stops here");
                         listing.unchanged = true;
                         return Ok(listing);
                     }
@@ -2336,7 +2423,7 @@ impl GithubPort for GithubClient {
             if continue_from.is_none() {
                 listing.page1_etag.clone_from(&page.etag);
                 if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
-                    tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                    tracing::debug!(url = %redacted_word(&url), "page one is unchanged; the sweep stops here");
                     listing.unchanged = true;
                     return Ok(listing);
                 }
@@ -2587,8 +2674,9 @@ impl GithubPort for GithubClient {
             if continue_from.is_none() {
                 listing.page1_etag.clone_from(&page.etag);
                 if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
-                    tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                    tracing::debug!(url = %redacted_word(&url), "page one is unchanged; the sweep stops here");
                     listing.unchanged = true;
+                    listing.next = continue_after(&stages, 0, None);
                     return Ok(listing);
                 }
                 listing.head_sha = page.parsed.first().map(|c| c.sha.clone());

@@ -27,6 +27,12 @@ pub enum DomainError {
     #[error("the sync was interrupted before it finished")]
     Cancelled,
 
+    #[error("{message}")]
+    Unavailable {
+        message: String,
+        retry_after_secs: Option<u64>,
+    },
+
     #[error("Internal error: {0}")]
     Internal(String),
 
@@ -46,9 +52,11 @@ impl DomainError {
     #[must_use]
     pub fn public_text(&self) -> String {
         match self {
-            Self::NotFound | Self::Validation { .. } | Self::Conflict(_) | Self::Cancelled => {
-                self.to_string()
-            }
+            Self::NotFound
+            | Self::Validation { .. }
+            | Self::Conflict(_)
+            | Self::Cancelled
+            | Self::Unavailable { .. } => self.to_string(),
             Self::Forbidden(_) => "access forbidden".to_owned(),
             Self::AccessLost(_) => {
                 "GitHub refused the mirror's credentials for this repository".to_owned()

@@ -732,10 +732,6 @@ impl MirrorWorker {
             if listing.swept_to_end {
                 run.mark_swept(Family::Commits, page1_etag.clone(), head_sha.clone());
             }
-            if listing.unchanged {
-                return Ok(());
-            }
-
             let mut candidates = Vec::new();
             for commit in &listing.commits {
                 if !swept.insert(commit.sha.clone()) {
