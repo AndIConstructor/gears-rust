@@ -281,7 +281,7 @@ The subject **MUST** be able to see all facts about them with their origin, in e
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-fr-review-request`
 
-The subject **MUST** be able to mark any fact as incorrect, with an optional comment, which creates a review request. While the request is open, Construct **MUST NOT** serve the fact to applications or agents; the subject still sees it. Construct **MUST** list open requests to the reviewers the tenant assigns (tenant administrator or data protection officer). A reviewer **MUST** resolve each request as corrected, deleted, or rejected with a reason. A corrected value comes from the reviewer, passes the same guardrails as any fact, and its origin names the reviewer; a deleted fact is handled as a delete by the subject; a rejected fact is served again. The subject **MUST** see the state and outcome of their requests. Construct **MUST** log each correction and each resolution, without content.
+The subject **MUST** be able to mark any fact as incorrect, with an optional comment, which creates a review request. While the request is open, Construct **MUST NOT** serve the fact to applications or agents, and a record or an agent **MUST NOT** change or remove it; the subject still sees it. Construct **MUST** list open requests to the reviewers the tenant assigns (tenant administrator or data protection officer). A reviewer **MUST** resolve each request as corrected, deleted, or rejected with a reason. A corrected value comes from the reviewer, passes the same guardrails as any fact, and its origin names the reviewer; a deleted fact is handled as a delete by the subject; a rejected fact is served again. If the subject deletes the fact, or its retention period ends, before the request is resolved, the request **MUST** close as deleted. The subject **MUST** see the state and outcome of their requests. Construct **MUST** log each correction and each resolution, without content.
 
 - **Rationale**: Some wrong facts come from outside sources; the subject needs a way to flag them, and a request nobody closes gives no control.
 - **Actors**: `cpt-cf-construct-actor-subject`, `cpt-cf-construct-actor-tenant-admin`, `cpt-cf-construct-actor-dpo`, `cpt-cf-construct-actor-log-storage`
@@ -526,7 +526,7 @@ The guardrails **MUST** find special-category content on the reference test set 
 - Every reader gets the corrected value
 
 **Alternative Flows**:
-- **The subject does not want to wait**: the subject deletes the fact, or tells an agent the right value and the agent replaces it over MCP
+- **The subject does not want to wait**: the subject deletes the fact, and the request closes as deleted. The subject can then tell an agent the right value, and the agent adds it over MCP
 
 #### The Subject Erases Their Data
 
@@ -554,7 +554,7 @@ The guardrails **MUST** find special-category content on the reference test set 
 - [ ] Subject control and settings: after a delete, erasure, or personalization off, no application or agent gets the affected facts, and records received before the request store nothing; every read, fact delete, correction and resolution is logged without content, and the data protection officer can find it per subject; after an erasure, the personalization setting is off and a log event of the erasure exists, without content
 - [ ] Sensitive data: the reference test set meets `cpt-cf-construct-nfr-guardrail-detection`; blocked and redacted content is never served or kept, and the checks cannot be turned off; every block and redaction is logged with its category and without content, and the data protection officer can count them
 - [ ] Tenancy: adversarial tests find zero cases of another tenant's data, and a request without a platform-authenticated identity and tenant is refused
-- [ ] Retention, tenant exit and the rest: a fact past the tenant's retention period, and all data of a tenant that leaves except its log events, are not served from the next read and are gone from storage within 30 days; log events follow the log's retention period; the data export holds all of a subject's data; a fact under an open review request is not served
+- [ ] Retention, tenant exit and the rest: a fact past the tenant's retention period, and all data of a tenant that leaves except its log events, are not served from the next read and are gone from storage within 30 days; log events follow the log's retention period; the data export holds all of a subject's data; a fact under an open review request is not served, and records and agents do not change it
 - [ ] Every use case in section 8 passes as an end-to-end test
 
 ## 10. Dependencies
