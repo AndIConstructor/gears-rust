@@ -652,6 +652,12 @@ jobs:
         timeout-minutes: 30
         env:
           RUSTFLAGS: "-C debuginfo=0 --cfg coverage_nightly"
+          # The same split as the workspace coverage job: with the current
+          # nightly, cargo writes object files to the build directory, and
+          # `cargo llvm-cov` finds nothing to report unless it is told where
+          # both directories are.
+          CARGO_LLVM_COV_TARGET_DIR: llvm-cov-target
+          CARGO_LLVM_COV_BUILD_DIR: llvm-cov-build
           GEARS_TEST_PG_GRAPH_IMAGE: "pg19-pgvector:ci"
           GEARS_TEST_PG_GRAPH_REQUIRED: "1"
         run: |

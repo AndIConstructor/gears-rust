@@ -70,11 +70,11 @@ impl FakeEmbeddingProvider {
             hasher.update(input.as_bytes());
             hasher.update(&block.to_be_bytes());
             let digest = hasher.finish();
-            for lane in digest.as_ref().chunks_exact(BYTES_PER_LANE) {
+            for lane in digest.as_ref().as_chunks::<BYTES_PER_LANE>().0 {
                 if lanes.len() == dimension {
                     break;
                 }
-                let raw = u32::from_be_bytes([lane[0], lane[1], lane[2], lane[3]]);
+                let raw = u32::from_be_bytes(*lane);
                 // Map to [-1, 1) through f64 so the conversion is exact for
                 // every u32 before it is narrowed.
                 let unit = f64::from(raw) / f64::from(u32::MAX);
