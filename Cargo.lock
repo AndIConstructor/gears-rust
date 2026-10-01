@@ -3281,6 +3281,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tower",
  "tracing",
  "utoipa",
  "uuid",
@@ -3295,6 +3296,7 @@ dependencies = [
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
+ "serde_json",
  "uuid",
 ]
 
