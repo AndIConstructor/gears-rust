@@ -204,7 +204,7 @@ impl SyncPoolRunner {
     reason = "a panic in these tests is the failure report"
 )]
 mod tests {
-    use toolkit_security::SecurityContext;
+    use toolkit_security::{AccessScope, SecurityContext};
 
     use super::*;
     use crate::domain::scope::ScopeConfig;
@@ -222,6 +222,7 @@ mod tests {
             scope: ScopeConfig::default(),
             force: false,
             since: None,
+            access_scope: AccessScope::default(),
             claim: None,
         }
     }

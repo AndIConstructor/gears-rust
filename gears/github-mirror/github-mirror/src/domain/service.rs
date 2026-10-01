@@ -137,6 +137,7 @@ fn keyset_page<T>(
 }
 
 struct EnqueueScopes {
+    sync: AccessScope,
     session: AccessScope,
     repo_status: AccessScope,
 }
@@ -453,6 +454,7 @@ pub struct SyncJob {
     pub force: bool,
     /// Oldest closed entity worth collecting, from the request.
     pub since: Option<DateTime<Utc>>,
+    pub access_scope: AccessScope,
     #[expect(
         dead_code,
         reason = "held for its drop: a job that goes away, run or not, gives its claim back"
@@ -3331,6 +3333,20 @@ impl Service {
             .await?)
     }
 
+    async fn sync_access_scope(&self, ctx: &SecurityContext) -> Result<AccessScope, DomainError> {
+        let tenant_id = ctx.subject_tenant_id();
+        Ok(self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &SYNC_RESOURCE,
+                actions::SYNC,
+                None,
+                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
+            )
+            .await?)
+    }
+
     /// Scope for this tenant's per-repository run-status rows.
     /// GitHub's id for a mirrored repository, once Discovery has stored it.
     /// A repository not yet mirrored, or a lookup the caller may not make,
@@ -3640,11 +3656,13 @@ impl Service {
             .await
     }
 
-    /// The two write scopes one sync request needs, resolved once so a resume
-    /// of hundreds of repositories asks the policy enforcer once, not per
-    /// repository.
+    /// The scopes one sync request needs, resolved once so a resume of hundreds
+    /// of repositories asks the policy enforcer once, not per repository. The
+    /// sync permission is among them, so a caller without it gets 403 here
+    /// rather than a 202 for a run that fails later.
     async fn enqueue_scopes(&self, ctx: &SecurityContext) -> Result<EnqueueScopes, DomainError> {
         Ok(EnqueueScopes {
+            sync: self.sync_access_scope(ctx).await?,
             session: self.session_scope(ctx, actions::UPSERT).await?,
             repo_status: self.repo_status_scope(ctx, actions::UPSERT).await?,
         })
@@ -3830,6 +3848,7 @@ impl Service {
             scope: sync_scope,
             force,
             since,
+            access_scope: scopes.sync.clone(),
             claim: Some(claim),
         };
         Ok(PreparedSync::Claimed {
@@ -4081,14 +4100,14 @@ impl Service {
         let percent = progress.handle();
         let options = FetchOptions {
             tenant_id: job.ctx.subject_tenant_id(),
-            access_scope: AccessScope::default(),
+            access_scope: job.access_scope.clone(),
             scope: job.scope,
             force: job.force,
             since: job.since,
             cancel: cancel.clone(),
         };
-        let sync =
-            self.sync_repository(&job.ctx, &job.owner, &job.name, &options, progress, cancel);
+        let sync = self
+            .sync_repository_scoped(&job.ctx, &job.owner, &job.name, &options, progress, cancel);
         let mut sync = std::pin::pin!(sync);
 
         loop {
@@ -4343,6 +4362,23 @@ impl Service {
         progress: &SyncProgress,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
+        let options = FetchOptions {
+            access_scope: self.sync_access_scope(ctx).await?,
+            ..options.clone()
+        };
+        self.sync_repository_scoped(ctx, owner, name, &options, progress, cancel)
+            .await
+    }
+
+    async fn sync_repository_scoped(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: &str,
+        options: &FetchOptions,
+        progress: &SyncProgress,
+        cancel: &CancellationToken,
+    ) -> Result<SyncSummary, DomainError> {
         // Checked here and not only in the REST handler: the tests call this
         // directly, and `owner`/`name` reach a log line below, where a newline
         // would forge a record of its own.
@@ -4350,17 +4386,6 @@ impl Service {
         options.scope.validate()?;
 
         let tenant_id = ctx.subject_tenant_id();
-
-        let scope = self
-            .policy_enforcer
-            .access_scope_with(
-                ctx,
-                &SYNC_RESOURCE,
-                actions::SYNC,
-                None,
-                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
-            )
-            .await?;
 
         let lock_key = format!("sync/{tenant_id}/{owner}/{name}");
         let sync_lock = match self.db.db().lock(GEAR_NAME, &lock_key).await {
@@ -4388,12 +4413,11 @@ impl Service {
 
         let run = Arc::new(RunState::new(
             Uuid::new_v4(),
-            scope.clone(),
+            options.access_scope.clone(),
             tenant_id,
             owner,
             name,
             FetchOptions {
-                access_scope: scope,
                 cancel: cancel.clone(),
                 ..options.clone()
             },
