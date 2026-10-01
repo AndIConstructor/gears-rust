@@ -1790,6 +1790,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "ureq",
  "utoipa",
@@ -3602,6 +3603,7 @@ dependencies = [
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-sdk",
  "cf-gears-toolkit-security",
+ "cf-gears-toolkit-trace-context",
  "cf-gears-toolkit-transport-grpc",
  "cf-gears-toolkit-utils",
  "chrono",
@@ -3899,6 +3901,7 @@ dependencies = [
  "cf-gears-rustls-corecrypto-provider",
  "cf-gears-rustls-fips-shim",
  "cf-gears-toolkit-security",
+ "cf-gears-toolkit-trace-context",
  "flate2",
  "http",
  "http-body",
@@ -4076,6 +4079,18 @@ dependencies = [
 [[package]]
 name = "cf-gears-toolkit-stable-hash"
 version = "0.1.0"
+
+[[package]]
+name = "cf-gears-toolkit-trace-context"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "cf-gears-toolkit-transport-grpc"
