@@ -1539,16 +1539,13 @@ dependencies = [
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-contract",
- "cf-gears-toolkit-http",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-transport-grpc",
  "futures-core",
  "futures-util",
- "http",
  "mockall",
  "parking_lot",
- "secrecy",
  "serde",
  "serde_json",
  "tokio",
@@ -1572,7 +1569,6 @@ dependencies = [
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-contract",
- "cf-gears-toolkit-http",
  "cf-gears-toolkit-security",
  "parking_lot",
  "serde_json",
@@ -1882,7 +1878,6 @@ dependencies = [
  "cf-gears-toolkit-http",
  "cf-gears-toolkit-security",
  "gts",
- "http",
  "schemars 1.2.1",
  "secrecy",
  "serde",
@@ -1930,7 +1925,6 @@ version = "0.0.0"
 dependencies = [
  "cf-gears-bss-fixtures",
  "chrono",
- "serde",
  "thiserror 2.0.20",
  "toml 1.1.2+spec-1.1.0",
 ]
@@ -2319,7 +2313,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "base64 0.22.1",
  "bytes",
  "cf-gears-api-gateway",
  "cf-gears-authn-resolver",
@@ -2351,10 +2344,8 @@ dependencies = [
  "http",
  "http-body-util",
  "jsonschema",
- "parking_lot",
  "pingora-core",
  "pingora-http",
- "rand 0.10.1",
  "reqwest",
  "sea-orm",
  "sea-orm-migration",
@@ -2394,11 +2385,8 @@ dependencies = [
  "futures-core",
  "futures-util",
  "gts",
- "gts-id",
- "http-body",
  "http-body-util",
  "jsonschema",
- "reqwest",
  "rusqlite",
  "schemars 1.2.1",
  "sea-orm",
@@ -3235,7 +3223,6 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
- "tracing-test",
  "utoipa",
  "uuid",
 ]
@@ -3316,7 +3303,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-settings-service"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3401,6 +3388,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tower",
  "tracing",
  "utoipa",
  "uuid",
@@ -3415,6 +3403,7 @@ dependencies = [
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
+ "serde_json",
  "uuid",
 ]
 
@@ -3856,7 +3845,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tonic",
- "tower",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -3881,13 +3869,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-contract",
- "cf-gears-toolkit-contract-macros",
  "cf-gears-toolkit-security",
  "futures-core",
  "secrecy",
  "serde",
  "thiserror 2.0.20",
- "tokio",
  "trybuild",
  "uuid",
 ]
@@ -4217,7 +4203,6 @@ dependencies = [
  "futures-util",
  "http",
  "parking_lot",
- "rand 0.10.1",
  "secrecy",
  "serde",
  "serde_json",
@@ -4389,10 +4374,8 @@ version = "0.1.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "cf-gears-cluster",
  "cf-gears-cluster-conformance",
  "cf-gears-cluster-sdk",
- "cf-gears-standalone-cluster-plugin",
  "cf-gears-toolkit",
  "cf-gears-toolkit-macros",
  "dashmap",
@@ -4415,8 +4398,6 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

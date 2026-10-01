@@ -609,6 +609,50 @@ impl ResolutionHarness {
         value_type_id: &str,
         classification: &str,
     ) -> Uuid {
+        self.declare_in(
+            self.category_id,
+            name,
+            scope_class,
+            default,
+            value_type_id,
+            classification,
+        )
+        .await
+    }
+
+    /// A second category beside the harness's own, by slug.
+    pub async fn add_category(&self, slug: &str) -> Uuid {
+        let conn = self.db.conn().expect("connection");
+        CategoryRepo
+            .insert(
+                &conn,
+                &AccessScope::allow_all(),
+                CategoryDraft {
+                    key: CategoryKey::parse(slug).expect("slug"),
+                    name: slug.to_owned(),
+                    description: None,
+                    domain_affinity: None,
+                    sort_order: 0,
+                    icon: None,
+                },
+            )
+            .await
+            .expect("category")
+            .id
+    }
+
+    /// Declare a setting in a named category; its key still carries the
+    /// harness's `network` segment, so the key names one category and the
+    /// row another — what a filter on `category_id` must follow.
+    pub async fn declare_in(
+        &self,
+        category_id: Uuid,
+        name: &str,
+        scope_class: &str,
+        default: Value,
+        value_type_id: &str,
+        classification: &str,
+    ) -> Uuid {
         let conn = self.db.conn().expect("connection");
         let key = self.key(name);
         DeclarationRepo
@@ -619,7 +663,7 @@ impl ResolutionHarness {
                     key: key.to_string(),
                     leaf_slug: name.to_owned(),
                     value_type_id: value_type_id.to_owned(),
-                    category_id: self.category_id,
+                    category_id,
                     default_value: default,
                     scope_class: scope_class.to_owned(),
                     mode: "standard".to_owned(),
