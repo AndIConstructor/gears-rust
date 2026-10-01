@@ -354,6 +354,9 @@ const HEARTBEAT_SECS: u64 = 2;
 /// keep its lock.
 const ABANDONED_AFTER_SECS: i64 = 300;
 
+pub(crate) const SWEEP_AGAIN_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(ABANDONED_AFTER_SECS.unsigned_abs() + HEARTBEAT_SECS);
+
 /// Most repositories one resume call will re-queue: what the sync channel
 /// holds, so a call never queues more than fits; the rest stay `in_progress`
 /// for the next call.
@@ -3995,6 +3998,8 @@ impl Service {
         session.status = SessionStatus::InProgress;
         session.started_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.started_at);
+        session.ended_at = None;
+        session.error = None;
         self.sync_sessions
             .upsert(&scope, tenant_id, session.clone())
             .await?;
@@ -4151,10 +4156,14 @@ impl Service {
     /// long ago. What is left is what one process had in flight, which the
     /// pool width bounds.
     ///
-    /// The queue is in-memory, so a `queued` or `in_progress` row that survives a
-    /// restart has no worker behind it and never will. Called once at startup,
-    /// across every tenant — hence the unconstrained scope, which is why this
-    /// takes no [`SecurityContext`] and is not reachable from the API.
+    /// Only a row [`abandoned`] says is dead, and that this process holds no
+    /// claim for, is closed: during a rolling deploy or with two replicas the
+    /// other process's runs keep their heartbeat, so they are left alone. A
+    /// row from a process that died moments before this one started is not
+    /// abandoned yet, which is why start-up calls this again after
+    /// [`SWEEP_AGAIN_AFTER`]. Across every tenant — hence the unconstrained
+    /// scope, which is why this takes no [`SecurityContext`] and is not
+    /// reachable from the API.
     ///
     /// # Errors
     /// `Database` when the sweep cannot read or write the session table.
@@ -4170,10 +4179,11 @@ impl Service {
         let now = Utc::now();
         let mut count = 0;
         for (tenant_id, mut session) in stale {
-            if abandoned(&session, now) {
-                self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
-                    .await;
+            if !abandoned(&session, now) || self.session_in_flight(session.id) {
+                continue;
             }
+            self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
+                .await;
             count += 1;
             session.status = SessionStatus::Interrupted;
             session.progress_percent = 100;
@@ -4184,6 +4194,14 @@ impl Service {
         }
 
         Ok(count)
+    }
+
+    fn session_in_flight(&self, session_id: Uuid) -> bool {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|claim| claim.session_id == session_id)
     }
 
     /// Drop the per-repo sync lock marker left for `repo` by a run whose

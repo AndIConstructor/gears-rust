@@ -16,7 +16,7 @@ use crate::api::rest::routes;
 use crate::config::GithubMirrorConfig;
 use crate::domain::local_client::LocalClient;
 use crate::domain::ports::github::GithubPort;
-use crate::domain::service::{Service, ServiceConfig};
+use crate::domain::service::{SWEEP_AGAIN_AFTER, Service, ServiceConfig};
 use crate::domain::sync::SyncPoolRunner;
 use crate::infra::github::client::GithubClient;
 use crate::infra::storage::sea_orm_repo::{
@@ -183,6 +183,17 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+async fn sweep_interrupted_sessions(service: &ConcreteService) {
+    match service
+        .sweep_interrupted_sessions(&toolkit_security::AccessScope::allow_all())
+        .await
+    {
+        Ok(0) => {}
+        Ok(swept) => info!(sessions = swept, "closed out interrupted sync sessions"),
+        Err(e) => warn!(error = %e, "could not sweep interrupted sync sessions"),
+    }
+}
+
 #[async_trait]
 impl RunnableCapability for GithubMirrorGear {
     /// Start the sync worker pool: up to `max_concurrent_syncs` repositories
@@ -211,18 +222,13 @@ impl RunnableCapability for GithubMirrorGear {
             anyhow::bail!("{} sync worker already started", Self::MODULE_NAME);
         };
 
-        match service
-            .sweep_interrupted_sessions(&toolkit_security::AccessScope::allow_all())
-            .await
-        {
-            Ok(0) => {}
-            Ok(swept) => info!(sessions = swept, "closed out interrupted sync sessions"),
-            Err(e) => warn!(error = %e, "could not sweep interrupted sync sessions"),
-        }
+        sweep_interrupted_sessions(&service).await;
 
         let new_cancel_token = cancel.child_token();
         service.bind_shutdown(new_cancel_token.clone());
         let max_concurrent = service.max_concurrent_syncs();
+        let late_sweep = Arc::clone(&service);
+        let late_cancel = new_cancel_token.clone();
         let runner = SyncPoolRunner::new(service, jobs, max_concurrent, new_cancel_token.clone());
         let handle = tokio::spawn(runner.run());
 
@@ -237,6 +243,15 @@ impl RunnableCapability for GithubMirrorGear {
 
         let mut sync_handle = lock(&self.sync_handle);
         *sync_handle = Some(handle);
+
+        tokio::spawn(async move {
+            tokio::select! {
+                () = late_cancel.cancelled() => {}
+                () = tokio::time::sleep(SWEEP_AGAIN_AFTER) => {
+                    sweep_interrupted_sessions(&late_sweep).await;
+                }
+            }
+        });
 
         info!("github-mirror sync worker started");
         Ok(())

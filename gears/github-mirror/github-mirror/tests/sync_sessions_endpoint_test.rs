@@ -7,10 +7,14 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
+use chrono::Utc;
 use github_mirror::api::rest::routes::{ConcreteService, register_routes};
 use github_mirror::domain::ports::github::{FetchedRepository, ListingCompleteness};
-use github_mirror::domain::repo::RepoRecord;
+use github_mirror::domain::repo::{RepoRecord, SyncSessionRepository};
+use github_mirror::infra::storage::sea_orm_repo::SeaOrmSyncSessionRepository;
 use toolkit::api::OpenApiRegistryImpl;
+use toolkit_db::{DBProvider, DbError};
+use toolkit_security::AccessScope;
 use toolkit_security::SecurityContext;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -172,10 +176,11 @@ async fn a_failed_sync_leaves_a_failed_session_behind() {
 
 #[tokio::test]
 async fn a_restart_closes_out_sessions_left_in_flight() {
-    let ctx = common::caller_in(Uuid::new_v4());
+    let tenant = Uuid::new_v4();
+    let ctx = common::caller_in(tenant);
     let db = common::inmem_db().await;
     let service = common::service_with_github(
-        db,
+        db.clone(),
         "https://api.github.com",
         Arc::new(common::FakeGithub {
             result: Some(fetched()),
@@ -198,8 +203,31 @@ async fn a_restart_closes_out_sessions_left_in_flight() {
         .expect("session_id")
         .to_owned();
 
-    let swept = service
-        .sweep_interrupted_sessions(&toolkit_security::AccessScope::allow_all())
+    let scope = AccessScope::allow_all();
+    let sessions =
+        SeaOrmSyncSessionRepository::new(Arc::new(DBProvider::<DbError>::new(db.clone())));
+    let mut row = sessions
+        .find_by_id(&scope, Uuid::parse_str(&session_id).expect("a uuid"))
+        .await
+        .expect("the session must read")
+        .expect("the session must exist");
+    let long_ago = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+    row.created_at.clone_from(&long_ago);
+    row.updated_at = Some(long_ago);
+    sessions
+        .upsert(&scope, tenant, row)
+        .await
+        .expect("the session must write");
+
+    let restarted = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(fetched()),
+        }),
+    );
+    let swept = restarted
+        .sweep_interrupted_sessions(&scope)
         .await
         .expect("the sweep must succeed");
     assert_eq!(swept, 1);
