@@ -1383,7 +1383,7 @@ async fn ch_batch_isolates_an_unrepresentable_value() {
     assert_eq!(
         common::raw_rows_for_id(&h, row1.id).await,
         0,
-        "the refused record must leave no row behind — not even a rounded one"
+        "the refused record must leave no row behind - not even a rounded one"
     );
 }
 
