@@ -21,7 +21,11 @@ the gear blocks vector search until the graph is re-embedded (see
 
 ONNX Runtime is loaded with `dlopen` at first use (`ORT_DYLIB_PATH`), never
 linked at build time. Building needs no runtime headers; running needs the
-shared library. The pinned runtime version follows the workspace's `ort` crate.
+shared library. The session itself -- the pinned `ort`, its open under a
+deadline (a wrong `ORT_DYLIB_PATH` hangs rather than errors), and inference
+that does not hold a Tokio worker -- is `cf-gears-toolkit-onnx-runtime`'s
+(`libs/ai/toolkit-onnx-runtime`); this crate owns the model's tokenization,
+tensors, pooling and embedding-space identity.
 
 ```yaml
 graph-storage:

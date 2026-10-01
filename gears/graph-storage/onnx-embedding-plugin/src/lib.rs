@@ -13,13 +13,14 @@
 //! identity be the SHA-256 of the bytes actually loaded, so two deployments
 //! claiming one space either agree on that hash or are visibly different.
 //!
-//! # The runtime is loaded, not linked
+//! # The runtime is the toolkit's
 //!
-//! `ort` is pinned with `load-dynamic`, so ONNX Runtime is resolved by
-//! `dlopen` at first use through `ORT_DYLIB_PATH`. Building this crate needs
-//! no runtime headers; running it needs the shared library. See
-//! [`OnnxEmbeddingProvider::load`] for what happens when that path is wrong,
-//! which is worse than an error.
+//! The session -- the pinned `ort`, loaded by `dlopen` through
+//! `ORT_DYLIB_PATH`; opening it under a deadline because a wrong path hangs
+//! rather than errors; sharing it with async callers without stalling a Tokio
+//! worker -- is `toolkit_onnx_runtime`'s. What is this crate's is the model:
+//! tokenization, the three input tensors, pooling, normalization and the
+//! embedding-space identity they make up.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,12 +32,12 @@ use graph_storage_sdk::models::EmbeddingSpaceId;
 use graph_storage_sdk::plugin_api::{
     EmbedRequest, EmbedResponse, EmbeddingProviderError, EmbeddingProviderV1,
 };
-use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
-use ort::value::Tensor;
 use thiserror::Error;
 use tokenizers::Tokenizer;
-use tokio::sync::Mutex;
+use toolkit_onnx_runtime::ort;
+use toolkit_onnx_runtime::ort::session::Session;
+use toolkit_onnx_runtime::ort::value::Tensor;
+use toolkit_onnx_runtime::{OnnxSession, OpenError, SessionOptions};
 use tracing::warn;
 
 /// How the model turns a sequence of token vectors into one sentence vector.
@@ -123,7 +124,7 @@ pub enum OnnxLoadError {
 }
 
 /// How long to wait for the runtime before deciding it has hung.
-const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+const LOAD_TIMEOUT: Duration = toolkit_onnx_runtime::DEFAULT_LOAD_TIMEOUT;
 
 /// How long the boot probe's single inference may take.
 ///
@@ -136,12 +137,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A `MiniLM`-class sentence-embedding model, in this process.
 pub struct OnnxEmbeddingProvider {
-    /// `ort`'s `Session::run` takes `&mut self`, so inference is serialized
-    /// whatever the sharing. A fair mutex over one session is then the honest
-    /// shape: extra sessions would each hold a resident copy of the weights
-    /// and their own intra-op thread pool, which is the wrong trade for a
-    /// component called once per ingest batch.
-    session: Arc<Mutex<Session>>,
+    /// One session, used by one caller at a time (`OnnxSession` says why);
+    /// for a component called once per ingest batch, extra sessions would
+    /// each hold a resident copy of the weights for no throughput.
+    session: OnnxSession,
     tokenizer: Tokenizer,
     space: EmbeddingSpaceId,
     config: OnnxProviderConfig,
@@ -159,21 +158,11 @@ pub struct OnnxEmbeddingProvider {
 impl OnnxEmbeddingProvider {
     /// Load the artifacts and open a session.
     ///
-    /// # The hang this guards against
-    ///
-    /// `ort` 2.0.0-rc.12 **hangs forever instead of erroring** when the
-    /// library at `ORT_DYLIB_PATH` cannot be loaded — measured in this
-    /// repository against a nonexistent path, where neither `Session::builder`
-    /// nor `ort::init_from` returns in 45 seconds. No pre-flight validation
-    /// exists; every entry point funnels through the same lazy init. Since the
-    /// hang cannot be interrupted from inside, the blocked thread is
-    /// **abandoned**: a raw `std::thread` rather than `spawn_blocking`,
-    /// because Tokio joins blocking threads at shutdown and a wedged one would
-    /// hang that too. A caller receiving [`OnnxLoadError::RuntimeHung`] has
+    /// The session opens under `LOAD_TIMEOUT` on a thread that is abandoned
+    /// if the runtime hangs, which `ort` does instead of erroring on a wrong
+    /// `ORT_DYLIB_PATH` (`toolkit_onnx_runtime::OnnxSession::open` has the
+    /// measurement). A caller receiving [`OnnxLoadError::RuntimeHung`] has
     /// leaked one thread and must terminate the process rather than retry.
-    ///
-    /// See `gears/file-parser/file-parser/src/gear.rs` for the same mitigation
-    /// and the measurements behind it.
     ///
     /// # Errors
     ///
@@ -209,7 +198,7 @@ impl OnnxEmbeddingProvider {
         );
 
         let provider = Arc::new(Self {
-            session: Arc::new(Mutex::new(session)),
+            session,
             tokenizer,
             space,
             config,
@@ -246,56 +235,20 @@ fn file_digest(what: &'static str, path: &Path) -> Result<String, OnnxLoadError>
     Ok(hex::encode(sha256(&SHA256, &bytes)))
 }
 
-/// Open the session on an abandonable thread. See [`OnnxEmbeddingProvider::load`].
-async fn open_session(config: &OnnxProviderConfig) -> Result<Session, OnnxLoadError> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let model_path = config.model_path.clone();
-    let threads = config.intra_op_threads;
-
-    std::thread::Builder::new()
-        .name("graph-storage-onnx-init".to_owned())
-        .spawn(move || {
-            let result = build_session(&model_path, threads);
-            // The receiver is gone when the timeout already fired; that is the
-            // abandoned case, and dropping the session here is correct.
-            drop(tx.send(result));
+/// Open the session through the toolkit, keeping this crate's error type.
+async fn open_session(config: &OnnxProviderConfig) -> Result<OnnxSession, OnnxLoadError> {
+    let options = SessionOptions {
+        intra_op_threads: config.intra_op_threads,
+        load_timeout: LOAD_TIMEOUT,
+        thread_name: "graph-storage-onnx-init".to_owned(),
+        ..SessionOptions::new(config.model_path.clone())
+    };
+    OnnxSession::open(&options)
+        .await
+        .map_err(|error| match error {
+            OpenError::RuntimeHung { seconds } => OnnxLoadError::RuntimeHung { seconds },
+            other => OnnxLoadError::Session(other.to_string()),
         })
-        .map_err(|error| OnnxLoadError::Session(error.to_string()))?;
-
-    match tokio::time::timeout(LOAD_TIMEOUT, rx).await {
-        Ok(Ok(result)) => result,
-        // The sender was dropped without sending: the init thread panicked.
-        Ok(Err(_)) => Err(OnnxLoadError::Session(
-            "the ONNX init thread ended without a result".to_owned(),
-        )),
-        Err(_) => {
-            warn!(
-                path = %config.model_path.display(),
-                "ONNX Runtime did not load in time; leaking the init thread deliberately"
-            );
-            Err(OnnxLoadError::RuntimeHung {
-                seconds: LOAD_TIMEOUT.as_secs(),
-            })
-        }
-    }
-}
-
-fn build_session(
-    model_path: &Path,
-    intra_op_threads: Option<usize>,
-) -> Result<Session, OnnxLoadError> {
-    let mut builder = Session::builder()
-        .map_err(|error| OnnxLoadError::Session(error.to_string()))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|error| OnnxLoadError::Session(error.to_string()))?;
-    if let Some(threads) = intra_op_threads {
-        builder = builder
-            .with_intra_threads(threads)
-            .map_err(|error| OnnxLoadError::Session(error.to_string()))?;
-    }
-    builder
-        .commit_from_file(model_path)
-        .map_err(|error| OnnxLoadError::Session(error.to_string()))
 }
 
 #[async_trait]
@@ -323,36 +276,23 @@ impl EmbeddingProviderV1 for OnnxEmbeddingProvider {
         }
 
         let encoded = self.encode(&req.inputs)?;
-        let mut session = self.session.lock().await;
-        // Checked again after the queue: a batch that waited out its deadline
-        // -- or whose caller gave up -- behind another one should not then
-        // spend CPU on it.
-        if req.budget.is_exhausted() {
-            return Err(EmbeddingProviderError::Deadline);
-        }
-        if req.cancel.is_cancelled() {
-            return Err(EmbeddingProviderError::Cancelled);
-        }
-        // `Session::run` is synchronous CPU work measured in tens to hundreds
-        // of milliseconds. Calling it directly would hold a Tokio worker
-        // thread for that long, starving every other task scheduled on it --
-        // in a gear whose other work is database round trips, that is the
-        // difference between a slow embedding and a stalled request.
-        //
-        // `block_in_place` rather than `spawn_blocking` because the session
-        // guard borrows `self`: moving it into a `'static` task would mean
-        // cloning the `Arc` and re-locking inside, which is the same work
-        // with more moving parts. It needs a multi-threaded runtime, which is
-        // what the gear runs on; a current-thread runtime (some tests) gets
-        // the direct call, which is correct there because there are no other
-        // tasks to starve.
-        let outcome = if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-        }) {
-            tokio::task::block_in_place(|| self.run(&mut session, &encoded))
-        } else {
-            self.run(&mut session, &encoded)
-        };
+        // The toolkit takes the session in arrival order and runs the work
+        // without holding a Tokio worker for its duration. The checks at the
+        // start run once the wait is over: a batch that waited out its
+        // deadline -- or whose caller gave up -- behind another one should
+        // not then spend CPU on it.
+        let outcome = self
+            .session
+            .run(|session| {
+                if req.budget.is_exhausted() {
+                    return Err(EmbeddingProviderError::Deadline);
+                }
+                if req.cancel.is_cancelled() {
+                    return Err(EmbeddingProviderError::Cancelled);
+                }
+                Ok(self.run(session, &encoded))
+            })
+            .await?;
         // Both outcomes are evidence, which is what lets readiness answer
         // without running inference of its own: a failure here is what a
         // later probe reports, and a success clears one.
@@ -370,10 +310,11 @@ impl EmbeddingProviderV1 for OnnxEmbeddingProvider {
 
     async fn health(&self) -> Result<(), EmbeddingProviderError> {
         // Observed, not polled: `load` proved the session can infer, and
-        // every `embed` since has been evidence of its own. Taking the lock
-        // still matters -- a session whose holder panicked cannot be locked
-        // -- but on its own it only reports that the weights are resident.
-        drop(self.session.lock().await);
+        // every `embed` since has been evidence of its own. Waiting for the
+        // session still matters -- one wedged behind a call that never
+        // returned is not available -- but on its own it only reports that
+        // the weights are resident.
+        self.session.wait_until_idle().await;
         match self.failure() {
             Some(reason) => Err(EmbeddingProviderError::Unavailable { reason }),
             None => Ok(()),
@@ -390,9 +331,10 @@ impl OnnxEmbeddingProvider {
     /// what the vector says.
     async fn probe(provider: Arc<Self>) -> Result<(), OnnxLoadError> {
         // On a blocking thread and under a bound, for the same two reasons
-        // `open_session` uses them. `Session::run` is synchronous CPU work,
+        // the session's open uses them. `Session::run` is synchronous CPU work,
         // so calling it on a Tokio worker holds that worker for the duration
-        // -- the reason `embed` uses `block_in_place`. And `ort` can hang
+        // -- the reason `OnnxSession::run` hands the worker back for `embed`.
+        // And `ort` can hang
         // rather than error, which is what `LOAD_TIMEOUT` is there for: a
         // probe added to catch a session that cannot run would otherwise be
         // able to stop the gear from ever starting, which is worse than the
@@ -401,16 +343,15 @@ impl OnnxEmbeddingProvider {
             let encoded = provider
                 .encode(std::slice::from_ref(&PROBE_INPUT.to_owned()))
                 .map_err(|error| OnnxLoadError::Session(format!("probe tokenization: {error}")))?;
-            // Nobody else holds the session yet; this is load.
-            let mut session = provider.session.blocking_lock();
-            // The width is checked by `run` itself, which answers
-            // `SpaceMismatch` -- a declared width the model does not produce
-            // is exactly what that name is for, and comparing again here
-            // would be a second answer to one question. Reaching it is the
-            // point: this makes the check happen once, before anyone depends
-            // on the provider.
+            // Nobody else holds the session yet; this is load. The width is
+            // checked by `run` itself, which answers `SpaceMismatch` -- a
+            // declared width the model does not produce is exactly what that
+            // name is for, and comparing again here would be a second answer
+            // to one question. Reaching it is the point: this makes the check
+            // happen once, before anyone depends on the provider.
             provider
-                .run(&mut session, &encoded)
+                .session
+                .run_blocking(|session| provider.run(session, &encoded))
                 .map_err(|error| OnnxLoadError::Session(format!("probe inference: {error}")))?;
             Ok::<(), OnnxLoadError>(())
         });

@@ -2738,8 +2738,8 @@ dependencies = [
  "async-trait",
  "aws-lc-rs",
  "cf-gears-graph-storage-sdk",
+ "cf-gears-toolkit-onnx-runtime",
  "hex",
- "ort",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4152,6 +4152,16 @@ dependencies = [
  "syn 3.0.4",
  "trybuild",
  "uuid",
+]
+
+[[package]]
+name = "cf-gears-toolkit-onnx-runtime"
+version = "0.1.0"
+dependencies = [
+ "ort",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

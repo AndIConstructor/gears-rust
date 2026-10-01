@@ -30,11 +30,9 @@ tracing = { workspace = true }
 aws-lc-rs = { workspace = true }
 hex = { workspace = true }
 
-# The ONNX Runtime is resolved by `dlopen` at first use (`ORT_DYLIB_PATH`), so
-# building this crate needs no runtime headers -- only running it needs the
-# library. The pin and its `api-24` feature are the workspace's; see the root
-# manifest for why both are load-bearing.
-ort = { workspace = true }
+# The ONNX Runtime -- the pinned `ort`, the session's open under a deadline,
+# inference off the Tokio workers -- is the toolkit's.
+toolkit-onnx-runtime = { workspace = true }
 tokenizers = { workspace = true }
 
 [dev-dependencies]

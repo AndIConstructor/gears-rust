@@ -78,6 +78,7 @@ members = [
     "libs/toolkit-stable-hash",
     "libs/toolkit-transport-grpc",
     "libs/toolkit-utils",
+    "libs/ai/toolkit-onnx-runtime",
     "libs/rustls-corecrypto-provider",
     "libs/rustls-fips-shim",
     "libs/toolkit-contract",
@@ -330,6 +331,7 @@ toolkit-security = { package = "cf-gears-toolkit-security", version = "0.11.0", 
 toolkit-stable-hash = { package = "cf-gears-toolkit-stable-hash", version = "0.1.0", path = "libs/toolkit-stable-hash" }
 toolkit-transport-grpc = { package = "cf-gears-toolkit-transport-grpc", version = "0.9.0", path = "libs/toolkit-transport-grpc" }
 toolkit-utils = { package = "cf-gears-toolkit-utils", version = "0.7.2", path = "libs/toolkit-utils" }
+toolkit-onnx-runtime = { package = "cf-gears-toolkit-onnx-runtime", version = "0.1.0", path = "libs/ai/toolkit-onnx-runtime" }
 rustls-corecrypto-provider = { package = "cf-gears-rustls-corecrypto-provider", version = "0.1.3", path = "libs/rustls-corecrypto-provider" }
 rustls-fips-shim = { package = "cf-gears-rustls-fips-shim", version = "0.1.2", path = "libs/rustls-fips-shim" }
 # Windows CNG-backed rustls CryptoProvider (Windows-only FIPS path). Caret-pinned to 0.1.x;
