@@ -761,7 +761,9 @@ test-usage-collector-pg: install-tools
 	cargo nextest run -p cf-gears-timescaledb-usage-collector-plugin --features postgres
 
 ## Run ClickHouse usage-collector plugin integration tests (Docker required;
-## the suite spins up its own clickhouse container via testcontainers).
+## every test gets its own database on one shared, named clickhouse container,
+## `uc-clickhouse-test-harness-<tag>`, which is reused across runs — remove it
+## with `docker rm -fv` to start clean).
 ## `--run-ignored all` because the suite is double-gated: the `clickhouse`
 ## feature compiles the test files, and every Docker-backed test inside them is
 ## `#[ignore]`d. CH_REQUIRE_DOCKER=1 turns an unreachable Docker into a panic —
