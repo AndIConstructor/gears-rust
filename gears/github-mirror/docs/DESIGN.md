@@ -421,6 +421,7 @@ Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the
 |---|---|
 | `tenant_id`, `repo_id`, `family` | Primary key (`issues`, `pull_requests`, `commits`) |
 | `last_seen_updated_at` | High-water mark promoted after a complete sweep |
+| `page1_etag`, `last_head_sha` | Page one's `ETag` and, for commits, the head commit, both from the last complete sweep |
 | `sweep_in_progress`, `candidate_high_water` | The sweep under way and the mark it will promote |
 
 #### Table: gm_entity_fingerprints
@@ -445,7 +446,9 @@ Tasks have no table: the queue is in memory.
 
 #### 3.8.1 Incremental Listing Sweep
 
-Issues, pull requests and commits are listed newest first. A sweep starts from the family's `last_seen_updated_at` minus a five-minute overlap and stops at the first page whose rows are all older. The newest `updated_at` seen is staged as the candidate; it is promoted only when the whole family, including its refinements, has finished. A run that stops early promotes nothing, so the next run walks the listing again and the gate re-seeds whatever was left `pending`. `force` ignores the watermark.
+Issues and pull requests are listed newest first. A sweep starts from the family's `last_seen_updated_at` minus a five-minute overlap and stops at the first page whose rows are all older. The newest `updated_at` seen is staged as the candidate; it is promoted only when the whole family, including its refinements, has finished. A run that stops early promotes nothing, so the next run walks the listing again and the gate re-seeds whatever was left `pending`. `force` ignores the watermark.
+
+Commits have no date watermark. Their only date is `committer.date`, which the committer's machine sets: a commit dated in the future would push the bound past every later commit, and one made before the last sync but pushed after it would fall below the bound. The commits sweep keeps the head commit instead. When page one's `ETag` has changed and a head from the last complete sweep is stored, it asks `GET /repos/{owner}/{name}/compare/{last_head}...{head}` for the commits added since, whatever their dates, and then walks the commit comments as usual. The first sync, `force`, and a head GitHub no longer has below the new one (a force push answers `diverged` or `404`) walk the whole listing instead. The new head is promoted with the page-one `ETag`, at the same family-complete point.
 
 #### 3.8.2 Change Gate
 

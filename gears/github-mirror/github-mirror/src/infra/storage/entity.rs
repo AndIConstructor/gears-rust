@@ -931,6 +931,7 @@ pub mod sync_watermarks {
         pub last_seen_updated_at: Option<String>,
         /// `ETag` of page 1 from the last successful sweep (short-circuit).
         pub page1_etag: Option<String>,
+        pub last_head_sha: Option<String>,
         /// Crash-safety flag: a sweep is currently running.
         pub sweep_in_progress: bool,
         /// RFC3339 staged high-water, promoted on sweep success.

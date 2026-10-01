@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS gm_sync_watermarks (
     family VARCHAR(64) NOT NULL,
     last_seen_updated_at VARCHAR(64),
     page1_etag VARCHAR(255),
+    last_head_sha VARCHAR(64),
     sweep_in_progress BOOLEAN NOT NULL,
     candidate_high_water VARCHAR(64),
     PRIMARY KEY (tenant_id, repo_id, family)
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS gm_sync_watermarks (
     family VARCHAR(64) NOT NULL,
     last_seen_updated_at VARCHAR(64),
     page1_etag VARCHAR(255),
+    last_head_sha VARCHAR(64),
     sweep_in_progress BOOLEAN NOT NULL,
     candidate_high_water VARCHAR(64),
     PRIMARY KEY (tenant_id, repo_id, family)
@@ -47,6 +49,7 @@ CREATE TABLE IF NOT EXISTS gm_sync_watermarks (
     family TEXT NOT NULL,
     last_seen_updated_at TEXT,
     page1_etag TEXT,
+    last_head_sha TEXT,
     sweep_in_progress BOOLEAN NOT NULL,
     candidate_high_water TEXT,
     PRIMARY KEY (tenant_id, repo_id, family)

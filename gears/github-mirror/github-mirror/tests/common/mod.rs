@@ -300,6 +300,7 @@ impl GithubPort for FakeGithub {
             commit_comments: f.commit_comments.clone(),
             contributors: Vec::new(),
             page1_etag: None,
+            head_sha: None,
             unchanged: false,
             swept_to_end: true,
             next: None,

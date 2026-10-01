@@ -4499,14 +4499,15 @@ impl Service {
         }
 
         for family in Family::SWEPT {
-            if run.is_swept(family) {
+            if let Some(end) = run.swept_end(family) {
                 self.sweep_watermark
                     .promote(
                         &run.scope,
                         run.tenant_id,
                         run.repo_id()?,
                         family,
-                        run.swept_page1_etag(family),
+                        end.page1_etag,
+                        end.head_sha,
                     )
                     .await?;
             }

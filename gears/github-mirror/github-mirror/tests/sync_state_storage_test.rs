@@ -160,6 +160,7 @@ async fn a_watermark_is_keyed_by_repo_and_family_and_promotes_its_candidate() {
         family: "issues".to_owned(),
         last_seen_updated_at: None,
         page1_etag: None,
+        last_head_sha: None,
         sweep_in_progress: true,
         candidate_high_water: Some("2026-08-25T09:00:00Z".to_owned()),
     };
@@ -172,6 +173,7 @@ async fn a_watermark_is_keyed_by_repo_and_family_and_promotes_its_candidate() {
         family: "issues".to_owned(),
         last_seen_updated_at: Some("2026-08-25T09:00:00Z".to_owned()),
         page1_etag: Some("W/\"abc\"".to_owned()),
+        last_head_sha: None,
         sweep_in_progress: false,
         candidate_high_water: None,
     };

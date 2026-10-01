@@ -497,6 +497,7 @@ async fn walk_issues(
                 ListCursor {
                     updated_after,
                     page1_etag,
+                    last_head_sha: None,
                     continue_from: continue_from.as_deref(),
                 },
                 options,
@@ -542,6 +543,7 @@ async fn walk_pulls(
                 ListCursor {
                     updated_after,
                     page1_etag,
+                    last_head_sha: None,
                     continue_from: continue_from.as_deref(),
                 },
                 options,
@@ -585,6 +587,7 @@ async fn walk_commits(
                 ListCursor {
                     updated_after,
                     page1_etag,
+                    last_head_sha: None,
                     continue_from: continue_from.as_deref(),
                 },
                 options,

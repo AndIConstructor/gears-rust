@@ -77,6 +77,7 @@ pub fn high_water(seen: &[&str], threshold: Option<DateTime<Utc>>) -> Option<Dat
 pub struct SweepStart {
     pub updated_after: Option<DateTime<Utc>>,
     pub page1_etag: Option<String>,
+    pub last_head_sha: Option<String>,
 }
 
 pub struct SweepWatermark {
@@ -102,13 +103,13 @@ impl SweepWatermark {
             .watermark_store
             .find(scope, repo_id, family.as_str())
             .await?;
+        if force {
+            return Ok(SweepStart::default());
+        }
         Ok(SweepStart {
             updated_after: stop_threshold(stored.as_ref(), force),
-            page1_etag: if force {
-                None
-            } else {
-                stored.and_then(|w| w.page1_etag)
-            },
+            page1_etag: stored.as_ref().and_then(|w| w.page1_etag.clone()),
+            last_head_sha: stored.and_then(|w| w.last_head_sha),
         })
     }
 
@@ -137,7 +138,8 @@ impl SweepWatermark {
                     last_seen_updated_at: stored
                         .as_ref()
                         .and_then(|w| w.last_seen_updated_at.clone()),
-                    page1_etag: stored.and_then(|w| w.page1_etag),
+                    page1_etag: stored.as_ref().and_then(|w| w.page1_etag.clone()),
+                    last_head_sha: stored.and_then(|w| w.last_head_sha),
                     sweep_in_progress: true,
                     candidate_high_water: candidate,
                 },
@@ -164,6 +166,7 @@ impl SweepWatermark {
         repo_id: i64,
         family: Family,
         page1_etag: Option<String>,
+        head_sha: Option<String>,
     ) -> Result<(), DomainError> {
         let Some(stored) = self
             .watermark_store
@@ -186,6 +189,7 @@ impl SweepWatermark {
                 SyncWatermarkRecord {
                     last_seen_updated_at,
                     page1_etag: page1_etag.or_else(|| stored.page1_etag.clone()),
+                    last_head_sha: head_sha.or_else(|| stored.last_head_sha.clone()),
                     sweep_in_progress: false,
                     candidate_high_water: None,
                     ..stored

@@ -97,6 +97,10 @@ fn continue_after(stages: &[Stage], stage: usize, page_next: Option<String>) -> 
     page_next.or_else(|| stages.get(stage + 1).map(|next| next.first.clone()))
 }
 
+fn is_compare_url(url: &str) -> bool {
+    url.split('?').next().unwrap_or(url).contains("/compare/")
+}
+
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
 
 /// The REST API version every request pins (DESIGN 3.5). Without it the
@@ -433,6 +437,48 @@ impl GithubClient {
             }) => request.header("If-Modified-Since", modified.clone()),
             _ => request,
         }
+    }
+
+    async fn compare_page(
+        &self,
+        repo_id: i64,
+        stages: &[Stage],
+        url: &str,
+        first: bool,
+        options: &FetchOptions,
+    ) -> Result<Option<CommitListing>, DomainError> {
+        let page: FetchedPage<GhComparison> = match self.get_page(url, options).await {
+            Ok(page) => page,
+            Err(DomainError::NotFound) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let GhComparison {
+            status,
+            total_commits,
+            commits,
+        } = page.parsed;
+        let linear = matches!(status.as_str(), "ahead" | "identical");
+        let cut_short = first && page.next.is_none() && total_commits > commits.len();
+        if !linear || cut_short {
+            tracing::debug!(
+                url = %redacted_word(url),
+                status,
+                "the commits since the stored head cannot be listed; walking every commit"
+            );
+            return Ok(None);
+        }
+        let contributors = derive_commit_people(repo_id, &commits, &[]).into_records();
+        let mut listing = CommitListing {
+            commits: commits
+                .into_iter()
+                .map(|c| commit_record(repo_id, c))
+                .collect(),
+            contributors,
+            next: continue_after(stages, 0, page.next),
+            ..CommitListing::default()
+        };
+        listing.swept_to_end = listing.next.is_none();
+        Ok(Some(listing))
     }
 
     /// One response: what it parsed to, plus the `rel="next"` URL if the list
@@ -1306,6 +1352,13 @@ struct GhReview {
 }
 
 #[derive(Debug, Deserialize)]
+struct GhComparison {
+    status: String,
+    total_commits: usize,
+    commits: Vec<GhCommit>,
+}
+
+#[derive(Debug, Deserialize)]
 struct GhCommit {
     sha: String,
     commit: GhCommitDetails,
@@ -2101,6 +2154,7 @@ impl GithubPort for GithubClient {
             updated_after,
             page1_etag,
             continue_from,
+            ..
         } = cursor;
         if !options.scope.objects.issues {
             return Ok(IssueListing::default());
@@ -2252,6 +2306,7 @@ impl GithubPort for GithubClient {
             updated_after,
             page1_etag,
             continue_from,
+            ..
         } = cursor;
         if !options.scope.objects.pull_requests {
             return Ok(PullListing::default());
@@ -2492,6 +2547,7 @@ impl GithubPort for GithubClient {
         let ListCursor {
             updated_after,
             page1_etag,
+            last_head_sha,
             continue_from,
         } = cursor;
         if !options.scope.objects.commits {
@@ -2513,6 +2569,15 @@ impl GithubPort for GithubClient {
             },
         ];
         let url = continue_from.map_or_else(|| stages[0].first.clone(), str::to_owned);
+        if is_compare_url(&url) {
+            let compared = self
+                .compare_page(repo_id, &stages, &url, false, options)
+                .await?;
+            return Ok(compared.unwrap_or_else(|| CommitListing {
+                next: Some(stages[0].first.clone()),
+                ..CommitListing::default()
+            }));
+        }
         let stage = stage_of(&stages, &url)?;
         let bounded = updated_after.is_some();
 
@@ -2525,6 +2590,22 @@ impl GithubPort for GithubClient {
                     tracing::debug!(%url, "page one is unchanged; the sweep stops here");
                     listing.unchanged = true;
                     return Ok(listing);
+                }
+                listing.head_sha = page.parsed.first().map(|c| c.sha.clone());
+                if let (Some(base), Some(head)) = (last_head_sha, listing.head_sha.as_deref()) {
+                    let compare = self.absolute(&format!(
+                        "/repos/{owner}/{name}/compare/{base}...{head}?per_page={FIRST_PAGE_SIZE}"
+                    ));
+                    if let Some(compared) = self
+                        .compare_page(repo_id, &stages, &compare, true, options)
+                        .await?
+                    {
+                        return Ok(CommitListing {
+                            page1_etag: listing.page1_etag,
+                            head_sha: listing.head_sha,
+                            ..compared
+                        });
+                    }
                 }
             }
             listing.contributors = derive_commit_people(repo_id, &page.parsed, &[]).into_records();

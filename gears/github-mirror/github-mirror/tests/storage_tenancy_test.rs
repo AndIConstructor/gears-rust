@@ -538,6 +538,7 @@ async fn every_child_listing_of_a_shared_repository_stays_with_its_tenant() {
                 family: "issues".to_owned(),
                 last_seen_updated_at: Some(A_ONLY.to_owned()),
                 page1_etag: Some(A_ONLY.to_owned()),
+                last_head_sha: None,
                 sweep_in_progress: true,
                 candidate_high_water: Some(A_ONLY.to_owned()),
             },

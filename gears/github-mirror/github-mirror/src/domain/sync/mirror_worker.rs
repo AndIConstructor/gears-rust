@@ -33,6 +33,12 @@ use crate::domain::repo::{
 };
 use crate::domain::scope::CollectionMode;
 
+#[derive(Debug, Clone, Default)]
+pub struct SweptEnd {
+    pub page1_etag: Option<String>,
+    pub head_sha: Option<String>,
+}
+
 /// Everything the tasks of one run share.
 ///
 /// `repo_id` is learned by Discovery and read by every later task; the
@@ -47,7 +53,7 @@ pub struct RunState {
     pub options: FetchOptions,
     repo_id: OnceLock<i64>,
     complete: Mutex<ListingCompleteness>,
-    swept: Mutex<HashMap<Family, Option<String>>>,
+    swept: Mutex<HashMap<Family, SweptEnd>>,
     summary: Mutex<SyncSummary>,
     drift: Mutex<Vec<CountDrift>>,
     contributors: Mutex<HashMap<i64, ContributorRecord>>,
@@ -146,29 +152,26 @@ impl RunState {
     /// may be promoted. Independent of [`Self::completeness`]: a walk bounded
     /// by `updated_after` saw everything it asked for without seeing everything there
     /// is, so it may advance the watermark but not drive reconciliation.
-    fn mark_swept(&self, family: Family, page1_etag: Option<String>) {
+    fn mark_swept(&self, family: Family, page1_etag: Option<String>, head_sha: Option<String>) {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(family, page1_etag);
+            .insert(
+                family,
+                SweptEnd {
+                    page1_etag,
+                    head_sha,
+                },
+            );
     }
 
     #[must_use]
-    pub fn is_swept(&self, family: Family) -> bool {
-        self.swept
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(&family)
-    }
-
-    #[must_use]
-    pub fn swept_page1_etag(&self, family: Family) -> Option<String> {
+    pub fn swept_end(&self, family: Family) -> Option<SweptEnd> {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&family)
             .cloned()
-            .flatten()
     }
 
     pub fn accept_drift(&self, drift: CountDrift) {
@@ -406,6 +409,7 @@ impl MirrorWorker {
                     ListCursor {
                         updated_after,
                         page1_etag: start.page1_etag.as_deref(),
+                        last_head_sha: None,
                         continue_from: continue_from.as_deref(),
                     },
                     &run.options,
@@ -416,7 +420,7 @@ impl MirrorWorker {
                 page1_etag.clone_from(&listing.page1_etag);
             }
             if listing.swept_to_end {
-                run.mark_swept(Family::Issues, page1_etag.clone());
+                run.mark_swept(Family::Issues, page1_etag.clone(), None);
             }
             let seen: Vec<&str> = listing
                 .issues
@@ -527,6 +531,7 @@ impl MirrorWorker {
                     ListCursor {
                         updated_after,
                         page1_etag: start.page1_etag.as_deref(),
+                        last_head_sha: None,
                         continue_from: continue_from.as_deref(),
                     },
                     &run.options,
@@ -537,7 +542,7 @@ impl MirrorWorker {
                 page1_etag.clone_from(&listing.page1_etag);
             }
             if listing.swept_to_end {
-                run.mark_swept(Family::PullRequests, page1_etag.clone());
+                run.mark_swept(Family::PullRequests, page1_etag.clone(), None);
             }
             let seen: Vec<&str> = listing
                 .pull_requests
@@ -697,10 +702,9 @@ impl MirrorWorker {
             .watermark
             .start_sweep(&run.scope, repo_id, Family::Commits, run.options.force)
             .await?;
-        let updated_after = start.updated_after;
         let with_ci = run.options.scope.collection.actions == CollectionMode::All;
-        let mut high = updated_after;
         let mut page1_etag: Option<String> = None;
+        let mut head_sha: Option<String> = None;
         let mut swept: HashSet<String> = HashSet::new();
         let mut continue_from: Option<String> = None;
 
@@ -710,8 +714,9 @@ impl MirrorWorker {
                 .list_commits(
                     run.repo_ref()?,
                     ListCursor {
-                        updated_after,
+                        updated_after: None,
                         page1_etag: start.page1_etag.as_deref(),
+                        last_head_sha: start.last_head_sha.as_deref(),
                         continue_from: continue_from.as_deref(),
                     },
                     &run.options,
@@ -721,24 +726,19 @@ impl MirrorWorker {
             if page1_etag.is_none() {
                 page1_etag.clone_from(&listing.page1_etag);
             }
-            if listing.swept_to_end {
-                run.mark_swept(Family::Commits, page1_etag.clone());
+            if head_sha.is_none() {
+                head_sha.clone_from(&listing.head_sha);
             }
-            let seen: Vec<&str> = listing
-                .commits
-                .iter()
-                .filter_map(|c| c.committed_at.as_deref())
-                .collect();
-            high = high_water(&seen, high);
+            if listing.swept_to_end {
+                run.mark_swept(Family::Commits, page1_etag.clone(), head_sha.clone());
+            }
             if listing.unchanged {
                 return Ok(());
             }
 
             let mut candidates = Vec::new();
             for commit in &listing.commits {
-                if !swept.insert(commit.sha.clone())
-                    || is_stale(commit.committed_at.as_deref(), updated_after)
-                {
+                if !swept.insert(commit.sha.clone()) {
                     continue;
                 }
                 candidates.push(RefinementCandidate {
@@ -767,7 +767,7 @@ impl MirrorWorker {
         }
 
         self.watermark
-            .stage(&run.scope, run.tenant_id, repo_id, Family::Commits, high)
+            .stage(&run.scope, run.tenant_id, repo_id, Family::Commits, None)
             .await?;
         Ok(())
     }

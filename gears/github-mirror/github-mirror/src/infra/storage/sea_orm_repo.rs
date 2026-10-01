@@ -5442,6 +5442,7 @@ fn sync_watermark_active_model(
         family: ActiveValue::Set(r.family.clone()),
         last_seen_updated_at: ActiveValue::Set(r.last_seen_updated_at.clone()),
         page1_etag: ActiveValue::Set(r.page1_etag.clone()),
+        last_head_sha: ActiveValue::Set(r.last_head_sha.clone()),
         sweep_in_progress: ActiveValue::Set(r.sweep_in_progress),
         candidate_high_water: ActiveValue::Set(r.candidate_high_water.clone()),
     }
@@ -5454,6 +5455,7 @@ impl From<sync_watermarks::Model> for SyncWatermarkRecord {
             family: m.family,
             last_seen_updated_at: m.last_seen_updated_at,
             page1_etag: m.page1_etag,
+            last_head_sha: m.last_head_sha,
             sweep_in_progress: m.sweep_in_progress,
             candidate_high_water: m.candidate_high_water,
         }
@@ -5477,6 +5479,7 @@ impl SyncWatermarkRepository for SeaOrmSyncWatermarkRepository {
         .update_columns([
             sync_watermarks::Column::LastSeenUpdatedAt,
             sync_watermarks::Column::Page1Etag,
+            sync_watermarks::Column::LastHeadSha,
             sync_watermarks::Column::SweepInProgress,
             sync_watermarks::Column::CandidateHighWater,
         ])

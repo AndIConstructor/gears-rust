@@ -1660,6 +1660,7 @@ pub struct SyncWatermarkRecord {
     pub family: String,
     pub last_seen_updated_at: Option<String>,
     pub page1_etag: Option<String>,
+    pub last_head_sha: Option<String>,
     pub sweep_in_progress: bool,
     pub candidate_high_water: Option<String>,
 }
