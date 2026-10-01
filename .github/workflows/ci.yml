@@ -613,10 +613,13 @@ jobs:
           cache-targets: false
           shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}-llvm-cov
 
+      # The same pin as the workspace coverage job: the v2.70.3 one installed
+      # cargo-llvm-cov 0.8.5, which on nightly-2026-08-21 ran every test and
+      # then found no object files to report on.
       - name: Install cargo-llvm-cov and nextest
-        uses: taiki-e/install-action@6ef672efc2b5aabc787a9e94baf4989aa02a97df # v2.70.3
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
-          tool: cargo-llvm-cov,cargo-nextest
+          tool: cargo-llvm-cov, nextest
 
       # PostgreSQL 19 plus a pinned pgvector, on the official base so the
       # stock entrypoint and server arguments testcontainers drives are intact.
