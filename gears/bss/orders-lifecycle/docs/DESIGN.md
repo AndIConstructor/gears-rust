@@ -4034,8 +4034,9 @@ and 3 are driven by the buyer surface synchronously; row 12 is reported by the s
 itself. Emitting an event nobody consumes would enlarge the PRD's event set without a consumer,
 so the absence is a decision rather than a gap.
 
-**Registration and consumers (D-178).** Each of the eleven events is a GTS type under
-`gts.cf.bss.orders.*.v1~` registered before its `TypedEvent` compiles; none is registered yet. The
+**Registration and consumers (D-178).** Each of the eleven events is a GTS type derived from the
+Orders event family `gts.cf.core.events.event.v1~cf.bss.orders.event.v1~` (§4.7) and registered
+before its `TypedEvent` compiles; none is registered yet. The
 Workflow branch consumes nine of them (W/design/10:274-276) and reads commercial facts through
 `get_version`; Seam Atlas C09 lists three and must be regenerated from this table. A rejected
 message is dead-lettered and the partition cursor advances (§3.6), so consumers see a gap they
