@@ -70,6 +70,10 @@ pub enum DomainError {
     #[error("Reaction must be 'like' or 'dislike'")]
     InvalidReaction,
 
+    /// Chat title empty after trim, or longer than 255 characters.
+    #[error("Invalid title: {message}")]
+    InvalidTitle { message: String },
+
     #[error("Model not found: {model_id}")]
     ModelNotFound { model_id: String },
 

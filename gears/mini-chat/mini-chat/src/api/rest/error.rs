@@ -157,6 +157,10 @@ impl From<DomainError> for CanonicalError {
                 )
                 .create(),
 
+            DomainError::InvalidTitle { message } => MiniChatChatError::invalid_argument()
+                .with_field_violation("title", message, "INVALID_TITLE")
+                .create(),
+
             DomainError::InvalidReaction => MiniChatChatError::invalid_argument()
                 .with_field_violation(
                     "reaction",
@@ -534,6 +538,21 @@ mod tests {
     }
 
     // ── Wire-status changes accepted by the migration plan ───────────────
+
+    #[test]
+    fn invalid_title_emits_field_violation() {
+        let p: Problem = DomainError::InvalidTitle {
+            message: "Title must be 255 characters or fewer".into(),
+        }
+        .into_test_problem();
+        assert_eq!(p.status, Some(400));
+        assert_eq!(p.problem_type, INVALID_ARGUMENT_TYPE);
+        let v = p.context["field_violations"]
+            .as_array()
+            .expect("field_violations must be present");
+        assert_eq!(v[0]["field"], "title");
+        assert_eq!(v[0]["reason"], "INVALID_TITLE");
+    }
 
     #[test]
     fn invalid_reaction_emits_field_violation() {
