@@ -1,9 +1,5 @@
 # Feature: Workflow Seam
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-workflow-seam-implemented`
-- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-workflow-seam`
-
-## Table of Contents
 
 <!-- toc -->
 
@@ -12,18 +8,18 @@
   - [1.2 Purpose](#12-purpose)
   - [1.3 Actors](#13-actors)
   - [1.4 References](#14-references)
-- [2. Actor Flows](#2-actor-flows)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
   - [2.1 Reflect an approval verdict](#21-reflect-an-approval-verdict)
   - [2.2 Begin fulfillment and fence activation dispatch](#22-begin-fulfillment-and-fence-activation-dispatch)
   - [2.3 Acknowledge completion or compensated failure](#23-acknowledge-completion-or-compensated-failure)
   - [2.4 Cancel after operational compensation](#24-cancel-after-operational-compensation)
-- [3. Processes / Business Logic](#3-processes--business-logic)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [3.1 Reflect facts without owning approval policy](#31-reflect-facts-without-owning-approval-policy)
   - [3.2 Compose begin guards and handle the activation re-check](#32-compose-begin-guards-and-handle-the-activation-re-check)
   - [3.3 Validate completed acknowledgement](#33-validate-completed-acknowledgement)
   - [3.4 Validate failed acknowledgement and compensation](#34-validate-failed-acknowledgement-and-compensation)
   - [3.5 Shared direct-cancel window](#35-shared-direct-cancel-window)
-- [4. States](#4-states)
+- [4. States (CDSL)](#4-states-cdsl)
   - [4.1 Engine-owned seam transitions](#41-engine-owned-seam-transitions)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [5.1 Guarded seam operations](#51-guarded-seam-operations)
@@ -37,11 +33,8 @@
 
 <!-- /toc -->
 
-**SDK parity (D-155):** [Workflow SDK contract](../DESIGN.md#orders-lifecycle-workflow-sdk)
-is normative for in-process consumers and immutable-version reads. All SDK methods enter the same
-authorized application service as REST, preserving authorities, explicit line mappings and engine
-replay/concurrency semantics. An SDK method is not an authorization bypass.
-
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-workflow-seam-implemented`
+- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-workflow-seam`
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -74,7 +67,7 @@ The detailed design remains authoritative for schemas and API contracts. [UPSTRE
 
 **UI applicability**: UI layout, keyboard navigation, screen-reader behavior and visual accessibility are not applicable because this feature specifies backend contracts, not a user interface. API usability, actionable errors and non-disclosing diagnostics remain applicable; consuming consoles own their UI requirements.
 
-## 2. Actor Flows
+## 2. Actor Flows (CDSL)
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`, `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`, `cpt-cf-bss-orders-lifecycle-usecase-order-cancel-during-approval`.
 
@@ -131,7 +124,7 @@ All five operations use `/bss-orders-lifecycle/v1/orders/{orderId}` and require 
 3. [ ] After engine authorization, expected-version and admissibility checks, evaluate registered guards in source order: mandatory cancel reason, pre-hold state, compensation evidence, then the shared cancel-window guard (§3.5). Preserve that refusal precedence.
 4. [ ] Commit `cancelled`, evidence, caller reason, audit and `OrderCancelled` atomically. Keep the spawn signal permanently recorded.
 
-## 3. Processes / Business Logic
+## 3. Processes / Business Logic (CDSL)
 
 ### 3.1 Reflect facts without owning approval policy
 
@@ -186,7 +179,7 @@ Map `required`, `not_required`, `granted`, `denied` to `reflect-approval-require
 
 **Output**: Validated terminal contribution, plus acknowledgement projection only for acknowledgement requests, or ordered refusal; invalid boundary values are rejected before engine entry.
 
-1. [ ] At boundary validation, reject unknown failure-reason values or any failure reason on a completed outcome as `request-invalid`, unaudited and before authorization. Permit exactly `market-divergence`, `overlap-collision`, `identity-party-unavailable`, `overlap-presence-unevaluable`, `line-execution-failed`, `dependency-graph-invalid`; the last two are received outcomes, not Lifecycle refusal reasons.
+1. [ ] At boundary validation, reject unknown failure-reason values or any failure reason on a completed outcome as `request-invalid`, unaudited and before authorization. Permit exactly `market-divergence`, `overlap-collision`, `identity-party-unavailable`, `overlap-presence-unevaluable`, `line-execution-failed`, `dependency-graph-invalid`; the last two are received outcomes, not Lifecycle refusal reasons, and `dependency-graph-invalid` is accepted for replay only (D-172).
 2. [ ] After engine authorization, expected-version and admissibility checks, evaluate failed-acknowledgement guards in this order: failure reason present (`failure-reason-missing`), compensation evidence present, evidence valid, then—if held—stored pre-hold state is `in_fulfillment` (`prehold-not-in-fulfillment`). The workflow-cancel guard order is separately defined in §2.4.
 3. [ ] For failed acknowledgement and every workflow cancel, refuse absent evidence with `compensation-evidence-missing`. Validate the closed five-member schema: `drafts_voided`, `activated_rolled_back`, `activation_dispatched`, `at_sale_facts_emitted`, `no_active_subscription_remains`.
 4. [ ] Require the final assertion true; schema-invalid or false evidence refuses `compensation-evidence-incomplete`. Empty lists are valid. Lifecycle validates structure and asserted fact only, never reconciles the lists through Subscriptions calls.
@@ -203,7 +196,7 @@ Map `required`, `not_required`, `granted`, `denied` to `reflect-approval-require
 
 For an already-authorized ordinary or mediated cancel from fulfillment (including a fulfillment hold), first read the spawn signal. If absent, admit on the open window. If present, refuse any actor other than the configured Workflow service principal with `direct-cancel-window-closed`. Do not hoist the service-principal check before the open-window branch: ordinary authorized buyers/operators must retain pre-spawn cancellation. Operation grants are checked separately before this guard; ordinary cancel requires no evidence, while mediated cancel always does. Held mediated cancel additionally requires stored pre-hold `in_fulfillment` and a mandatory cancel reason.
 
-## 4. States
+## 4. States (CDSL)
 
 ### 4.1 Engine-owned seam transitions
 
@@ -281,7 +274,7 @@ shared schemas and interfaces are defined in [DESIGN.md](../DESIGN.md).
 
 #### Reflect an approval verdict
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-reflect-verdict`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-reflect-verdict`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -311,7 +304,7 @@ than being indistinguishable from a policy one. The denial reason is carried for
 
 #### Begin fulfillment and record the spawn signal
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-begin-and-spawn`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-begin-and-spawn`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`
 
@@ -375,7 +368,7 @@ dispatch waits on (§4.3).
 
 #### Acknowledge the fulfillment outcome
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-acknowledge-fulfillment`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-acknowledge-fulfillment`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`
 
@@ -418,7 +411,7 @@ Billing credit note — money reverse is a billing-chain concern.
 
 #### Cancel across the spawn boundary (the shared cancel guard)
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-seam-cancel-guard`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-seam-cancel-guard`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-cancel-during-approval`
 
@@ -481,7 +474,7 @@ every other caller ([`../DECISIONS.md`](../DECISIONS.md) D-109).
 
 #### Cancel through the Workflow (the `/workflow-cancel` handler)
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-workflow-cancel`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-workflow-cancel`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-cancel-during-approval`
 
@@ -641,7 +634,7 @@ signal as after it (D-134).
 | `identity-party-unavailable` | a re-check `defer` on the identity port (whose unavailable reason is `identity-party-unavailable`) exhausted `activation-recheck-retry-budget` (D-127) |
 | `overlap-presence-unevaluable` | a re-check `defer` on the overlap-occupancy port exhausted the same budget (D-127) |
 | `line-execution-failed` | a line's provisioning failed and Workflow's remediation was exhausted or its fail-fast policy applied |
-| `dependency-graph-invalid` | the plan's Catalog dependency graph was missing a dependency or cyclic, so Workflow halted before any subscription was created |
+| `dependency-graph-invalid` | **Withdrawn as an emitted value (D-172):** Workflow D-196 removed the plan dependency graph; retained in the closed set so replayed historical payloads still validate, never emitted by the current Workflow design |
 
 A failed acknowledgement without a failure reason **MUST** be refused `failure-reason-missing`. A
 value outside the enumeration, and a failure reason supplied with a completed acknowledgement,

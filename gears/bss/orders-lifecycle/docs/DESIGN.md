@@ -300,6 +300,16 @@ Persistence         toolkit-db backend (append-only version rows; current-versio
 | Domain | The Transition Engine: aggregate and version chain, transition table and guard evaluation, idempotency semantics, version check, audit and event contracts | Rust; GTS for the cross-gear contract surface ([01 §4.7](DESIGN.md#contract-01-4-7)) + Rust domain structs |
 | Infrastructure | Append-only version and audit stores, current-version projection, idempotency registry, platform producer outbox, expiry scheduler | PostgreSQL, SecureORM, `event-broker-sdk` (`outbox` feature), `toolkit_db::outbox`, `toolkit_db::Db::lock` ([Foundation contract §3.8](DESIGN.md#contract-01-3-8)) |
 
+
+<a id="register-tech"></a>
+
+#### Slice technology choices
+
+Technology choices that a slice contract introduces are defined here and specified normatively in [§6](#6-detailed-architecture-contracts); each entry links to its contract.
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-tech-foundation-stack`
+  — Foundation — Foundation stack ([contract](#contract-01-1-3))
+
 ## 2. Principles & Constraints
 
 ### 2.1 Design Principles
@@ -362,6 +372,109 @@ The registry stores the committed outcome of an operation, so replay returns tha
 including a stored failure — rather than re-executing or optimistically assuming success. The
 three non-success cases are distinct and none of them may be read as success: payload mismatch,
 still-processing conflict, and stale version.
+
+
+<a id="register-principles"></a>
+
+#### Slice principles
+
+The principles each slice adds are defined here and specified normatively in [§6](#6-detailed-architecture-contracts); each entry links to its contract.
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-atomic-transition-commit`
+  — Foundation — One transaction, with a conditional fourth effect ([contract](#contract-01-one-transaction-with-a-conditional-fourth-effect))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-guard-declared-not-embedded`
+  — Foundation — Guards are declared, never embedded ([contract](#contract-01-guards-are-declared-never-embedded))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-outcome-store-idempotency`
+  — Foundation — Idempotency stores an outcome, and is resolved after authorization ([contract](#contract-01-idempotency-stores-an-outcome-and-is-resolved-after-authorization))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-append-only-history`
+  — Foundation — History is append-only, per table ([contract](#contract-01-history-is-append-only-per-table))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-absence-is-refusal`
+  — Foundation — Absence is a refusal ([contract](#contract-01-absence-is-a-refusal))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-draft-is-unvalidated`
+  — Capture — A draft is unvalidated by construction ([contract](#contract-02-a-draft-is-unvalidated-by-construction))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-line-identity-stable`
+  — Capture — Line identity is stable across versions ([contract](#contract-02-line-identity-is-stable-across-versions))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-field-class-declared`
+  — Capture — Field class is declared, not inferred ([contract](#contract-02-field-class-is-declared-not-inferred))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-adopt-not-fork-gate`
+  — Gate and pin — Adopt the catalog gate, never fork it ([contract](#contract-03-adopt-the-catalog-gate-never-fork-it))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-pin-is-the-commit`
+  — Gate and pin — The pin is the commit ([contract](#contract-03-the-pin-is-the-commit))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-resolve-outside-decide-inside`
+  — Gate and pin — Resolve outside, decide inside ([contract](#contract-03-resolve-outside-decide-inside))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-preview-shares-implementation`
+  — Gate and pin — Preview and submit share one implementation ([contract](#contract-03-preview-and-submit-share-one-implementation))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-version-is-concurrency`
+  — Versioning — The version counter is the concurrency mechanism ([contract](#contract-04-the-version-counter-is-the-concurrency-mechanism))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-amend-by-append`
+  — Versioning — Amend by append, never by edit ([contract](#contract-04-amend-by-append-never-by-edit))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-carry-forward-reresolve`
+  — Versioning — Carry forward, re-resolve the gate ([contract](#contract-04-carry-forward-re-resolve-the-gate))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-amendment-not-state-first`
+  — Versioning — An amendment is a versioning operation first ([contract](#contract-04-an-amendment-is-a-versioning-operation-first))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-acceptance-never-defaulted`
+  — Preconditions — The acceptance instant is never defaulted ([contract](#contract-05-the-acceptance-instant-is-never-defaulted))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-agreement-not-delegation`
+  — Preconditions — Agreement and delegation are different facts ([contract](#contract-05-agreement-and-delegation-are-different-facts))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-authorization-read-not-owned`
+  — Preconditions — Authorization is read, not owned ([contract](#contract-05-authorization-is-read-not-owned))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-workflow-is-ordinary-caller`
+  — Workflow seam — The sibling gear is an ordinary caller ([contract](#contract-06-the-sibling-gear-is-an-ordinary-caller))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-store-verdict-not-reasoning`
+  — Workflow seam — Store the verdict, never the reasoning ([contract](#contract-06-store-the-verdict-never-the-reasoning))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-commit-anchor-before-risk`
+  — Workflow seam — Commit the guard anchor before the risk ([contract](#contract-06-commit-the-guard-anchor-before-the-risk))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-outcome-not-mirror`
+  — Workflow seam — An outcome is not a mirror ([contract](#contract-06-an-outcome-is-not-a-mirror))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-hold-changes-only-order`
+  — Hold and expiry — A hold changes only the order ([contract](#contract-07-a-hold-changes-only-the-order))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-prehold-stored`
+  — Hold and expiry — The pre-hold state is stored, not derived ([contract](#contract-07-the-pre-hold-state-is-stored-not-derived))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-exemptions-in-table`
+  — Hold and expiry — Exemptions live in the table ([contract](#contract-07-exemptions-live-in-the-table))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-resume-is-capped`
+  — Hold and expiry — A resume restarts the state clock, never the order's ([contract](#contract-07-a-resume-restarts-the-state-clock-never-the-orders))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-park-does-not-stop-clock`
+  — Hold and expiry — A park does not stop the clock ([contract](#contract-07-a-park-does-not-stop-the-clock))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-read-row-not-chain`
+  — Reads and authorization — Read the row, never the chain ([contract](#contract-08-read-the-row-never-the-chain))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-scope-by-relationship`
+  — Reads and authorization — Scope by relationship, not by equality ([contract](#contract-08-scope-by-relationship-not-by-equality))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-no-internal-exposure`
+  — Reads and authorization — Nothing internal is readable ([contract](#contract-08-nothing-internal-is-readable))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-one-permission-model`
+  — Reads and authorization — One PDP adapter, invoked from two places ([contract](#contract-08-one-pdp-adapter-invoked-from-two-places))
 
 ### 2.2 Constraints
 
@@ -439,6 +552,100 @@ response metadata; canonical error mapping to RFC 9457 with no internal diagnost
 runtime-owned database privilege with the gear exposing migrations and receiving scoped access;
 and `SecurityContext` propagated across every in-process call.
 
+
+<a id="register-constraints"></a>
+
+#### Slice constraints
+
+The constraints each slice adds are defined here and specified normatively in [§6](#6-detailed-architecture-contracts); each entry links to its contract.
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-single-writer`
+  — Foundation — The engine is the single writer ([contract](#contract-01-the-engine-is-the-single-writer))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-idempotency-window`
+  — Foundation — The idempotency window is 24 hours and is not a commercial bound ([contract](#contract-01-the-idempotency-window-is-24-hours-and-is-not-a-commercial-bound))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-outbox-at-least-once`
+  — Foundation — Delivery is at-least-once; ordering is partition-scoped ([contract](#contract-01-delivery-is-at-least-once-ordering-is-partition-scoped))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-guard-input-ports`
+  — Foundation — Guard inputs from unimplemented gears are ports ([contract](#contract-01-guard-inputs-from-unimplemented-gears-are-ports))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-single-currency-basket`
+  — Capture — The basket is single-currency ([contract](#contract-02-the-basket-is-single-currency))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-change-category-refused`
+  — Capture — The `change` category is refused ([contract](#contract-02-the-change-category-is-refused))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-single-payer`
+  — Capture — One order, one payer ([contract](#contract-02-one-order-one-payer))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-no-addon-selection`
+  — Capture — Optional items are selected within the acquisition line ([contract](#contract-02-add-on-selection-is-not-expressible))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-port-budgets`
+  — Gate and pin — Ports are bounded by deadline, breaker and bulkhead ([contract](#contract-03-ports-are-bounded-by-deadline-breaker-and-bulkhead))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-partial-predicate-evaluability`
+  — Gate and pin — Adopted predicate evaluability and SDK readiness ([contract](#contract-03-adopted-predicate-evaluability-and-sdk-readiness))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-overlap-read-unagreed`
+  — Gate and pin — The overlap check depends on an unagreed upstream read ([contract](#contract-03-the-overlap-check-depends-on-an-unagreed-upstream-read))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-overlap-key-partner-collision`
+  — Gate and pin — The default overlap key collides in the partner path ([contract](#contract-03-the-default-overlap-key-collides-in-the-partner-path))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-total-excludes-subscription-overlays`
+  — Gate and pin — The order-time total is incomplete by construction ([contract](#contract-03-the-order-time-total-is-incomplete-by-construction))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-no-amendment-in-fulfillment`
+  — Versioning — Amendment stops at `in_fulfillment` ([contract](#contract-04-amendment-stops-at-in_fulfillment))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-reapproval-target-external`
+  — Versioning — The re-approval target is not this slice's decision ([contract](#contract-04-the-re-approval-target-is-not-this-slices-decision))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-paired-payer-seller-rebinding`
+  — Versioning — A payer change must not cross seller scope ([contract](#contract-04-a-payer-change-must-not-cross-seller-scope))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-no-payment-pending-state`
+  — Preconditions — There is no `payment_pending` state ([contract](#contract-05-there-is-no-payment_pending-state))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-declined-instrument-exit`
+  — Preconditions — A declined instrument exits by expiry, and only where the TTL is set ([contract](#contract-05-a-declined-instrument-exits-by-expiry-and-only-where-the-ttl-is-set))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-no-payment-collection`
+  — Preconditions — Payment collection is out of scope entirely ([contract](#contract-05-payment-collection-is-out-of-scope-entirely))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-approval-owner-absent`
+  — Workflow seam — The approval policy owner does not exist ([contract](#contract-06-the-approval-policy-owner-does-not-exist))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-compensation-reason-unagreed`
+  — Workflow seam — The compensation cancel reason is unagreed ([contract](#contract-06-the-compensation-cancel-reason-is-unagreed))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-provenance-one-directional`
+  — Workflow seam — Order-reference provenance is not yet bidirectional ([contract](#contract-06-order-reference-provenance-is-not-yet-bidirectional))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-correlation-propagation-unagreed`
+  — Workflow seam — Correlation propagation is not guaranteed ([contract](#contract-06-correlation-propagation-is-not-guaranteed))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-in-fulfillment-not-expirable`
+  — Hold and expiry — `in_fulfillment` has no automatic bound ([contract](#contract-07-in_fulfillment-has-no-automatic-bound))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-hold-does-not-pause-draft-ttl`
+  — Hold and expiry — Hold does not pause the Subscriptions draft TTL ([contract](#contract-07-hold-does-not-pause-the-subscriptions-draft-ttl))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-ttl-values-unchosen`
+  — Hold and expiry — TTL values are unchosen ([contract](#contract-07-ttl-values-are-unchosen))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-read-fails-closed`
+  — Reads and authorization — Fail closed on store unavailability ([contract](#contract-08-fail-closed-on-store-unavailability))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-delegation-proof-required`
+  — Reads and authorization — Cross-tenant access requires delegation proof ([contract](#contract-08-cross-tenant-access-requires-delegation-proof))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-bounded-page-size`
+  — Reads and authorization — Page size is bounded ([contract](#contract-08-page-size-is-bounded))
+
 ## 3. Technical Architecture
 
 ### 3.1 Domain Model
@@ -510,6 +717,91 @@ external references, display labels and internal notes at order and line level.
 - `Order` → `OrderTransition`: one-to-many, append-only; the audit trail is complete by construction because the append shares the transition's transaction.
 - `OrderVersion` → `AcceptanceRecord`: zero-or-one per immutable version, whether required or volunteered; never defaulted or copied across amendment.
 - `OrderLine` → `LineFulfillment`: one-to-one after fulfillment acknowledgement; carries the 1:1 line-to-subscription mapping.
+
+
+<a id="register-entities"></a>
+
+#### Slice entities
+
+The entities each slice introduces are defined here and specified normatively in [§6](#6-detailed-architecture-contracts); each entry links to its contract.
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-root`
+  — Foundation — Order root ([contract](#contract-01-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-version-chain`
+  — Foundation — Order version chain ([contract](#contract-01-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-line-identity`
+  — Foundation — Order line identity ([contract](#contract-01-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-line`
+  — Foundation — Order line ([contract](#contract-01-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-resolved-total`
+  — Foundation — Resolved total ([contract](#contract-01-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-administrative-content`
+  — Foundation — Administrative content ([contract](#contract-01-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-transition-record`
+  — Foundation — Transition record ([contract](#contract-01-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-idempotency-record`
+  — Foundation — Idempotency record ([contract](#contract-01-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-outbox-entry`
+  — Foundation — Outbox entry ([contract](#contract-01-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-line-date-set`
+  — Capture — Line date set ([contract](#contract-02-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-catalog-price-pin`
+  — Gate and pin — Catalog price pin ([contract](#contract-03-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-market`
+  — Gate and pin — Order market ([contract](#contract-03-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-gate-outcome`
+  — Gate and pin — Gate outcome ([contract](#contract-03-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-amendment-request`
+  — Versioning — Amendment request ([contract](#contract-04-3-1))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-administrative-edit`
+  — Versioning — Administrative edit ([contract](#contract-04-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-acceptance-record`
+  — Preconditions — Acceptance record ([contract](#contract-05-3-1))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-authorization-outcome`
+  — Preconditions — Authorization outcome ([contract](#contract-05-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-approval-reflection`
+  — Workflow seam — Approval reflection ([contract](#contract-06-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-spawn-signal`
+  — Workflow seam — Spawn signal ([contract](#contract-06-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-fulfillment-acknowledgement`
+  — Workflow seam — Fulfillment acknowledgement ([contract](#contract-06-3-1))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-line-fulfillment-projection`
+  — Workflow seam — Line fulfillment projection ([contract](#contract-06-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-hold-record`
+  — Hold and expiry — Hold record ([contract](#contract-07-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-state-ttl-policy`
+  — Hold and expiry — State ttl policy ([contract](#contract-07-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-resume-cap`
+  — Hold and expiry — Resume cap ([contract](#contract-07-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-read-view`
+  — Reads and authorization — Order read view ([contract](#contract-08-3-1))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-permission-declaration`
+  — Reads and authorization — Permission declaration ([contract](#contract-08-3-1))
 
 ### 3.2 Component Model
 
@@ -776,6 +1068,85 @@ tenancy scope, and it never exposes internal diagnostics through a read surface.
 
 - `cpt-cf-bss-orders-lifecycle-component-transition-engine` — depends on
 
+
+<a id="register-components"></a>
+
+#### Slice components
+
+The internal components of each slice are defined here and specified normatively in [§6](#6-detailed-architecture-contracts); each entry links to its contract.
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-transition-orchestrator`
+  — Foundation — Transition orchestrator ([contract](#contract-01-transition-orchestrator))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-guard-registry`
+  — Foundation — Guard registry ([contract](#contract-01-guard-registry))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-state-table`
+  — Foundation — State table ([contract](#contract-01-state-table))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-idempotency-registry`
+  — Foundation — Idempotency registry ([contract](#contract-01-idempotency-registry))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-audit-store`
+  — Foundation — Audit store ([contract](#contract-01-audit-store))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-outbox-publisher`
+  — Foundation — Platform event producer adapter ([contract](#contract-01-platform-event-producer-adapter))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-reason-registry`
+  — Foundation — Reason registry ([contract](#contract-01-reason-registry))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-capture-line-model`
+  — Capture — Line-model authoring ([contract](#contract-02-line-model-authoring))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-capture-field-classifier`
+  — Capture — Field classifier ([contract](#contract-02-field-classifier))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-gate-predicate-orchestrator`
+  — Gate and pin — Predicate orchestrator ([contract](#contract-03-predicate-orchestrator))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-gate-pin-capture`
+  — Gate and pin — Pin and total capture ([contract](#contract-03-pin-and-total-capture))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-gate-preview`
+  — Gate and pin — Preview ([contract](#contract-03-preview))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-versioning-appender`
+  — Versioning — Version appender ([contract](#contract-04-version-appender))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-versioning-reader`
+  — Versioning — Version reader ([contract](#contract-04-version-reader))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-preconditions-acceptance`
+  — Preconditions — Acceptance recorder ([contract](#contract-05-acceptance-recorder))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-preconditions-money-gate`
+  — Preconditions — Money gate ([contract](#contract-05-money-gate))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-seam-verdict-reflector`
+  — Workflow seam — Verdict reflector ([contract](#contract-06-verdict-reflector))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-seam-fulfillment-coordinator`
+  — Workflow seam — Fulfillment coordinator ([contract](#contract-06-fulfillment-coordinator))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-seam-line-projection`
+  — Workflow seam — Line projection maintainer ([contract](#contract-06-line-projection-maintainer))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-hold-handler`
+  — Hold and expiry — Hold and resume handler ([contract](#contract-07-hold-and-resume-handler))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-expiry-scheduler`
+  — Hold and expiry — Expiry scheduler ([contract](#contract-07-expiry-scheduler))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-draft-sweep`
+  — Hold and expiry — Draft abandonment sweep ([contract](#contract-07-draft-abandonment-sweep))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-read-projection`
+  — Reads and authorization — Read projection ([contract](#contract-08-read-projection))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-authz-declaration`
+  — Reads and authorization — Permission declaration ([contract](#contract-08-permission-declaration))
+
 ### 3.3 API Contracts
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-order-operations`
@@ -899,6 +1270,15 @@ Paths use `/bss-orders-lifecycle/v1` as their prefix. All mutation methods carry
 existing bounds and authorized-principal idempotency namespace. State names, reason names,
 version semantics and errors come from Foundation, not a second SDK registry.
 
+**Alignment with the Workflow branch (`bss/orders-workflow` @ `3ccf7793c`, D-193…D-199).** Workflow
+calls all nine methods as specified here. `hold` and `resume` are reserved: holds are driven by
+Lifecycle events, and the branch declares both and calls neither. `get_version` is also the read
+Subscriptions performs for the pinned comparison at activation (D-158, D-162), granted to
+`bss-subscriptions.system` over the same finite order set as Workflow's (08 §4.3). Idempotency
+receipts for these triggers are retained for at least 30 days, the window under which Workflow
+re-issues a key (D-173). The attempt-fenced `OrdersLifecycleClientV1` of Seam Atlas C02 is not this
+contract; both gears use this one (D-175, Atlas ticket T2).
+
 `ApprovalReflection` always contains `verdict`, `deciding_authority` and conditional `denial_reason`:
 
 | Verdict | Authority | Denial reason |
@@ -947,6 +1327,46 @@ is `verdict-authority-missing`. A completion `[line-B → sub-2, line-A → sub-
 An acknowledgement for the old version after amendment is `version-conflict`; a replay of a settled
 request returns its persisted result. These are acceptance cases, not runtime test results.
 
+
+<a id="register-interfaces"></a>
+
+#### Slice interfaces
+
+The interfaces each slice owns are defined here and specified normatively in [§6](#6-detailed-architecture-contracts); each entry links to its contract.
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-transition-api`
+  — Foundation — Transition api ([contract](#contract-01-3-3))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-guard-registration`
+  — Foundation — Guard registration ([contract](#contract-01-3-3))
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-order-read-model`
+  — Foundation — Order read model ([contract](#contract-01-3-3))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-capture-ops`
+  — Capture — Capture ops ([contract](#contract-02-3-3))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-gate-ops`
+  — Gate and pin — Gate ops ([contract](#contract-03-3-3))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-gate-ports`
+  — Gate and pin — Gate ports ([contract](#contract-03-3-3))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-versioning-ops`
+  — Versioning — Versioning ops ([contract](#contract-04-3-3))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-preconditions-ops`
+  — Preconditions — Preconditions ops ([contract](#contract-05-3-3))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-seam-ops`
+  — Workflow seam — Seam ops ([contract](#contract-06-3-3))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-hold-ops`
+  — Hold and expiry — Hold ops ([contract](#contract-07-3-3))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-read-ops`
+  — Reads and authorization — Read ops ([contract](#contract-08-3-3))
+
 ### 3.4 Internal Dependencies
 
 | Dependency Gear | Interface Used | Purpose |
@@ -983,7 +1403,7 @@ concern rather than a core change.
 |-------------------|---------------|---------|
 | `pricing` | `PricingReadV1` (`resolve`, `price`, `current_revision`) over the existing reads, called as the `bss-orders.system` subject in the seller tenant (D-160, D-161) | Revision currentness and availability, item roster, chain bindings, SKU versions and descriptors; the residual purchase verdict and the activation deadline are the open asks of UPSTREAM_REQS §2.2. The trait does not exist on the pinned baseline. |
 | `rating` | SDK client — **unexposed today** (no Rating SDK crate exists) | The price-evaluation contract producing the non-authoritative resolved total, **including the named TCV figure computed there rather than here**; composition system of record for the full pricing snapshot, which this gear never stores. Raised as `cpt-cf-bss-orders-lifecycle-upreq-rating-evaluation` in `UPSTREAM_REQS.md` §2.2; until exposed the gate refuses `evaluation-unavailable` |
-| `products` | `ProductsClient::get_sku` (`sellable`, `lifecycle`), or the same two fields echoed by resolve | SKU sellability and lifecycle at assessment. SKU protection is inherited from the revision's `plan_item` references (D-164); no registry call. The overlap key is Subscriptions' SUB-G1 key, not a Product entity. |
+| `products` | `ProductsClient::get_sku` (`sellable`, `lifecycle`) under this gear's own grant (D-171, D-177); the resolve-echo alternative is withdrawn | SKU sellability and lifecycle at assessment, interim until `SellabilityV1` exists. SKU protection is inherited from the revision's `plan_item` references (D-164); no registry call. The overlap key is Subscriptions' SUB-G1 key, not a Product entity. |
 | Billing-chain tax owner | SDK client | The **indicative** tax figure Preview returns and never stores; a Preview-only operation with its own unavailability reason |
 
 #### Identity, contracts and downstream fulfillment
@@ -1010,7 +1430,7 @@ Per-flow sequences are specified in the corresponding slice documents. The load-
 
 #### Submit through the gate
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-submit-gate`
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-seq-submit-gate`
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -1038,7 +1458,7 @@ failing predicate refuses the whole order with a machine-readable reason and lea
 
 #### Amendment supersedes in-flight work
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-amendment-supersession`
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-seq-amendment-supersession`
 
 **Mechanics specified in**: [04 §3.6](features/04-versioning.md#contract-04-3-6)
 
@@ -1065,7 +1485,7 @@ is what makes asynchronous approval safe without distributed locking.
 
 #### Fulfillment acknowledgement and linkage
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-fulfillment-acknowledgement`
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-seq-fulfillment-acknowledgement`
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`
 
@@ -1091,7 +1511,7 @@ only on an acknowledgement asserting that operational compensation completed.
 
 #### Cancellation across the spawn boundary
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-cancel-guard`
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-seq-cancel-guard`
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-cancel-during-approval`
 
@@ -1116,7 +1536,7 @@ order-side window at all.
 
 #### Scheduler-driven expiry
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-state-expiry`
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-seq-state-expiry`
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -1137,6 +1557,94 @@ sequenceDiagram
 **Description**: Expiry is an ordinary guarded transition with the system as actor. The
 exclusions live in the transition table, so a scheduler defect cannot expire an order whose
 subscriptions may be provisioning.
+
+
+<a id="register-sequences"></a>
+
+#### Feature sequences
+
+The detailed interaction sequences of each feature are defined here and specified normatively in the feature's behavior contracts; each entry links to its sequence.
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-transition-commit`
+— Foundation — Transition commit ([sequence](features/01-foundation.md#contract-01-transition-commit))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-create-transition`
+— Foundation — Create transition ([sequence](features/01-foundation.md#contract-01-create-transition))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-idempotent-replay`
+— Foundation — Idempotent replay ([sequence](features/01-foundation.md#contract-01-idempotent-replay))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-outbox-drain`
+— Foundation — Platform producer-outbox publication ([sequence](features/01-foundation.md#contract-01-platform-producer-outbox-publication))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-create-draft`
+— Capture — Create draft order ([sequence](features/02-capture.md#contract-02-create-draft-order))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-author-line`
+— Capture — Author a line and resolve its dates ([sequence](features/02-capture.md#contract-02-author-a-line-and-resolve-its-dates))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-edit-order`
+— Capture — Edit the order header ([sequence](features/02-capture.md#contract-02-edit-the-order-header))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-edit-or-remove-line`
+— Capture — Edit or remove a line ([sequence](features/02-capture.md#contract-02-edit-or-remove-a-line))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-gate-submit`
+— Gate and pin — Submit through the gate ([sequence](features/03-gate-and-pin.md#contract-03-submit-through-the-gate))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-gate-preview`
+— Gate and pin — Preview a basket ([sequence](features/03-gate-and-pin.md#contract-03-preview-a-basket))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-gate-fulfillment-recheck`
+— Gate and pin — Re-check before first activation ([sequence](features/03-gate-and-pin.md#contract-03-re-check-before-first-activation))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-amend-order`
+— Versioning — Amend an order ([sequence](features/04-versioning.md#contract-04-amend-an-order))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-administrative-edit`
+— Versioning — Administrative edit ([sequence](features/04-versioning.md#contract-04-administrative-edit))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-record-acceptance`
+— Preconditions — Record the acceptance instant ([sequence](features/05-preconditions.md#contract-05-record-the-acceptance-instant))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-self-service-acceptance`
+— Preconditions — Self-service submit constitutes acceptance ([sequence](features/05-preconditions.md#contract-05-self-service-submit-constitutes-acceptance))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-begin-fulfillment-guards`
+— Preconditions — Begin-fulfillment guard evaluation ([sequence](features/05-preconditions.md#contract-05-begin-fulfillment-guard-evaluation))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-reflect-verdict`
+— Workflow seam — Reflect an approval verdict ([sequence](features/06-workflow-seam.md#contract-06-reflect-an-approval-verdict))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-begin-and-spawn`
+— Workflow seam — Begin fulfillment and record the spawn signal ([sequence](features/06-workflow-seam.md#contract-06-begin-fulfillment-and-record-the-spawn-signal))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-acknowledge-fulfillment`
+— Workflow seam — Acknowledge the fulfillment outcome ([sequence](features/06-workflow-seam.md#contract-06-acknowledge-the-fulfillment-outcome))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-seam-cancel-guard`
+— Workflow seam — Cancel across the spawn boundary (the shared cancel guard) ([sequence](features/06-workflow-seam.md#contract-06-cancel-across-the-spawn-boundary-the-shared-cancel-guard))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-workflow-cancel`
+— Workflow seam — Cancel through the Workflow (the `/workflow-cancel` handler) ([sequence](features/06-workflow-seam.md#contract-06-cancel-through-the-workflow-the-workflow-cancel-handler))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-hold-resume`
+— Hold and expiry — Hold and resume ([sequence](features/07-hold-and-expiry.md#contract-07-hold-and-resume))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-expiry-sweep`
+— Hold and expiry — The expiry sweep ([sequence](features/07-hold-and-expiry.md#contract-07-the-expiry-sweep))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-overdue-handoff`
+— Hold and expiry — Overdue escalation handoff ([sequence](features/07-hold-and-expiry.md#contract-07-overdue-escalation-handoff))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-scoped-read`
+— Reads and authorization — Scoped read ([sequence](features/08-read-and-authz.md#contract-08-scoped-read))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-list-orders`
+— Reads and authorization — Paginated list ([sequence](features/08-read-and-authz.md#contract-08-paginated-list))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-audit-read`
+— Reads and authorization — Audit retrieval ([sequence](features/08-read-and-authz.md#contract-08-audit-retrieval))
 
 ### 3.7 Database schemas & tables
 
@@ -1189,6 +1697,79 @@ Append-only tables need no backfill because a correction is a new row; the two m
 administrative tables are additive. The gear exposes migrations and the runtime applies them, so
 the schema version is the migration set the deployed gear carries, and a rollback is a
 forward-only compensating migration rather than a down-migration.
+
+
+<a id="register-tables"></a>
+
+#### Slice tables
+
+The tables and schema each slice contributes are defined here and specified normatively in [§6](#6-detailed-architecture-contracts); each entry links to its contract.
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-db-foundation-schema`
+  — Foundation — Foundation schema ([contract](#contract-01-3-7))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-event-outbox`
+— Foundation — Platform-managed producer persistence ([contract](#contract-01-platform-managed-producer-persistence))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-order`
+— Foundation — Table: orders_order ([contract](#contract-01-table-orders_order))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-order-version`
+— Foundation — Table: orders_order_version ([contract](#contract-01-table-orders_order_version))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-order-line-identity`
+— Foundation — Table: orders_order_line_identity ([contract](#contract-01-table-orders_order_line_identity))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-order-line`
+— Foundation — Table: orders_order_line ([contract](#contract-01-table-orders_order_line))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-inflight-overlap-claim`
+— Foundation — Table: orders_inflight_overlap_claim ([contract](#contract-01-table-orders_inflight_overlap_claim))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-draft-content`
+— Foundation — Table: orders_draft_content ([contract](#contract-01-table-orders_draft_content))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-administrative-content`
+— Foundation — Table: orders_order_admin / orders_order_line_admin ([contract](#contract-01-table-orders_order_admin--orders_order_line_admin))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-resolved-total`
+— Foundation — Table: orders_resolved_total ([contract](#contract-01-table-orders_resolved_total))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-transition-audit`
+— Foundation — Table: orders_transition_audit ([contract](#contract-01-table-orders_transition_audit))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-audit-checkpoint`
+— Foundation — Table: orders_audit_checkpoint ([contract](#contract-01-table-orders_audit_checkpoint))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-audit-checkpoint-member`
+— Foundation — Table: orders_audit_checkpoint_member ([contract](#contract-01-table-orders_audit_checkpoint_member))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-idempotency`
+— Foundation — Table: orders_idempotency ([contract](#contract-01-table-orders_idempotency))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-line-fulfillment`
+— Foundation — Table: orders_line_fulfillment ([contract](#contract-01-table-orders_line_fulfillment))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-acceptance`
+— Foundation — Table: orders_acceptance ([contract](#contract-01-table-orders_acceptance))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-date-policy`
+— Capture — Table: orders_date_policy ([contract](#contract-02-table-orders_date_policy))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-gate-outcome`
+— Gate and pin — Table: orders_gate_outcome ([contract](#contract-03-table-orders_gate_outcome))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-policy-election`
+— Preconditions — Table: orders_policy_election ([contract](#contract-05-table-orders_policy_election))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-approval-reflection`
+— Workflow seam — Table: orders_approval_reflection ([contract](#contract-06-table-orders_approval_reflection))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-state-ttl-policy`
+— Hold and expiry — Table: orders_state_ttl_policy ([contract](#contract-07-table-orders_state_ttl_policy))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-read-access-log`
+— Reads and authorization — Table: orders_read_access_log ([contract](#contract-08-table-orders_read_access_log))
 
 ### 3.8 Deployment Topology
 
@@ -1265,6 +1846,16 @@ readiness is split in `DECOMPOSITION.md`: PriceBook revision reads exist behind 
 [UPSTREAM_REQS.md §2.2](UPSTREAM_REQS.md#22-rating--price-evaluation) registers that prerequisite and fail-closed behavior. Assessment identity
 includes component and scope key so a bundle's repeated predicate results remain distinct.
 These are documented contracts and prerequisites, not runtime verification results.
+
+
+<a id="register-topology"></a>
+
+#### Slice topology
+
+Slice-level deployment topology is defined here and specified normatively in [§6](#6-detailed-architecture-contracts); each entry links to its contract.
+
+- [ ] `p3` - **ID**: `cpt-cf-bss-orders-lifecycle-topology-foundation-runtime`
+  — Foundation — Foundation runtime ([contract](#contract-01-3-8))
 
 ## 4. Additional context
 
@@ -1717,7 +2308,7 @@ state machine instead of a posting or a publish.
 <!-- contract:01-foundation:1.3 -->
 ### Foundation: Architecture Layers
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-tech-foundation-stack`
+**Contract**: `cpt-cf-bss-orders-lifecycle-tech-foundation-stack` (`p2`), defined in [§1.3 Slice technology choices](#register-tech).
 
 ```text
 Slice guards +      declared guard predicates · document contributions
@@ -1759,7 +2350,7 @@ Persistence         PostgreSQL via SecureORM; runtime-owned privilege; append-on
 
 #### One transaction, with a conditional fourth effect
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-atomic-transition-commit`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-atomic-transition-commit` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 A committed transition produces exactly three durable effects in one transaction: the state or
 version change, the audit entry and the settled idempotency outcome. Where the row declares an
@@ -1772,7 +2363,7 @@ commit would make atomicity a hope.
 
 #### Guards are declared, never embedded
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-guard-declared-not-embedded`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-guard-declared-not-embedded` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 A slice registers a named guard predicate and the engine evaluates it at the point the table
 says to. Slices do not call the engine back mid-transition, do not refuse a request before
@@ -1787,7 +2378,7 @@ an unauthorized caller learns no stored outcome from a key they possess.
 
 #### Idempotency stores an outcome, and is resolved after authorization
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-outcome-store-idempotency`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-outcome-store-idempotency` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 The registry records what a completed operation *decided*, not merely that it was seen. After the
 engine authorizes the caller, replay returns the stored outcome, and a stored refusal replays as
@@ -1801,7 +2392,7 @@ be reported as success: payload mismatch, still-processing, and stale version.
 
 #### History is append-only, per table
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-append-only-history`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-append-only-history` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Versions, line identities, lines, resolved totals, acceptance rows and audit entries are
 append-only: they are inserted and never updated or deleted; corrections are new rows. The audit
@@ -1816,7 +2407,7 @@ operational state to advance.
 
 #### Absence is a refusal
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-absence-is-refusal`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-absence-is-refusal` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 A guard whose inputs cannot be resolved fails. The engine never substitutes a default for a
 missing guard input and never treats an unreachable dependency as a pass, matching the
@@ -1834,7 +2425,7 @@ fail-closed posture the published pricing gate takes for an unevaluable predicat
 
 #### The engine is the single writer
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-single-writer`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-single-writer` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 No migration, repair script, administrative surface or slice may write the aggregate, version,
 line, resolved-total, audit or idempotency tables outside a transition. Producer messages may be
@@ -1857,7 +2448,7 @@ are not permission to repair business state or broaden any role's grants.
 
 #### The idempotency window is 24 hours and is not a commercial bound
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-idempotency-window`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-idempotency-window` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 The registry is request-cache infrastructure with a **24-hour** retention window, matching the
 sibling catalog gear's ratified value. Past the window a replayed key is a new operation, so the
@@ -1870,7 +2461,7 @@ that bound an order's commercial life.
 
 #### Delivery is at-least-once; ordering is partition-scoped
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-outbox-at-least-once`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-outbox-at-least-once` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 The platform producer outbox guarantees one message per committed transition that declares an
 event and at-least-once delivery of that message. It does **not** guarantee global ordering or a
@@ -1885,7 +2476,7 @@ a notification channel, not a reconstruction ledger (§4.4).
 
 #### Guard inputs from unimplemented gears are ports
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-guard-input-ports`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-guard-input-ports` (`p2`), defined in [§2.2 Slice constraints](#register-constraints).
 
 Guard inputs sourced from gears without an implementation — the occupancy read (`SUB-O5`, amended by D-126) and the
 party-eligibility check among them — are resolved through ports before the transaction opens,
@@ -1905,7 +2496,7 @@ a capability instead of stalling the gear.
 
 **Core Entities**:
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-root`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-order-root` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The aggregate root and the only mutable row among the commercial stores. Carries identity,
 human-readable number, category, the three tenant axes, the initiating actor, the optional
@@ -1913,36 +2504,36 @@ contract reference, the current state, `state_entered_at`, the current-version p
 pre-hold state, the spawn-signal instant, the tolerated-authorization risk flag, and the
 per-order audit sequence counter.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-version-chain`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-order-version-chain` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 An append-only sequence of immutable commercial-content snapshots, each carrying its actor,
 timestamp, reason, the derived order market, and a `supersedes_version` back-reference. Exactly
 one version is current.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-line-identity`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-order-line-identity` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The order-scoped identity of a line, independent of any version. It is the parent every
 version-scoped line row, per-line total and per-line projection references, and it is what makes
 "the same line at a different quantity" expressible across an amendment.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-line`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-order-line` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 A version-scoped, immutable line: catalog references, quantity, currency, the accepted order pin,
 the three resolved dates with the policy-switch state that governed them, term duration, billing
 cycle and the overlap scope key.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-resolved-total`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-resolved-total` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The captured non-authoritative figures per line and per order, discriminated by scope, carrying
 gross and net, the discount component with its promotion reference, and the three charge kinds.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-administrative-content`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-administrative-content` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 Mutable, separately-audited content that carries no commercial meaning: external references at
 order and line level, display labels and internal notes. It lives outside the immutable stores so
 that correcting a mistyped purchase-order number requires no version and mutates no history.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-transition-record`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-transition-record` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 One append-only audit entry per transition attempt, committed or refused: from-state, to-state,
 trigger, outcome, actor identity and class, the delegation-proof reference where one was
@@ -1951,13 +2542,13 @@ in force, the changed field with its prior and new value for an administrative e
 appends one entry per changed field, D-117), and the
 predecessor hash forming a per-order chain.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-idempotency-record`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-idempotency-record` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The stored outcome of an operation keyed by `(operation, authorized principal, idempotency key)`:
 a request fingerprint for mismatch detection binding the record to one target order, a state of in-flight or settled with a lease instant, and the settled
 outcome — success with its result reference, or a refusal with its machine-readable reason.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-outbox-entry`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-outbox-entry` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 One `event-broker-sdk` typed-event envelope per committed transition that declares an event type,
 holding the event identity, GTS type, `orderId` subject and partition key, version at event time and
@@ -2005,7 +2596,7 @@ graph TB
 
 #### Transition orchestrator
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-transition-orchestrator`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-transition-orchestrator` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-01-why-this-component-exists-6"></a>
 
@@ -2046,7 +2637,7 @@ no money arithmetic, and holds no commercial vocabulary.
 
 #### Guard registry
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-guard-registry`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-guard-registry` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-01-why-this-component-exists-6"></a>
 
@@ -2082,7 +2673,7 @@ mid-transition.
 
 #### State table
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-state-table`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-state-table` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-01-why-this-component-exists-6"></a>
 
@@ -2115,7 +2706,7 @@ It holds no guard implementations and no scheduling. It does not know why an edg
 
 #### Idempotency registry
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-idempotency-registry`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-idempotency-registry` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-01-why-this-component-exists-6"></a>
 
@@ -2151,7 +2742,7 @@ assessment diagnostics when present; it is not the source of current commercial 
 
 #### Audit store
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-audit-store`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-audit-store` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-01-why-this-component-exists-6"></a>
 
@@ -2186,7 +2777,7 @@ source a read derives state from.
 
 #### Platform event producer adapter
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-outbox-publisher`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-outbox-publisher` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-01-why-this-component-exists-6"></a>
 
@@ -2225,7 +2816,7 @@ state.
 
 #### Reason registry
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-reason-registry`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-reason-registry` (`p2`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-01-why-this-component-exists-6"></a>
 
@@ -2265,7 +2856,7 @@ It does not author slice reasons and never carries internal diagnostics into a r
 <!-- contract:01-foundation:3.3 -->
 ### Foundation: API Contracts
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-transition-api`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-transition-api` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 - **Requirement**: `cpt-cf-bss-orders-lifecycle-interface-order-ops`
 - **Technology**: internal Rust API in `gears/bss/orders-lifecycle/orders-lifecycle/src/domain/`; the REST surface is registered by the owning slices through `OperationBuilder` with explicit response metadata
@@ -2276,13 +2867,13 @@ the optional correlation identifier, and the slice's document contribution. It r
 committed outcome or a registered refusal. There is no second entry point, and no variant that
 skips a guard.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-guard-registration`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-guard-registration` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 The startup contract by which a slice registers a named guard against transition-table rows,
 declaring the guard's inputs and its failure reason. Registration against a non-existent row
 fails startup rather than degrading at runtime.
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-order-read-model`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-order-read-model` (`p2`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 The engine-owned read of the aggregate row and a named version, on which the read slice builds
 its projections. It exposes current state, `state_entered_at`, the current-version pointer and
@@ -2378,7 +2969,7 @@ the commit path ([DESIGN.md](DESIGN.md) §3.5).
 <!-- contract:01-foundation:3.7 -->
 ### Foundation: Database Schemas and Tables
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-db-foundation-schema`
+**Contract**: `cpt-cf-bss-orders-lifecycle-db-foundation-schema` (`p1`), defined in [§3.7 Slice tables](#register-tables).
 
 The canonical schema. Column types are logical; money is stored as integer minor units at the
 currency's ISO 4217 scale. Foundation tables are specified here; additional tables are introduced by slices and
@@ -2451,7 +3042,7 @@ key and the engine's choice between them is undefined (`§4.6`).
 
 #### Platform-managed producer persistence
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-event-outbox`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-event-outbox`, defined in [§3.7 Slice tables](#register-tables).
 
 Orders defines no `orders_event_outbox` table. Service migrations run the
 `event_broker_sdk::producer_registration_migrations()` and the `toolkit_db::outbox` migrations;
@@ -2475,7 +3066,7 @@ toolkit outbox's 64 KiB payload limit. Capacity tests cover the largest `OrderSu
 
 #### Table: orders_order
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-order`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-order`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -2558,7 +3149,7 @@ indexes are a design baseline, not proof that every combination avoids sorting o
 
 #### Table: orders_order_version
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-order-version`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-order-version`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -2595,7 +3186,7 @@ this column is the historical record, and the two are written in the same transi
 
 #### Table: orders_order_line_identity
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-order-line-identity`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-order-line-identity`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -2625,7 +3216,7 @@ which is the key the projection and the totals depend on.
 
 #### Table: orders_order_line
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-order-line`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-order-line`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -2656,7 +3247,7 @@ without one.
 
 #### Table: orders_inflight_overlap_claim
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-inflight-overlap-claim`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-inflight-overlap-claim`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -2758,7 +3349,7 @@ the concurrency enforcement behind the gate's friendly pre-check.
 
 #### Table: orders_draft_content
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-draft-content`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-draft-content`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**: mirrors `orders_order_line`'s authored columns, keyed `(order_id, line_id)` with no
 `version`.
@@ -2776,7 +3367,7 @@ chain is append-only" are both true. Without it the two statements contradict ea
 
 #### Table: orders_order_admin / orders_order_line_admin
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-administrative-content`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-administrative-content`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**: `order_id` (and `line_id` for the line variant), `external_reference`,
 `display_label`, `internal_notes`, `updated_by`, `updated_at`.
@@ -2795,7 +3386,7 @@ transition, and the audit entry carries the changed field with its prior and new
 
 #### Table: orders_resolved_total
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-resolved-total`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-resolved-total`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -2826,7 +3417,7 @@ storable: a nullable column cannot participate in a primary key.
 
 #### Table: orders_transition_audit
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-transition-audit`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-transition-audit`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -3004,7 +3595,7 @@ defines concurrent inserts, retention, authorization and cursor validation.
 
 #### Table: orders_audit_checkpoint
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-audit-checkpoint`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-audit-checkpoint`, defined in [§3.7 Slice tables](#register-tables).
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -3027,7 +3618,7 @@ evidence it covers, not under the 90-day refusal purge. Storage-tier moves must 
 
 #### Table: orders_audit_checkpoint_member
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-audit-checkpoint-member`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-audit-checkpoint-member`, defined in [§3.7 Slice tables](#register-tables).
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -3047,7 +3638,7 @@ intact rather than delete it. Tenant and sequence must match the owning header.
 
 #### Table: orders_idempotency
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-idempotency`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-idempotency`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -3105,7 +3696,7 @@ request fingerprint*.
 
 #### Table: orders_line_fulfillment
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-line-fulfillment`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-line-fulfillment`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -3139,7 +3730,7 @@ different orders ([DECISIONS.md](DECISIONS.md) D-84, Q-02).
 
 #### Table: orders_acceptance
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-acceptance`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-acceptance`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -3172,7 +3763,7 @@ does not copy it forward. Begin-fulfillment checks only acceptance of its curren
 <!-- contract:01-foundation:3.8 -->
 ### Foundation: Deployment Topology
 
-- [ ] `p3` - **ID**: `cpt-cf-bss-orders-lifecycle-topology-foundation-runtime`
+**Contract**: `cpt-cf-bss-orders-lifecycle-topology-foundation-runtime` (`p3`), defined in [§3.8 Slice topology](#register-topology).
 
 The engine is a library inside the gear process, not a separate deployable. This is the
 authoritative roster and coordination contract for the **five Orders-owned workers**:
@@ -3442,6 +4033,14 @@ rows 7 and 11 are driven by the sibling gear, whose trigger set contains neither
 and 3 are driven by the buyer surface synchronously; row 12 is reported by the sibling gear
 itself. Emitting an event nobody consumes would enlarge the PRD's event set without a consumer,
 so the absence is a decision rather than a gap.
+
+**Registration and consumers (D-178).** Each of the eleven events is a GTS type under
+`gts.cf.bss.orders.*.v1~` registered before its `TypedEvent` compiles; none is registered yet. The
+Workflow branch consumes nine of them (W/design/10:274-276) and reads commercial facts through
+`get_version`; Seam Atlas C09 lists three and must be regenerated from this table. A rejected
+message is dead-lettered and the partition cursor advances (§3.6), so consumers see a gap they
+tolerate and recover through the authorized reads; the atlas's C00 gap-free stream sequence is not
+promised here.
 
 Every event carries a bounded common summary: `orderId`, `orderVersion`, category, resulting
 state, resource/seller/payer axes, contract reference and external reference where present, plus the
@@ -4301,7 +4900,7 @@ infrastructure of its own.
 
 #### A draft is unvalidated by construction
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-draft-is-unvalidated`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-draft-is-unvalidated` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 No sellability predicate, catalog resolution or price evaluation runs while an order is in
 `draft`. The only guards on authoring are local and structural: category admissibility, currency
@@ -4315,7 +4914,7 @@ for validation on every keystroke.
 
 #### Line identity is stable across versions
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-line-identity-stable`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-line-identity-stable` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 A line's `line_id` is assigned once and reused by every later version that carries that line.
 Version rows are immutable, but the identity is not version-scoped. Without this, an amendment
@@ -4326,7 +4925,7 @@ another, and the per-line fulfillment projection would have nothing durable to k
 
 #### Field class is declared, not inferred
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-field-class-declared`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-field-class-declared` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Every authored field is declared in exactly one class in one table (§4.3) — **commercial**,
 **commercial-frozen** or **administrative**, with read-through fields named as never authored
@@ -4348,7 +4947,7 @@ to provide.
 
 #### The basket is single-currency
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-single-currency-basket`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-single-currency-basket` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 All lines of an order share one currency, enforced on line insert rather than only at submit.
 This is an MVP basket constraint carried from the PRD, not a platform limit: the downstream
@@ -4360,10 +4959,10 @@ own cycle.
 
 #### The `change` category is refused
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-change-category-refused`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-change-category-refused` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 `category` is authored as `new_sale` or `change`, and `change` is **refused on creation, commercial draft edits, submit and amendment** with
-the shared `category-not-admitted` reason ([01 §4.1](DESIGN.md#contract-01-4-1)) until the change-order path ships. The field exists in the model
+the shared `category-not-admitted` reason ([01 §4.1](DESIGN.md#contract-01-4-1)) until the change-order path ships. The PRD (2026-09-30) admits `change` for increases whose document model, gate and application are specified by the Change Orders PRD §17; this design covers `new_sale` and keeps the refusal until that design lands (D-176, Q-33): Workflow D-199 defers Change Orders and Subscriptions has designed no apply-on-live-subscription. The field exists in the model
 now because the state machine, the event set and the line model all depend on whether a line may
 target an existing subscription; admitting the value before that path exists would produce
 orders nothing can fulfil.
@@ -4372,7 +4971,7 @@ orders nothing can fulfil.
 
 #### One order, one payer
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-single-payer`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-single-payer` (`p2`), defined in [§2.2 Slice constraints](#register-constraints).
 
 All lines share the order's three tenant axes and in particular a single `payerTenantId`. A
 buyer purchasing for two different payers authors two orders. The axes are authored here;
@@ -4384,7 +4983,7 @@ frozen by the submit guard, and only `payerTenantId` has an amendment path, owne
 
 #### Optional items are selected within the acquisition line
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-no-addon-selection`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-no-addon-selection` (`p2`), defined in [§2.2 Slice constraints](#register-constraints).
 
 **D-156 supersedes the old exclusion; the ID/anchor are retained for traceability.**
 The line carries a plan revision and explicit selected items/quantities/dimensions. Paid and selected
@@ -4402,7 +5001,7 @@ PriceBook optional items, not the removed legacy add-on model or a new inter-lin
 **Core Entities**: this slice authors the entities the engine persists; it introduces one of its
 own.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-line-date-set`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-line-date-set` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The resolved triple of contract-effective date, service-activation date and acceptance-due date
 for one line, together with the policy switch state that governed whether the latter two were
@@ -4434,7 +5033,7 @@ This slice realises `cpt-cf-bss-orders-lifecycle-component-capture`
 
 #### Line-model authoring
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-capture-line-model`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-capture-line-model` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-02-why-this-component-exists-1"></a>
 
@@ -4475,7 +5074,7 @@ it to the admitted version.
 
 #### Field classifier
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-capture-field-classifier`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-capture-field-classifier` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-02-why-this-component-exists-1"></a>
 
@@ -4516,7 +5115,7 @@ commercial change — that is [`04-versioning`](DESIGN.md#contract-04-1-1).
 <!-- contract:02-capture:3.3 -->
 ### Capture: API Contracts
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-capture-ops`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-capture-ops` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 - **Requirement**: `cpt-cf-bss-orders-lifecycle-interface-order-ops`
 - **Technology**: REST/OpenAPI registered through `OperationBuilder` with explicit response metadata; RFC 9457 problems
@@ -4602,7 +5201,7 @@ configuration ([DECISIONS.md](DECISIONS.md) D-121).
 
 #### Table: orders_date_policy
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-date-policy`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-date-policy`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -4837,7 +5436,7 @@ all invoked before the transition transaction opens.
 
 #### Adopt the catalog gate, never fork it
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-adopt-not-fork-gate`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-adopt-not-fork-gate` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 The catalog predicates are invoked through a port against the published pricing gate. This slice
 holds no copy of them, no partial re-implementation and no local override. Where the adopted
@@ -4850,7 +5449,7 @@ its complexity avoiding.
 
 #### The pin is the commit
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-pin-is-the-commit`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-pin-is-the-commit` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Pin capture and the state change share one transaction. There is no window in which an order is
 `submitted` but unpinned, and no repair path that pins retroactively. An amendment re-pins as
@@ -4860,7 +5459,7 @@ part of its own commit, so every version's pin is contemporaneous with that vers
 
 #### Resolve outside, decide inside
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-resolve-outside-decide-inside`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-resolve-outside-decide-inside` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Every external input — catalog predicates, axis validity, contract status, evaluation output,
 overlap occupancy — is resolved before the transaction opens and enters the guard as a plain
@@ -4872,7 +5471,7 @@ capability rather than stalling the gear.
 
 #### Preview and submit share one implementation
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-preview-shares-implementation`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-preview-shares-implementation` (`p2`), defined in [§2.1 Slice principles](#register-principles).
 
 Preview calls the same predicate set and the same evaluation contract as submit, differing only
 in that it creates no order or commercial artifact; it persists its bounded-retention gate outcome
@@ -4891,7 +5490,7 @@ preview that disagrees with submit is worse than no preview.
 
 #### Ports are bounded by deadline, breaker and bulkhead
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-port-budgets`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-port-budgets` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 All owning SDK calls finish before the order transition transaction opens. Deadlines are per
 logical port per assessment, including batching, queueing and retries; splitting a batch does not
@@ -4929,7 +5528,7 @@ measurement/ratification; no one-second end-to-end latency claim is made.
 
 #### Adopted predicate evaluability and SDK readiness
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-partial-predicate-evaluability`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-partial-predicate-evaluability` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 On PriceBook `16705a243`, `pricing-sdk/src/lib.rs` exports only `product_catalog`. REST resolve
 returns binding matrices for published or superseded revisions, no total and no purchase verdict.
@@ -4963,7 +5562,7 @@ is treated as permission to sell.
 
 #### The overlap check depends on an unagreed upstream read
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-overlap-read-unagreed`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-overlap-read-unagreed` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 The against-existing-subscriptions half of the overlap rule requires an **occupancy read** on the
 Subscriptions gear — registered upstream as `SUB-O5` (amended by this design from a presence read
@@ -5034,7 +5633,7 @@ as the closable form of this gap rather than adopted here.
 
 #### The default overlap key collides in the partner path
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-overlap-key-partner-collision`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-overlap-key-partner-collision` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 **The commercial rule, before the partner case:** at most **one in-flight order per overlap key**
 ([01 §3.7](DESIGN.md#contract-01-3-7), predicate 9 in §4.2 below). A buyer who has submitted an order for a product and not yet seen
@@ -5065,7 +5664,7 @@ rederive it at activation. The known partner collision is an unresolved business
 
 #### The order-time total is incomplete by construction
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-total-excludes-subscription-overlays`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-total-excludes-subscription-overlays` (`p2`), defined in [§2.2 Slice constraints](#register-constraints).
 
 Overlays scoped to a subscription — brand being the named case — need evaluation context that
 does not exist before a subscription does. No pre-subscription evaluation operation exists, so
@@ -5080,18 +5679,18 @@ separate: it freezes the accepted binding under §4.3; its producer contract is 
 <!-- contract:03-gate-and-pin:3.1 -->
 ### Gate and pin: Domain Model
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-catalog-price-pin`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-catalog-price-pin` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The accepted `OrderPin` of [§4.3](#contract-03-4-3): immutable selected composition, prices, descriptor provenance and activation deadline per line. Its legacy entity ID remains for traceability. Totals are separate; neither the pin nor the displayed total is a composed billing snapshot.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-market`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-order-market` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The derived, non-authoritative `(currency, region)` binding computed at submit from the
 **payer's** commercial profile. Gate currency and region checks are consistency assertions
 against it. The authoritative binding is frozen downstream by Subscriptions at activation, so
 this entity is evidence of what was assumed, not a claim about what will hold.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-gate-outcome`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-gate-outcome` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The per-line and per-order result of one gate run: each predicate's identity, its verdict, and
 its reason where it failed. Retained for a refused submit as well as an admitted one, so a
@@ -5120,7 +5719,7 @@ This slice realises `cpt-cf-bss-orders-lifecycle-component-gate-and-pin`
 
 #### Predicate orchestrator
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-gate-predicate-orchestrator`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-gate-predicate-orchestrator` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-03-why-this-component-exists-2"></a>
 
@@ -5158,7 +5757,7 @@ verdict.
 
 #### Pin and total capture
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-gate-pin-capture`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-gate-pin-capture` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-03-why-this-component-exists-2"></a>
 
@@ -5193,7 +5792,7 @@ from TCV. Nothing it stores may be read as a billing input.
 
 #### Preview
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-gate-preview`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-gate-preview` (`p2`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-03-why-this-component-exists-2"></a>
 
@@ -5232,7 +5831,7 @@ field, omits `tcv` and states why in `tcvWithheld` (§4.6, D-125); it does not r
 <!-- contract:03-gate-and-pin:3.3 -->
 ### Gate and pin: API Contracts
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-gate-ops`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-gate-ops` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 - **Requirement**: `cpt-cf-bss-orders-lifecycle-interface-order-ops`
 - **Technology**: REST/OpenAPI via `OperationBuilder`; RFC 9457 problems
@@ -5273,7 +5872,7 @@ the port's own unavailable reason listed above (`identity-party-unavailable` or
 `overlap-presence-unevaluable`), not a new one (D-127). The date predicate reuses capture's
 `date-cascade-invalid`, not a second reason registration.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-gate-ports`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-gate-ports` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 **Nine logical outbound operations** are listed in §2.2. All use owning SDKs before the
 transition transaction. One Pricing assessment may implement predicates and composition together;
@@ -5320,7 +5919,7 @@ An expired acceptance or exceeded aggregate capacity contributes `order-binding-
 |-------------------|---------------|---------|
 | `pricing` | `PricingReadV1` (`resolve`, `price`, `current_revision`) over the existing reads, called as the `bss-orders.system` subject in the seller tenant (D-160, D-161) | Revision currentness and availability, item roster, chain bindings, SKU versions and descriptors; the residual purchase verdict and the activation deadline are the open asks of UPSTREAM_REQS §2.2. The trait does not exist on the pinned baseline. |
 | `rating` | SDK client — **unexposed today** (no Rating SDK crate exists) | The price-evaluation contract producing the resolved total and the TCV figure; composition owner of the full snapshot, which this slice never stores. Raised as `cpt-cf-bss-orders-lifecycle-upreq-rating-evaluation` (TCV semantics under `cpt-cf-bss-orders-lifecycle-upreq-tcv-with-annualisation`); until exposed the evaluation outcome is `evaluation-unavailable` |
-| `products` | `ProductsClient::get_sku` (`sellable`, `lifecycle`), or the same two fields echoed by resolve | SKU sellability and lifecycle at assessment. SKU protection is inherited from the revision's `plan_item` references (D-164); no registry call. The overlap key is Subscriptions' SUB-G1 key, not a Product entity. |
+| `products` | `ProductsClient::get_sku` (`sellable`, `lifecycle`) under this gear's own grant (D-171, D-177); the resolve-echo alternative is withdrawn | SKU sellability and lifecycle at assessment, interim until `SellabilityV1` exists. SKU protection is inherited from the revision's `plan_item` references (D-164); no registry call. The overlap key is Subscriptions' SUB-G1 key, not a Product entity. |
 
 <a id="contract-03-identity-contracts-and-fulfillment"></a>
 
@@ -5356,7 +5955,7 @@ of `orders_resolved_total`.
 
 #### Table: orders_gate_outcome
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-gate-outcome`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-gate-outcome`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -5489,19 +6088,22 @@ the configured `bss-orders.system` subject in the order's seller tenant (§3.5, 
 signatures, as the reads exist: `resolve(plan_revision_id, date, item_id?, pins[]) → PricingResolveDto`;
 `price(price_id) → PricingPinnedPriceDto`; `current_revision(plan_id) → PricingPlanDto` with
 `published_rev: Option<i32>` (a revision number) and `revisions[] { id, rev_no, book_id, state,
-available_from, published_at }`. Resolve's 404 is `pricing-revision-absent`; its 409
-`REVISION_NOT_PUBLISHED` is a `catalog-predicate-failed` result on the first row; any other
-unreachable, denied or malformed answer from the trait is `pricing-revision-unavailable`. The 15
+available_from, published_at }`; at the fork tip (`7d3544156`, Pricing D-460) the plan read also
+names `in_effect`, and `state` admits `scheduled` (D-446–D-454). Resolve's 404 is
+`pricing-revision-absent`; its 409 `REVISION_NOT_PUBLISHED` is a `catalog-predicate-failed` result
+on the first row, as is its 409 `REVISION_NOT_YET_AVAILABLE` with detail `revision-not-yet-available`
+(Pricing D-454, D-169); its 503 `REGISTRY_UNAVAILABLE` (Pricing D-469) and any other unreachable,
+denied or malformed answer from the trait is `pricing-revision-unavailable`. The 15
 golden contract files freeze `resolve` and `price`; `current_revision` has no golden today.
 
 | Predicate | Source | Status |
 |---|---|---|
-| The line's revision is the plan's current `published` revision: the `revisions[]` entry with `id == plan_revision_id` has `state == published` and `rev_no == published_rev`; a `superseded` entry fails | `current_revision(plan_id)`; resolve `state` | Existing read |
+| The line's revision is the plan's revision **in effect** on the assessment date (D-169, Pricing D-460): the `revisions[]` entry with `id == plan_revision_id` is the one `current_revision` names as `in_effect`; `current` may name a `scheduled` revision waiting for its sale date and does not make a sale current; a `superseded` or `scheduled` entry fails, the latter with detail `revision-not-yet-available` | `current_revision(plan_id)`; resolve `state` | Existing read (served contract at `7d3544156`) |
 | The revision is available on the assessment date | that entry's `available_from`; null means available since publication | Existing read |
-| Every selected item is a member; treatment, `qty_min` and `included_qty` hold | resolve `items[]` | Existing read |
+| Every selected item is a member of the revision; since Pricing D-467 an item is a SKU and its entry, with no optional or included items and no `treatment`, `qty_min` or `included_qty` to hold (D-170) | resolve `items[]` | Existing read |
 | The selected slot of every consumed charged item exists and is covered | resolve `items[].chains[]`: the slot whose `dim_value` equals `selected_dim_value` (null selects the default chain) has `uncovered == false`; no such slot is `catalog-predicate-failed` with detail `dim-value-unknown` | Existing read |
 | SKU version and descriptors as of the assessment date | resolve `items[].sku_version`, invoice inputs, `meter` | Existing read |
-| The SKU is sellable and its lifecycle admits a sale | `Sku.sellable` and `Sku.lifecycle` through `ProductsClient::get_sku`, a scoped read that needs a Products SKU read grant for `bss-orders.system` (UPSTREAM_REQS §2.10); a later echo of the two fields by resolve may replace the call | Existing read; grant is an ask |
+| The SKU is sellable and its lifecycle admits a sale | `Sku.sellable` and `Sku.lifecycle` through `ProductsClient::get_sku`, a scoped read that needs a Products SKU read grant for `bss-orders.system` (UPSTREAM_REQS §2.10); P-D-222 makes that grant the only self-service path, since the Pricing system actor is in-process only (D-171); the read is interim until `SellabilityV1` exists (D-177) | Existing read; grant is an ask |
 | The selected dimension value applies to the payer's market | none | Residual ask, Atlas decision 1 |
 | Any further purchase-eligibility rule the catalog owner holds | none | Residual ask, `SellabilityV1` |
 
@@ -5513,7 +6115,9 @@ Orders-owned setting.
 Resolve's acceptance of a superseded revision is for history and renewal; the first row is what
 makes a new sale current. All selected charged items must bind; unselected optional chains need not
 bind, and unpriced included items have no chain, so rejecting every uncovered cell in the full
-matrix would reject valid sales. Composition-only SKU sellability and deprecated/retiring treatment
+matrix would reject valid sales. Under Pricing D-467 every revision item is a charged item with an
+entry; the optional and included distinctions remain in the stored shape only as history for
+assessments made before the tip and are never evaluated (D-170). Composition-only SKU sellability and deprecated/retiring treatment
 follow the two Products fields as they are read; a stricter owner rule, if one is added, arrives
 through the residual `SellabilityV1` row and never as a local reimplementation.
 
@@ -5568,7 +6172,7 @@ A UTC date change before submit commit invalidates the prepared assessment with 
 | `assessment_id`, `assessed_at`, `resolve_date` | Common assessment identity and UTC basis |
 | `seller_tenant_id`, `plan_id`, `plan_revision_id`, `book_id` | Authorized origin and immutable composition |
 | `currency`, `currency_minor_digits`, `rounding_policy` | Producer-supplied monetary interpretation, frozen with the evidence |
-| `items[]` | Complete revision-item roster with `treatment`, `selected`, `item_id`, `sku_id`, `quantity`, `included_qty`, `qty_min`, `charge_kind`, `period`, `model` and `selected_dim_value`, as resolve names them; unselected optionals are identified, not billed |
+| `items[]` | Complete revision-item roster with `treatment`, `selected`, `item_id`, `sku_id`, `quantity`, `included_qty`, `qty_min`, `charge_kind`, `period`, `model` and `selected_dim_value`, as resolve names them; unselected optionals are identified, not billed. `treatment`, `included_qty` and `qty_min` are absent from resolve since Pricing D-467 and stored as null; no reader may depend on them (D-170) |
 | `items[].sku_version` | `{ published_version, effective_from }` used in assessment; required for consumed items; no fallback to today's mutable SKU head |
 | `items[].descriptor_snapshot` | `meter` and the four invoice inputs with their `source`, as resolve returned them, or an immutable producer reference guaranteeing identical replay |
 | `items[].chains[]` | The item's matrix as resolve answered it (D-159): one slot per `dim_value` (null is the default slot), each `{ dim_value, uncovered, binding? }`. A consumed charged item stores every slot it was answered; an unpriced included item and an unselected optional have none |
@@ -5667,6 +6271,14 @@ at/after it fails the gate as `order-binding-expired`. Workflow checks it again 
 activation dispatch. Neither check is an admission guarantee, and no clock agreement between gears
 is required: the receiver's comparison decides. Replay lookup precedes the comparison: an activation
 committed before a price change replays its success after it.
+
+**The hold is Pricing's decision (Q-32, Atlas ticket T1).** Three documents answer differently
+what happens to an order accepted at price 10 when an `all` successor at 12 starts before
+activation: Pricing's resolve walks (12), this design refuses (D-162), and Seam Atlas P5/D02
+honour 10 through a hold no Pricing document defines. This design holds D-162 and prepares the
+other branch: if Pricing adds a hold, the activation read passes `hold_until = activation_deadline`,
+the `accepted-price-mismatch` path becomes unreachable and fixture F-B2 expects 10; if Pricing
+declines, D-162 stands and F-B2 expects `order-binding-expired`.
 
 A hold or resume changes no deadline. State TTLs may be unset and fulfillment is expiry-exempt;
 they do not bound commercial validity. Before fulfillment, a fresh assessment uses the existing
@@ -5908,7 +6520,7 @@ directly.
 
 #### The version counter is the concurrency mechanism
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-version-is-concurrency`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-version-is-concurrency` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Appending a version invalidates every in-flight asynchronous result against the prior one. There
 is no separate lock, lease or generation token. A consequence to hold onto: a caller that omits
@@ -5922,7 +6534,7 @@ engine's `version-conflict`.
 
 #### Amend by append, never by edit
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-amend-by-append`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-amend-by-append` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 A prior version is never rewritten, re-pinned, corrected or deleted — not by a repair path, not
 by a migration. A mistake in version N is fixed by version N+1. This is what makes a reviewer
@@ -5933,7 +6545,7 @@ than the content.
 
 #### Carry forward, re-resolve the gate
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-carry-forward-reresolve`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-carry-forward-reresolve` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 An amendment supplies only the fields it changes. The new version inherits the prior version's
 commercial content for everything else, and the gate output — pin, total, market — is
@@ -5944,7 +6556,7 @@ accepted binding from a prior assessment into a version the buyer believes is cu
 
 #### An amendment is a versioning operation first
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-amendment-not-state-first`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-amendment-not-state-first` (`p2`), defined in [§2.1 Slice principles](#register-principles).
 
 Amendment always appends a version and always publishes `OrderAmended`; it moves state from
 `pending_approval` and `approved` (rows 19, 20); only `submitted` (row 18) produces no state
@@ -5963,7 +6575,7 @@ admitting states produces no state change at all.
 
 #### Amendment stops at `in_fulfillment`
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-no-amendment-in-fulfillment`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-no-amendment-in-fulfillment` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 There is no amendment row from `in_fulfillment` or from any terminal state — only cancel and
 hold remain. The reason is downstream rather than local: a provisioning intent may already be
@@ -5975,7 +6587,7 @@ cancels and reorders, or changes the subscription.
 
 #### The re-approval target is not this slice's decision
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-reapproval-target-external`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-reapproval-target-external` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 An amendment from `pending_approval` or `approved` transitions the order to **`submitted`
 unconditionally**. Whether the **new version** requires approval is a verdict owned by the
@@ -5990,7 +6602,7 @@ created. The two-step shape is what makes rows 19 and 20 reachable at all
 
 #### A payer change must not cross seller scope
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-paired-payer-seller-rebinding`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-paired-payer-seller-rebinding` (`p2`), defined in [§2.2 Slice constraints](#register-constraints).
 
 `payerTenantId` is the only tenant axis with an amendment path, and that path **stops at the
 seller boundary**. A payer change that crosses seller scope **MUST** be refused with
@@ -6036,13 +6648,13 @@ authority because it is never admitted.
 <!-- contract:04-versioning:3.1 -->
 ### Versioning: Domain Model
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-amendment-request`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-amendment-request` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The delta a caller supplies: the changed commercial fields, the amendment reason, the expected
 version, and the idempotency key. It is not persisted as itself — it is resolved into a new
 version row — but it is the unit the caller-facing contract is written against.
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-administrative-edit`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-administrative-edit` (`p2`), defined in [§3.1 Slice entities](#register-entities).
 
 An in-place change to administrative content, at order or line level, in any non-terminal state:
 each changed field with its prior and new value, the actor and the instant. It produces one audit
@@ -6071,7 +6683,7 @@ This slice realises `cpt-cf-bss-orders-lifecycle-component-versioning`
 
 #### Version appender
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-versioning-appender`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-versioning-appender` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-04-why-this-component-exists-1"></a>
 
@@ -6110,7 +6722,7 @@ platform producer outbox from the transition.
 
 #### Version reader
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-versioning-reader`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-versioning-reader` (`p2`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-04-why-this-component-exists-1"></a>
 
@@ -6148,7 +6760,7 @@ beyond the engine's pre-guard.
 <!-- contract:04-versioning:3.3 -->
 ### Versioning: API Contracts
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-versioning-ops`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-versioning-ops` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 - **Requirement**: `cpt-cf-bss-orders-lifecycle-interface-order-ops`
 - **Technology**: REST/OpenAPI via `OperationBuilder`; RFC 9457 problems; ETag carries the expected version
@@ -6382,7 +6994,7 @@ the outcome arrives as a request input, so this slice adds no infrastructure of 
 
 #### The acceptance instant is never defaulted
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-acceptance-never-defaulted`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-acceptance-never-defaulted` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 No policy, cascade, migration or convenience path may write an acceptance instant that a party
 did not perform. The line-level acceptance **due date** has a cascade; the instant has none.
@@ -6393,7 +7005,7 @@ its absence is a truthful answer.
 
 #### Agreement and delegation are different facts
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-agreement-not-delegation`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-agreement-not-delegation` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 On the partner-placed path the order evidences the partner's **right to act** — carried by the
 initiating actor and the delegation proof PDP policy requires at the engine's authorization pre-guard (D-111). It does
@@ -6405,7 +7017,7 @@ own authority as proof of their customer's consent.
 
 #### Authorization is read, not owned
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-authorization-read-not-owned`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-authorization-read-not-owned` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 The authorization outcome is a point-in-time answer from a capability this platform has not
 specified. This slice consumes it as a guard input at begin-fulfillment and stores no
@@ -6424,7 +7036,7 @@ answer "is the payer good" later, which it cannot.
 
 #### There is no `payment_pending` state
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-no-payment-pending-state`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-no-payment-pending-state` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 A pending authorization leaves the order `approved` with begin-fulfillment simply not called. No
 twelfth state is added. The consequence is real and is not hidden: an order awaiting
@@ -6435,7 +7047,7 @@ from the order document alone, and process visibility is the sibling gear's to p
 
 #### A declined instrument exits by expiry, and only where the TTL is set
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-declined-instrument-exit`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-declined-instrument-exit` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 Where authorization fails and the seller has not elected tolerate-failure, Lifecycle refuses
 begin-fulfillment and the order remains `approved` until its TTL elapses. Two qualifications, and both are
@@ -6455,7 +7067,7 @@ than deferred silently: the order expires, and the buyer learns nothing from the
 
 #### Payment collection is out of scope entirely
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-no-payment-collection`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-no-payment-collection` (`p2`), defined in [§2.2 Slice constraints](#register-constraints).
 
 Capture, settlement, strong-customer-authentication challenges and their asynchronous return,
 retry with an alternative instrument, refunds, chargebacks and provider webhooks are all outside
@@ -6471,7 +7083,7 @@ applicable to this gear.
 <!-- contract:05-preconditions:3.1 -->
 ### Preconditions: Domain Model
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-acceptance-record`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-acceptance-record` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The customer-acceptance instant as a recorded fact: when it happened, which actor recorded it,
 and whether the requirement came from a referenced contract, a seller election, the platform
@@ -6479,7 +7091,7 @@ default, or was volunteered where none was required (D-107). At
 most one per immutable commercial version. Only acceptance of the current version gates begin-fulfillment where acceptance is required; its
 absence is never inferred to be satisfaction.
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-authorization-outcome`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-authorization-outcome` (`p2`), defined in [§3.1 Slice entities](#register-entities).
 
 A **transient** guard input, not a persisted entity: the authorization verdict supplied by the
 sibling gear at begin-fulfillment — a three-valued outcome (authorized, pending, failed); only
@@ -6508,7 +7120,7 @@ This slice realises `cpt-cf-bss-orders-lifecycle-component-preconditions`
 
 #### Acceptance recorder
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-preconditions-acceptance`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-preconditions-acceptance` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-05-why-this-component-exists-1"></a>
 
@@ -6543,7 +7155,7 @@ it supplies one of two guard inputs.
 
 #### Money gate
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-preconditions-money-gate`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-preconditions-money-gate` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-05-why-this-component-exists-1"></a>
 
@@ -6582,7 +7194,7 @@ stores no authorization outcome as an order fact.
 <!-- contract:05-preconditions:3.3 -->
 ### Preconditions: API Contracts
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-preconditions-ops`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-preconditions-ops` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 - **Requirement**: `cpt-cf-bss-orders-lifecycle-interface-order-ops`
 - **Technology**: REST/OpenAPI via `OperationBuilder`; RFC 9457 problems
@@ -6666,7 +7278,7 @@ cleared, since it records a decision taken at a moment rather than a current con
 
 #### Table: orders_policy_election
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-policy-election`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-policy-election`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**: `election` enum (`tolerate_authorization_failure`, `acceptance_required`), `scope`
 enum (`platform`, `seller`), `scope_id` (null for platform scope), `elected`, `elected_by`,
@@ -6844,7 +7456,7 @@ and, deliberately, no outbound adapter.
 
 #### The sibling gear is an ordinary caller
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-workflow-is-ordinary-caller`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-workflow-is-ordinary-caller` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Workflow's five operations pass the same guards as any other. It receives no privileged
 interface, no state-setting bypass and no exemption from the version check. R1 is then a
@@ -6856,7 +7468,7 @@ can set state without a guard.
 
 #### Store the verdict, never the reasoning
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-store-verdict-not-reasoning`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-store-verdict-not-reasoning` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 An approval verdict is persisted as a received fact with its deciding authority. This gear does
 not evaluate it, does not cache a threshold, does not recompute it on amendment, and does not
@@ -6869,7 +7481,7 @@ unable to distinguish "policy said no approval was needed" from "nothing was ask
 
 #### Commit the guard anchor before the risk
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-commit-anchor-before-risk`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-commit-anchor-before-risk` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Begin-fulfillment must be durably committed before Workflow issues any activation intent,
 because the cancel guard reads a fact this gear stores. If the intent could precede the commit,
@@ -6880,7 +7492,7 @@ already activating.
 
 #### An outcome is not a mirror
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-outcome-not-mirror`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-outcome-not-mirror` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 This gear records the **order-level outcome** of downstream work and a per-line projection of it.
 It does not mirror the Subscriptions transition-request machine, does not reflect
@@ -6900,7 +7512,7 @@ at Subscriptions instead of Workflow.
 
 #### The approval policy owner does not exist
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-approval-owner-absent`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-approval-owner-absent` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 No approval service exists; the built `cf-gears-bss-approval` library is infrastructure, not a
 policy owner, and until Workflow's approval adapter hosts the policy (D-166) the sibling gear
@@ -6914,7 +7526,7 @@ would undo R2.
 
 #### The compensation cancel reason is unagreed
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-compensation-reason-unagreed`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-compensation-reason-unagreed` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 The acknowledgement path depends on Subscriptions carrying a cancellation reason for
 order-fulfillment compensation — registered upstream as `SUB-O1`, marked critical there, and
@@ -6929,7 +7541,7 @@ materially cheaper now than later.
 
 #### Order-reference provenance is not yet bidirectional
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-provenance-one-directional`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-provenance-one-directional` (`p2`), defined in [§2.2 Slice constraints](#register-constraints).
 
 This gear persists the line-to-subscription mapping, so "which subscription did this order
 produce" is answerable. The reverse — "which order produced this subscription" — requires
@@ -6941,7 +7553,7 @@ outside the order path is indistinguishable from one created through it.
 
 #### Correlation propagation is not guaranteed
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-correlation-propagation-unagreed`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-correlation-propagation-unagreed` (`p2`), defined in [§2.2 Slice constraints](#register-constraints).
 
 The process correlation identifier is recorded on every audit entry here, which makes the order
 side of an acquisition traceable. Propagation onward through Subscriptions to the Policy Engine
@@ -6956,26 +7568,26 @@ at the seam.
 <!-- contract:06-workflow-seam:3.1 -->
 ### Workflow seam: Domain Model
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-approval-reflection`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-approval-reflection` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 A stored approval fact: the verdict — approval required, not required, granted or denied — the
 deciding authority that produced it, the denial reason as received where the verdict is denied, the order version it was decided against, and the instant
 it was reflected. Never evaluated, never recomputed.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-spawn-signal`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-spawn-signal` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The recorded instant at which Workflow reported its first activation intent for the current
 fulfillment attempt. A single nullable column on the aggregate, written by begin-fulfillment's
 successor report and read by the cancel guard. It is a fact about what has been attempted, not a
 state.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-fulfillment-acknowledgement`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-fulfillment-acknowledgement` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The order-level outcome Workflow reports: completed with the per-line subscription mapping, or
 failed with a failure reason from the closed enumeration of §4.4 and the compensation evidence,
 under the closed schema of [01 §3.7](DESIGN.md#contract-01-3-7), asserting that no active subscription remains.
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-line-fulfillment-projection`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-line-fulfillment-projection` (`p2`), defined in [§3.1 Slice entities](#register-entities).
 
 The read-only per-line view — created, activated or failed — with the spawned subscription
 identifier and the downstream transition-request identifier as a join key. Explicitly not a
@@ -7001,7 +7613,7 @@ This slice realises `cpt-cf-bss-orders-lifecycle-component-workflow-seam`
 
 #### Verdict reflector
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-seam-verdict-reflector`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-seam-verdict-reflector` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-06-why-this-component-exists-2"></a>
 
@@ -7036,7 +7648,7 @@ verdict for an amended version from the version it superseded.
 
 #### Fulfillment coordinator
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-seam-fulfillment-coordinator`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-seam-fulfillment-coordinator` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-06-why-this-component-exists-2"></a>
 
@@ -7073,7 +7685,7 @@ asserted it and records the evidence.
 
 #### Line projection maintainer
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-seam-line-projection`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-seam-line-projection` (`p2`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-06-why-this-component-exists-2"></a>
 
@@ -7112,7 +7724,7 @@ remain atomic and order-level.
 <!-- contract:06-workflow-seam:3.3 -->
 ### Workflow seam: API Contracts
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-seam-ops`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-seam-ops` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 - **Requirement**: `cpt-cf-bss-orders-lifecycle-interface-order-ops`
 - **Technology**: REST/OpenAPI via `OperationBuilder`; RFC 9457 problems. Every call carries an idempotency key, the expected version and the process correlation identifier
@@ -7204,7 +7816,7 @@ This slice introduces one table, `orders_approval_reflection`, specified here. I
 
 #### Table: orders_approval_reflection
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-approval-reflection`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-approval-reflection`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -7379,6 +7991,19 @@ The seventh ask is `cpt-cf-bss-orders-lifecycle-upreq-overlap-activation-atomici
 must re-evaluate `overlapScopeKey` atomically with committing `active`. Until it does, the §4.3
 activation re-check is an early abort only, with no admission guarantee (D-89).
 
+**Reconciled on the Workflow side (2026-10-02).** The Workflow branch (`bss/orders-workflow` @
+`3ccf7793c`) registers the provisioning-intent contract as `SUB-O11`…`SUB-O16`: an envelope with
+the source tuple, wave, kind, wave attempt and correlation; the key
+`{tenant}:{orderId}:{orderVersion}:{orderLineId}:{wave}:{kind}[:{attempt}]`; status words
+`applied | approved | oss_unconfirmed`; a settle and status read (`SUB-O13`); an outcome echo
+(`SUB-O16`). Lifecycle's asks map onto them: `SUB-O10` start instant onto the activate intent,
+`SUB-O9` correlation onto the envelope, `SUB-O1` compensation reason onto the two compensation
+legs, `SUB-O5` occupancy onto the pre-wave-2 count (Workflow D-195); the three asks added to
+UPSTREAM_REQS §2.1 on 2026-10-02 (`settle-create`, `intent-status-read`,
+`transition-outcome-echo`) are co-signed with `SUB-O13` and `SUB-O16`. Subscriptions' register still
+ends at `SUB-O6` with `SUB-O3` as the placeholder for this pair. The failure catalog is aligned under
+D-172 and receipt retention under D-173.
+
 
 <!-- /contract -->
 
@@ -7488,7 +8113,7 @@ workers at the infrastructure layer, both singleton-coordinated.
 
 #### A hold changes only the order
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-hold-changes-only-order`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-hold-changes-only-order` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 A hold pauses the order document and the sibling gear's process. It does not pause entitlement,
 does not pause billing, does not extend a term, and does not void a subscription draft.
@@ -7500,7 +8125,7 @@ deliberately cannot provide it.
 
 #### The pre-hold state is stored, not derived
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-prehold-stored`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-prehold-stored` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Hold writes the outgoing state to a column; resume reads it. The rejected alternative was
 deriving it from the last transition before the hold, which would make resume depend on audit
@@ -7511,7 +8136,7 @@ hold and resume.
 
 #### Exemptions live in the table
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-exemptions-in-table`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-exemptions-in-table` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 `in_fulfillment` is not expirable because no such transition row exists — not because the
 scheduler declines to select it. The distinction matters under defect: a scheduler bug can select
@@ -7523,7 +8148,7 @@ mandatory guard rejects `pre_hold_state = in_fulfillment` as `expiry-exempt-preh
 
 #### A resume restarts the state clock, never the order's
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-resume-is-capped`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-resume-is-capped` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Resume sets `state_entered_at`, so the **per-state** bound genuinely starts over — that is correct,
 because the order has genuinely re-entered the state and the state's TTL asks how long it may
@@ -7544,7 +8169,7 @@ bounded dwell is a bounded total.
 
 #### A park does not stop the clock
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-park-does-not-stop-clock`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-park-does-not-stop-clock` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 When the sibling gear cannot obtain an approval-requirement verdict it parks fail-closed, leaving
 the order in `submitted`. The `submitted` TTL **continues to elapse**, and expiry is the bound of
@@ -7563,7 +8188,7 @@ bounded lifetime exists to prevent.
 
 #### `in_fulfillment` has no automatic bound
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-in-fulfillment-not-expirable`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-in-fulfillment-not-expirable` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 Neither `in_fulfillment` nor a hold taken from it may be auto-expired, because a spawn signal
 may already have been issued and expiry would orphan provisioned resources with no compensation.
@@ -7576,7 +8201,7 @@ incident or an operator abort.
 
 #### Hold does not pause the Subscriptions draft TTL
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-hold-does-not-pause-draft-ttl`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-hold-does-not-pause-draft-ttl` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 Wave-1 subscription drafts created during two-phase fulfillment are process artifacts of the
 sibling gear. A hold does not void them and **must not be assumed** to pause the Subscriptions
@@ -7588,7 +8213,7 @@ otherwise.
 
 #### TTL values are unchosen
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-ttl-values-unchosen`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-ttl-values-unchosen` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 The per-state TTL defaults, the draft auto-void TTL and the override scope —
 platform versus seller — are all PRD open questions owned by Product. This slice specifies the
@@ -7623,7 +8248,7 @@ claimed closed.
 <!-- contract:07-hold-and-expiry:3.1 -->
 ### Hold and expiry: Domain Model
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-hold-record`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-hold-record` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The pause. The hold record is `pre_hold_state` plus the hold transition's audit entry, which
 carries the actor, the instant and the reason; there is no separate hold column set
@@ -7632,14 +8257,14 @@ resume target, and it needs no table because at most one hold is ever in force. 
 **optional**: it is recorded on the audit entry, as its `caller_reason` (D-143), and in `OrderHeld` when the caller supplies one,
 and no guard requires it, unlike the mandatory cancel reason of §4.6.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-state-ttl-policy`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-state-ttl-policy` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The per-state time-to-live configuration: the state it bounds, its duration, and its
 configuration scope. Resolved at sweep time rather than stored per order, so a policy change
 takes effect on orders already in flight. It is **per-state and optional**; where it is unset the
 state is unbounded, and the re-entry caps limit restarts rather than supplying a duration.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-resume-cap`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-resume-cap` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The restart bound: a single maximum count of resumes per order, compared against a counter on the
 aggregate that only the resume transition increments. It is configuration with a design-owned
@@ -7668,7 +8293,7 @@ This slice realises `cpt-cf-bss-orders-lifecycle-component-hold-and-expiry`
 
 #### Hold and resume handler
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-hold-handler`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-hold-handler` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-07-why-this-component-exists-2"></a>
 
@@ -7702,7 +8327,7 @@ sibling gear's timers — it publishes the event that lets that gear decide.
 
 #### Expiry scheduler
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-expiry-scheduler`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-expiry-scheduler` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-07-why-this-component-exists-2"></a>
 
@@ -7738,7 +8363,7 @@ the sweep selects. It raises no escalation; that is the sibling gear's.
 
 #### Draft abandonment sweep
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-draft-sweep`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-draft-sweep` (`p2`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-07-why-this-component-exists-2"></a>
 
@@ -7775,7 +8400,7 @@ It deletes nothing and touches no order past `draft`.
 <!-- contract:07-hold-and-expiry:3.3 -->
 ### Hold and expiry: API Contracts
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-hold-ops`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-hold-ops` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 - **Requirement**: `cpt-cf-bss-orders-lifecycle-interface-order-ops`
 - **Technology**: REST/OpenAPI via `OperationBuilder`; RFC 9457 problems
@@ -7853,7 +8478,7 @@ relative to [01-foundation — Database Schemas and Tables](DESIGN.md#contract-0
 
 #### Table: orders_state_ttl_policy
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-state-ttl-policy`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-state-ttl-policy`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**:
 
@@ -8116,7 +8741,7 @@ presentation layer and the permission declaration at the domain layer; it adds n
 
 #### Read the row, never the chain
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-read-row-not-chain`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-read-row-not-chain` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Current state and the current-version pointer live on the aggregate row, so read cost is
 independent of amendment count. No read walks the version chain, replays events or derives state.
@@ -8127,7 +8752,7 @@ safe precisely because the engine is the single writer.
 
 #### Scope by relationship, not by equality
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-scope-by-relationship`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-scope-by-relationship` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 A caller's readable set is defined by their relationship to the order's axes — delegated scope
 over the resource axis, seller scope over the seller axis, ownership of their own orders — not by
@@ -8138,7 +8763,7 @@ or, if widened to fix it, leak across customers of the same partner.
 
 #### Nothing internal is readable
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-no-internal-exposure`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-no-internal-exposure` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 Guard state, idempotency records, outbox rows, dead-letter contents and engine diagnostics are
 not exposed on any surface, and no error body carries them. What a caller sees is the commercial
@@ -8148,7 +8773,7 @@ document, its history, its audit trail and registered business reasons.
 
 #### One PDP adapter, invoked from two places
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-principle-one-permission-model`
+**Contract**: `cpt-cf-bss-orders-lifecycle-principle-one-permission-model` (`p1`), defined in [§2.1 Slice principles](#register-principles).
 
 The declaration owned here governs every operation in the gear. Authorization decisions belong
 to the platform PDP, reached through **one shared PolicyEnforcer adapter** used by the engine
@@ -8169,7 +8794,7 @@ mechanism ([DECISIONS.md](DECISIONS.md) D-34, amended for platform PDP).
 
 #### Fail closed on store unavailability
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-read-fails-closed`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-read-fails-closed` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 A read whose store is unavailable **MUST** fail rather than serve a cached or stale answer.
 Orders are financial commitments and a stale state read can cause a wrong operational decision —
@@ -8180,7 +8805,7 @@ truthful answer; stale is not.
 
 #### Cross-tenant access requires delegation proof
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-delegation-proof-required`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-delegation-proof-required` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 Delegation is determined by the **authorized access path**, not by comparing the caller's
 tenant to a single presumed order owner. Customer access uses the resource-tenant relationship,
@@ -8227,7 +8852,7 @@ assessment scope. This does not give Payer Reader Preview access.
 
 #### Page size is bounded
 
-- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-bounded-page-size`
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-bounded-page-size` (`p2`), defined in [§2.2 Slice constraints](#register-constraints).
 
 **Every collection response is paged**, not only the order list: the order list, the version
 list, the per-line read, the acceptance history and the audit read each take a page size and
@@ -8326,14 +8951,14 @@ completeness. Chain verification must remain sequence-based and independent of t
 <!-- contract:08-read-and-authz:3.1 -->
 ### Reads and authorization: Domain Model
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-order-read-view`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-order-read-view` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The composed read of an order: the aggregate's identity, number, category, axes, state and
 contract reference; the current version's lines with their pins and resolved total; the per-line
 fulfillment status and subscription linkage; expected fulfillment time and per-line deferral
 where they apply; and the declared exclusions on the resolved total.
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-entity-permission-declaration`
+**Contract**: `cpt-cf-bss-orders-lifecycle-entity-permission-declaration` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
 The per-actor permission set: for each actor class, the operations permitted, the axis the scope
 is evaluated against, and whether delegation proof is required. Declared as data, read by the
@@ -8360,7 +8985,7 @@ This slice realises `cpt-cf-bss-orders-lifecycle-component-read-and-authz`
 
 #### Read projection
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-read-projection`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-read-projection` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-08-why-this-component-exists-1"></a>
 
@@ -8398,7 +9023,7 @@ row.
 
 #### Permission declaration
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-authz-declaration`
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-authz-declaration` (`p1`), defined in [§3.2 Slice components](#register-components).
 
 <a id="contract-08-why-this-component-exists-1"></a>
 
@@ -8438,7 +9063,7 @@ service-principal check for the workflow-only operations is specified in
 <!-- contract:08-read-and-authz:3.3 -->
 ### Reads and authorization: API Contracts
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-interface-read-ops`
+**Contract**: `cpt-cf-bss-orders-lifecycle-interface-read-ops` (`p1`), defined in [§3.3 Slice interfaces](#register-interfaces).
 
 - **Requirement**: `cpt-cf-bss-orders-lifecycle-interface-order-ops`
 - **Technology**: REST/OpenAPI via `OperationBuilder`; RFC 9457 problems; ETag carries the current commercial version. Draft reads also expose `draftRevision`; draft commercial writes and submit must supply it as `expected_draft_revision`, separately from expected_version; on `draft-mutate` its absence is not a boundary rejection, and the engine compares it only after admissibility, so a post-draft commercial `PATCH` refuses `not-admissible` (D-147). ETag alone cannot detect mutable draft edits.
@@ -8704,7 +9329,7 @@ section. The rest of its contract is expressed as index requirements on tables o
 
 #### Table: orders_read_access_log
 
-**ID**: `cpt-cf-bss-orders-lifecycle-dbtable-read-access-log`
+**Contract**: `cpt-cf-bss-orders-lifecycle-dbtable-read-access-log`, defined in [§3.7 Slice tables](#register-tables).
 
 **Schema**: `access_id`, `order_id` (nullable — NULL for a list call, and NULL for an order-scoped
 call whose aggregate does not exist, since the FK below cannot be satisfied against a row that is

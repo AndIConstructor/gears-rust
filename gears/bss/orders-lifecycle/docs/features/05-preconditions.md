@@ -1,9 +1,5 @@
 # Feature: Buyer Acceptance and the Money Gate
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-preconditions-implemented`
-- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-preconditions`
-
-## Table of Contents
 
 <!-- toc -->
 
@@ -12,16 +8,16 @@
   - [1.2 Purpose](#12-purpose)
   - [1.3 Actors](#13-actors)
   - [1.4 References](#14-references)
-- [2. Actor Flows](#2-actor-flows)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
   - [2.1 Submit as the accepting buyer](#21-submit-as-the-accepting-buyer)
   - [2.2 Record acceptance of the current version](#22-record-acceptance-of-the-current-version)
   - [2.3 Attempt fulfillment with a payment outcome](#23-attempt-fulfillment-with-a-payment-outcome)
-- [3. Processes / Business Logic](#3-processes--business-logic)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [3.1 Resolve the acceptance requirement](#31-resolve-the-acceptance-requirement)
   - [3.2 Bind assent to actor and commercial version](#32-bind-assent-to-actor-and-commercial-version)
   - [3.3 Evaluate begin-fulfillment preconditions](#33-evaluate-begin-fulfillment-preconditions)
   - [3.4 Pending authorization integration contract](#34-pending-authorization-integration-contract)
-- [4. States](#4-states)
+- [4. States (CDSL)](#4-states-cdsl)
   - [4.1 Acceptance and authorization effects](#41-acceptance-and-authorization-effects)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [5.1 Acceptance implementation](#51-acceptance-implementation)
@@ -36,11 +32,8 @@
 
 <!-- /toc -->
 
-**Accepted-binding rule (D-152):** [03 §4.3](../DESIGN.md#contract-03-4-3) defines a separate
-absolute activation deadline. State TTLs, hold/resume and payment-tolerance elections neither extend
-it nor authorize renewal/repricing. A fresh amendment reassesses and reapproves; an expiry during
-fulfillment stops dispatch and follows evidence-gated compensation, not a new expiry edge.
-
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-preconditions-implemented`
+- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-preconditions`
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -74,7 +67,7 @@ Schemas and architecture remain in the design. [UPSTREAM_REQS.md](../UPSTREAM_RE
 
 **UI applicability**: UI layout, keyboard navigation, screen-reader behavior and visual accessibility are not applicable because this feature specifies backend contracts, not a user interface. API usability, actionable errors and non-disclosing diagnostics remain applicable; consuming consoles own their UI requirements.
 
-## 2. Actor Flows
+## 2. Actor Flows (CDSL)
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`, `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`.
 
@@ -117,7 +110,7 @@ Schemas and architecture remain in the design. [UPSTREAM_REQS.md](../UPSTREAM_RE
 3. [ ] Lifecycle resolves acceptance and tolerance inputs and evaluates §3.3 within the engine's guarded transition contract.
 4. [ ] Return admission, admission with a durable risk flag, or the specific refusal. A refusal leaves the order `approved`; Workflow's existing manual-task path handles authorization failure.
 
-## 3. Processes / Business Logic
+## 3. Processes / Business Logic (CDSL)
 
 ### 3.1 Resolve the acceptance requirement
 
@@ -177,7 +170,7 @@ This process is **owned by Workflow and must be implemented there**, not a new L
 4. [ ] Reread Lifecycle on wake-up and before forwarding: stop for terminal/superseded versions, suspend on hold while retaining remaining budget, and attempt fulfillment only for the matching current `approved` version.
 5. [ ] Deduplicate timer delivery by checkpoint and resume overdue checkpoints after restart. Escalation is independent of optional Lifecycle TTL and precedes expiry where configured; it does not wait for an acceptance event.
 
-## 4. States
+## 4. States (CDSL)
 
 ### 4.1 Acceptance and authorization effects
 
@@ -251,7 +244,7 @@ shared schemas and interfaces are defined in [DESIGN.md](../DESIGN.md).
 
 #### Record the acceptance instant
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-record-acceptance`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-record-acceptance`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -279,7 +272,7 @@ sibling gear re-evaluate begin-fulfillment eligibility without polling.
 
 #### Self-service submit constitutes acceptance
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-self-service-acceptance`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-self-service-acceptance`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -311,7 +304,7 @@ Separate recording copies `orders_order.sales_path` (written once at create, D-1
 
 #### Begin-fulfillment guard evaluation
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-begin-fulfillment-guards`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-begin-fulfillment-guards`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`
 

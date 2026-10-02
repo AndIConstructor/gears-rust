@@ -17,7 +17,7 @@ decision-makers: BSS Orders team
 - [Pros and Cons of the Options](#pros-and-cons-of-the-options)
   - [A claim table with a partial unique index (chosen)](#a-claim-table-with-a-partial-unique-index-chosen)
   - [Application-level counting under the aggregate row lock](#application-level-counting-under-the-aggregate-row-lock)
-  - [SERIALIZABLE isolation for transitions touching an overlap key](#serializable-isolation-for-transitions-touching-an-overlap-key)
+  - [`SERIALIZABLE` isolation for transitions touching an overlap key](#serializable-isolation-for-transitions-touching-an-overlap-key)
   - [A PostgreSQL advisory lock on the hashed key](#a-postgresql-advisory-lock-on-the-hashed-key)
   - [An upstream reservation in Subscriptions](#an-upstream-reservation-in-subscriptions)
 - [More Information](#more-information)

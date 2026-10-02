@@ -1,10 +1,5 @@
 # Feature: Draft Capture and the Line Model
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-capture-implemented`
-
-- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-capture`
-
-## Table of Contents
 
 <!-- toc -->
 
@@ -37,6 +32,9 @@
 
 <!-- /toc -->
 
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-capture-implemented`
+
+- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-capture`
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -273,7 +271,7 @@ shared schemas and interfaces are defined in [DESIGN.md](../DESIGN.md).
 
 #### Create draft order
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-create-draft`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-create-draft`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -300,7 +298,7 @@ capture and submit is caught where it matters.
 
 #### Author a line and resolve its dates
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-author-line`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-author-line`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -330,7 +328,7 @@ D-117).
 
 #### Edit the order header
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-edit-order`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-edit-order`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`, `cpt-cf-bss-orders-lifecycle-usecase-order-amendment`
 
@@ -357,7 +355,7 @@ splitting would commit two transitions under one idempotency key.
 
 #### Edit or remove a line
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-edit-or-remove-line`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-edit-or-remove-line`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`, `cpt-cf-bss-orders-lifecycle-usecase-order-amendment`
 

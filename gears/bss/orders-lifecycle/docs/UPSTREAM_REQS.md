@@ -56,6 +56,10 @@ since Q-04 records it carrying two different meanings across the two registers. 
 registered below but is a **preservation** ask rather than a change request, which is why the
 slices that rest on it do not count it among their unagreed dependencies.
 
+The Workflow branch (`bss/orders-workflow` @ `3ccf7793c`) registers the provisioning-intent contract
+on its own side as `SUB-O11`…`SUB-O16`; the asks below that overlap them name the matching Workflow
+id so Subscriptions receives one list, not two (DECISIONS D-172–D-175).
+
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-subscription-start-instant`
 
 The activation intent and `create` **MUST** accept an explicit **start instant** and **MUST NOT**
@@ -64,7 +68,9 @@ barrier defers a line past its quoted service-activation date, the spawned subsc
 the **actual activation instant**; billing and entitlement **MUST NOT** be backdated to the
 earlier quoted date. Raised as **`SUB-O10`** — a new ask, not present in either existing register.
 Without it the PRD's no-backdating requirement is unenforceable from the order side, because
-Subscriptions owns the start. See [`DECISIONS.md`](./DECISIONS.md) D-56.
+Subscriptions owns the start. See [`DECISIONS.md`](./DECISIONS.md) D-56. The Workflow branch carries
+the instant on its activate intent (Workflow D-195); `start_at` wins over any internally computed
+instant.
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-overlap-presence-read`
 
@@ -78,7 +84,10 @@ exceeds one, so this design asks for the count and the limit; the Subscriptions 
 is not edited here ([`DECISIONS.md`](./DECISIONS.md) D-126). The requirement ID is kept for
 stability. The against-existing-subscriptions half of the
 submit gate's overlap predicate depends on it; until it lands that half is unevaluable and
-therefore a refusal, which fails closed.
+therefore a refusal, which fails closed. The same read serves Workflow's pre-wave-2 re-check
+(Workflow D-195); the shape is `occupancy(payer, keys[]) → [{ key, active_count, draft_count,
+max_concurrent_active, source }]`, with the keys obtained through
+`…-upreq-catalog-subscription-product-key`.
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-compensation-cancel-reason`
 
@@ -86,7 +95,11 @@ A cancellation **reason value for order-fulfillment compensation**, scoped **out
 early-termination class so it derives neither a termination fee nor a credit. Registered upstream
 as **`SUB-O1`**, marked critical there, unagreed. The upstream note records that reason values
 ride event payloads consumers key on, so adding one after Billing consumes the contract is a
-breaking change — making this the ask materially cheaper now than later.
+breaking change — making this the ask materially cheaper now than later. Workflow submits both compensation legs
+(draft void, activated cancel) as provisioning intents with reason `order_compensation`;
+Subscriptions treats void as `cancel` from draft (SUB-D-11), so one
+`CancelReason::OrderCompensation { order_id, order_version }` accepted from draft and from active
+closes both legs.
 
 - [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-order-reference-on-create`
 
@@ -126,6 +139,34 @@ pre-activation abort; one appearing at or after `active` is a fulfillment failur
 `overlap-collision` on the failure-acknowledgement path, whose compensation evidence must show no
 active subscription remains ([03 §2.2](DESIGN.md#contract-03-2-2), `DECISIONS.md` D-89). This is the same seam as `SUB-O5`, which supplies the *read*; this ask is
 the *enforcement*, and the read alone does not make the rule hold.
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-settle-create`
+
+**Settlement of a timed-out create.** `settle_create(create_key) → NoDraft { tombstone_id } |
+DraftFound { subscription_id, status }`, serialized with `create` on the same unique dedup index so
+exactly one of a late create and a settlement wins. Needed on the F12 compensation path: a status
+read alone cannot prove that a delayed create will not commit later and attach a subscription to a
+settled order. Co-registered with the Workflow branch's `SUB-O13` (unasked upstream); Subscriptions
+slice 01 has only the dedup key today. See [`DECISIONS.md`](./DECISIONS.md) D-172.
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-intent-status-read`
+
+**Status of a non-terminal provisioning intent**, by transition request id or by the full
+`(tenant, order, version, line, wave, kind[, attempt])` tuple: `approved | applied |
+oss_unconfirmed | failed`, with the subscription id where one exists. Workflow's reconcile step
+detects by re-read, never by absence of notification; Lifecycle counts a line as activated only at
+`applied` (D-165). The Workflow branch's `SUB-O13`; not in Subscriptions' register.
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-transition-outcome-echo`
+
+**One outcome event per intent, echoing the caller's identity.** `SubscriptionTransitionOutcome {
+transition_request_id, source { order_id, order_version, order_line_id }, wave, kind, wave_attempt,
+correlation_id, transition, outcome: applied | failed { reason_code } | oss_unconfirmed }` for
+create, activate, void and cancel, as the twin of `SubscriptionActivated`, which carries no caller
+tuple and has no failure variant. Without it Workflow cannot correlate the event Subscriptions would
+send and falls back to the status read for every outcome; Lifecycle's completion acknowledgement
+depends on Workflow receiving a terminal outcome per line. The Workflow branch's `SUB-O16`; Seam
+Atlas names the same event in C03/C09 (ticket T12).
 
 **PriceBook provisioning amendment (D-157, D-165).** The create/activate SDK must accept the exact
 order/version/line reference (which is the accepted version reference), the order/line external
@@ -234,6 +275,10 @@ Exact-price mode must not feed order pins to renewal resolve and walk to success
 preview does not synthesize a one-time recurring/usage rating unit. Minimum fees are Rating's.
 Absent SDK, inconsistent binding identity or incomplete required figures is `evaluation-unavailable`.
 Every submit/amendment requires totals; Preview retains only the explicitly allowed TCV withholding.
+This D-167 request is the single evaluation DTO: Seam Atlas C06 (`acceptance_ref` plus digest,
+`ExactAmount` outputs) is not consumed, figures are integer minor units stored verbatim, and
+Rating's own `fr-pre-purchase-evaluation` must be promoted from p2 and lose its catalog-version
+prefix before the seam exists (Atlas ticket T3).
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-pricing-bundle-sellability`
 
@@ -315,7 +360,10 @@ whether the payer is in a commercial relationship with the order's `sellerTenant
 that changes `payerTenantId` reads this answer to decide whether the change crosses seller scope
 ([04 §2.2](DESIGN.md#contract-04-2-2)), and refuses `payer-rebinding-requires-seller` unless the
 relationship is confirmed. No separate tenant-hierarchy operation is requested. See
-[`DECISIONS.md`](./DECISIONS.md) D-128.
+[`DECISIONS.md`](./DECISIONS.md) D-128. Shape (2026-10-02): `payer_profile(payer_tenant_id,
+seller_tenant_id) → { currency, region, in_relationship_with_seller }`, as a first-class read or a
+documented schema on the tenant metadata API; Seam Atlas takes the market from the caller's
+request, which this gear treats as untrusted.
 
 ### 2.5 Payments
 
@@ -337,6 +385,13 @@ selected execution platform ([05 §4.3](features/05-preconditions.md#contract-05
 timer. Configuration, restart recovery and exhaustion tests are prerequisites, not delivered
 capabilities. Conclusive `failed` outcomes are sent to Lifecycle, the sole evaluator of its
 tolerate-failure policy; Workflow must not independently suppress that transition request.
+
+**Shape and request identity (2026-10-02).** `authorize(request_ref, payer, amount | postpaid) →
+Authorized | Pending { request_ref } | Failed { reason }` and `get(request_ref)`; Workflow mints
+`request_ref` from its intent key (Workflow Q-06), and the authorized amount is specified
+separately from TCV (Workflow D-199). The worktree's `admission-control` gear is platform policy
+admission, not this capability; Seam Atlas N4/D05 use the word admission for both, and its
+`AdmissionReadV1` is not consumed by this gear (D-175).
 
 ### 2.6 Orders Workflow
 
@@ -380,7 +435,10 @@ continuation, hold/resume and superseded-version cancellation belong to Workflow
 execution platform, which remains Q-10, not an Orders-owned scheduler. Completion evidence must
 cover the exact persisted current-version line roster, with no omissions, extras or duplicates.
 Workflow must obtain a committed `report-spawn-signal` before dispatching activation and recover
-that result after ambiguous replies. This closes **order** direct cancellation before dispatch;
+that result after ambiguous replies. The branch does so (W/design/05:668, :771); its PRD §9.1 still
+equates the signal with the first activation intent and must name the call. Workflow re-issues under
+one idempotency key for 30 days; Lifecycle's receipt floor for workflow-class triggers is the same
+window (D-173). This closes **order** direct cancellation before dispatch;
 it is not the Workflow task's potentially later unilateral-cancellation boundary. The Workflow
 PRD wording must be reconciled by its owner before release; this document does not claim that
 Product has approved the divergence. See [06 §4.3](features/06-workflow-seam.md#contract-06-4-3).
@@ -394,9 +452,9 @@ themselves; Subscriptions reads `chains[]` through `get_version`), check `activa
 before each activation dispatch, treat a line as activated only at Subscriptions' `applied`, map
 `oss_unconfirmed` and the receiver's `accepted-price-mismatch` refusal to its failure catalog
 (`order-binding-expired` for the latter) and handle receiver refusal through compensation. Its approved-instance
-constructor requires a revision-stamped complete dependency graph before begin-fulfillment.
-Topology ownership is an open catalog/provisioning contract: PriceBook item composition alone is
-not that graph. Unknown topology must not become an empty dependency set. Workflow's approval-policy
+constructor no longer requires a dependency graph: Workflow D-196 (branch `3ccf7793c`) withdrew the
+graph and the `dependency-graph-invalid` outcome, and wave ordering is Workflow-internal; the
+former unknown-topology clause is withdrawn with it (D-172). Workflow's approval-policy
 adapter owns requirement/routing decisions and receives required TCV; embedding `cf-gears-bss-approval`
 is an implementation option, not evidence the policy service exists. Payment authorization amount
 and provenance must be specified separately from TCV and Ledger settlement. See reciprocal amendments.
@@ -730,8 +788,10 @@ decision.
 Products must admit the `bss-orders.system` subject to `ProductsClient::get_sku` in the seller
 tenant (a SKU read grant), so the gate can read `Sku.sellable` and `Sku.lifecycle` for each consumed
 SKU (DESIGN §4.1, D-160). `get_sku` is a scoped read: the tenant argument narrows, it never grants.
-Alternatively resolve may echo the two fields per item, after which the grant is unnecessary;
-until either exists the row is `catalog-predicate-unevaluable`.
+P-D-222 (fork tip `7d3544156`) refuses the Pricing system actor at every REST door, so this grant
+is the only self-service path; the resolve-echo alternative is withdrawn (D-171). The read is
+interim: it retires when Pricing publishes `SellabilityV1` (D-177), after which Seam Atlas P9
+holds. Until the grant exists the row is `catalog-predicate-unevaluable`.
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-sku-protection`
 
@@ -760,7 +820,11 @@ already names (Contracts PRD §6.6 *Party eligibility predicate*, consumed by th
 Orders maps an inactive contract to `contract-not-active`, an ineligible party to
 `contract-party-ineligible`, and outage or an unimplemented operation to
 `contract-resolution-unavailable` (fail closed, ADR-0003). The gear has a PRD and no
-implementation or SDK today ([03 §3.5](DESIGN.md#contract-03-3-5), §4.2 predicate 2).
+implementation or SDK today ([03 §3.5](DESIGN.md#contract-03-3-5), §4.2 predicate 2). Shape
+(2026-10-02): `resolve_for_order(contract_id, tenant_axes, catalog_scope[plan_id], at) → { status,
+party_eligible, reason_code?, acceptance_required, contract_effective_at, version }`, one call
+serving this ask, `…-upreq-contract-acceptance-declaration` and the `contractEffectiveAt` the create
+envelope carries; Seam Atlas's `check_active` returns none of the last three.
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-contract-acceptance-declaration`
 
@@ -778,7 +842,7 @@ ADR-0003) at both guards; it never falls back to an election.
 
 | Priority | Requirements |
 |----------|-------------|
-| `p1` (critical) | `…-upreq-subscription-start-instant`, `…-upreq-overlap-presence-read`, `…-upreq-compensation-cancel-reason`, `…-upreq-pre-subscription-evaluation`, `…-upreq-tcv-with-annualisation`, `…-upreq-external-reference-propagation`, `…-upreq-delegation-proof-credential`, `…-upreq-authorization-outcome`, `…-upreq-workflow-amendment-verdict`, `…-upreq-event-broker-runtime`, `…-upreq-event-broker-cursor-retry`, `…-upreq-event-broker-dead-letter-recovery`, `…-upreq-event-broker-root-tenancy`, `…-upreq-event-delivery-observability`, `…-upreq-catalog-subscription-product-key`, `…-upreq-pricing-read-sdk`, `…-upreq-pricing-catalog-tenant-reads`, `…-upreq-products-sku-read-grant`, `…-upreq-pricing-purchase-assessment`, `…-upreq-initial-binding-acceptance`, `…-upreq-sku-protection`, `…-upreq-rating-evaluation`, `…-upreq-payer-commercial-profile`, `…-upreq-contract-party-eligibility`, `…-upreq-contract-acceptance-declaration` |
+| `p1` (critical) | `…-upreq-subscription-start-instant`, `…-upreq-overlap-presence-read`, `…-upreq-compensation-cancel-reason`, `…-upreq-pre-subscription-evaluation`, `…-upreq-tcv-with-annualisation`, `…-upreq-external-reference-propagation`, `…-upreq-delegation-proof-credential`, `…-upreq-authorization-outcome`, `…-upreq-workflow-amendment-verdict`, `…-upreq-event-broker-runtime`, `…-upreq-event-broker-cursor-retry`, `…-upreq-event-broker-dead-letter-recovery`, `…-upreq-event-broker-root-tenancy`, `…-upreq-event-delivery-observability`, `…-upreq-catalog-subscription-product-key`, `…-upreq-pricing-read-sdk`, `…-upreq-pricing-catalog-tenant-reads`, `…-upreq-products-sku-read-grant`, `…-upreq-pricing-purchase-assessment`, `…-upreq-initial-binding-acceptance`, `…-upreq-sku-protection`, `…-upreq-rating-evaluation`, `…-upreq-payer-commercial-profile`, `…-upreq-contract-party-eligibility`, `…-upreq-contract-acceptance-declaration`, `…-upreq-settle-create`, `…-upreq-intent-status-read`, `…-upreq-transition-outcome-echo` |
 | `p2` (important) | `…-upreq-order-reference-on-create`, `…-upreq-two-phase-pair-preserved`, `…-upreq-correlation-propagation`, `…-upreq-indicative-tax-read`, `…-upreq-audit-identity-lifecycle` |
 
 `cpt-cf-bss-orders-lifecycle-upreq-pdp-policy-integration` is also `p1`: verification and
@@ -795,7 +859,7 @@ mitigation exists.
 
 - **PRD**: [`./PRD.md`](./PRD.md) — §13 dependencies, §15 open questions
 - **DESIGN**: [`./DESIGN.md`](./DESIGN.md) §3.5, §3.8; [01 §3.8](DESIGN.md#contract-01-3-8), §4.4; [03 §2.2](DESIGN.md#contract-03-2-2); [06 §4.2](DESIGN.md#contract-06-4-2), §4.6
-- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-168, Q-04, Q-05, Q-08
+- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-178, Q-04, Q-05, Q-08, Q-32, Q-33
 - **ADRs**: [`./ADR/0003`](./ADR/0003-cpt-cf-bss-orders-lifecycle-adr-fail-closed-gate.md) — the fail-closed posture that makes `SUB-O5` a blocker rather than a degradation; [`./ADR/0006`](./ADR/0006-cpt-cf-bss-orders-lifecycle-adr-outbox-publication.md) — the platform producer path and Event Broker readiness gate
 - **Upstream registers**: `gears/bss/subscriptions/docs/SEAMS.md` §I (`SUB-O1`…`SUB-O6`); the sibling Workflow PRD §13 (`SUB-O5`…`SUB-O9`); `gears/bss/rating/docs/SEAMS.md` for the three Rating asks; `gears/bss/contracts/docs/PRD.md` §6.6 (*Party eligibility predicate*, *Booking instant and acceptance*) for the Contracts asks; `gears/bss/subscriptions/docs/SEAMS.md` `SUB-G1` (PR #4177) for the catalog-registry product key; `gears/bss/pricing/docs` D-419–D-425 and PRD §2.2 for the Pricing reads and system subjects; `gears/bss/products/docs` P-D-189/P-D-194 for SKU lifecycle and references. Rating **is** specified in this repository, with a PRD, a DESIGN, ADRs and its own seam register, so its asks are raised against that specification.
 - **Billing chain ownership (D-168).** The billing chain is **not** `gears/bss/ledger`. The Ledger is built and its `LedgerClientV1` is the GL posting and settlement target (`post_balanced_entry`, `settle_payment`, `allocate_payment`, `return_payment`, `record_dispute_phase`, credit application, AR balances, revenue recognition); it generates no invoices, values no at-sale facts and answers no tax, and settlement is not payment authorization. The capabilities this gear needs are owned as follows:
@@ -817,3 +881,10 @@ the residual verdict), `…-upreq-initial-binding-acceptance` (compare-at-activa
 are additional release prerequisites. Existing seller-read, Rating, composition and overlap-key IDs
 carry the revised contracts above. The 2026-09-30 revision (D-159–D-168) pulls each ask back onto the
 seam that already exists where one does; no ID marked unchecked is represented as delivered.
+
+**Atlas overlay alignment (2026-10-02).** Three asks were added to §2.1 (`…-upreq-settle-create`,
+`…-upreq-intent-status-read`, `…-upreq-transition-outcome-echo`), co-signed with the Workflow
+branch's `SUB-O13`/`SUB-O16`; §2.2, §2.4, §2.5, §2.6, §2.10 and §2.11 carry field shapes and the
+fork-tip facts (Pricing D-454/D-460/D-467/D-469, Products P-D-222, Workflow D-193–D-199).
+Decisions D-169–D-178 record the Orders-side positions; Q-32 (the hold) and Q-33 (add-ons and
+change orders) are the two open product questions.

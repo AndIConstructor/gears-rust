@@ -1,10 +1,5 @@
 # Feature: Sellability Gate, Price Pin and Preview
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-gate-and-pin-implemented`
-
-- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-gate-and-pin`
-
-## Table of Contents
 
 <!-- toc -->
 
@@ -37,6 +32,9 @@
 
 <!-- /toc -->
 
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-gate-and-pin-implemented`
+
+- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-gate-and-pin`
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -306,7 +304,7 @@ shared schemas and interfaces are defined in [DESIGN.md](../DESIGN.md).
 
 #### Submit through the gate
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-gate-submit`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-gate-submit`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -364,7 +362,7 @@ a fresh attempt must re-resolve them for the new day.
 
 #### Preview a basket
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-gate-preview`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-gate-preview`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -395,7 +393,7 @@ the lines that caused it, while every other field is returned (§4.6, D-125).
 
 #### Re-check before first activation
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-gate-fulfillment-recheck`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-gate-fulfillment-recheck`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`
 
@@ -473,7 +471,7 @@ Nine predicates are this gear's own. Each **MUST** carry its own machine-readabl
 
 1. **Axis validity** — all three tenant axes resolve against IdP/Account Management.
 2. **Contract active** — where a contract reference is present it resolves to an **active** contract (`contract-not-active`) under which the payer is party-eligible (`contract-party-ineligible`). Party-eligibility policy is owned by Contracts and consulted only when a contract is referenced, through the contract-resolution port alone — never the identity port; its unevaluability there is a refusal (`contract-resolution-unavailable`). This is a predicate of its own because it carries its own registered reason, and folding it into axis validity was what made the predicate count and the reason count disagree.
-3. **Purchase-quantity floor** — each selected item quantity satisfies the owning item's `qty_min` and applicable selection rule. No implicit line multiplier or legacy one-time-plan bound is assumed. Resource quota ceilings remain a fulfillment concern.
+3. **Purchase-quantity floor** — each selected item quantity satisfies the owning item's `qty_min` and applicable selection rule; since Pricing D-467 resolve carries no `qty_min`, so the floor reduces to a positive exact-decimal quantity (D-170). No implicit line multiplier or legacy one-time-plan bound is assumed. Resource quota ceilings remain a fulfillment concern.
 4. **Order-market consistency** — compare the book currency and producer-declared market applicability with the payer profile. An arbitrary selected dimension is not inherently region. Market applicability is a residual owner row (DESIGN §4.1): while its owner is missing the predicate is `unevaluable` with `catalog-predicate-unevaluable`; preserve the producer mapping and policy identity once answered (D-156, D-161).
 5. **Reference resolution** — every plan/revision/item reference and selected binding resolves, with no collision or duplication across lines.
 6. **Single currency** — all lines share one currency. Authoring already refuses a mixed basket; this predicate is the backstop for a basket assembled before the rule existed.

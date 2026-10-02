@@ -1,10 +1,5 @@
 # Feature: Order Transition Engine
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-foundation-implemented`
-
-- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-foundation`
-
-## Table of Contents
 
 <!-- toc -->
 
@@ -24,6 +19,7 @@
 - [4. States (CDSL)](#4-states-cdsl)
   - [4.1 Authoritative order lifecycle](#41-authoritative-order-lifecycle)
   - [4.2 Idempotency record lifecycle](#42-idempotency-record-lifecycle)
+  - [4.3 Order state machine](#43-order-state-machine)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [5.1 Atomic engine and persistence](#51-atomic-engine-and-persistence)
   - [5.2 Replay and evidence](#52-replay-and-evidence)
@@ -38,11 +34,9 @@
 
 <!-- /toc -->
 
-**SDK parity (D-155):** [Workflow SDK contract](../DESIGN.md#orders-lifecycle-workflow-sdk)
-is normative for in-process consumers and immutable-version reads. All SDK methods enter the same
-authorized application service as REST, preserving authorities, explicit line mappings and engine
-replay/concurrency semantics. An SDK method is not an authorization bypass.
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-foundation-implemented`
 
+- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-foundation`
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -210,6 +204,13 @@ Create, submit and amendment append versions; draft and administrative edits do 
 
 **Transitions**: absent → owned `in_flight` after conflict-safe claim; matching expired `in_flight` → reclaimed `in_flight` under lock; owned `in_flight` → `settled` with success/refusal in the same transaction; eligible expired record → absent/replacement under locked retention checks. A settled response remains immutable until normal retention expiry. Rollback removes the attempt's new effects.
 
+
+### 4.3 Order state machine
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-state-order-lifecycle`
+
+The complete state machine — the closed state and event sets, the transition rows and their guards — is specified normatively in [Foundation: The State Machine](#contract-01-order-state-machine).
+
 ## 5. Definitions of Done
 
 ### 5.1 Atomic engine and persistence
@@ -284,7 +285,7 @@ shared schemas and interfaces are defined in [DESIGN.md](../DESIGN.md).
 
 #### Transition commit
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-transition-commit`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-transition-commit`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -671,7 +672,7 @@ shortfall).
 
 #### Create transition
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-create-transition`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-create-transition`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Algorithm: Create Transition (D-105)**
 
@@ -753,7 +754,7 @@ and trusted actor identity; caller-supplied actor data must not override that id
 
 #### Idempotent replay
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-idempotent-replay`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-idempotent-replay`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`
 
@@ -786,7 +787,7 @@ into a success by retrying.
 
 #### Platform producer-outbox publication
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-outbox-drain`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-outbox-drain`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -998,7 +999,7 @@ five callers and naming it per caller is the defect the registry exists to preve
 
 #### Order State Machine
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-state-order-lifecycle`
+**Contract**: `cpt-cf-bss-orders-lifecycle-state-order-lifecycle` (`p1`), defined in [§4.3](#43-order-state-machine).
 
 **States**: `draft`, `submitted`, `pending_approval`, `approved`, `in_fulfillment`, `on_hold`,
 `completed`, `rejected`, `cancelled`, `fulfillment_failed`, `expired`

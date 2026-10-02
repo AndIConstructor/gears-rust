@@ -1,9 +1,5 @@
 # Feature: Read Surfaces and Authorization
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-read-and-authz-implemented`
-- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-read-and-authz`
-
-## Table of Contents
 
 <!-- toc -->
 
@@ -11,16 +7,17 @@
   - [1.1 Overview](#11-overview)
   - [1.2 Purpose](#12-purpose)
   - [1.3 Actors](#13-actors)
-  - [1.4 References and delivery boundaries](#14-references-and-delivery-boundaries)
-- [2. Actor Flows](#2-actor-flows)
+  - [1.4 References](#14-references)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
   - [2.1 Read an order and its children](#21-read-an-order-and-its-children)
   - [2.2 List and page authorized collections](#22-list-and-page-authorized-collections)
   - [2.3 Retrieve an authorized audit subset](#23-retrieve-an-authorized-audit-subset)
-- [3. Processes / Business Logic](#3-processes--business-logic)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [3.1 Shared authorization enforcement](#31-shared-authorization-enforcement)
   - [3.2 Denials, outages and bounded internal authority](#32-denials-outages-and-bounded-internal-authority)
   - [3.3 Read access logging](#33-read-access-logging)
-- [4. States](#4-states)
+- [4. States (CDSL)](#4-states-cdsl)
+  - [4.1 Read and authorization outcomes](#41-read-and-authorization-outcomes)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [5.1 Shared permissions before public operation delivery](#51-shared-permissions-before-public-operation-delivery)
   - [5.2 Coherent, bounded reads and disclosure evidence](#52-coherent-bounded-reads-and-disclosure-evidence)
@@ -31,11 +28,8 @@
 
 <!-- /toc -->
 
-**SDK parity (D-155):** [Workflow SDK contract](../DESIGN.md#orders-lifecycle-workflow-sdk)
-is normative for in-process consumers and immutable-version reads. All SDK methods enter the same
-authorized application service as REST, preserving authorities, explicit line mappings and engine
-replay/concurrency semantics. An SDK method is not an authorization bypass.
-
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-read-and-authz-implemented`
+- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-read-and-authz`
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -62,7 +56,7 @@ Audit retrieval is design-introduced, not a PRD recording requirement. Product a
 
 Payer Reader and configured event consumers are permission paths, not new audit actor classes. Payer access uses the current payer and grants reads only; consumer reads require finite explicit PDP order-ID grants. Root event access creates no order-read grant.
 
-### 1.4 References and delivery boundaries
+### 1.4 References
 
 - [PRD](../PRD.md) §6.6, §9.1 and §11; [DESIGN](../DESIGN.md).
 - [Decomposition](../DECOMPOSITION.md): `cpt-cf-bss-orders-lifecycle-feature-read-and-authz`.
@@ -75,7 +69,7 @@ Payer Reader and configured event consumers are permission paths, not new audit 
 
 **UI applicability**: UI layout, keyboard navigation, screen-reader behavior and visual accessibility are not applicable because this feature specifies backend contracts, not a user interface. API usability, actionable errors and non-disclosing diagnostics remain applicable; consuming consoles own their UI requirements.
 
-## 2. Actor Flows
+## 2. Actor Flows (CDSL)
 
 ### 2.1 Read an order and its children
 
@@ -118,7 +112,7 @@ A cursor is position only. Reauthorization may narrow or deny later pages, inclu
 
 This is a live view, not an exhaustive denial listing or incremental export. Each page has a fresh snapshot; a transaction committed later with a tuple behind the cursor may be absent from the ongoing walk. A fresh scan is required to observe it. Audit chain verification remains sequence-based and independent of API order.
 
-## 3. Processes / Business Logic
+## 3. Processes / Business Logic (CDSL)
 
 ### 3.1 Shared authorization enforcement
 
@@ -178,7 +172,9 @@ Persist trusted immutable actor UUID/class, operation, outcome, timestamp, optio
 
 Required served-log failure returns `read-store-unavailable` with no payload; refused-log failure preserves the original refusal and emits the infrastructure/security signal. Retention is 90 days, separate from committed commercial evidence. Identity deletion does not rewrite actor evidence or authorize identifying enrichment.
 
-## 4. States
+## 4. States (CDSL)
+
+### 4.1 Read and authorization outcomes
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-state-read-and-authz-outcomes`
 
@@ -307,7 +303,7 @@ the sanitized 503 exactly as an existing order would, never `order-not-found`. T
 
 #### Scoped read
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-scoped-read`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-scoped-read`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -360,7 +356,7 @@ returned here (D-141).
 
 #### Paginated list
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-list-orders`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-list-orders`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -394,7 +390,7 @@ is what makes the partner path work without widening to the partner's whole cust
 
 #### Audit retrieval
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-audit-read`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-audit-read`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-amendment`
 

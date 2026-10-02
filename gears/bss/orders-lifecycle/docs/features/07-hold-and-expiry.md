@@ -1,9 +1,5 @@
 # Feature: Hold, Resume and Bounded Lifetime
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-hold-and-expiry-implemented`
-- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-hold-and-expiry`
-
-## Table of Contents
 
 <!-- toc -->
 
@@ -11,14 +7,15 @@
   - [1.1 Overview](#11-overview)
   - [1.2 Purpose](#12-purpose)
   - [1.3 Actors](#13-actors)
-  - [1.4 References and delivery boundaries](#14-references-and-delivery-boundaries)
-- [2. Actor Flows](#2-actor-flows)
+  - [1.4 References](#14-references)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
   - [2.1 Hold and resume](#21-hold-and-resume)
   - [2.2 Cancel an order](#22-cancel-an-order)
-- [3. Processes / Business Logic](#3-processes--business-logic)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [3.1 Expiry and draft auto-void](#31-expiry-and-draft-auto-void)
   - [3.2 Policy changes and lifetime bounds](#32-policy-changes-and-lifetime-bounds)
-- [4. States](#4-states)
+- [4. States (CDSL)](#4-states-cdsl)
+  - [4.1 Hold, expiry and cancel transitions](#41-hold-expiry-and-cancel-transitions)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [5.1 Engine-backed lifecycle operations](#51-engine-backed-lifecycle-operations)
   - [5.2 Safe, observable maintenance](#52-safe-observable-maintenance)
@@ -27,18 +24,15 @@
   - [Hold and expiry: Interactions and Sequences](#hold-and-expiry-interactions-and-sequences)
   - [Hold and expiry: Hold and resume (normative)](#hold-and-expiry-hold-and-resume-normative)
   - [Hold and expiry: Bounded lifetime (normative)](#hold-and-expiry-bounded-lifetime-normative)
-  - [Hold and expiry: The in_fulfillment exemption (normative)](#hold-and-expiry-the-in_fulfillment-exemption-normative)
+  - [Hold and expiry: The `in_fulfillment` exemption (normative)](#hold-and-expiry-the-in_fulfillment-exemption-normative)
   - [Hold and expiry: Draft abandonment (normative)](#hold-and-expiry-draft-abandonment-normative)
   - [Hold and expiry: The ordinary cancel operation (normative)](#hold-and-expiry-the-ordinary-cancel-operation-normative)
   - [Hold and expiry: Traceability](#hold-and-expiry-traceability)
 
 <!-- /toc -->
 
-**Accepted-binding rule (D-152):** [03 §4.3](../DESIGN.md#contract-03-4-3) defines a separate
-absolute activation deadline. State TTLs, hold/resume and payment-tolerance elections neither extend
-it nor authorize renewal/repricing. A fresh amendment reassesses and reapproves; an expiry during
-fulfillment stops dispatch and follows evidence-gated compensation, not a new expiry edge.
-
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-hold-and-expiry-implemented`
+- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-hold-and-expiry`
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -62,7 +56,7 @@ Pause and resume an order, cancel it within the permitted window, expire configu
 
 The two private maintenance workers use configured authenticated system authority; a caller-supplied actor class cannot invoke them.
 
-### 1.4 References and delivery boundaries
+### 1.4 References
 
 - [PRD](../PRD.md) §6.3 and §7.1; [DESIGN](../DESIGN.md).
 - [Decomposition](../DECOMPOSITION.md): `cpt-cf-bss-orders-lifecycle-feature-hold-and-expiry`.
@@ -74,7 +68,7 @@ Product-owned TTL durations have no code default; seller overrides stay disabled
 
 **UI applicability**: UI layout, keyboard navigation, screen-reader behavior and visual accessibility are not applicable because this feature specifies backend contracts, not a user interface. API usability, actionable errors and non-disclosing diagnostics remain applicable; consuming consoles own their UI requirements.
 
-## 2. Actor Flows
+## 2. Actor Flows (CDSL)
 
 ### 2.1 Hold and resume
 
@@ -106,7 +100,7 @@ Hold/resume changes neither subscription entitlement nor billing, extends no ter
 
 Workflow uses its separate `/workflow-cancel` endpoint and compensation evidence, not the public cancel handler. A hold never clears the spawn signal or reopens the direct-cancel window. Completed orders have no cancellation window; subscription rights and Billing reversals remain downstream concerns.
 
-## 3. Processes / Business Logic
+## 3. Processes / Business Logic (CDSL)
 
 ### 3.1 Expiry and draft auto-void
 
@@ -139,7 +133,9 @@ Resume baseline 5 and Versioning's amendment baseline 20 are finite, independent
 
 A fail-closed approval park stays `submitted` and does not suspend that TTL. Fulfillment and holds from fulfillment instead use Workflow's operational SLA: baseline 24 hours past expected fulfillment time, with the fulfillment operator responsible. SLA exhaustion creates an incident/operator abort, never an automatic terminal state.
 
-## 4. States
+## 4. States (CDSL)
+
+### 4.1 Hold, expiry and cancel transitions
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-state-hold-and-expiry-transitions`
 
@@ -211,7 +207,7 @@ shared schemas and interfaces are defined in [DESIGN.md](../DESIGN.md).
 
 #### Hold and resume
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-hold-resume`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-hold-resume`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-cancel-during-approval`
 
@@ -243,7 +239,7 @@ alone — including their own auto-void TTL, which this gear cannot pause.
 
 #### The expiry sweep
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-expiry-sweep`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-expiry-sweep`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-new-acquisition`
 
@@ -327,7 +323,7 @@ absolute-lifetime pass.
 
 #### Overdue escalation handoff
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-overdue-handoff`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-overdue-handoff`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`
 

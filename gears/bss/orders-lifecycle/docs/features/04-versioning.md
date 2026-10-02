@@ -1,9 +1,5 @@
 # Feature: Amendment and Version History
 
-- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-versioning-implemented`
-- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-versioning`
-
-## Table of Contents
 
 <!-- toc -->
 
@@ -12,14 +8,14 @@
   - [1.2 Purpose](#12-purpose)
   - [1.3 Actors](#13-actors)
   - [1.4 References](#14-references)
-- [2. Actor Flows](#2-actor-flows)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
   - [2.1 Amend a committed order](#21-amend-a-committed-order)
   - [2.2 Correct administrative content and inspect history](#22-correct-administrative-content-and-inspect-history)
-- [3. Processes / Business Logic](#3-processes--business-logic)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [3.1 Prepare and append an amendment](#31-prepare-and-append-an-amendment)
   - [3.2 Apply an administrative edit](#32-apply-an-administrative-edit)
   - [3.3 Preserve and retrieve the version chain](#33-preserve-and-retrieve-the-version-chain)
-- [4. States](#4-states)
+- [4. States (CDSL)](#4-states-cdsl)
   - [4.1 Amendment and supersession](#41-amendment-and-supersession)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [5.1 Atomic amendment implementation](#51-atomic-amendment-implementation)
@@ -37,11 +33,8 @@
 
 <!-- /toc -->
 
-**Accepted-binding rule (D-152):** [03 §4.3](../DESIGN.md#contract-03-4-3) defines a separate
-absolute activation deadline. State TTLs, hold/resume and payment-tolerance elections neither extend
-it nor authorize renewal/repricing. A fresh amendment reassesses and reapproves; an expiry during
-fulfillment stops dispatch and follows evidence-gated compensation, not a new expiry edge.
-
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-featstatus-versioning-implemented`
+- [ ] `p1` - `cpt-cf-bss-orders-lifecycle-feature-versioning`
 ## 1. Feature Context
 
 ### 1.1 Overview
@@ -75,7 +68,7 @@ DESIGN owns schemas and architectural rationale; this feature owns the complete 
 
 **UI applicability**: UI layout, keyboard navigation, screen-reader behavior and visual accessibility are not applicable because this feature specifies backend contracts, not a user interface. API usability, actionable errors and non-disclosing diagnostics remain applicable; consuming consoles own their UI requirements.
 
-## 2. Actor Flows
+## 2. Actor Flows (CDSL)
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-amendment`.
 
@@ -106,7 +99,7 @@ DESIGN owns schemas and architectural rationale; this feature owns the complete 
 3. [ ] Read `/orders/{orderId}/versions` or `/orders/{orderId}/versions/{version}` through Read and Authorization's common wrapper, with current-parent authorization and access logging.
 4. [ ] Return the full requested commercial content and actor, timestamp, machine reason and supersession metadata. Return `version-not-found` for a missing version only after parent authorization; expose administrative history only through the separately authorized audit trail (Partner Admin or Seller Operator paths; Direct Customer history access does not grant audit reads).
 
-## 3. Processes / Business Logic
+## 3. Processes / Business Logic (CDSL)
 
 ### 3.1 Prepare and append an amendment
 
@@ -148,7 +141,7 @@ DESIGN owns schemas and architectural rationale; this feature owns the complete 
 
 Store complete immutable versions and enforce immediate-predecessor supersession without branching. Version reasons are only `create`, `submit`, `amendment`; state-only transition reasons belong to audit. Retrieve by `(order_id, version)` without chain replay, and never update or delete a version through repair, migration or archival paths.
 
-## 4. States
+## 4. States (CDSL)
 
 ### 4.1 Amendment and supersession
 
@@ -218,7 +211,7 @@ shared schemas and interfaces are defined in [DESIGN.md](../DESIGN.md).
 
 #### Amend an order
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-amend-order`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-amend-order`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-amendment`
 
@@ -304,7 +297,7 @@ from a callback. This is the whole of the concurrency design for a human-paced a
 
 #### Administrative edit
 
-**ID**: `cpt-cf-bss-orders-lifecycle-seq-administrative-edit`
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-administrative-edit`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
 
 **Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-amendment`
 
