@@ -2732,7 +2732,9 @@ fn result_for<'a>(body: &'a Value, key: &str) -> &'a Value {
         .expect("items")
         .iter()
         .find(|item| item["entity_key"] == key)
-        .unwrap_or_else(|| panic!("{key} answered: {body}"))
+        // The key is not printed: it can be a UUID, and CodeQL reads a UUID in a
+        // panic message as cleartext logging. The body still names what came back.
+        .unwrap_or_else(|| panic!("every asked key is answered: {body}"))
 }
 
 /// One `items` envelope of unconditional keys.
@@ -2875,7 +2877,8 @@ async fn a_batch_read_echoes_registry_references_canonically() {
         items
             .iter()
             .find(|item| item["entity_key"] == json!(key))
-            .unwrap_or_else(|| panic!("no result for {key}: {items:?}"))
+            // The key is not printed: it is a UUID spelling (see `result_for`).
+            .unwrap_or_else(|| panic!("every asked key has a result: {items:?}"))
     };
     let found = by_key(&uuid);
     assert_eq!(found["status"], json!("found"));

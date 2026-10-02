@@ -187,7 +187,9 @@ pub fn answer_for<'a>(
     &results
         .iter()
         .find(|(asked, _)| asked == key)
-        .unwrap_or_else(|| panic!("{key:?} answered: {results:?}"))
+        // Neither the key nor the results are printed: both can carry a `Uuid`,
+        // and CodeQL reads a `{:?}` of one as cleartext logging.
+        .expect("every asked key is answered")
         .1
 }
 
