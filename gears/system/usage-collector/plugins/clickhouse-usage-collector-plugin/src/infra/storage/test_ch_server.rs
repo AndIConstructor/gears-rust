@@ -294,14 +294,10 @@ async fn resolve_server() -> Result<(u16, Option<ContainerAsync<GenericImage>>),
             ));
         }
     }
-    let Some(container) = start_named(&docker, &name).await? else {
+    let container = match start_named(&docker, &name).await? {
+        Started::Owned(container) => *container,
         // A sibling won the name and its server already answers.
-        return match await_answer(&docker, &name).await {
-            Awaited::Answered(port) => Ok((port, None)),
-            Awaited::Corpse | Awaited::Undecided => Err(format!(
-                "the sibling that won the name {name} never brought its server up"
-            )),
-        };
+        Started::Sibling(port) => return Ok((port, None)),
     };
     let port = container
         .get_host_port_ipv4(HTTP_PORT)
@@ -436,25 +432,31 @@ async fn await_answer(docker: &Docker, name: &str) -> Awaited {
     }
 }
 
-/// Start the container under `name`; `Ok(None)` if a sibling started it first
-/// and it answers.
+/// How [`start_named`] came by the server.
+enum Started {
+    /// This process started the container and must hold it. Boxed because a
+    /// `ContainerAsync` dwarfs a port.
+    Owned(Box<ContainerAsync<GenericImage>>),
+    /// A sibling won the name; its server answered on this port.
+    Sibling(u16),
+}
+
+/// Start the container under `name`; [`Started::Sibling`] with the port its
+/// server answered on if a sibling started it first.
 ///
 /// A name conflict is the expected outcome for every process but one, so
 /// losing it hands control to [`await_answer`] instead of racing again. A
 /// conflict with a corpse removes the corpse and retries, up to
 /// [`BOOT_BUDGET`].
-async fn start_named(
-    docker: &Docker,
-    name: &str,
-) -> Result<Option<ContainerAsync<GenericImage>>, String> {
+async fn start_named(docker: &Docker, name: &str) -> Result<Started, String> {
     let deadline = Instant::now() + BOOT_BUDGET;
     loop {
         let last = match image().with_container_name(name).start().await {
-            Ok(container) => return Ok(Some(container)),
+            Ok(container) => return Ok(Started::Owned(Box::new(container))),
             Err(e) => e.to_string(),
         };
         match await_answer(docker, name).await {
-            Awaited::Answered(_) => return Ok(None),
+            Awaited::Answered(port) => return Ok(Started::Sibling(port)),
             Awaited::Corpse => remove_named(docker, name).await,
             Awaited::Undecided => {}
         }
