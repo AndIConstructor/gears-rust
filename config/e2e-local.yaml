@@ -161,6 +161,15 @@ gears:
               - "gts.cf.core.am.tenant_type.v1~cf.core.am.platform.v1~"
               - "gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"
             idp_provisioning: false
+      # Types-registry suite settings, kept here rather than in its manifest so
+      # the shared `make e2e-local` server has them too. Force lets TR-REG-903
+      # waive a compatibility failure; the suite's `force-disabled` profile
+      # turns it off for TR-REG-902. Vendor `acme` is open only in the suite's
+      # own namespace (TR-REG-904); every other region stays closed.
+      allow_compatibility_force: true
+      registration_policy:
+        "gts.acme.e2e.*":
+          allowed_vendors: [acme]
 
   static-tr-plugin:
     config:
