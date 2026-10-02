@@ -692,7 +692,7 @@ OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_OPENAPI_FEATURE_ARGS),$(OPENAP
 
 # -------- Tests --------
 
-.PHONY: test test-no-macros test-macros test-sqlite test-pg test-pgq test-mysql test-db test-users-info-pg test-usage-collector-pg test-usage-collector-ch test-types-registry-db test-cluster-pg test-cluster-redis test-cluster-k8s coverage-cluster-k8s test-rg-pg test-pricing-pg test-coord-pg test-fixtures-narrow test-fips
+.PHONY: test test-no-macros test-macros test-sqlite test-pg test-pgq test-mysql test-db test-users-info-pg test-usage-collector-pg test-usage-collector-ch test-types-registry-db test-cluster-pg test-cluster-redis test-cluster-k8s coverage-cluster-k8s test-rg-pg test-settings-service-pg test-pricing-pg test-coord-pg test-fixtures-narrow test-fips
 
 # Run all tests, or a single gear when GEAR=<gear> is set.
 # When GEAR= is set, cargo gears ls packages finds matching crates + their
@@ -883,6 +883,15 @@ coverage-cluster-k8s:
 ## gears/system/resource-group/resource-group/tests/pg_smoke_test.rs)
 test-rg-pg: install-tools
 	cargo nextest run -p cf-gears-resource-group --features integration
+
+## Run the settings-service gear's PostgreSQL migration suite (Docker required;
+## spins up its own postgres container via testcontainers -- see
+## gears/settings-service/settings-service/tests/pg_migrations_test.rs). The
+## suites beside the gear's migrations run on SQLite, where a statement
+## PostgreSQL refuses can still pass; this lane runs the chain a stand's startup
+## runs, on the backend it runs it on.
+test-settings-service-pg: install-tools
+	cargo nextest run -p cf-gears-settings-service --features integration --test pg_migrations_test
 
 ## Run bss-pricing's Postgres tier (Docker required; each suite spins up its own
 ## postgres container via testcontainers).
