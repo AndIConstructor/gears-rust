@@ -687,7 +687,6 @@ async def test_barrier_metadata_in_descendants(
         assert normal_meta is None or normal_meta.get("self_managed") is not True
 
 
-@pytest.mark.smoke
 async def test_membership_quoted_uuid_and_gts_filter_sql(
     rg_base_url, rg_headers, create_type, create_group,
 ):

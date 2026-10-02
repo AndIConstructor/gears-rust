@@ -767,14 +767,21 @@ async fn create_self_ref_type(type_svc: &TypeService<TypeRepository>, suffix: &s
     code
 }
 
-/// Helper: build a fully-wired router with shared services for multi-request tests.
-async fn build_shared_router() -> (
+/// Router and services sharing one database for HTTP fixtures.
+type SharedRouter = (
     Router,
     Arc<TypeService<TypeRepository>>,
     Arc<GroupService<GroupRepository, TypeRepository>>,
     Arc<MembershipService<GroupRepository, TypeRepository, MembershipRepository>>,
-) {
-    let db = test_db().await;
+);
+
+/// Helper: build a fully-wired router with shared services for multi-request tests.
+async fn build_shared_router() -> SharedRouter {
+    build_shared_router_with_db(test_db().await)
+}
+
+/// Build services around an explicit database for legacy storage fixtures.
+fn build_shared_router_with_db(db: Arc<DBProvider<DbError>>) -> SharedRouter {
     let enforcer = make_enforcer();
     let type_svc = Arc::new(TypeService::new(
         db.clone(),
@@ -2689,23 +2696,26 @@ async fn group_type_filters_preserve_registered_identifiers() {
         canonical.to_uppercase(),
         rg_type_id!("test.filter.spelling.v1~"),
     ] {
-        let (router, types, groups, _) = build_shared_router().await;
+        let db = test_db().await;
+        let (router, _, groups, _) = build_shared_router_with_db(db.clone());
         let tenant = Uuid::now_v7();
         let mut expected_id = Uuid::nil();
         for code in [&canonical, &stored] {
-            types
-                .create_type(
-                    &make_ctx(tenant),
-                    resource_group_sdk::CreateTypeRequest {
-                        code: code.clone(),
-                        can_be_root: true,
-                        allowed_parent_types: vec![],
-                        allowed_membership_types: vec![],
-                        metadata_schema: None,
-                    },
-                )
-                .await
-                .unwrap();
+            // Model pre-existing rows without depending on current creation validation.
+            use resource_group::infra::storage::entity::gts_type;
+            use sea_orm::Set;
+            toolkit_db::secure::secure_insert::<gts_type::Entity>(
+                gts_type::ActiveModel {
+                    schema_id: Set(code.clone()),
+                    metadata_schema: Set(Some(serde_json::json!({"__can_be_root": true}))),
+                    created_at: Set(time::OffsetDateTime::now_utc()),
+                    ..Default::default()
+                },
+                &toolkit_security::AccessScope::allow_all(),
+                &db.conn().unwrap(),
+            )
+            .await
+            .unwrap();
             let group = groups
                 .create_group(
                     &make_ctx(tenant),
@@ -2819,4 +2829,41 @@ async fn group_filter_cursor_preserves_the_original_filter() {
         body["type"],
         gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~")
     );
+}
+
+/// Unsupported group operators and unknown membership types are client errors.
+#[tokio::test]
+async fn typed_filters_reject_unsupported_operators_unknown_types_and_null() {
+    let (router, tenant, _, known, _, _) = membership_filter_fixture().await;
+    let unknown = rg_type_id!("test.filter._.unknown.v1~");
+    let group_type = rg_type_id!("test.filter._.group.v1~");
+    for (endpoint, filter) in [
+        ("groups", format!("type gt '{group_type}'")),
+        ("groups", format!("contains(type, '{group_type}')")),
+        ("memberships", format!("resource_type ne '{unknown}'")),
+        (
+            "memberships",
+            format!("resource_type in ('{known}', '{unknown}')"),
+        ),
+        ("memberships", format!("not (resource_type eq '{unknown}')")),
+        ("memberships", "resource_type eq null".to_owned()),
+        ("memberships", "group_id eq null".to_owned()),
+    ] {
+        let uri = format!(
+            "/resource-group/v1/{endpoint}?$filter={}",
+            encode_query_value(&filter)
+        );
+        let response = router
+            .clone()
+            .oneshot(json_request("GET", &uri, None, tenant))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response_body(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{filter}: {body}");
+        assert_eq!(
+            body["type"],
+            gts_uri!("cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~")
+        );
+    }
 }
