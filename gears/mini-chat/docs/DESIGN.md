@@ -408,7 +408,7 @@ graph TB
 
   Each adapter builds the request, parses the provider SSE stream into internal events and maps errors. Requests go through the in-process OAGW proxy client (`ServiceGatewayClientV1`) to `{alias}{api_path}`. Tenant/user identity and metadata are attached to every chat and thread-summary request; each adapter sends what its protocol supports (see section 4: Provider Request Metadata). The library handles streaming chat and the non-streaming thread-summary call. File and vector-store operations are dispatched to the OpenAI or Azure implementation by the provider's `storage_kind` (or the `rag_provider` entry). When at least one entry uses `anthropic_messages`, an Anthropic Files client is created. For a chat whose model is served by an `anthropic_messages` provider, it uploads a secondary copy of each uploaded image to the Anthropic Files API and deletes it on cleanup. Documents and images larger than `thumbnail.max_decode_bytes` get no copy.
 
-- **OAGW provisioning** — At gear start the gear obtains an S2S security context from `authn_resolver` using `client_credentials` and registers an OAGW upstream and route for every provider entry and tenant override. During gear initialization `upstream_alias` is filled with the host when it is not configured (for a tenant override, with the override's host), so an alias is always passed to OAGW; the upstream is created, or reused when OAGW reports it already exists, under that alias. The provider resolver is built during initialization from these entries and routes by that alias. Registration at start runs on a copy of the entries, so the alias OAGW returns does not reach the resolver. A deterministically misconfigured entry fails startup; an entry whose credstore secret is not yet readable is retried by a background reconcile task.
+- **OAGW provisioning** — At gear start the gear obtains an S2S security context from `authn_resolver` using `client_credentials` and registers an OAGW upstream and route for every provider entry and tenant override. During gear initialization `upstream_alias` is filled with the host when it is not configured (for a tenant override, with the override's host), so an alias is always passed to OAGW; the upstream is created, or reused when OAGW reports it already exists, under that alias. The provider resolver is built during initialization from these entries and routes by that alias. Registration at start runs on a copy of the entries, so the alias OAGW returns does not reach the resolver. A deterministically misconfigured entry fails startup; an entry whose credstore secret is not yet readable is retried by a background reconcile task: the first retry runs 2 s after start, the interval then doubles up to 60 s and stays at 60 s; after 2 minutes without success one warning names the providers still pending. Retries continue until the gear stops.
 
 - **Knowledge retriever** — Port for knowledge search with an Azure OpenAI implementation. Wired only when `knowledge_search.enabled = true`. See section 4 "Knowledge Search".
 
@@ -1067,7 +1067,7 @@ data: {"items": [{"source": "file", "title": "Q3 Report.pdf", "attachment_id": "
 | `items[].snippet` | string | Excerpt. Web citations: the annotation text, or the answer text in the annotation range. The range is applied as character offsets into the `output_text` part that carries the annotation; a range outside that text gives an empty snippet. OpenAI file citations: always `""`. |
 | `items[].score` | number (optional) | Relevance score (0-1). Not populated in P1 (never serialized). |
 
-**Provider identifier non-exposure invariant**: no provider-issued identifier — including `provider_file_id`, `provider_response_id`, `vector_store_id`, provider correlation IDs, or any other provider-scoped ID — MUST appear in any API response body, SSE event payload, or error message. This includes error message text: provider error messages that contain provider-scoped IDs MUST be sanitized or replaced with a generic message before being returned to clients. Sanitization replaces each recognized provider ID with `[provider_id]`, each URL with `[url]`, and each `sk-…` key or `Bearer` token with `[credential]`; everything else in the message is left as is. Internal systems (DB columns, structured logs, audit events, operator tooling) may store and reference these identifiers, but they MUST NOT be returned to public clients. All client-visible identifiers are internal UUIDs only (`chat_id`, `turn_id`, `request_id`, `attachment_id`, `message_id`).
+**Provider identifier non-exposure invariant**: no provider-issued identifier — including `provider_file_id`, `provider_response_id`, `vector_store_id`, provider correlation IDs, or any other provider-scoped ID — MUST appear in any API response body, SSE event payload, or error message. This includes error message text: provider error messages that contain provider-scoped IDs MUST be sanitized or replaced with a generic message before being returned to clients. Sanitization replaces each recognized provider ID with `[provider_id]`, each URL with `[url]`, and each `sk-…` key or `Bearer` token with `[credential]`; everything else in the message is left as is. Recognized provider IDs are response and completion IDs (`resp_`, `chatcmpl-`, `cmpl-`, `msg_` followed by letters and digits) and file and vector store IDs (`file-`, `file_`, `assistant-`, `vs_` followed by at least 12 letters and digits; the length floor keeps ordinary words such as `file-based` or `file_search` intact). An `sk-` key is recognized from 10 letters or digits after the prefix. Internal systems (DB columns, structured logs, audit events, operator tooling) may store and reference these identifiers, but they MUST NOT be returned to public clients. All client-visible identifiers are internal UUIDs only (`chat_id`, `turn_id`, `request_id`, `attachment_id`, `message_id`).
 
 P1: `citations` is sent once near stream completion, before `done`, only on a normally completed stream with at least one mapped citation. A provider `incomplete` response sends no `citations` event. Citations are not persisted, so an idempotent replay does not send them ([ADR-0010](./ADR/0010-cpt-cf-mini-chat-adr-runtime-consistency-limitations.md)). The contract supports multiple `citations` events per stream for future use. When web search contributes to the response, citations with `source: "web"` include `url`, `title`, and `snippet`. File citations carry `attachment_id`, the attachment filename as `title`, an empty `snippet` and no `span`.
 
@@ -1106,6 +1106,8 @@ Finalizes the stream. Provides usage and model selection metadata.
 ##### `event: error`
 
 Terminates the stream with an application error. No further events follow. The payload is `{code, message}`; this envelope is independent of the REST `Problem` format ([ADR-0004](./ADR/0004-cpt-cf-mini-chat-adr-canonical-error-contract.md)). Quota exhaustion is always rejected before the stream opens, so the SSE `error` event never carries a quota scope.
+
+Example (the `message` text is illustrative):
 
 ```
 event: error
@@ -1201,6 +1203,8 @@ For streaming endpoints, failures before any streaming begins are returned as no
 - `context.field_violations[].reason` (`invalid_argument`, `out_of_range`);
 - `context.violations[]` (`failed_precondition`: `{subject, description, type}`; `resource_exhausted`: `{subject, description}`).
 
+`detail` (and the message in `context.format`, where present) is human-readable text for people. It is not part of the contract and may change; clients MUST NOT parse it and MUST branch on the category, the HTTP status and the machine-readable fields above. The same holds for the `message` of SSE `event: error`: the contract is its `code`.
+
 The REST error mapping:
 
 | Condition | Category | HTTP | Reason / violation |
@@ -1209,21 +1213,21 @@ The REST error mapping:
 | Unknown or disabled model on `POST /chats` | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL` |
 | The chat's model is no longer in the catalog (`messages:stream`, retry, edit, attachment upload) | `invalid_argument` | 400 | `field_violations[model].reason = INVALID_MODEL`. The upload checks it before reading the body |
 | Empty or whitespace-only `content` on `messages:stream` or turn edit | `invalid_argument` | 400 | `field_violations[content].reason = EMPTY_CONTENT` |
-| Invalid chat title on `POST /chats` or `PATCH /chats/{id}` (empty or whitespace-only after trim, or longer than 255 characters) | `invalid_argument` | 400 | `detail`; the same message is also in `context.format` |
-| Invalid reaction value (not `like` or `dislike`); checked before authorization. A body that does not match the schema (e.g. no `reaction` field) is 422, see below | `invalid_argument` | 400 | `detail`; the same message is also in `context.format` |
+| Invalid chat title on `POST /chats` or `PATCH /chats/{id}` (empty or whitespace-only after trim, or longer than 255 characters) | `invalid_argument` | 400 | `field_violations[title].reason = INVALID_TITLE` |
+| Invalid reaction value (not `like` or `dislike`); checked before authorization. A body that does not match the schema (e.g. no `reaction` field) is 422, see below | `invalid_argument` | 400 | `field_violations[reaction].reason = INVALID_REACTION` |
 | Bad OData query on a list endpoint (`GET /chats`, `GET /chats/{id}/messages`: `$filter`, `$orderby`, `$select`, page size, cursor, unsupported query option) | `invalid_argument` | 400 | `context.resource_type = gts.cf.core.odata.query.v1~` (not the chat type, not a `format` violation), for errors raised by the query extractor and by the repository while paginating. `field_violations[].reason` from the platform OData library: `INVALID_FILTER` (`$filter`), `INVALID_ORDERBY_FIELD` (`$orderby`), `INVALID_LIMIT` (field `$top`, `limit=0`), `INVALID_CURSOR` (malformed cursor), `ORDER_MISMATCH` / `FILTER_MISMATCH` (cursor does not match the query), `ORDER_WITH_CURSOR` (`cursor` combined with `$orderby`); from the platform OData extractor: `FILTER_TOO_LONG`, `FILTER_TOO_COMPLEX` (`$filter`), `INVALID_SELECT` (`$select`), `UNSUPPORTED_QUERY_PARAM` (a `$` option the extractor does not bind, e.g. `$skip`, `$count`), `INVALID_QUERY_PARAMS` (unparsable query string). A `limit` above 100 is clamped to 100, not rejected |
 | Request body does not match the schema (missing required field, wrong type, e.g. a non-UUID `attachment_ids` entry); malformed JSON is 400 | `invalid_argument` | 422 | `field_violations[body].reason = invalid_json_body` (platform JSON extractor) |
 | Malformed JSON body | `invalid_argument` | 400 | `field_violations[body].reason = json_syntax_error` (platform JSON extractor) |
 | JSON body without a JSON `Content-Type` (`POST /chats`, `PATCH /chats/{id}`, `messages:stream`, turn edit, reaction `PUT`) | `invalid_argument` | 415 | `field_violations[body].reason = missing_json_content_type` (platform JSON extractor). Not declared in the OpenAPI document |
 | Path parameter that is not a UUID (chat, message, turn `request_id`, attachment id) | `invalid_argument` | 400 | `field_violations[].reason = invalid_path_params` (platform path extractor) |
 | Unsupported upload MIME type | `invalid_argument` | 400 | `UNSUPPORTED_CONTENT_TYPE` (was 415) |
-| Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `detail`; the same message is also in `context.format` |
+| Code-interpreter-only upload (XLSX) while code interpreter is unavailable (kill switch, or the chat's model lacks `tool_support.code_interpreter`) | `invalid_argument` | 400 | `field_violations[file].reason = CODE_INTERPRETER_UNAVAILABLE`; `context.resource_type` is the attachment type |
 | Upload request is not valid multipart: no boundary in `Content-Type`, unreadable multipart body, no `file` field, `file` part without a content type | `invalid_argument` | 400 | `field_violations[].reason`: `BOUNDARY_REQUIRED` (`content_type`), `MULTIPART_ERROR` (`multipart`), `MISSING_FILE` (`file`), `MISSING_CONTENT_TYPE` (`content_type`) |
 | `DELETE /chats/{id}`: the chat-cleanup outbox payload exceeds the outbox size limit | `invalid_argument` | 400 | `detail`; the same message is also in `context.format`. The same failure on attachment `DELETE` and on turn retry, edit and delete is returned as 500 `internal` |
 | Image on a model without vision | `invalid_argument` | 400 | `VISION_NOT_SUPPORTED` (was 415) |
 | Invalid, duplicate, foreign or not-ready `attachment_ids`, or more than `rag.max_documents_per_chat + rag.max_images_per_message` of them | `invalid_argument` | 400 | `field_violations[attachment].reason = invalid_attachment` |
 | Upload larger than the limit | `out_of_range` | 400 | `field_violations[content_length].reason = FILE_TOO_LARGE` (was 413). A body above api-gateway `defaults.body_limit_bytes` (default 16 MiB) gets 413 from the gateway before it reaches mini-chat |
-| Too many images in one message | `out_of_range` | 400 | `TOO_MANY_IMAGES` |
+| Too many images in one message | `out_of_range` | 400 | `field_violations[image_count].reason = TOO_MANY_IMAGES` |
 | Message exceeds `max_input_tokens` | `out_of_range` | 400 | `INPUT_TOO_LONG` |
 | Mandatory context does not fit the budget | `out_of_range` | 400 | `CONTEXT_BUDGET_EXCEEDED` |
 | Kill switch (web search, images) | `failed_precondition` | 400 | `violations[{subject: web_search\|images, type: FEATURE_DISABLED}]` |
@@ -1234,13 +1238,13 @@ The REST error mapping:
 | The PDP could not evaluate the request (unreachable, timeout, evaluation error); access is still refused (fail-closed) | `service_unavailable` | 503 + `Retry-After` | `Retry-After: 5` (`context.retry_after_seconds = 5`); generic detail, the cause is only logged |
 | Retry, edit or delete of a turn whose `requester_user_id` is not the caller | `permission_denied` | 403 | `AUTHZ_DENIED` |
 | Tenant lacks the required license feature (platform base license feature `gts.cf.core.lic.feat.v1~cf.core.global.base.v1`; `ai_chat` is the target, ADR-0008) | `permission_denied` | 403 | `LICENSE_FEATURE_REQUIRED` (api-gateway license middleware) |
-| Another turn is running in the chat (stream, including the insert race) | `aborted` | 409 | `context.reason = turn_already_running`; `detail = "Another turn is running in this chat"` |
-| `request_id` reused for a non-completed or deleted turn | `aborted` | 409 | `context.reason = request_id_conflict`; `detail = "request_id is already used by another turn in this chat"`. The `detail` of both reasons is fixed; the internal message (turn ids, driver text) is only logged |
+| Another turn is running in the chat (stream, including the insert race) | `aborted` | 409 | `context.reason = turn_already_running` |
+| `request_id` reused for a non-completed or deleted turn | `aborted` | 409 | `context.reason = request_id_conflict`. `detail` is a generic text; the internal message (turn ids, driver text) is only logged |
 | Mutation of a turn that is not the latest (including an already deleted turn) | `aborted` | 409 | `NOT_LATEST_TURN` |
 | Concurrent mutation lost the running-turn race | `aborted` | 409 | `GENERATION_IN_PROGRESS` |
-| Deleting an attachment referenced by a message | `already_exists` | 409 | `resource_name = attachment_locked`; `detail = "Attachment is referenced by one or more messages and cannot be deleted"` |
-| Upload into a chat whose vector store was created for another provider backend | `already_exists` | 409 | `resource_name = provider_mismatch`; `detail = "chat vector store belongs to another provider"` |
-| Any other unique-constraint violation that the caller does not handle (reported by the persistence layer) | `already_exists` | 409 | `resource_name = unique_violation`; `detail = "resource already exists"` (also for any other conflict code). The `detail` of every 409 `already_exists` is a fixed string per code; the driver or backend message is only logged |
+| Deleting an attachment referenced by a message | `already_exists` | 409 | `resource_name = attachment_locked` |
+| Upload into a chat whose vector store was created for another provider backend | `already_exists` | 409 | `resource_name = provider_mismatch` |
+| Any other unique-constraint violation that the caller does not handle (reported by the persistence layer) | `already_exists` | 409 | `resource_name` is the conflict code (`unique_violation` here; every conflict reports its own code in `resource_name`). `detail` is a generic text per code; the driver or backend message is only logged |
 | Quota exhausted (tokens, daily web search, daily code interpreter) | `resource_exhausted` | 429 | `violations[{subject: <quota_scope>, description: "quota_exceeded"}]`; `quota_scope` is `tokens`, `web_search` or `code_interpreter` |
 | Per-chat document count or storage limit | `resource_exhausted` | 429 | `document_limit` / `storage_limit` (was 400) |
 | Storage backend (provider Files / vector store API) failure on attachment upload | `service_unavailable` | 503 + `Retry-After` | `Retry-After: 10` (`context.retry_after_seconds = 10`) (was 502/504) |
@@ -1260,7 +1264,7 @@ Codes sent in the SSE `event: error` payload (`{code, message}`) after the strea
 |---|---|---|
 | `provider_error` | Provider returned a non-429 error, an invalid response, is unavailable, or the provider stream failed. For a provider error (`response.failed`, SSE `error` event, error body) `message` is the sanitized provider message | `failed` |
 | `provider_timeout` | Provider request timed out: a gateway timeout, or the gateway's own HTTP 504 `deadline_exceeded` Problem. A provider's own HTTP 504 with its JSON error body is `provider_error` | `failed` |
-| `rate_limited` | Provider returned 429. `message` is `Rate limited by provider; retry in {N}s` when the provider sent a numeric `Retry-After`, otherwise `Rate limited by provider` | `failed` |
+| `rate_limited` | Provider returned 429. When the provider sent a numeric `Retry-After`, `message` includes the delay in seconds; SSE `error` has no separate retry field | `failed` |
 | `web_search_calls_exceeded` | The model started more `web_search` calls than `quota.web_search_max_calls_per_message` in one turn | `failed` |
 | `code_interpreter_calls_exceeded` | The model started more `code_interpreter` calls than `quota.code_interpreter_max_calls_per_message` in one turn | `failed` |
 | `agentic_iterations_exceeded` | The knowledge-search agentic loop exceeded `knowledge_search.max_calls_per_message + 2` iterations | `failed` |
@@ -1792,6 +1796,7 @@ Such heuristics MUST NOT be used as the sole correctness criterion for summary g
 - The shared outbox framework is responsible for delivery, partitioned ordering, lease/reclaim, retries with backoff, dead-letter handling, and reconciliation.
 - The thread-summary queue lease is `thread_summary_worker.claim_timeout_secs` (default 300 s, range 30–3600 s), so the non-streaming LLM call is not cancelled and redelivered mid-flight. A handler attempt that would return `Retry` on its `thread_summary_worker.max_attempts`-th delivery (default 3) returns `Reject` instead and the message is dead-lettered, so a persistent failure does not block other chats in the partition.
 - The trigger is evaluated only when `thread_summary_worker.enabled = true` (default). The summary model is `thread_summary_worker.summary_model_id` (empty = `gpt-4.1-mini`); message content in the prompt is truncated to `thread_summary_worker.message_content_limit` characters. The summary request sets `max_output_tokens` to the summary model's catalog `max_output_tokens`; it is not capped by `streaming.max_output_tokens`.
+- Request format: the system prompt is the summary model's catalog `thread_summary_prompt` when it is not empty, otherwise `thread_summary_worker.summary_system_prompt`, otherwise the built-in default (B.5.5). The user prompt starts with an instruction to summarize the conversation; when a summary already exists, it is included in an `<existing_summary>` block with an instruction to merge it with the new messages into one updated, concise summary. Then each non-system message of the summarized range follows in chronological order, one entry per message: `User: <content>` or `Assistant: <content>`, entries separated by a blank line; content longer than `message_content_limit` characters is cut to that length and ends with `...`. The prompt ends with the analysis instruction, which asks for an `<analysis>` block and then a `<summary>` block with fixed sections. The prompt texts are in B.5.5.
 - The summary model is resolved with the enabled filter. If it is disabled or missing from the catalog (`invalid_model`), the handler logs an error, records `result = model_unavailable` and returns `Reject` (dead letter, no retry); other resolution errors record `retry` and return `Retry`. At gear start, once the policy catalog is available, the gear resolves the summary model when summaries are enabled and logs an error if it is missing or disabled; startup continues, because a dynamic policy plugin can add the model later. The trigger does not check the summary model, so turns keep enqueuing work.
 - Response parsing: the `<analysis>...</analysis>` block is removed and the text inside `<summary>...</summary>` is stored, with runs of blank lines collapsed. Without a `<summary>` block the whole remaining text is stored, unless it still contains `<analysis` or `<summary` markup, in which case the result is empty. An empty result records `result = empty_summary` and returns `Retry`.
 - The stored `token_estimate` is the provider's `output_tokens` minus `reasoning_tokens` for the summary call (the result still includes the removed `<analysis>` block), or `ceil(summary bytes / 4)` when that difference is not positive (for example the provider reports 0, or only reasoning tokens).
@@ -2037,7 +2042,7 @@ Vector-store cleanup does not have an independent persisted state machine in P1.
 
 ### 3.7 Database Schemas & Tables
 
-**Database engines**: PostgreSQL and SQLite. Every schema migration runs on both engines: where the dialects differ, the migration has a PostgreSQL and a SQLite variant; otherwise one statement serves both. The schema definitions below use PostgreSQL types (`UUID`, `TIMESTAMPTZ`, `JSONB`, `TEXT`); SQLite uses `TEXT`/`INTEGER`/`BLOB` equivalents. The shared outbox tables are created by the platform outbox migrations.
+**Database engines**: PostgreSQL and SQLite. Every schema migration runs on both engines: where the dialects differ, the migration has a PostgreSQL and a SQLite variant; otherwise one statement serves both. The schema definitions below use PostgreSQL types (`UUID`, `TIMESTAMPTZ`, `JSONB`, `TEXT`); SQLite uses `TEXT`/`INTEGER`/`BLOB` equivalents; UUID columns are declared `TEXT` in SQLite, but their values are written as 16-byte `BLOB`s (the UUID bytes, not the text form), so a query that binds a UUID directly must bind its bytes. The shared outbox tables are created by the platform outbox migrations.
 
 **Tenant scoping**: every table has a `tenant_id` column declared as the Secure ORM tenant column, so every query is tenant-scoped by Secure ORM. Owner scoping (owner column `user_id`) is declared on `chats`, `message_reactions` and `quota_usage`; child tables of a chat are additionally filtered by a `chat_id` obtained from an owner-scoped chat query (owner check on the compiled scope).
 
@@ -3026,7 +3031,7 @@ All values are those of the effective model's catalog entry (`context_window`, `
 | Droppable | Thread summary | Dropped if it doesn't fit after mandatory items. |
 | Truncatable | Recent messages (whole turns), then the thread summary | Oldest whole turns are dropped first; the thread summary is dropped if it does not fit after the mandatory items. Retrieval excerpts are not part of the assembled context. There is no document-summary tier. |
 
-**Thread summary delivery format**: when kept, the thread summary is sent to the LLM as a single `user`-role message (not `system`), with a preamble prepended to the summary text; the preamble's size counts toward the thread summary's estimated token size for budget purposes.
+**Thread summary delivery format**: when kept, the thread summary is sent to the LLM as a single `user`-role message (not `system`), with a preamble prepended to the summary text; the preamble tells the model that earlier messages were replaced by the summary and that recent messages follow (text in B.5.5). The preamble's size counts toward the thread summary's estimated token size for budget purposes.
 
 **Algorithm** (step by step):
 
@@ -3096,7 +3101,7 @@ Limits: `file_search` calls per provider request are bounded by the catalog mode
 
 - [ ] `p1` - **ID**: `cpt-cf-mini-chat-design-code-interpreter`
 
-The `code_interpreter` tool is included in the Responses API request when the chat contains at least one ready attachment with `for_code_interpreter = true`. The backend queries for code interpreter file IDs via `attachments WHERE chat_id = :chat_id AND for_code_interpreter = true AND status = 'ready' AND deleted_at IS NULL` (under normal tenant access scope) and passes them as `tools[].container.file_ids` in the provider request.
+The `code_interpreter` tool is included in the Responses API request when the chat contains at least one ready attachment with `for_code_interpreter = true`. The backend queries for code interpreter file IDs via `attachments WHERE chat_id = :chat_id AND for_code_interpreter = true AND status = 'ready' AND deleted_at IS NULL` (under normal tenant access scope) and passes them as `tools[].container.file_ids` in the provider request. The tool entry is `{"type": "code_interpreter", "container": {"type": "auto", "file_ids": [...]}}` (the provider manages the container), and the request sets `include: ["code_interpreter_call.outputs"]` so that the provider returns the code output that the `tool` event carries.
 
 **Purpose routing and multi-purpose model**: Each attachment's purpose is derived from its MIME type at upload and persisted as two boolean columns (`for_file_search`, `for_code_interpreter`) on the `attachments` row. Current assignments:
 
@@ -6980,6 +6985,46 @@ All token estimates (preflight reserve, `INPUT_TOO_LONG` check, context-assembly
 | Parameter | Type | Default | Source |
 |-----------|------|---------|--------|
 | Negative threshold for tier downgrade | — | — | No config key (not implemented as a separate knob) |
+
+### B.5.5 Model-facing prompts
+
+Texts the gear sends to the model. They are prompt design, not client contract. The tool guard texts are in section 4 (`context.web_search_guard`, `context.file_search_guard`).
+
+Thread summary preamble, prepended to the summary in the next turn's context (followed by the summary text):
+
+> This conversation has earlier messages that have been summarized. The summary below covers the earlier portion of the conversation. Recent messages follow after.
+
+Built-in default system prompt of the summary request (used when neither the model's catalog `thread_summary_prompt` nor `thread_summary_worker.summary_system_prompt` is set; it is also the default value of `thread_summary_worker.summary_system_prompt`):
+
+> You are a conversation summarizer. Given a conversation (and optionally an existing summary), produce a detailed structured summary. Respond with an <analysis> block (your reasoning) followed by a <summary> block (the final summary). Only the <summary> content will be stored. Do not invent information not present in the conversation.
+
+Opening of the summary request: `Summarize the following conversation:` when there is no summary yet. Otherwise:
+
+> The existing summary below covers the earlier conversation. Incorporate it with the new messages into a single updated summary.
+>
+> IMPORTANT: Keep the summary concise. If the combined information is too large, prioritize: current topic and recent decisions > user preferences and corrections > older facts. Compress or drop the least relevant older details rather than letting the summary grow unboundedly.
+
+followed by the `<existing_summary>` block and `New messages to incorporate:`.
+
+Analysis instruction, at the end of the summary request:
+
+> Before providing your final summary, wrap your analysis in <analysis> tags. In your analysis:
+> 1. Chronologically review each exchange, identifying:
+>    - The user's requests and questions
+>    - Key decisions, answers, and information shared
+>    - Any follow-up actions or commitments
+>    - Specific names, dates, numbers, URLs, or references mentioned
+> 2. Verify accuracy and completeness.
+>
+> Your summary MUST include these sections:
+>
+> 1. Conversation Purpose: The user's primary goals and recurring themes
+> 2. Key Information Exchanged: Important facts, decisions, recommendations, and answers
+> 3. User Requests and Preferences: All explicit user requests, stated preferences, and corrections
+> 4. Open Items: Any unresolved questions, wake actions, or things the user asked to revisit
+> 5. Current Topic: What was being discussed most recently, with enough detail to continue naturally
+>
+> Respond with an <analysis> block followed by a <summary> block.
 
 ## B.6 Web search configuration
 
