@@ -46,7 +46,7 @@
 
 Construct is an open-source component of Constructor Fabric. It keeps one living profile for each subject and serves it to the applications and AI agents of a tenant. A subject is anything with a lasting identity: a person, an organization, a partner, a competitor, a product, a project, a team or a process. Each kind of subject has its own profile types. A new kind of subject is a new set of registered types and needs no Construct code. This release ships the person types.
 
-Connectors are any systems that learn something about a subject. They send what they learn to Construct as typed records, under GTS (Global Type System) contracts that the connectors own. Construct checks each record against its type and turns it into facts. A record may add, replace or remove facts, and Construct decides which on its own. Applications and agents read the profile to personalize what they do. The profile's owner can see, correct and erase what Construct knows.
+Connectors are any systems that learn something about a subject. They send what they learn to Construct as typed records, under GTS (Global Type System) contracts that the connectors own. Construct checks each record against its type and turns it into facts. A record may add, replace or remove facts, and Construct decides which on its own. Applications and agents read the profile to personalize what they do. The profile's owner can see, correct and erase what Construct knows. A tenant administrator can also read a subject's facts and add, edit or delete them directly.
 
 All kinds of subjects use the same intake, decisions, guardrails, read path and MCP tools. They differ in three ways. First, each kind has its own categories; a person has identity, roles, skills and preferences. Second, the owner controls the profile. A person owns their own profile and has the rights of a data subject. For any other subject, the user who creates the profile owns it and controls it the same way. Where this document says the subject acts, states something or controls their data, for a subject that is not a person, the owner does. Third, the special categories of sensitive data, the data that must stay secret because of the law, security, safety, industry standards or contracts, can differ by kind of subject. This release implements them for a person.
 
@@ -57,7 +57,7 @@ flowchart LR
     CN["Connector"] -->|"sends records"| C(("Construct"))
     APP["Consumer application or agent"] -->|"reads and manages facts"| C
     S["Subject or owner"] -->|"views, corrects, erases"| C
-    TA["Tenant administrator"] -->|"resolves review requests"| C
+    TA["Tenant administrator"] -->|"resolves review requests, reads and fixes facts"| C
     TA -->|"sets tenant rules"| SS["Settings service"]
     C -->|"reads tenant settings"| SS
     DPO["Data protection officer"] -->|"audits, handles requests"| C
@@ -91,7 +91,7 @@ Every product that personalizes builds the same parts again. It collects signals
 | Tenant | One customer organization in a deployment. Its data is kept apart from every other tenant's data |
 | Fact | One statement about a subject, with its origin and the time it was stored |
 | Category | A named group of facts of one kind, for example skills or preferences. Construct's GTS types define the categories |
-| Origin | Where a fact came from: the connector and record, the subject or agent who stated it, or the reviewer who corrected it |
+| Origin | Where a fact came from: the connector and record, the subject or agent who stated it, the reviewer who corrected it, or the tenant administrator who wrote it |
 | Record | One item a connector sends about one subject. Its type is a GTS type that the connector owns |
 | Connector | Any system that sends records to Construct |
 | Agent | An AI agent that reads or manages the profile over MCP for a subject |
@@ -103,7 +103,7 @@ Every product that personalizes builds the same parts again. It collects signals
 | Admission rules | The tenant's rules for which changes Construct may store: the sources it trusts, a confidence floor (the lowest confidence a change must have), the categories it may add to, and limits on how much one record may write |
 | Guardrails | The checks for special categories that run before a fact is stored |
 | Special category | One of the groups of sensitive data that must stay secret: the law, security, safety, industry standards or contracts require it. Listed in `cpt-cf-construct-fr-sensitive-data-guardrails`, such as health data or authentication secrets |
-| Log event | An event that Construct writes to the platform's log storage. It holds the tenant, the subject, the application or agent, the event type, the categories or the special category involved, and the time. It never holds a fact value or record content. It is kept for the log's retention period |
+| Log event | An event that Construct writes to the platform's log storage. It holds the tenant, the subject, the application, agent or administrator, the event type, the categories or the special category involved, and the time. It never holds a fact value or record content. It is kept for the log's retention period |
 
 ## 2. Actors
 
@@ -122,7 +122,7 @@ The tenant is the data controller for its subjects' data: it decides why and how
 
 **ID**: `cpt-cf-construct-actor-tenant-admin`
 
-- **Role**: Runs Construct for one tenant. Turns connectors on or off; sets the admission rules, default personalization settings and the retention period; resolves review requests when the tenant assigns this task. Data-protection role: acts for the data controller.
+- **Role**: Runs Construct for one tenant. Turns connectors on or off; sets the admission rules, default personalization settings and the retention period; resolves review requests when the tenant assigns this task; reads a subject's facts and adds, edits or deletes them directly. Data-protection role: acts for the data controller.
 - **Needs**: Control of sources and rules for the whole tenant; confidence that the tenant's data never mixes with another tenant's.
 
 #### Data Protection Officer
@@ -197,6 +197,7 @@ None beyond the project defaults.
 - Intake of records one at a time, and turning them into facts that Construct adds, replaces or removes
 - A structured profile read by category, for applications and for agents over MCP
 - Subject control and personalization settings, retention, and a log of every read
+- Direct reads and changes of a subject's facts by a tenant administrator
 - Guardrails for special categories of data
 - Tenant isolation, with identity and access from the platform
 
@@ -250,10 +251,19 @@ Once Construct has decided the changes for a record, it **MUST** store them full
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-fr-fact-origin`
 
-Every fact **MUST** carry its origin and the time it was stored: the connector and record it came from, the subject or agent who stated it, or the reviewer who corrected it. The subject and the data protection officer **MUST** be able to see the origin of every fact.
+Every fact **MUST** carry its origin and the time it was stored: the connector and record it came from, the subject or agent who stated it, the reviewer who corrected it, or the tenant administrator who wrote it. The subject and the data protection officer **MUST** be able to see the origin of every fact.
 
 - **Rationale**: The subject needs the origin to judge a fact; the data protection officer needs it to audit collection.
 - **Actors**: `cpt-cf-construct-actor-subject`, `cpt-cf-construct-actor-dpo`
+
+#### Facts Managed by a Tenant Administrator
+
+- [ ] `p1` - **ID**: `cpt-cf-construct-fr-admin-facts`
+
+A tenant administrator **MUST** be able to read all facts of any subject in their tenant, with origin, and to add, edit and delete a fact directly. An added or edited fact **MUST** pass the same guardrails as any fact, and its origin **MUST** name the administrator; Construct does not decide about it on its own, as it does for a record. An add for a subject with no profile yet creates the profile. A delete works like the subject's delete: the fact is not served from the next read on, and a repeat of its record does not bring it back. While personalization is off for the subject, an add or an edit **MUST NOT** store anything; the administrator's read and delete still work. An edit of a fact that no longer exists stores nothing. Whenever an add or an edit stores nothing, Construct **MUST** tell the administrator so. An edit that is stored, or a delete, of a fact under an open review request **MUST** close the request as corrected or deleted; an edit that the guardrails block or the admission rules drop leaves the request open. Each such read is logged like any other read, and Construct **MUST** log each add, edit and delete without content.
+
+- **Rationale**: A tenant administrator checks and fixes a subject's profile when no connector or agent can, and sets up profiles for tests. Their reads and changes are log events that name the administrator, and their reads appear in the export like any read.
+- **Actors**: `cpt-cf-construct-actor-tenant-admin`, `cpt-cf-construct-actor-subject`, `cpt-cf-construct-actor-log-storage`
 
 ### 5.3 Profile Read
 
@@ -272,7 +282,7 @@ Construct **MUST** serve the profile of one subject with facts grouped by catego
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-fr-subject-access`
 
-The subject **MUST** be able to see all facts about them with their origin, in every category, together with their settings and review requests. Construct **MUST** log every read of a profile, through any interface: which application or agent, which subject, which categories, and when. The data protection officer **MUST** be able to find these log events per subject and per application. On the subject's request, the data protection officer **MUST** be able to give the subject all of this data as a machine-readable file, together with who read their profile.
+The subject **MUST** be able to see all facts about them with their origin, in every category, together with their settings and review requests. Construct **MUST** log every read of a profile, through any interface: which application, agent or administrator, which subject, which categories, and when. The data protection officer **MUST** be able to find these log events per subject and per application. On the subject's request, the data protection officer **MUST** be able to give the subject all of this data as a machine-readable file, together with who read their profile.
 
 - **Rationale**: The subject can only control what they can see; the right of access asks for all of it, including who received the data.
 - **Actors**: `cpt-cf-construct-actor-subject`, `cpt-cf-construct-actor-dpo`, `cpt-cf-construct-actor-consumer-app`
@@ -310,7 +320,7 @@ A tenant administrator **MUST** be able to set one retention period for the tena
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-fr-settings`
 
-Construct **MUST** keep, for each subject, whether personalization is on or off. The subject **MUST** be able to read and change their settings; a tenant administrator **MUST** be able to set the defaults for new subjects. When personalization is off, Construct **MUST NOT** serve the subject's facts to applications or agents, and **MUST** refuse records about the subject with that reason; a record received before personalization was turned off **MUST NOT** store anything. Personalization off and erasure never block the subject's own view, delete, settings or export. A change **MUST** apply from the next request.
+Construct **MUST** keep, for each subject, whether personalization is on or off. The subject **MUST** be able to read and change their settings; a tenant administrator **MUST** be able to set the defaults for new subjects. When personalization is off, Construct **MUST NOT** serve the subject's facts to applications or agents, and **MUST** refuse records about the subject with that reason; a record received before personalization was turned off **MUST NOT** store anything. Personalization off and erasure never block the subject's own view, delete, settings or export, or an administrator's read or delete. A change **MUST** apply from the next request.
 
 - **Rationale**: The subject decides whether and how their profile is used.
 - **Actors**: `cpt-cf-construct-actor-subject`, `cpt-cf-construct-actor-tenant-admin`, `cpt-cf-construct-actor-settings-service`
@@ -370,7 +380,7 @@ Every operation **MUST** be confined to the caller's tenant. A read, count, sear
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-fr-access-control`
 
-Every request **MUST** carry a caller identity and a tenant that the platform has authenticated, and Construct **MUST** refuse a request without them. Construct **MUST** take the caller and the tenant only from the platform, never from the content of a record or request. The platform **MUST** authorize every operation. Sending records, reading profiles, managing facts, controlling the profiles one owns, resolving review requests, changing tenant settings and exporting a subject's data **MUST** be separate permissions. Log events are read in the platform's log storage, under its own permissions.
+Every request **MUST** carry a caller identity and a tenant that the platform has authenticated, and Construct **MUST** refuse a request without them. Construct **MUST** take the caller and the tenant only from the platform, never from the content of a record or request. The platform **MUST** authorize every operation. Sending records, reading profiles, managing facts, controlling the profiles one owns, resolving review requests, administering a subject's facts, changing tenant settings and exporting a subject's data **MUST** be separate permissions. Log events are read in the platform's log storage, under its own permissions.
 
 - **Rationale**: Each actor needs a different level of access; separate permissions let the tenant grant exactly what each needs.
 - **Actors**: `cpt-cf-construct-actor-platform-auth`, `cpt-cf-construct-actor-connector`, `cpt-cf-construct-actor-consumer-app`
@@ -420,7 +430,7 @@ The guardrails **MUST** find special-category content on the reference test set 
 
 - **Type**: REST API and a Rust SDK
 - **Stability**: unstable
-- **Description**: Record intake for connectors; profile read for applications; settings, facts, review requests and erasure for the subject; review resolution and a subject's data export for tenant administrators and the data protection officer.
+- **Description**: Record intake for connectors; profile read for applications; settings, facts, review requests and erasure for the subject; review resolution and a subject's data export for tenant administrators and the data protection officer; direct reads and changes of a subject's facts for tenant administrators.
 - **Breaking Change Policy**: A breaking change brings a new major version of the API and the SDK.
 
 #### MCP Tools for Agents
@@ -555,6 +565,7 @@ The guardrails **MUST** find special-category content on the reference test set 
 - [ ] Sensitive data: the reference test set meets `cpt-cf-construct-nfr-guardrail-detection`; blocked and redacted content is never served or kept, and the checks cannot be turned off; every block and redaction is logged with its category and without content, and the data protection officer can count them
 - [ ] Tenancy: adversarial tests find zero cases of another tenant's data, and a request without a platform-authenticated identity and tenant is refused
 - [ ] Retention, tenant exit and the rest: a fact past the tenant's retention period, and all data of a tenant that leaves except its log events, are not served from the next read and are gone from storage within 30 days; log events follow the log's retention period; the data export holds all of a subject's data; a fact under an open review request is not served, and records and agents do not change it
+- [ ] Administration: a tenant administrator reads, adds, edits and deletes a subject's facts; an added or edited fact passes the guardrails and its origin names the administrator; while personalization is off, an add or edit stores nothing and the administrator is told so, and the read and delete still work; every such read and change is logged without content
 - [ ] Every use case in section 8 passes as an end-to-end test
 
 ## 10. Dependencies

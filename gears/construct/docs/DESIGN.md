@@ -50,9 +50,10 @@ Requirements that significantly influence architecture decisions.
 | `cpt-cf-construct-fr-record-intake` | Results API checks the record against its GTS type and base types. Before any model call, it refuses a broken envelope or type, a repeat, a connector that is off, or personalization off. It answers received, repeat or refused. It keeps only the received record's identity in `record_ids`; the content stays in memory while the record is processed. If an instance of Construct stops before the record is processed, the record is lost and no drop is logged. Connectors on or off is a tenant setting in the settings service. A new connector is a new registered type and needs no Construct code |
 | `cpt-cf-construct-fr-fact-decisions` | Planner runs the agent loop over the record and the subject's current profile. Its plan adds, replaces or removes entities of that subject only; a replace removes the old value in the same plan. The reference evaluation set measures that no contradicting pair remains (see Risks, "Quality lives in the prompts") |
 | `cpt-cf-construct-fr-deterministic-storage` | Profile writer applies the admitted plan in one write with the profile version the plan was built on. Graph storage rejects the write if the profile changed; the planner runs again, up to a small limit. Each write carries graph storage's idempotency key, and a plan's node keys are fixed when the plan is built. So storing the same changes again gives the same facts. Profile reader serves from graph storage, so the next read returns the stored value |
-| `cpt-cf-construct-fr-fact-origin` | Each plan carries its origin from the record envelope, the MCP call or the reviewer. Profile writer stores it and the storing time with each entity. Profile reader and Subject control return it |
+| `cpt-cf-construct-fr-fact-origin` | Each plan carries its origin from the record envelope, the MCP call, the reviewer or the tenant administrator. Profile writer stores it and the storing time with each entity. Profile reader and Subject control return it |
+| `cpt-cf-construct-fr-admin-facts` | Subject control serves the admin operations on paths under `admin`. A read returns all facts of the subject with origin, like the subject's own view, and is a read log event. An add or edit becomes a plan with one step and no planner. It passes the sensitive-data checks and Admission, and the Profile writer stores it with the administrator as its origin. A delete works like the subject's delete. A stored edit or a delete of a fact under an open review request closes the request as corrected or deleted. When nothing is stored, the call says so. Each change is a log event without content |
 | `cpt-cf-construct-fr-profile-read` | Profile reader serves the profile only for its owner: to the owner, and to applications and agents that act for the owner. It groups entities by entity kind, which is the PRD's category. It lists only permitted categories with at least one readable fact, and names the subject. Permissions come from the platform on each read |
-| `cpt-cf-construct-fr-subject-access` | Subject control shows all facts with origin, the settings and the review requests. Each read is a log event without content in the platform's log storage. The subject's own view and the export also write read log events. The data protection officer finds read events there per subject and per application, and gives them to the subject with the export |
+| `cpt-cf-construct-fr-subject-access` | Subject control shows all facts with origin, the settings and the review requests. Each read is a log event without content in the platform's log storage. The subject's own view, the export and an administrator's read also write read log events. The data protection officer finds read events there per subject and per application, and gives them to the subject with the export |
 | `cpt-cf-construct-fr-review-request` | Subject control creates a review request keyed by the graph node key. Profile reader hides the fact from applications and agents while the request is open. The planner skips it, so no record or agent changes it. If the subject deletes the fact or retention removes it first, the request closes as deleted. The assigned reviewers are a tenant setting in the settings service. Reviewers resolve a request as corrected, deleted or rejected. A corrected value becomes a plan with one replace step, which passes the sensitive-data checks and Admission. If they block or drop it, nothing is stored and the request stays open. Each correction and each resolution is a log event without content |
 | `cpt-cf-construct-fr-subject-delete` | Subject control deletes one fact in graph storage; each fact delete is a log event without content. Deletion erases everything on request: the subject's entities, review requests and record IDs. It sets personalization off and writes an erasure log event without content. Results API refuses a repeat of a deleted fact's record by its identity in `record_ids`. A deleted entity that returns gets a new node key |
 | `cpt-cf-construct-fr-retention` | Deletion runs retention by age with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader and uses the same code as erasure. It covers facts, review requests and record IDs; log events follow the log's retention period. Profile reader does not serve an item past the period, even before the job removes it. Tenant exit follows the platform's tenant offboarding protocol |
@@ -62,7 +63,7 @@ Requirements that significantly influence architecture decisions.
 | `cpt-cf-construct-fr-mcp-caller-binding` | MCP tools take the caller and tenant from the platform only. For the subject a call names, the AuthZ resolver decides whether the caller may act for it, as that person or as the profile's owner. A call for a subject or tenant the caller may not act for gets the same answer as a subject that does not exist |
 | `cpt-cf-construct-fr-sensitive-data-guardrails` | Sensitive-data checks run one model check per sensitive-data kind on the values a plan would store. Admission enforces block and redact before Profile writer runs. The checks have no off switch. Each block and redaction is a log event with its sensitive-data kind and without content; the counts come from these events |
 | `cpt-cf-construct-fr-tenant-isolation` | Every component takes the tenant from the platform security context. Graph storage calls and Construct's own tables are scoped to that tenant. Log events carry the tenant, and the log storage confines reads of them to the caller's tenant |
-| `cpt-cf-construct-fr-access-control` | Every REST operation and MCP tool needs a platform-authenticated caller and tenant, and asks the AuthZ resolver for its own separate permission (see 3.3). Exporting a subject's data is its own permission. Tenant settings are changed in the settings service, and log events are read in the platform's log storage, under their own permissions |
+| `cpt-cf-construct-fr-access-control` | Every REST operation and MCP tool needs a platform-authenticated caller and tenant, and asks the AuthZ resolver for its own separate permission (see 3.3). Exporting a subject's data and administering a subject's facts are permissions of their own. Tenant settings are changed in the settings service, and log events are read in the platform's log storage, under their own permissions |
 
 #### NFR Allocation
 
@@ -89,7 +90,7 @@ flowchart TD
         CN["Connector"]
         APP["Application"]
         AG["Agent"]
-        SU["Subject or owner, reviewers, data protection officer"]
+        SU["Subject or owner, tenant administrators, reviewers, data protection officer"]
     end
     subgraph Construct
         subgraph Presentation
@@ -132,7 +133,7 @@ flowchart TD
     SD --> MC
     SC --> PR
     SC --> DEL
-    SC -->|"corrected value"| SD
+    SC -->|"corrected or admin value"| SD
     PL -->|"profile and version"| GSC
     PW --> GSC
     PR --> GSC
@@ -155,7 +156,7 @@ Construct is a Rust gear with the standard gear anatomy: an SDK crate with a cli
 
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
-| Presentation | REST operations for connectors, applications, subjects, reviewers and the data protection officer; the MCP endpoint for agents | REST through the API gateway, registered with OperationBuilder; RFC 9457 Problem errors; MCP |
+| Presentation | REST operations for connectors, applications, subjects, reviewers, tenant administrators and the data protection officer; the MCP endpoint for agents | REST through the API gateway, registered with OperationBuilder; RFC 9457 Problem errors; MCP |
 | Application | Intake, subject control, MCP tools, deletion and the read path | Rust services in the gear |
 | Domain | The profile model, the planner, the sensitive-data checks, admission and the writer | Rust types over Construct's GTS profile types |
 | Infrastructure | Model calls, graph storage calls, own tables, leader election | Model client adapters (the chat completions adapter through OAGW; the LLM gateway adapter through the gateway's SDK client); graph storage SDK client; toolkit-db; cluster leader election |
@@ -272,7 +273,7 @@ The tree of one subject: the subject node as its root, and the entities that han
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-entity-plan`
 
-The steps the planner's tools build in memory for one record or one MCP call. A step adds, replaces or removes an entity or a property. The plan also holds its origin and the profile version it was built on. Each step carries the confidence the model gives it. The source for the trust check is the connector named in the plan's origin. A plan is never written as such; only its admitted steps reach the profile. A reviewer's corrected value also becomes a plan, with one replace step and no planner.
+The steps the planner's tools build in memory for one record or one MCP call. A step adds, replaces or removes an entity or a property. The plan also holds its origin and the profile version it was built on. Each step carries the confidence the model gives it. The source for the trust check is the connector named in the plan's origin. A plan is never written as such; only its admitted steps reach the profile. A reviewer's corrected value also becomes a plan, with one replace step and no planner. So does a tenant administrator's added or edited fact, with one add or replace step.
 
 #### Sensitive-Data Verdict
 
@@ -347,7 +348,7 @@ flowchart LR
     SD --> MC
     SC --> PR
     SC --> DEL
-    SC -->|"corrected value"| SD
+    SC -->|"corrected or admin value"| SD
     PL -->|"profile and version"| GS[("Graph storage")]
     PW --> GS
     PR --> GS
@@ -434,7 +435,7 @@ Does not change the plan; Admission enforces the verdicts. Cannot be turned off.
 
 - `cpt-cf-construct-component-model-client` — calls, once per sensitive-data kind
 - `cpt-cf-construct-component-admission` — passes the plan and the verdicts to
-- `cpt-cf-construct-component-subject-control` — is called by, for a reviewer's corrected value
+- `cpt-cf-construct-component-subject-control` — is called by, for a reviewer's corrected value and an administrator's value
 
 #### Admission
 
@@ -468,7 +469,7 @@ A plan must land whole, and two records for one subject must not mix.
 
 Applies the admitted plan to graph storage in one write. The write also writes the profile's root node, the subject node, with the profile version the plan was built on as its expected version. Each write carries graph storage's idempotency key. The plan's node keys were fixed when the plan was built, so storing the same changes again gives the same facts. Each entity is stored with its origin and the time it was stored. If another change reached the profile in between, graph storage rejects the write. The planner then runs again, up to a small limit. Past the limit, the record is dropped, and the drop is a log event without content.
 
-A reviewer's corrected value has no planner. The planner skips a fact under review, so a record or an agent does not change it. On a write conflict, the writer reads the profile again and writes the reviewer's value again, up to the same small limit. If the fact is gone, because the subject deleted it or retention removed it, nothing is stored, and the review request closes as deleted.
+A reviewer's corrected value has no planner, and neither has a tenant administrator's added or edited fact. The planner skips a fact under review, so a record or an agent does not change it. On a write conflict, the writer reads the profile again and writes the same value again, up to the same small limit. If the fact to correct or edit is gone, because the subject deleted it or retention removed it, nothing is stored; that delete has already closed any review request on it as deleted.
 
 ##### Responsibility boundaries
 
@@ -488,7 +489,7 @@ Graph storage cannot enforce Construct's read rules, so Construct needs one read
 
 ##### Responsibility scope
 
-The only read path for applications and agents. Applies owner only, platform permissions per category, personalization off, and hidden-while-under-review. Owner only means the profile is served only for its owner: to the owner, and to applications and agents that act for the owner. It reads the subject settings and the review requests from Construct's own tables. It does not serve an item past the tenant's retention period, even before the retention job removes it. Groups entities by entity kind and lists only categories with at least one readable fact. Names the subject in every response. Each read is a log event without content: which application or agent, which subject, which categories, and when.
+The only read path for applications and agents. Applies owner only, platform permissions per category, personalization off, and hidden-while-under-review. Owner only means the profile is served only for its owner: to the owner, and to applications and agents that act for the owner. Owner only binds applications and agents. Two roles read a subject's facts without acting for the subject, through Subject control: the data protection officer, for an export on the subject's request, and the tenant administrator, through the admin operations. Each of their reads is a read log event too. It reads the subject settings and the review requests from Construct's own tables. It does not serve an item past the tenant's retention period, even before the retention job removes it. Groups entities by entity kind and lists only categories with at least one readable fact. Names the subject in every response. Each read it serves is a log event without content: which application or agent, which subject, which categories, and when.
 
 ##### Responsibility boundaries
 
@@ -505,23 +506,25 @@ Does not write the profile. Does not decide permissions; the platform does.
 
 ##### Why this component exists
 
-The subject controls their data: they see it, correct it and erase it.
+The subject controls their data: they see it, correct it and erase it. A tenant administrator reads and fixes a subject's facts through the same component.
 
 ##### Responsibility scope
 
-View: all facts with origin, the settings and the review requests. Mark incorrect: creates a review request keyed by the graph node key. Delete: soft-deletes one fact in graph storage, closes an open review request on the fact as deleted, and writes the root node with its expected version. On a write conflict, it reads the profile again and writes again, up to the same small limit. Erase: hands the request to Deletion. Export: on the subject's request, the data protection officer exports all of the subject's data in Construct as a machine-readable file. This needs the export permission. The data protection officer adds the read events from the platform's log storage. The subject's own view and the export each write a read log event without content. Also lists open review requests to the assigned reviewers and records their outcome, and keeps the subject's settings. The assigned reviewers are a tenant setting in the settings service.
+View: all facts with origin, the settings and the review requests. Mark incorrect: creates a review request keyed by the graph node key. Delete: soft-deletes one fact in graph storage, closes an open review request on the fact as deleted, and writes the root node with its expected version. On a write conflict, it reads the profile again and writes again, up to the same small limit. Erase: hands the request to Deletion. Export: on the subject's request, the data protection officer exports all of the subject's data in Construct as a machine-readable file. This needs the export permission. The data protection officer adds the read events from the platform's log storage. The subject's own view, the export and an administrator's read each write a read log event without content. Also lists open review requests to the assigned reviewers and records their outcome, and keeps the subject's settings. The assigned reviewers are a tenant setting in the settings service.
 
 For a corrected value, the reviewer sets the value by hand. Subject control turns it into a plan with one replace step, without the planner. The plan passes the sensitive-data checks and Admission like any plan, and the Profile writer stores it. Its origin names the reviewer. If the checks block the value or Admission drops the plan, nothing is stored, and the review request stays open.
 
+Admin operations, for a tenant administrator: read all facts of a subject with origin, like the subject's own view; add, edit or delete one fact. An add or edit becomes a plan with one add or replace step, without the planner, and goes through the sensitive-data checks, Admission and the Profile writer like a corrected value. Its origin names the administrator. An add for a subject with no profile yet creates the profile's root node, as a first record does. If the checks block the value, Admission drops the plan (for example because personalization is off), or the fact to edit is gone, nothing is stored and the call says so. A delete works like the subject's delete. A stored edit or a delete of a fact under an open review request closes the request as corrected or deleted; an edit that the checks block or Admission drops leaves it open. Each admin read is a read log event, and each change is a log event without content.
+
 ##### Responsibility boundaries
 
-Personalization off and erasure never block the subject's own view, delete, settings or export. Does not store new values itself; a corrected value goes through the sensitive-data checks, Admission and the Profile writer. Keeps no tenant settings: Construct builds no tenant-settings store or endpoint of its own. Tenant administrators change these values in the settings service.
+Personalization off and erasure never block the subject's own view, delete, settings or export, or an administrator's read or delete. Does not store new values itself; a corrected value or an administrator's value goes through the sensitive-data checks, Admission and the Profile writer. Keeps no tenant settings: Construct builds no tenant-settings store or endpoint of its own. Tenant administrators change these values in the settings service.
 
 ##### Related components (by ID)
 
 - `cpt-cf-construct-component-deletion` — calls for erasure
 - `cpt-cf-construct-component-profile-reader` — shares the read path with
-- `cpt-cf-construct-component-sensitive-data-checks` — calls for a reviewer's corrected value
+- `cpt-cf-construct-component-sensitive-data-checks` — calls for a reviewer's corrected value and an administrator's value
 
 #### MCP Tools
 
@@ -609,12 +612,16 @@ Construct offers three surfaces. REST and the Rust SDK realize `cpt-cf-construct
 | `GET`, `PUT` | `/api/construct/v1/subjects/{subject_id}/settings` | Read and change personalization | Control the profiles one owns | unstable |
 | `POST` | `/api/construct/v1/subjects/{subject_id}/erasure` | Erase everything about the subject | Control the profiles one owns | unstable |
 | `GET` | `/api/construct/v1/subjects/{subject_id}/export` | The subject's data as a machine-readable file, for the data protection officer on the subject's request | Export a subject's data | unstable |
-| `GET` | `/api/construct/v1/review-requests` | List open requests | Resolve review requests | unstable |
-| `POST` | `/api/construct/v1/review-requests/{request_id}/resolution` | Resolve one request | Resolve review requests | unstable |
+| `GET` | `/api/construct/v1/admin/review-requests` | List open requests | Resolve review requests | unstable |
+| `POST` | `/api/construct/v1/admin/review-requests/{request_id}/resolution` | Resolve one request | Resolve review requests | unstable |
+| `GET`, `POST` | `/api/construct/v1/admin/subjects/{subject_id}/facts` | Read all facts of a subject with origin; add one fact | Administer a subject's facts | unstable |
+| `PUT`, `DELETE` | `/api/construct/v1/admin/subjects/{subject_id}/facts/{fact_id}` | Edit or delete one fact | Administer a subject's facts | unstable |
 
-A resolution takes the outcome (corrected, deleted, or rejected with a reason) and, for a correction, the value the reviewer sets by hand; its wire shape is left to the feature design.
+A resolution takes the outcome (corrected, deleted, or rejected with a reason) and, for a correction, the value the reviewer sets by hand. An add or edit takes the fact's entity kind and value. Their wire shapes are left to the feature design.
 
-Each operation has its own permission, checked through the AuthZ resolver. The permission classes come from `cpt-cf-construct-fr-access-control`. For a path with `{subject_id}`, the AuthZ resolver also decides whether the caller may act for that subject. Tenant settings are changed in the settings service, not through Construct. Log events are read in the platform's log storage, under its own permissions.
+The reviewer queue and the admin operations sit under `/api/construct/v1/admin/`; the subject's own routes, such as marking a fact incorrect, stay under `subjects`. So a deployment can turn on one route-policy rule on `/api/construct/v1/admin/**` that rejects calls without the scope it chooses at the API gateway, as in [Gateway Scope Enforcement](../../../docs/arch/authorization/DESIGN.md#gateway-scope-enforcement-optional). Reviewers, including a data protection officer, then need that scope too. The AuthZ resolver still checks the permission of each operation.
+
+Each operation has its own permission, checked through the AuthZ resolver. The permission classes come from `cpt-cf-construct-fr-access-control`. For a path with `{subject_id}` outside `admin`, the AuthZ resolver also decides whether the caller may act for that subject. An admin path needs only its permission in the caller's tenant: the administrator does not act for the subject. Everything is scoped to the caller's tenant, so a subject in another tenant gets the same answer as a subject with no profile. Tenant settings are changed in the settings service, not through Construct. Log events are read in the platform's log storage, under its own permissions.
 
 **MCP**
 
@@ -683,7 +690,7 @@ This is the PRD's LLM gateway actor (`cpt-cf-construct-actor-llm-gateway`): the 
 |-------------------|---------------|---------|
 | Platform log storage | The platform's log interface | Holds Construct's log events |
 
-This is the PRD's log storage actor (`cpt-cf-construct-actor-log-storage`), a p1 dependency. Construct writes a log event for each read, delete, correction, review resolution and erasure, and for each block, redaction and drop. Each event carries the tenant, the subject, the application or agent, the event type and the time. A read event also names the categories read. A block or redaction event also names the sensitive-data kind. No event holds content. The log storage keeps events for the log's retention period. Erasure and the tenant's retention period do not remove them. The data protection officer reads them there, under the log storage's own permissions. The log storage confines each read to the caller's tenant. The counts of blocks, redactions and drops come from these events.
+This is the PRD's log storage actor (`cpt-cf-construct-actor-log-storage`), a p1 dependency. Construct writes a log event for each read, delete, correction, administrator change, review resolution and erasure, and for each block, redaction and drop. Each event carries the tenant, the subject, the application, agent or administrator, the event type and the time. A read event also names the categories read. A block or redaction event also names the sensitive-data kind. No event holds content. The log storage keeps events for the log's retention period. Erasure and the tenant's retention period do not remove them. The data protection officer reads them there, under the log storage's own permissions. The log storage confines each read to the caller's tenant. The counts of blocks, redactions and drops come from these events.
 
 **Dependency Rules** (per project conventions):
 
@@ -942,7 +949,7 @@ sequenceDiagram
 
 - [ ] `p3` - **ID**: `cpt-cf-construct-db-own-tables`
 
-Construct keeps three tables of its own through toolkit-db, scoped to the tenant. They are named here, not designed in detail. The columns are left to the feature design. Reads, deletes, corrections, review resolutions, erasures, blocks, redactions and drops are log events, not tables. Who owns a profile, and so who may read it, is kept by the platform's authorization, so no Construct table records it.
+Construct keeps three tables of its own through toolkit-db, scoped to the tenant. They are named here, not designed in detail. The columns are left to the feature design. Reads, deletes, corrections, administrator changes, review resolutions, erasures, blocks, redactions and drops are log events, not tables. Who owns a profile, and so who may read it, is kept by the platform's authorization, so no Construct table records it.
 
 #### Table: subject_settings
 
@@ -1017,13 +1024,13 @@ flowchart LR
 
 - **Security boundaries**: the platform authenticates every caller and supplies the tenant. Construct takes caller and tenant only from the platform, never from a record. Every operation has its own permission. Record text and agent input are untrusted. The model only proposes, Admission's deterministic checks decide, and the model never sees an ID. So text in a record cannot reach another subject's profile or change anything outside its plan. Encryption at rest and in transit follows the platform. [OAGW](../../system/oagw/docs/DESIGN.md) holds outbound credentials through credstore references.
 - **Data protection**: verdicts are enforced before storage; log events hold no content; erasure leaves a log event without content.
-- **Observability**: reads, deletes, corrections, review resolutions, erasures, blocks, redactions and drops are log events without content. Construct writes them to the platform's log storage, which keeps them for the log's retention period. The counts of drops, blocks and redactions come from these events; where the counts are stored is not part of this design. The PRD sets no other telemetry, so it is left to the feature design.
+- **Observability**: reads, deletes, corrections, administrator changes, review resolutions, erasures, blocks, redactions and drops are log events without content. Construct writes them to the platform's log storage, which keeps them for the log's retention period. The counts of drops, blocks and redactions come from these events; where the counts are stored is not part of this design. The PRD sets no other telemetry, so it is left to the feature design.
 - **Testability**: the reference evaluation set and the reference test set from the PRD, and the PRD's acceptance tests.
 - **Performance**: out of scope. The PRD sets no targets and inherits graph storage's.
 - **Availability**: follows the platform's standard posture. The PRD sets no higher target.
 - **User interface**: none. Host applications build it.
 - **Cost**: every planner round carries the whole profile; the sensitive-data checks see only the values the plan would store (see Risks). The deployment chooses the endpoint.
-- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check and the write stay in step, so that a record received before personalization is turned off, or before an erasure request, stores nothing, also when personalization is turned off and on again; where the profile GTS types live and which entity kinds and properties they define; backup and recovery of Construct's own tables, which follow the platform default; how source trust and the confidence floor apply to plans from a reviewer or an agent; how a review request that opens while a plan is in flight keeps that plan from changing the fact; how the sensitive-data checks take the sensitive-data kinds of a new kind of subject from its registered types; how the root node is created for a new subject so that two first writes never both succeed, because graph storage's compare-and-set covers only nodes that exist; how a profile created after an erasure finds its new root key.
+- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check and the write stay in step, so that a record received before personalization is turned off, or before an erasure request, stores nothing, also when personalization is turned off and on again; where the profile GTS types live and which entity kinds and properties they define; backup and recovery of Construct's own tables, which follow the platform default; how source trust and the confidence floor apply to plans from a reviewer, an administrator or an agent; how a review request that opens while a plan is in flight keeps that plan from changing the fact; how the sensitive-data checks take the sensitive-data kinds of a new kind of subject from its registered types; how the root node is created for a new subject so that two first writes never both succeed, because graph storage's compare-and-set covers only nodes that exist; how a profile created after an erasure finds its new root key.
 
 ## 5. Traceability
 
