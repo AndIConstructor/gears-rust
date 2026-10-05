@@ -593,7 +593,7 @@ The constraints each slice adds are defined here and specified normatively in [�
   — Gate and pin — The overlap check depends on an unagreed upstream read ([contract](#contract-03-the-overlap-check-depends-on-an-unagreed-upstream-read))
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-overlap-key-partner-collision`
-  — Gate and pin — The default overlap key collides in the partner path ([contract](#contract-03-the-default-overlap-key-collides-in-the-partner-path))
+  — Gate and pin — The in-flight claim is scoped per resource tenant ([contract](#contract-03-the-default-overlap-key-collides-in-the-partner-path))
 
 - [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-total-excludes-subscription-overlays`
   — Gate and pin — The order-time total is incomplete by construction ([contract](#contract-03-the-order-time-total-is-incomplete-by-construction))
@@ -2167,7 +2167,7 @@ this design previously passed over in silence are now explicit deferrals with th
 trial-conversion and renewal classification, subscription composition granularity, and the
 quantity model — recorded as Q-01, Q-02 and Q-03. **Four of the remaining seven carry design
 interim positions**: rows 5 and 7 (retention and per-state TTLs) as Q-07 and Q-06, row 12 (the
-overlap-key dimension) as Q-05, and row 3 (the order reference on `create`) as upstream ask
+overlap-key dimension) as Q-05 (its in-flight claim side closed by D-179), and row 3 (the order reference on `create`) as upstream ask
 `SUB-O2`. Rows 2, 14 and 15 are genuinely unaffected by this
 design.
 
@@ -3255,6 +3255,7 @@ without one.
 |--------|------|-------------|
 | claim_id | uuid | Claim identity |
 | payer_tenant_id | uuid | Billing party that owns the overlap scope |
+| resource_tenant_id | uuid | The order's resource recipient, copied from `orders_order.resource_tenant_id`; immutable once the order is `submitted`, so a claim's value never changes. Scopes the claim to one customer so a partner paying for several customers does not collide across them (D-179) |
 | overlap_scope_key | text | Subscriptions' registry-owned `catalogSubscriptionProductKey` (SUB-G1) for this accepted line, stored as received from its owner and never computed here; the PriceBook derivation proposed to that owner is the SKU of the line's paid recurring item(s). Persisted and reused by claims and activation; D-153, D-163. |
 | order_id, version | uuid, integer | Order and proposed version of the reservation attempt; a refused attempt's version may never materialize and is not proof of admission |
 | claimed_at | timestamptz | Server-recorded reservation instant inside the transaction, not an admission or commit timestamp |
@@ -3263,7 +3264,7 @@ without one.
 **PK**: claim_id
 
 **Constraints**: **partial UNIQUE** on
-`(payer_tenant_id, overlap_scope_key) WHERE released_at IS NULL`. This is the authoritative
+`(payer_tenant_id, resource_tenant_id, overlap_scope_key) WHERE released_at IS NULL`. This is the authoritative
 one-in-flight-order constraint, and *exactly one* is what PRD §6.1(g) requires — the in-flight
 order cap is fixed there, unlike the concurrent-**subscription** cardinality of §6.1(f), which
 Catalog or Contract may configure. A UNIQUE index expresses exactly one, so it expresses the rule
@@ -3279,13 +3280,15 @@ permanently. **This table therefore carries no foreign key to `orders_order_vers
 `order_id` and the version the claim was taken for as data, and giving it an FK would force the
 version to pre-exist the claim, which is exactly the ordering that produces the phantom version.
 
-Claim identity is the full **`(payer_tenant_id, overlap_scope_key)` tuple** everywhere, not
+Claim identity is the full **`(payer_tenant_id, resource_tenant_id, overlap_scope_key)` tuple** everywhere, not
 the overlap key alone. The payer comes from the proposed version on submit/amendment; existing
-claims retain their recorded payer. Step 17 retains the intersection of held and proposed
+claims retain their recorded payer. The resource tenant is the order's, which no path changes
+after `submitted` ([04 §4.1](features/04-versioning.md#contract-04-4-1)), so it never drives a replacement (D-179). Step 17 retains the intersection of held and proposed
 tuples, acquires the proposed-minus-held set and releases the held-minus-proposed set only
 after complete acquisition. Duplicate lines resolving to the same tuple offer one claim;
-identical overlap keys under different payers are distinct claims. Missing tuples are offered
-in a shared total order by payer UUID bytes then overlap-key bytes, preventing opposite-order
+identical overlap keys under different payers, or under one payer for different resource tenants,
+are distinct claims. Missing tuples are offered
+in a shared total order by payer UUID bytes, then resource-tenant UUID bytes, then overlap-key bytes, preventing opposite-order
 acquisition among those tuples. This is not a blanket deadlock-freedom claim for transactions
 already holding other claims. Transitions run at **READ
 COMMITTED** — under a snapshot isolation level the insert raises a serialisation failure instead of
@@ -3327,7 +3330,9 @@ authoritative admission history. This deliberate semantic change preserves the e
 no-DELETE/only-`released_at`-UPDATE grant contract.
 
 **Required regression tests (pending implementation).** Cover unchanged tuples, duplicate line
-keys, payer-only changes and payer-plus-key changes. After successful payer reassignment, the old
+keys, payer-only changes and payer-plus-key changes. One payer with the same key for two resource
+tenants holds two live claims, and a same-tenant collision's refusal names only an order that
+tenant can read (D-179). After successful payer reassignment, the old
 pair is reusable by another order and only proposed tuples remain live for this order. If the new
 pair is occupied, retain the old version/payer/claims and commit the refusal without provisional
 live claims. Force a multi-tuple partial insert before a collision: only returned IDs become
@@ -5632,7 +5637,7 @@ as the closable form of this gap rather than adopted here.
 
 <a id="contract-03-the-default-overlap-key-collides-in-the-partner-path"></a>
 
-#### The default overlap key collides in the partner path
+#### The in-flight claim is scoped per resource tenant
 
 **Contract**: `cpt-cf-bss-orders-lifecycle-constraint-overlap-key-partner-collision` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
@@ -5647,7 +5652,17 @@ place another, and a wedged order blocks the key until an operator clears it (AD
 refusal as "an order for this is already in progress" with a route to that order, rather than as a
 generic validation failure.
 
-The claim tuple remains `(payer_tenant_id, overlap_scope_key)`. The key is the one Subscriptions
+The claim tuple is `(payer_tenant_id, resource_tenant_id, overlap_scope_key)` (D-179). The
+payer-only form refused a partner's second order for the same product even when it was for a
+different customer, and the refusal — with its route to the conflicting order — told one customer
+that another customer under the same payer had an order in flight. Adding the resource tenant
+closes both: different customers never collide, and the conflicting order a refusal names always
+belongs to the caller's own resource tenant, so it is one the caller could already read under
+[08 §4.4](DESIGN.md#contract-08-4-4). The refusal **MUST NOT** name an order the caller cannot read. This
+follows the extra-dimension form Subscriptions already permits for its own key
+(`subscriptions/docs/design/03-plan-changes.md` §4.4: active subscriptions may coexist "when they
+differ on `overlapScopeKey` (extra dimensions)"), and the resource tenant is an immutable order
+axis after submit, not something Orders derives. The key is the one Subscriptions
 already defines and keys its own cardinality rule on: the registry-owned
 `catalogSubscriptionProductKey` of SUB-G1, "bound to a published SKU/product key" (D-163). Products
 no longer has a Product entity but still has SKUs, and resolve names each item's `sku_id` and
@@ -5658,8 +5673,15 @@ claims all of them; the owner may collapse them. Orders submits the prospective 
 Subscriptions' key operation (UPSTREAM_REQS §2.10) and stores the key(s) and provenance as answered;
 it never computes the key. Missing definition/SDK is `overlap-key-unavailable`; a successful no-key
 answer is `overlap-key-unresolvable`. Retain the resolved key with the accepted line and never
-rederive it at activation. The known partner collision is an unresolved business-policy question
-(Q-05), not permission for Orders to widen scope.
+rederive it at activation. Orders still never computes `overlap_scope_key`; the resource tenant is a
+separate claim column, not part of the key. The occupancy read predicate 7 consumes is asked for on
+the same tuple, with `resourceTenantId` as a default dimension of Subscriptions' key (`SUB-O5`
+amendment, `UPSTREAM_REQS.md` `…-upreq-overlap-presence-read`), so both halves of the rule and the
+activation commit count the same thing. Until Subscriptions enforces the resource dimension at its active commit, it answers on the tuple it
+enforces and says so in `provenance`; predicate 7 applies that answer as given, so a per-payer answer
+refuses a partner's second customer at cardinality one at submit rather than passing it into an
+activation refusal. Orders never re-buckets a per-payer count locally (D-83: no local fork).
+Q-05 stays open for the Subscriptions-side default only.
 
 <a id="contract-03-the-order-time-total-is-incomplete-by-construction"></a>
 
@@ -5930,7 +5952,7 @@ An expired acceptance or exceeded aggregate capacity contributes `order-binding-
 |-------------------|---------------|---------|
 | `account-management` | SDK client (`AccountManagementClient::get_tenant`); commercial profile **unexposed today** | Tenant-axis validity through the existing `get_tenant`. The payer's commercial profile behind the order market has no Account Management operation — `cpt-cf-bss-orders-lifecycle-upreq-payer-commercial-profile`; until exposed the identity outcome is `identity-party-unavailable` |
 | `contracts` | SDK client — **unexposed today** | Contract status and party eligibility where a reference is present — the sole owner of party eligibility; the same operation also returns the contract's `acceptance_required` declaration, read by `05`'s acceptance guards outside the gate (D-132). The gear is specified but unimplemented, raised as `cpt-cf-bss-orders-lifecycle-upreq-contract-party-eligibility` and `cpt-cf-bss-orders-lifecycle-upreq-contract-acceptance-declaration`; until exposed the gate outcome is `contract-resolution-unavailable` and `05`'s acceptance outcome is `acceptance-requirement-unevaluable` |
-| `subscriptions` | SDK client | The overlap-occupancy read (`SUB-O5`, amended: `(activeCount, maxConcurrentActive, provenance)` per payer/key, D-126), unagreed and unimplemented |
+| `subscriptions` | SDK client | The overlap-occupancy read (`SUB-O5`, amended: `(activeCount, maxConcurrentActive, provenance)` per payer/resource tenant/key, D-126, D-179), unagreed and unimplemented |
 | Billing-chain tax owner | SDK client | The indicative tax figure Preview returns and never stores |
 
 **Dependency Rules** (per project conventions):

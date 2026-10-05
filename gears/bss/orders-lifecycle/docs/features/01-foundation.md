@@ -141,12 +141,12 @@ Cross-principal create duplication and post-window re-execution remain disclosed
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-algo-foundation-overlap-claims`
 
-**Input**: Locked order, target state, distinct proposed `(payer_tenant_id, overlap_scope_key)` tuples.
+**Input**: Locked order, target state, distinct proposed `(payer_tenant_id, resource_tenant_id, overlap_scope_key)` tuples.
 
 **Output**: Complete admitted claim set, or audited/settled `order-in-flight-for-key` with prior claims intact.
 
 1. On every terminal transition, release all live claims before the acquisition branch. Other non-acquiring transitions retain claims.
-2. For submit/amendment, retain already-held full tuples and insert missing tuples in payer UUID/key byte order under `READ COMMITTED`, using the partial unique constraint and conflict-safe insert with returned IDs.
+2. For submit/amendment, retain already-held full tuples and insert missing tuples in payer UUID/resource-tenant UUID/key byte order under `READ COMMITTED`, using the partial unique constraint and conflict-safe insert with returned IDs.
 3. On shortfall, release exactly this attempt's returned fresh IDs, checking the affected count; preserve every pre-existing claim. Persist the assessment with authoritative predicate-9 conflict, audit and settle refusal before any version/contribution append. Cleanup failure aborts the whole transaction.
 4. Only after full acquisition release superseded tuples. A payer change replaces the full tuple; duplicate line keys offer one claim. No claim row proves that its proposed version was admitted.
 
@@ -394,10 +394,10 @@ refusal. The common infrastructure-error mapping applies, without target-specifi
 17. [ ] - `p1` - Maintain this order's overlap claims; this is where the one-in-flight-order rule of `§3.7` is enforced, and it runs on **every** row rather than only on the acquiring ones: - `inst-maintain-claims`
     1. [ ] - `p1` - **IF** the effective target is in the terminal set of `§4.3`: release every unreleased claim this order holds and **SKIP TO** step 18 — a terminal transition acquires nothing, and releasing here is what keeps a completed order from holding its key forever - `inst-release-on-terminal`
     2. [ ] - `p1` - **IF** the contribution carries no resolved overlap keys — every non-terminal row but submit and amendment: **SKIP TO** step 18, leaving the claim set untouched - `inst-skip-claims`
-    3. [ ] - `p1` - Compute the **distinct** proposed claim tuples `(proposed payer_tenant_id, overlap_scope_key)` from the incoming version. Compare full tuples with this order's unreleased claims and partition them into already-held and missing tuples; never compare overlap keys alone - `inst-partition-claim-keys`
-    4. [ ] - `p1` - Insert one claim row per missing tuple only, offered in a common total order by payer UUID bytes then overlap-key bytes, with `ON CONFLICT (payer_tenant_id, overlap_scope_key) WHERE released_at IS NULL DO NOTHING`, returning inserted claim IDs and tuples. Use the proposed version's payer even before the aggregate payer is updated - `inst-take-claims`
+    3. [ ] - `p1` - Compute the **distinct** proposed claim tuples `(proposed payer_tenant_id, resource_tenant_id, overlap_scope_key)` from the incoming version, the resource tenant being the order's own (D-179). Compare full tuples with this order's unreleased claims and partition them into already-held and missing tuples; never compare overlap keys alone - `inst-partition-claim-keys`
+    4. [ ] - `p1` - Insert one claim row per missing tuple only, offered in a common total order by payer UUID bytes, then resource-tenant UUID bytes, then overlap-key bytes, with `ON CONFLICT (payer_tenant_id, resource_tenant_id, overlap_scope_key) WHERE released_at IS NULL DO NOTHING`, returning inserted claim IDs and tuples. Use the proposed version's payer even before the aggregate payer is updated - `inst-take-claims`
     5. [ ] - `p1` - **IF** fewer rows return than distinct tuples were offered: release only the exact claim IDs returned by this attempt's insert, scoped to this order and `released_at IS NULL`, and require the affected count to equal the returned-ID count. Skip the UPDATE if that set is empty. On release error/count mismatch abort the whole transaction with an infrastructure outcome. Otherwise preserve all pre-existing claims, persist the reached assessment with predicate 9 replaced by the authoritative conflict under the diagnostic settlement contract, settle the complete response for `order-in-flight-for-key`, append refusal audit and commit by returning a successful transaction result carrying the refusal; §3.7 defines the released-reservation history - `inst-if-claim-conflict`
-    6. [ ] - `p1` - After complete acquisition, release only this order's unreleased claims whose full `(payer_tenant_id, overlap_scope_key)` tuple is absent from the proposed set. A payer-only change therefore releases `(old payer, key)` after acquiring `(new payer, key)`, in the same transaction as the amendment - `inst-release-superseded-claims`
+    6. [ ] - `p1` - After complete acquisition, release only this order's unreleased claims whose full `(payer_tenant_id, resource_tenant_id, overlap_scope_key)` tuple is absent from the proposed set. A payer-only change therefore releases `(old payer, resource tenant, key)` after acquiring `(new payer, resource tenant, key)`, in the same transaction as the amendment - `inst-release-superseded-claims`
 18. [ ] - `p1` - **IF** the row's versioning behaviour is versioning: - `inst-if-versioning-row`
     1. [ ] - `p1` - Append a new version row from the contribution, with supersedes_version set to the outgoing current version - `inst-append-version`
     2. [ ] - `p1` - Move the aggregate's current-version pointer to the new version - `inst-move-version-pointer`
@@ -646,7 +646,7 @@ follow: no step **MAY** take the claim after step 17, and no path **MAY** map th
 infrastructure error.
 
 **Tuple identity and acquisition ordering.** Sub-steps 17.3 to 17.6 compare full
-`(payer_tenant_id, overlap_scope_key)` tuples: retain held tuples, acquire missing tuples and
+`(payer_tenant_id, resource_tenant_id, overlap_scope_key)` tuples: retain held tuples, acquire missing tuples and
 release superseded tuples only after complete acquisition. A refusal preserves all claims held
 on entry and releases only this attempt's provisional acquisitions as specified in §3.7. Release
 first — the earlier shape — committed the release along with the refusal, so a refused amendment

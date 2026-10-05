@@ -74,7 +74,7 @@ instant.
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-overlap-presence-read`
 
-An **overlap-key occupancy read**: batched, and for each `(payer_tenant_id, overlap_scope_key)`
+An **overlap-key occupancy read**: batched, and for each `(payer_tenant_id, resource_tenant_id, overlap_scope_key)`
 returning `(activeCount, maxConcurrentActive, provenance)` — the number of subscriptions `active`
 on that key (drafts excluded), the effective concurrent-active cardinality, and the Catalog/Contract
 policy that cardinality was resolved from. Registered upstream as **`SUB-O5`**, unagreed.
@@ -82,10 +82,17 @@ policy that cardinality was resolved from. Registered upstream as **`SUB-O5`**, 
 presence"): a boolean cannot evaluate `activeCount + proposed ≤ maxConcurrentActive` when the limit
 exceeds one, so this design asks for the count and the limit; the Subscriptions gear's own seam map
 is not edited here ([`DECISIONS.md`](./DECISIONS.md) D-126). The requirement ID is kept for
-stability. The against-existing-subscriptions half of the
+stability. **Second amendment (D-179):** the tuple carries the resource tenant, by making
+`resourceTenantId` a default dimension of `overlapScopeKey` — Subscriptions' own
+`design/03-plan-changes.md` §4.4 already permits extra dimensions — and enforcing the same tuple at
+the active commit. On self-service sales payer and resource tenant are one tenant, so only the
+partner path changes. Until Subscriptions enforces the resource dimension at its active commit, it answers on the tuple it
+enforces and says so in `provenance`; predicate 7 applies that answer as given, so a per-payer answer
+refuses a partner's second customer at cardinality one at submit rather than passing it into an
+activation refusal. Orders never re-buckets a per-payer count locally (D-83: no local fork). The against-existing-subscriptions half of the
 submit gate's overlap predicate depends on it; until it lands that half is unevaluable and
 therefore a refusal, which fails closed. The same read serves Workflow's pre-wave-2 re-check
-(Workflow D-195); the shape is `occupancy(payer, keys[]) → [{ key, active_count, draft_count,
+(Workflow D-195); the shape is `occupancy(payer, resource_tenant, keys[]) → [{ key, active_count, draft_count,
 max_concurrent_active, source }]`, with the keys obtained through
 `…-upreq-catalog-subscription-product-key`.
 
@@ -780,8 +787,9 @@ submits the prospective line/revision, batched and seller-scoped, to a Subscript
 (proposed `SubscriptionsOverlapKeyV1::keys`, the SUB-P8 shape: the neighbour submits, Subscriptions
 answers) and stores the key(s) plus derivation/policy provenance as answered; it never computes the
 key. Missing key and unavailable resolver are distinct. Resolve it once per assessment, store it on
-the version, and reuse it at activation. The partner/customer dimension (Q-05) remains a joint
-decision.
+the version, and reuse it at activation. The partner/customer dimension (Q-05) is closed for
+the Orders in-flight claim by D-179, which keeps `resource_tenant_id` beside the key rather than
+inside it; the subscription-side dimension rides the `SUB-O5` amendment above.
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-products-sku-read-grant`
 
@@ -859,7 +867,7 @@ mitigation exists.
 
 - **PRD**: [`./PRD.md`](./PRD.md) — §13 dependencies, §15 open questions
 - **DESIGN**: [`./DESIGN.md`](./DESIGN.md) §3.5, §3.8; [01 §3.8](DESIGN.md#contract-01-3-8), §4.4; [03 §2.2](DESIGN.md#contract-03-2-2); [06 §4.2](DESIGN.md#contract-06-4-2), §4.6
-- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-178, Q-04, Q-05, Q-08, Q-32, Q-33
+- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-179, Q-04, Q-05, Q-08, Q-32, Q-33
 - **ADRs**: [`./ADR/0003`](./ADR/0003-cpt-cf-bss-orders-lifecycle-adr-fail-closed-gate.md) — the fail-closed posture that makes `SUB-O5` a blocker rather than a degradation; [`./ADR/0006`](./ADR/0006-cpt-cf-bss-orders-lifecycle-adr-outbox-publication.md) — the platform producer path and Event Broker readiness gate
 - **Upstream registers**: `gears/bss/subscriptions/docs/SEAMS.md` §I (`SUB-O1`…`SUB-O6`); the sibling Workflow PRD §13 (`SUB-O5`…`SUB-O9`); `gears/bss/rating/docs/SEAMS.md` for the three Rating asks; `gears/bss/contracts/docs/PRD.md` §6.6 (*Party eligibility predicate*, *Booking instant and acceptance*) for the Contracts asks; `gears/bss/subscriptions/docs/SEAMS.md` `SUB-G1` (PR #4177) for the catalog-registry product key; `gears/bss/pricing/docs` D-419–D-425 and PRD §2.2 for the Pricing reads and system subjects; `gears/bss/products/docs` P-D-189/P-D-194 for SKU lifecycle and references. Rating **is** specified in this repository, with a PRD, a DESIGN, ADRs and its own seam register, so its asks are raised against that specification.
 - **Billing chain ownership (D-168).** The billing chain is **not** `gears/bss/ledger`. The Ledger is built and its `LedgerClientV1` is the GL posting and settlement target (`post_balanced_entry`, `settle_payment`, `allocate_payment`, `return_payment`, `record_dispute_phase`, credit application, AR balances, revenue recognition); it generates no invoices, values no at-sale facts and answers no tax, and settlement is not payment authorization. The capabilities this gear needs are owned as follows:
