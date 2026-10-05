@@ -305,6 +305,15 @@ impl RunnableCapability for GithubMirrorGear {
                 }
             }
         }
+
+        if let Some(service) = self.service.get() {
+            tokio::select! {
+                () = service.wait_for_in_process_syncs() => {}
+                () = deadline_token.cancelled() => {
+                    info!("github-mirror in-process syncs still running at the framework's stop deadline");
+                }
+            }
+        }
         Ok(())
     }
 }

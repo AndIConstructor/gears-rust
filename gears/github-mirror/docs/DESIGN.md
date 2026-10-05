@@ -149,7 +149,7 @@ Unlike repotap, raw bodies are kept only as the HTTP cache. Reads are answered f
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-toolkit-gear`
 
-The gear is started and stopped by the framework. `stop()` cancels the pool and waits for running syncs; when the framework's hard-stop deadline fires first, the pool task is aborted. A job cut short gives its claim back through a drop guard, and its session is closed out as `interrupted` by the next start-up sweep.
+The gear is started and stopped by the framework. `stop()` cancels the pool and waits for running syncs, then for the in-process syncs `LocalClient` started; when the framework's hard-stop deadline fires first, the pool task is aborted. A job cut short gives its claim back through a drop guard, and its session is closed out as `interrupted` by the next start-up sweep.
 
 #### One GitHub Token
 
@@ -347,7 +347,7 @@ A second request for the same repository while the first is queued or running ge
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-seq-in-process-sync`
 
-`LocalClient::sync_repository` calls `Service::sync_now`: the same `prepare_sync` (claim, session row, repository status), then the run itself on a task of its own that `LocalClient` spawns and awaits, so a caller that drops the call does not stop it, then the run's `SyncSummary` or its own error. It gets the deadline, the heartbeat and a `/sessions` row; it does not take a pool slot. A sync of the same repository already in flight answers `Conflict`.
+`LocalClient::sync_repository` calls `Service::sync_now`: the same `prepare_sync` (claim, session row, repository status), then the run itself on a task of its own that the service starts and tracks (`spawn_sync_now`) and `LocalClient` awaits, so a caller that drops the call does not stop it, then the run's `SyncSummary` or its own error. It gets the deadline, the heartbeat and a `/sessions` row; it does not take a pool slot, but at most `max_concurrent_syncs` in-process syncs run at once, and `stop()` waits for them. A sync of the same repository already in flight answers `Conflict`.
 
 #### Resume
 
@@ -458,6 +458,8 @@ Tasks have no table: the queue is in memory.
 Issues and pull requests are listed newest first. A sweep starts from the family's `last_seen_updated_at` minus a five-minute overlap and stops at the first page whose rows are all older. The newest `updated_at` seen is staged as the candidate; it is promoted only when the whole family, including its refinements, has finished. A run that stops early promotes nothing, so the next run walks the listing again and the gate re-seeds whatever was left `pending`. `force` ignores the watermark.
 
 Commits have no date watermark. Their only date is `committer.date`, which the committer's machine sets: a commit dated in the future would push the bound past every later commit, and one made before the last sync but pushed after it would fall below the bound. The commits sweep keeps the head commit instead. When page one's `ETag` has changed and a head from the last complete sweep is stored, it asks `GET /repos/{owner}/{name}/compare/{last_head}...{head}` for the commits added since, whatever their dates, and then walks the commit comments as usual. The first sync, `force`, and a head GitHub no longer has below the new one (a force push answers `diverged` or `404`) walk the whole listing instead. The new head is promoted with the page-one `ETag`, at the same family-complete point.
+
+Workflow runs have no watermark either: a sync reads the newest ten pages of `/actions/runs` (1,000 runs) and stops there, and older runs keep what was stored. Runs are never reconciled away, so the cap removes nothing.
 
 #### 3.8.2 Change Gate
 

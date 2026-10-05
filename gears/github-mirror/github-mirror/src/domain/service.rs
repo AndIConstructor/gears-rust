@@ -14,6 +14,7 @@ use github_mirror_sdk::{
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use toolkit_macros::domain_model;
 use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
@@ -554,6 +555,8 @@ pub struct Service {
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
     active_syncs: Arc<dyn ActiveSyncRepository>,
     instance_id: Uuid,
+    in_process_syncs: TaskTracker,
+    in_process_slots: Arc<tokio::sync::Semaphore>,
     /// One gate per repository, so the look, the write and the claim that a
     /// queue request makes are serialised for that repository alone rather than
     /// for the whole gear.
@@ -743,6 +746,8 @@ impl Clone for Service {
             sync_rx: Arc::clone(&self.sync_rx),
             active_syncs: Arc::clone(&self.active_syncs),
             instance_id: self.instance_id,
+            in_process_syncs: self.in_process_syncs.clone(),
+            in_process_slots: Arc::clone(&self.in_process_slots),
             claim_gates: self.claim_gates.clone(),
             shutdown: Arc::clone(&self.shutdown),
         }
@@ -795,6 +800,9 @@ impl Service {
         config: ServiceConfig,
     ) -> Self {
         let (sync_tx, sync_rx) = mpsc::channel(SYNC_QUEUE_DEPTH);
+        let in_process_slots = Arc::new(tokio::sync::Semaphore::new(
+            config.max_concurrent_syncs.get(),
+        ));
         Self {
             db,
             repo,
@@ -835,6 +843,8 @@ impl Service {
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
             active_syncs,
             instance_id: Uuid::new_v4(),
+            in_process_syncs: TaskTracker::new(),
+            in_process_slots,
             claim_gates: gate::ClaimGates::default(),
             shutdown: Arc::new(OnceLock::new()),
         }
@@ -3747,6 +3757,31 @@ impl Service {
             session_id: id,
             status: SessionStatus::Queued,
         })
+    }
+
+    #[must_use]
+    pub fn spawn_sync_now(
+        self: &Arc<Self>,
+        ctx: SecurityContext,
+        owner: String,
+        name: String,
+    ) -> tokio::task::JoinHandle<Result<SyncSummary, DomainError>> {
+        let service = Arc::clone(self);
+        self.in_process_syncs.spawn(async move {
+            let shutdown = service.shutdown_token();
+            let _slot = tokio::select! {
+                slot = service.in_process_slots.acquire() => slot.map_err(|e| {
+                    DomainError::internal(format!("the in-process sync slots are closed: {e}"))
+                })?,
+                () = shutdown.cancelled() => return Err(DomainError::Cancelled),
+            };
+            service.sync_now(&ctx, &owner, &name).await
+        })
+    }
+
+    pub async fn wait_for_in_process_syncs(&self) {
+        self.in_process_syncs.close();
+        self.in_process_syncs.wait().await;
     }
 
     /// Sync `owner/name` on the task that calls this and hand back what it

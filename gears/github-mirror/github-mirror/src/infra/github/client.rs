@@ -749,6 +749,31 @@ impl GithubClient {
         }
     }
 
+    async fn get_json_newest_wrapped<P: serde::de::DeserializeOwned, T>(
+        &self,
+        path: &str,
+        options: &FetchOptions,
+        max_pages: usize,
+        unwrap: impl Fn(P) -> Vec<T>,
+    ) -> Result<Vec<T>, DomainError> {
+        let mut url = self.absolute(path);
+        let mut items: Vec<T> = Vec::new();
+        for _ in 0..max_pages {
+            let fetched: FetchedPage<P> = self.get_page(&url, options).await?;
+            items.extend(unwrap(fetched.parsed));
+            match fetched.next {
+                Some(next) => url = next,
+                None => return Ok(items),
+            }
+        }
+        tracing::debug!(
+            path = %redacted_word(path),
+            max_pages,
+            "stopped after the newest pages; older entries keep what was stored"
+        );
+        Ok(items)
+    }
+
     async fn get_json_all_wrapped<P: serde::de::DeserializeOwned, T>(
         &self,
         path: &str,
@@ -1983,6 +2008,8 @@ const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $numb
 /// cursor GitHub never ends cannot keep one refinement going for ever.
 const REVIEW_THREAD_PAGES: usize = 20;
 
+const WORKFLOW_RUN_PAGES: usize = 10;
+
 fn review_threads_variables(
     owner: &str,
     name: &str,
@@ -2893,9 +2920,10 @@ impl GithubPort for GithubClient {
         }
 
         let runs = self
-            .get_json_all_wrapped(
+            .get_json_newest_wrapped(
                 &format!("/repos/{owner}/{name}/actions/runs?per_page={FIRST_PAGE_SIZE}"),
                 options,
+                WORKFLOW_RUN_PAGES,
                 |page: GhWorkflowRunsPage| page.workflow_runs,
             )
             .await?;
