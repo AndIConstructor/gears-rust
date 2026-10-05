@@ -17285,6 +17285,12 @@
       "ResumeAcceptedDto": {
         "description": "Sessions queued by one resume call.",
         "properties": {
+          "failed": {
+            "items": {
+              "$ref": "#/components/schemas/ResumeFailureDto"
+            },
+            "type": "array"
+          },
           "resumed": {
             "description": "How many repositories were re-queued.",
             "minimum": 0,
@@ -17300,7 +17306,23 @@
         },
         "required": [
           "resumed",
-          "session_ids"
+          "session_ids",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "ResumeFailureDto": {
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "error"
         ],
         "type": "object"
       },

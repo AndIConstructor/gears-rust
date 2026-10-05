@@ -1440,6 +1440,61 @@ async fn a_graphql_server_error_followed_by_success_is_retried() {
 }
 
 #[tokio::test]
+async fn a_redirect_to_another_host_is_refused() {
+    let server = MockServer::start_async().await;
+    let elsewhere = MockServer::start_async().await;
+    let foreign = elsewhere
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+    let moved = format!("{}/repos/rust-lang/rust", elsewhere.base_url());
+    server
+        .mock_async(move |when, then| {
+            when.method("GET").path("/repos/rust-lang/rust");
+            then.status(302).header("location", moved);
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let result = client
+        .fetch_repository_metadata("rust-lang", "rust", &opts(ScopeConfig::default()))
+        .await;
+
+    assert!(
+        matches!(result, Err(DomainError::Internal(_))),
+        "a redirect off the API host must fail the request, got {result:?}"
+    );
+    foreign.assert_calls_async(0).await;
+}
+
+#[tokio::test]
+async fn a_redirect_on_the_api_host_is_followed() {
+    let server = MockServer::start_async().await;
+    let moved = format!("{}/repositories/42", server.base_url());
+    server
+        .mock_async(move |when, then| {
+            when.method("GET").path("/repos/rust-lang/old-name");
+            then.status(301).header("location", moved);
+        })
+        .await;
+    let renamed = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repositories/42");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+
+    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    client
+        .fetch_repository_metadata("rust-lang", "old-name", &opts(ScopeConfig::default()))
+        .await
+        .expect("a renamed repository answers with a redirect on the same host");
+    renamed.assert_calls_async(1).await;
+}
+
+#[tokio::test]
 async fn malformed_json_maps_to_internal() {
     let server = MockServer::start_async().await;
     server

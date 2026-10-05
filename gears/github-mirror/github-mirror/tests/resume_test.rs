@@ -260,7 +260,8 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
         .resume_incomplete_syncs(&ctx, None, false)
         .await
         .expect("resume must queue the repository again");
-    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed.session_ids.len(), 1);
+    assert!(resumed.refused.is_empty());
     assert_eq!(pump.drain(&service).await, 1);
 
     assert_eq!(
@@ -293,7 +294,7 @@ async fn a_repository_that_finished_has_nothing_to_resume() {
         .expect("resume must succeed");
 
     assert!(
-        resumed.is_empty(),
+        resumed.session_ids.is_empty(),
         "a completed repository is not resumed; asking for that is what POST /sync is for"
     );
 }
@@ -318,7 +319,7 @@ async fn one_tenant_cannot_resume_another_tenants_repository() {
         .expect("resume must succeed");
 
     assert!(
-        resumed.is_empty(),
+        resumed.session_ids.is_empty(),
         "the interrupted repository belongs to another tenant"
     );
 }

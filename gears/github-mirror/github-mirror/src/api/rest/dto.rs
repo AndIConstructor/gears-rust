@@ -1060,6 +1060,14 @@ pub struct ResumeAcceptedDto {
     pub resumed: usize,
     /// One session id per re-queued repository, in slug order.
     pub session_ids: Vec<String>,
+    pub failed: Vec<ResumeFailureDto>,
+}
+
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct ResumeFailureDto {
+    pub repository: String,
+    pub error: String,
 }
 
 /// Per-repository run status: the durable record resume works from.

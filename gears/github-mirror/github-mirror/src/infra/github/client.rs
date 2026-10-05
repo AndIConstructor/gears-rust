@@ -309,14 +309,24 @@ impl GithubClient {
         token: Option<String>,
         cache: Arc<dyn HttpCache>,
     ) -> Result<Self, DomainError> {
+        let parsed = url::Url::parse(&api_base_url)
+            .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?;
+        let redirect_origin = parsed.origin();
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() < MAX_REDIRECTS
+                    && attempt.url().origin() == redirect_origin
+                {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .build()
             .map_err(|e| DomainError::internal(format!("failed to build HTTP client: {e}")))?;
-        let parsed = url::Url::parse(&api_base_url)
-            .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?;
         if parsed.scheme() == "http" && token.is_some() && !is_loopback(&parsed) {
             return Err(DomainError::internal(format!(
                 "the GitHub API base URL {} uses http, which would send the token in cleartext; \
@@ -2015,6 +2025,8 @@ const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $numb
 /// busy repository, and the walk stops at [`REVIEW_THREAD_PAGES`] pages so a
 /// cursor GitHub never ends cannot keep one refinement going for ever.
 const REVIEW_THREAD_PAGES: usize = 20;
+
+const MAX_REDIRECTS: usize = 10;
 
 const WORKFLOW_RUN_PAGES: usize = 10;
 

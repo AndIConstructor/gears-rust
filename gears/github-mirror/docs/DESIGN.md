@@ -353,7 +353,7 @@ A second request for the same repository while the first is queued or running ge
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-seq-resume`
 
-`POST /sync/resume` lists repositories whose run status is `in_progress` and queues each with the configured scope. The repository status stays `in_progress` after a failed or interrupted run on purpose; only a completed run moves it to `complete`.
+`POST /sync/resume` lists repositories whose run status is `in_progress` and queues each with the configured scope. A repository that cannot be queued (another run on different terms, or a full queue) is listed in the answer's `failed` with its error; with `?repo=owner/name` that one repository's error is returned instead. The repository status stays `in_progress` after a failed or interrupted run on purpose; only a completed run moves it to `complete`.
 
 #### Cache-Before-Network Request
 

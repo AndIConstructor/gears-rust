@@ -186,6 +186,32 @@ fn silent_too_long(stamp: &str, now: DateTime<Utc>) -> bool {
         .is_ok_and(|at| (now - at.with_timezone(&Utc)).num_seconds() > ABANDONED_AFTER_SECS)
 }
 
+async fn heartbeat(
+    sessions: Arc<dyn SyncSessionRepository>,
+    scope: AccessScope,
+    session_id: Uuid,
+    percent: Arc<AtomicU8>,
+    stop: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = stop.cancelled() => return,
+            () = tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_SECS)) => {}
+        }
+        let progress_percent = i32::from(percent.load(Ordering::Relaxed));
+        if let Err(e) = sessions
+            .record_heartbeat(&scope, session_id, progress_percent, &now_rfc3339())
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "sync heartbeat could not persist progress"
+            );
+        }
+    }
+}
+
 fn stored_summary_json(session_id: Uuid, summary: &SyncSummary) -> Option<String> {
     match serde_json::to_string(summary) {
         Ok(json) => Some(json),
@@ -445,6 +471,18 @@ pub(crate) const SYNC_QUEUE_DEPTH: usize = 64;
 /// The status is read rather than assumed, because a request that collapsed
 /// into a run already going is handed that run's session, which may have left
 /// `queued` some time ago.
+#[derive(Debug, Default)]
+pub struct ResumeOutcome {
+    pub session_ids: Vec<Uuid>,
+    pub refused: Vec<RefusedResume>,
+}
+
+#[derive(Debug)]
+pub struct RefusedResume {
+    pub repository: String,
+    pub error: DomainError,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueuedSync {
     pub session_id: Uuid,
@@ -3623,18 +3661,20 @@ impl Service {
     /// run rather than a second one, so calling resume twice is harmless.
     ///
     /// # Errors
-    /// `Forbidden`/`Database` as usual. A repository that cannot be queued is
-    /// skipped, so one full queue does not abandon the rest.
+    /// `Forbidden`/`Database` as usual, and, when `only` names one
+    /// repository, the error that kept it from being queued. Otherwise a
+    /// repository that cannot be queued is listed in `refused`, so one full
+    /// queue does not abandon the rest.
     pub async fn resume_incomplete_syncs(
         &self,
         ctx: &SecurityContext,
         only: Option<&str>,
         force: bool,
-    ) -> Result<Vec<Uuid>, DomainError> {
+    ) -> Result<ResumeOutcome, DomainError> {
         let pending = self.repos_awaiting_resume(ctx, only).await?;
         let scopes = self.enqueue_scopes(ctx).await?;
 
-        let mut resumed = Vec::with_capacity(pending.len());
+        let mut outcome = ResumeOutcome::default();
         for repo in pending {
             let Some((owner, name)) = repo.repo_full_name.split_once('/') else {
                 tracing::warn!(
@@ -3647,16 +3687,23 @@ impl Service {
                 .enqueue_sync_scoped(ctx, &scopes, owner, name, None, force, None)
                 .await
             {
-                Ok(queued) => resumed.push(queued.session_id),
-                Err(e) => tracing::warn!(
-                    repository = %repo.repo_full_name,
-                    error = %e,
-                    "could not queue a resume for this repository"
-                ),
+                Ok(queued) => outcome.session_ids.push(queued.session_id),
+                Err(e) if only.is_some() => return Err(e),
+                Err(e) => {
+                    tracing::warn!(
+                        repository = %repo.repo_full_name,
+                        error = %e,
+                        "could not queue a resume for this repository"
+                    );
+                    outcome.refused.push(RefusedResume {
+                        repository: repo.repo_full_name,
+                        error: e,
+                    });
+                }
             }
         }
 
-        Ok(resumed)
+        Ok(outcome)
     }
 
     /// Record a sync request and hand it to the background worker.
@@ -4185,7 +4232,9 @@ impl Service {
         };
 
         let progress = SyncProgress::new();
-        let outcome = self.sync_within_deadline(job, &progress, cancel).await;
+        let outcome = self
+            .sync_within_deadline(job, &scope, &progress, cancel)
+            .await;
 
         let completed = outcome.is_ok();
         match &outcome {
@@ -4248,12 +4297,13 @@ impl Service {
     async fn sync_within_deadline(
         &self,
         job: &SyncJob,
+        session_scope: &AccessScope,
         progress: &SyncProgress,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
         let job_cancel = cancel.child_token();
         let deadline = self.config.sync_deadline;
-        let sync = self.sync_with_heartbeat(job, progress, &job_cancel);
+        let sync = self.sync_with_heartbeat(job, session_scope, progress, &job_cancel);
         let mut sync = std::pin::pin!(sync);
 
         tokio::select! {
@@ -4278,10 +4328,10 @@ impl Service {
     async fn sync_with_heartbeat(
         &self,
         job: &SyncJob,
+        session_scope: &AccessScope,
         progress: &SyncProgress,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
-        let percent = progress.handle();
         let options = FetchOptions {
             tenant_id: job.ctx.subject_tenant_id(),
             access_scope: job.access_scope.clone(),
@@ -4290,41 +4340,29 @@ impl Service {
             since: job.since,
             cancel: cancel.clone(),
         };
-        let sync = self
-            .sync_repository_scoped(&job.ctx, &job.owner, &job.name, &options, progress, cancel);
-        let mut sync = std::pin::pin!(sync);
+        let stop_beating = CancellationToken::new();
+        let _stop_on_drop = stop_beating.clone().drop_guard();
+        let beat = tokio::spawn(heartbeat(
+            Arc::clone(&self.sync_sessions),
+            session_scope.clone(),
+            job.session_id,
+            progress.handle(),
+            stop_beating.clone(),
+        ));
 
-        loop {
-            tokio::select! {
-                outcome = &mut sync => return outcome,
-                () = tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_SECS)) => {
-                    let progress_percent = i32::from(percent.load(Ordering::Relaxed));
-                    if let Err(e) = self
-                        .save_session_progress(&job.ctx, job.session_id, progress_percent)
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %job.session_id,
-                            error = %e,
-                            "sync heartbeat could not persist progress"
-                        );
-                    }
-                }
-            }
+        let outcome = self
+            .sync_repository_scoped(&job.ctx, &job.owner, &job.name, &options, progress, cancel)
+            .await;
+
+        stop_beating.cancel();
+        if let Err(e) = beat.await {
+            tracing::warn!(
+                session_id = %job.session_id,
+                error = %e,
+                "sync heartbeat task did not finish cleanly"
+            );
         }
-    }
-
-    /// One heartbeat write, on its own scope: progress and `updated_at` only.
-    async fn save_session_progress(
-        &self,
-        ctx: &SecurityContext,
-        session_id: Uuid,
-        progress_percent: i32,
-    ) -> Result<(), DomainError> {
-        let scope = self.session_scope(ctx, actions::UPSERT).await?;
-        self.sync_sessions
-            .record_heartbeat(&scope, session_id, progress_percent, &now_rfc3339())
-            .await
+        outcome
     }
 
     /// Close out sessions left mid-flight by a previous process.
