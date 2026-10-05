@@ -263,7 +263,7 @@ Output: expired count
       1. [ ] - `p1` - **IF** the state is `on_hold` **AND** its pre-hold state is `in_fulfillment`: - `inst-es-if-hold-from-fulfillment`
          1. [ ] - `p1` - **SKIP TO** the next order; this case is escalated, never expired - `inst-es-skip-exempt-hold`
       2. [ ] - `p1` - Capture `order_id`, `current_version`, `audit_sequence`, state, `state_entered_at`, effective `(policy_id, policy_revision, ttl_duration)` and `platform_policy_revision`. Derive the deterministic key from the canonical tuple defined below - `inst-es-derive-key`
-      3. [ ] - `p1` - Invoke the private engine entry with `order_id`, trigger `expire`, configured `security_context`, `idempotency_key`, `expected_version = selected.current_version`, deterministic attempt `correlation_id` and the expiry contribution below. Narrow internal target authority to this order; actor class `system` is derived from the authenticated context — the configured Orders worker identity (D-115) — never from the worker entry and never a replacement for SecurityContext - `inst-es-request-expiry`
+      3. [ ] - `p1` - Invoke the private engine entry with `order_id`, trigger `expire`, configured `security_context`, `idempotency_key`, `expected_version = selected.current_version`, deterministic attempt `correlation_id` and the expiry contribution below. Narrow internal target authority to this order with `TargetScope::from_discovered` over the selected row (D-184); candidate selection (`inst-es-select-eligible`, `inst-es-select-platform-fallback`) runs under a `DiscoveryScope` in a read-only transaction that ends before this call, while the policy snapshot keeps its own locking SecureTx; actor class `system` is derived from the authenticated context — the configured Orders worker identity (D-115) — never from the worker entry and never a replacement for SecurityContext - `inst-es-request-expiry`
       4. [ ] - `p1` - On `not-admissible`, `expiry-exempt-prehold`, `expiry-not-due`, `expiry-candidate-stale` or the engine's expected-version conflict: record the outcome and continue past this scanned key. On `still-processing`, do not retry in-pass; leave the order for a later pass. On `idempotency-mismatch` or `authorization-context-changed`, record it as a worker defect, raise the sweep-error count of `§3.8` and continue, never retrying the same key. On infrastructure failure, retry the identical request within a bounded retry budget; if exhausted, record the failure and continue, leaving the order for a later pass. Never count a refusal/failure as expiry - `inst-es-if-refused`
 3. [ ] - `p1` - **RETURN** the expired count for the sweep metric - `inst-es-return-count`
 
@@ -533,7 +533,7 @@ has had no state transition since creation.
 The draft worker follows §3.6's full engine-input, policy-revision, keyset and retry contract —
 including the refusal handling of `inst-es-if-refused` and its sweep-error count — using trigger `auto-void`, `worker_kind = draft-auto-void`, and `created_at` as its dwell input.
 It supplies the selected `current_version` and `audit_sequence` and a configured internal
-SecurityContext; it is not an actor-class-only call. The engine rechecks `draft` and its effective
+SecurityContext and a `TargetScope` built from the selected row (D-184); it is not an actor-class-only call. The engine rechecks `draft` and its effective
 auto-void deadline under lock before committing.
 
 **Draft pass specialization:** on the shared five-minute working cadence, acquire

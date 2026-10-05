@@ -9318,6 +9318,57 @@ only inside this worker exception. Never carry a broad discovery scope into a wr
 [Foundation contract §3.8](DESIGN.md#contract-01-3-8) advisory locks, bounded batches, transactional eligibility checks and database-role separation
 remain mandatory; a lease is coordination, not authorization.
 
+**Structural scope separation (D-184).** The narrowing rule above is enforced by type and lint,
+not by review alone. Pricing's discover-broad-then-narrow convention ([infra/jobs.rs:42-47](../../pricing/pricing/src/infra/jobs.rs);
+`list_due` under `allow_all` at [jobs/window_activation.rs:413](../../pricing/pricing/src/infra/jobs/window_activation.rs) vs `for_tenant` before the write at `:453`)
+is the pattern being hardened; Ledger's `expire_due_all` ([approval_repo.rs:310-331](../../ledger/ledger/src/infra/storage/repo/approval_repo.rs)), a
+cross-tenant `UPDATE` executed directly under `allow_all`, is evidence that the convention alone
+drifts. The toolkit has no read-only scope type: one `&AccessScope` is accepted by
+`SecureSelect::scope_with` (`libs/toolkit-db/src/secure/select.rs:167`), `SecureUpdateMany::scope_with`
+and `SecureDeleteMany::scope_with` (`db_ops.rs:1164`, `:1262`) and `SecureInsertOne::scope_with_model`
+(`db_ops.rs:661`), and `AccessScope::allow_all()` (`libs/toolkit-security/src/access_scope.rs:844`) is
+public without a capability check. Orders therefore adds two crate-local newtypes with private
+fields; no toolkit change is required or proposed:
+
+- `DiscoveryScope` — constructor visible only inside the maintenance-discovery module; wraps
+  `AccessScope::allow_all()` and exposes only scoped **select** construction (a method taking an
+  entity select and returning `SecureSelect<E, Scoped>`). It never exposes `&AccessScope` and
+  implements no `Deref`, `AsRef`, `Borrow` or conversion into one, so it cannot reach an update,
+  delete or insert scope method. Every discovery query runs inside
+  `SecureConn::transaction_with_config(TxConfig::read_only(), …)` (`secure_conn.rs:650`,
+  `tx_config.rs:134`), so the database also rejects a write issued from discovery. Discovery
+  returns owned discovered-row values (`DiscoveredOrder` and one type per cleanup/purge/audit
+  table) and ends its transaction before any write. PostgreSQL refuses a locking read
+  (`FOR UPDATE … SKIP LOCKED`) in a read-only transaction, so candidate locking and the
+  eligibility recheck belong to the target phase, under `TargetScope`.
+- `TargetScope` — constructible only from a discovered row's persisted identifiers.
+  `TargetScope::from_discovered(&DiscoveredOrder)` yields the standard resource-ID restriction
+  on `order_id` (`AccessScope::for_resource`, `access_scope.rs:888`) conjoined with that row's
+  stored `seller_tenant_id`, `payer_tenant_id` and `resource_tenant_id` properties (§4.3; the
+  aggregate is `no_tenant`, so never `for_tenant()`). Per-table constructors from the discovered
+  idempotency, retention-candidate and audit-namespace rows yield the record-ID or namespace
+  restriction that table's grant names. There is no constructor from a raw UUID, caller input,
+  `SecurityContext` or `AccessScope`. The private worker engine entry
+  ([01 §3.6](features/01-foundation.md#contract-01-3-6) *Internal worker entry*) and the idempotency-cleanup, retention-purge and
+  checkpoint repositories accept only `&TargetScope`; the engine still rechecks state, deadline
+  and stored properties under the aggregate lock.
+- Lint — the Orders crates deny `clippy::disallowed_methods` with an entry for
+  `AccessScope::allow_all` (path as resolved from `toolkit_security`); `#[allow]` appears only on
+  the `DiscoveryScope` constructor. Clippy reads the nearest configuration file and does not
+  merge (`libs/.clippy.toml:1-10` replaces the workspace file and drops its entries), so a
+  crate-local file carries over the whole workspace file (secure-ORM `disallowed-methods` at
+  `clippy.toml:16-27`, thresholds and `disallowed-types` through `:59`). If a crate-local file is rejected, a CI grep failing on
+  `allow_all` outside the discovery module is the fallback.
+
+Limitations, stated rather than claimed closed: `SecureInsertOne::scope_unchecked`
+(`db_ops.rs:641`) ignores its scope, so the types do not constrain such an insert; worker-path
+inserts (checkpoint rows, worker audit and outbox effects) use `scope_with_model` with a
+`TargetScope` and rest on its validation and the restricted database grants above. Workers still
+hold a connection that can write: the types restrict which scope a worker can obtain, not the
+connection, so role separation remains the second line. Toolkit-internal `allow_all` uses on
+`no_tenant` coordination tables (leases, platform outbox) are outside the Orders crates and
+unaffected.
+
 Orders intentionally differs from Pricing's nil/anonymous worker attribution: use a real
 configured service actor for evidence, never an invented human, nil UUID or caller impersonation.
 Expiry and auto-void still use the transition engine and commit audit/outbox effects atomically;
@@ -9329,7 +9380,12 @@ not obtained as a fallback after a PDP denial. Missing internal authority or dat
 fails the affected job closed. Request-driven refusal evidence uses the separately bounded
 private persistence path below, not a worker capability borrowed by a caller. Tests must prove public callers cannot reach the internal path,
 discovery scopes never reach writes, target/retention restrictions hold, and worker transitions
-retain configured actor attribution and transactional audit.
+retain configured actor attribution and transactional audit. The first two are **blocking CI
+gates** (D-184), each backed by compile-fail evidence (`trybuild`, as
+`libs/toolkit-db-macros/tests/ui.rs:16-22`): `DiscoveryScope` cannot be constructed outside its
+module or passed to an update, delete, insert or worker-entry parameter; `TargetScope` has no
+raw constructor; and the `allow_all` lint fails outside the discovery module. A write attempted
+inside a discovery transaction fails on PostgreSQL as read-only.
 
 The repository donor describes this pattern as sanctioned; this design records the bounded
 Orders exception explicitly rather than claiming blanket PDP compliance or independently
@@ -9457,7 +9513,8 @@ that separation, not a new authorization framework:
 | Orders catalog and route tests | A recording PDP test double verifies the actual resource/action and properties for every public operation. Compare coverage against registered routes so an added or mis-gated route fails; verify catalog consistency and caller-context propagation |
 | Orders enforcement tests | Missing dependency fails initialization; denied operations leave business state/outbox unchanged; missing required constraints and invalid responses fail closed; outages return sanitized 503 without settling keys; refusal persistence follows the private audit contract |
 | Orders-specific isolation tests | Resource, seller and current-payer paths; combined complete grants; required delegation; historical child reads; former-payer loss of access including cursor/replay requests; audit-read separation; old-side allow/new-side deny and the reverse |
-| Orders database integration tests | On PostgreSQL, race authorization against tenant/version changes and verify conflict without mutation or key settlement, transactional audit/outbox rollback, and isolation of concurrent idempotent attempts. Test worker target/retention limits and rejection of public access to internal capabilities |
+| Orders database integration tests | On PostgreSQL, race authorization against tenant/version changes and verify conflict without mutation or key settlement, transactional audit/outbox rollback, and isolation of concurrent idempotent attempts. Test worker target/retention limits, rejection of public access to internal capabilities (blocking CI gate, D-184) and refusal of a write inside a `TxConfig::read_only()` discovery transaction |
+| Orders compile-time and lint gates (blocking CI, D-184) | `trybuild` compile-fail cases: `DiscoveryScope` constructed outside the discovery module, passed where `&AccessScope` or `&TargetScope` is expected, or dereferenced to `&AccessScope`; `TargetScope` built from a raw UUID or `AccessScope`. `clippy::disallowed_methods` denies `AccessScope::allow_all` outside the discovery module (CI grep fallback). "Public callers cannot reach the internal path" and "discovery scopes never reach writes" fail the build |
 | Platform/deployment verification | Against the selected real provider, verify role assignments and action/relationship policy behavior under `cpt-cf-bss-orders-lifecycle-upreq-pdp-policy-integration`; record provider and policy revisions |
 
 An in-process fake PDP proves that Orders asks the correct question and enforces the supplied

@@ -570,7 +570,9 @@ authority, not a user-supplied system flag. They recheck due-state/TTL eligibili
 properties under the same aggregate lock and keep every business guard, idempotency rule,
 transactional audit requirement and outbox obligation. They cannot rebind tenant axes or replay
 another principal's outcomes. Orders Workflow remains a PDP-governed external caller. Broad
-worker discovery scopes must never reach transition writes. Worker audit persistence uses its
+worker discovery scopes must never reach transition writes: the entry accepts only a
+`TargetScope` constructed from the discovered row's persisted `order_id` and stored tenant
+properties, never `&AccessScope` or a `DiscoveryScope` (D-184, [08 §3.5](../DESIGN.md#contract-08-3-5)). Worker audit persistence uses its
 configured restricted internal authority, with the same audit integrity guarantees as the
 private request-persistence path; neither path may bypass database grants.
 
@@ -951,8 +953,10 @@ create may be followed by a genuinely new create after the window, as the contra
 **Idempotency-window cleanup executor.** The existing worker in §3.8 uses advisory key
 `idempotency-cleanup` in namespace `bss-orders-lifecycle`. Design-selected configurable baseline:
 run every 60 seconds, at most 500 rows per pass, using the `expires_at` index and deterministic
-ordering by expiry then primary key. Select candidates under row locks with `SKIP LOCKED`,
-recheck against fresh database time, and delete only rows with `expires_at <= t` that are either
+ordering by expiry then primary key. Discover candidate keys under a `DiscoveryScope` in a
+read-only transaction (D-184), then in the deleting transaction lock those rows through their
+per-record `TargetScope` with `SKIP LOCKED` (a locking read is refused in a read-only
+transaction, so it belongs to the target phase), recheck against fresh database time, and delete only rows with `expires_at <= t` that are either
 settled or also have an expired in-flight lease. Commit the bounded batch and explicitly release
 the advisory guard; on failure roll back and retry on a later scheduled pass. Never acquire an
 aggregate lock from this worker, delete a live/reclaimed marker, or delete its referenced audit
