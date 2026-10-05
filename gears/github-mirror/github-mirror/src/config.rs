@@ -130,22 +130,21 @@ impl GithubMirrorConfig {
                 message: "must not carry a user name or a password".to_owned(),
             });
         }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(crate::domain::error::DomainError::Validation {
+                field: "api_base_url".to_owned(),
+                message:
+                    "must not carry a query or a fragment: every request path is appended to it"
+                        .to_owned(),
+            });
+        }
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(crate::domain::error::DomainError::Validation {
                 field: "api_base_url".to_owned(),
                 message: format!(
                     "`{}` must use http or https, not `{}`",
-                    self.api_base_url,
+                    crate::redact::redacted_word(&self.api_base_url),
                     parsed.scheme()
-                ),
-            });
-        }
-        if parsed.query().is_some() || parsed.fragment().is_some() {
-            return Err(crate::domain::error::DomainError::Validation {
-                field: "api_base_url".to_owned(),
-                message: format!(
-                    "`{}` must not carry a query or a fragment: every request path is appended to it",
-                    self.api_base_url
                 ),
             });
         }
@@ -159,7 +158,7 @@ impl GithubMirrorConfig {
                         "`{}` uses http, which would send the GitHub token in cleartext; ",
                         "use https (or a loopback host for local testing)"
                     ),
-                    self.api_base_url
+                    crate::redact::redacted_word(&self.api_base_url)
                 ),
             });
         }

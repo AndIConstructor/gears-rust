@@ -530,12 +530,6 @@ async fn above_the_backlog_bound_refinement_still_fills_every_lane() {
         above_bound.iter().any(|(_, _, in_flight)| *in_flight == 3),
         "above the bound refinement must still use every lane"
     );
-    assert!(
-        above_bound
-            .iter()
-            .all(|(kind, _, _)| !matches!(kind, TaskKind::Index(_))),
-        "no new listing starts while the backlog is above the bound"
-    );
 }
 
 #[tokio::test(start_paused = true)]

@@ -5379,7 +5379,14 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
         let result = SyncSessionEntity::update_many()
             .secure()
             .scope_with(scope)
-            .filter(sea_orm::Condition::all().add(sync_sessions::Column::Id.eq(id)))
+            .filter(
+                sea_orm::Condition::all()
+                    .add(sync_sessions::Column::Id.eq(id))
+                    .add(sync_sessions::Column::Status.is_in([
+                        SessionStatus::Queued.as_str(),
+                        SessionStatus::InProgress.as_str(),
+                    ])),
+            )
             .col_expr(
                 sync_sessions::Column::ProgressPercent,
                 Expr::value(progress_percent),
@@ -5391,13 +5398,61 @@ impl SyncSessionRepository for SeaOrmSyncSessionRepository {
 
         // A heartbeat that writes no row is what the liveness check reads as a
         // dead process, so it has to be said out loud rather than passed off as
-        // a write: the row is gone, or this scope cannot see it.
+        // a write: the row is gone, this scope cannot see it, or the session
+        // has already ended.
         if result.rows_affected == 0 {
             return Err(DomainError::internal(format!(
-                "the heartbeat for sync session {id} matched no row"
+                "the heartbeat for sync session {id} matched no running session"
             )));
         }
         Ok(())
+    }
+
+    async fn finish_if_running(
+        &self,
+        scope: &AccessScope,
+        record: &SyncSessionRecord,
+    ) -> Result<bool, DomainError> {
+        let conn = self.db.conn()?;
+        let result = SyncSessionEntity::update_many()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(sync_sessions::Column::Id.eq(record.id))
+                    .add(sync_sessions::Column::Status.is_in([
+                        SessionStatus::Queued.as_str(),
+                        SessionStatus::InProgress.as_str(),
+                    ])),
+            )
+            .col_expr(
+                sync_sessions::Column::Status,
+                Expr::value(record.status.as_str()),
+            )
+            .col_expr(
+                sync_sessions::Column::ProgressPercent,
+                Expr::value(record.progress_percent),
+            )
+            .col_expr(
+                sync_sessions::Column::Error,
+                Expr::value(record.error.clone()),
+            )
+            .col_expr(
+                sync_sessions::Column::SummaryJson,
+                Expr::value(record.summary_json.clone()),
+            )
+            .col_expr(
+                sync_sessions::Column::EndedAt,
+                Expr::value(record.ended_at.clone()),
+            )
+            .col_expr(
+                sync_sessions::Column::UpdatedAt,
+                Expr::value(record.updated_at.clone()),
+            )
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(result.rows_affected > 0)
     }
 
     async fn list_recent(

@@ -733,7 +733,7 @@ impl GithubClient {
         }
         Err(DomainError::internal(format!(
             "refusing to follow a link off {}: {}",
-            self.api_base_url,
+            redacted_word(&self.api_base_url),
             redacted_word(url)
         )))
     }

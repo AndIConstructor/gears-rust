@@ -1641,6 +1641,12 @@ pub trait SyncSessionRepository: Send + Sync {
         updated_at: &str,
     ) -> Result<(), DomainError>;
 
+    async fn finish_if_running(
+        &self,
+        scope: &AccessScope,
+        record: &SyncSessionRecord,
+    ) -> Result<bool, DomainError>;
+
     /// Sessions newest first, `created_at` then `id` descending, starting
     /// after the `(created_at, id)` pair in `after` when a page continues.
     async fn list_recent(

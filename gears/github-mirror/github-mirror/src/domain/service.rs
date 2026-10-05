@@ -186,6 +186,13 @@ fn silent_too_long(stamp: &str, now: DateTime<Utc>) -> bool {
         .is_ok_and(|at| (now - at.with_timezone(&Utc)).num_seconds() > ABANDONED_AFTER_SECS)
 }
 
+fn report_session_closed_meanwhile(session_id: Uuid) {
+    tracing::warn!(
+        session_id = %session_id,
+        "the session was closed while this run was still going; leaving it as it is"
+    );
+}
+
 async fn heartbeat(
     sessions: Arc<dyn SyncSessionRepository>,
     scope: AccessScope,
@@ -4035,6 +4042,30 @@ impl Service {
         }
     }
 
+    async fn finish_session_with_retry(
+        &self,
+        scope: &AccessScope,
+        session: &SyncSessionRecord,
+    ) -> Result<bool, DomainError> {
+        let mut attempt = 1;
+        loop {
+            match self.sync_sessions.finish_if_running(scope, session).await {
+                Ok(written) => return Ok(written),
+                Err(e) if attempt < SESSION_WRITE_ATTEMPTS => {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        attempt,
+                        error = %crate::redact::redacted(&e.to_string()),
+                        "could not write the sync session; trying again"
+                    );
+                    tokio::time::sleep(SESSION_WRITE_RETRY_DELAY).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     pub async fn interrupt_unstarted_job(&self, job: SyncJob) {
         let tenant_id = job.ctx.subject_tenant_id();
         match self
@@ -4268,7 +4299,6 @@ impl Service {
         job: &SyncJob,
         cancel: &CancellationToken,
     ) -> Result<Result<SyncSummary, DomainError>, DomainError> {
-        let tenant_id = job.ctx.subject_tenant_id();
         let (scope, mut session) = match self.start_session(job).await {
             Ok(started) => started,
             Err(e) => {
@@ -4311,8 +4341,10 @@ impl Service {
         session.ended_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.ended_at);
         let repo_full_name = session.repo_full_name.clone();
-        self.upsert_session_with_retry(&scope, tenant_id, session)
-            .await?;
+        if !self.finish_session_with_retry(&scope, &session).await? {
+            report_session_closed_meanwhile(job.session_id);
+            return Ok(outcome);
+        }
 
         // A run that failed leaves the repository `in_progress` on purpose:
         // that is the marker the resume operation looks for (PRD §5.2).

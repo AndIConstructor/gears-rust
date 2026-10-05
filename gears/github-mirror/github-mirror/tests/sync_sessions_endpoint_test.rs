@@ -218,11 +218,15 @@ async fn a_restart_closes_out_sessions_left_in_flight() {
         .expect("the session must exist");
     let long_ago = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
     row.created_at.clone_from(&long_ago);
-    row.updated_at = Some(long_ago.clone());
+    let id = row.id;
     sessions
         .upsert(&scope, tenant, row)
         .await
         .expect("the session must write");
+    sessions
+        .record_heartbeat(&scope, id, 0, &long_ago)
+        .await
+        .expect("the heartbeat must write");
 
     let active_syncs =
         SeaOrmActiveSyncRepository::new(Arc::new(DBProvider::<DbError>::new(db.clone())));
