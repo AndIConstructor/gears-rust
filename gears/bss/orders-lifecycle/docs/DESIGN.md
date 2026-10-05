@@ -611,7 +611,7 @@ The constraints each slice adds are defined here and specified normatively in [�
   — Preconditions — There is no `payment_pending` state ([contract](#contract-05-there-is-no-payment_pending-state))
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-declined-instrument-exit`
-  — Preconditions — A declined instrument exits by expiry, and only where the TTL is set ([contract](#contract-05-a-declined-instrument-exits-by-expiry-and-only-where-the-ttl-is-set))
+  — Preconditions — A declined instrument exits by expiry at the `approved` TTL ([contract](#contract-05-a-declined-instrument-exits-by-expiry-and-only-where-the-ttl-is-set))
 
 - [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-no-payment-collection`
   — Preconditions — Payment collection is out of scope entirely ([contract](#contract-05-payment-collection-is-out-of-scope-entirely))
@@ -635,7 +635,7 @@ The constraints each slice adds are defined here and specified normatively in [�
   — Hold and expiry — Hold does not pause the Subscriptions draft TTL ([contract](#contract-07-hold-does-not-pause-the-subscriptions-draft-ttl))
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-ttl-values-unchosen`
-  — Hold and expiry — TTL values are unchosen ([contract](#contract-07-ttl-values-are-unchosen))
+  — Hold and expiry — TTL values are provisional ([contract](#contract-07-ttl-values-are-unchosen))
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-read-fails-closed`
   — Reads and authorization — Fail closed on store unavailability ([contract](#contract-08-fail-closed-on-store-unavailability))
@@ -1028,10 +1028,11 @@ restarting the dwell without limit — its sibling, the amendment cap, is owned 
 [04 §4.1](features/04-versioning.md#contract-04-4-1) because its value is a commercial
 judgment; the coordinated expiry scheduler; and the transition-table
 exclusion of `in_fulfillment` and of holds taken from it, together with the handoff of those cases
-to the operational escalation owned by the sibling gear. It does **not** supply a fallback duration
-for a state whose TTL is unset — such a state is unbounded, disclosed in
-[07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2) and routed as
-[`DECISIONS.md`](./DECISIONS.md) Q-27.
+to the operational escalation owned by the sibling gear. It supplies **no code-constant
+fallback** duration: every expirable state ships a provisional platform TTL as a migration-seeded,
+revisioned policy row, and the policy channel refuses an unset duration in production
+([07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2), [`DECISIONS.md`](./DECISIONS.md) D-181,
+closing Q-27).
 
 ##### Responsibility boundaries
 
@@ -1817,11 +1818,14 @@ would answer successfully with stale state that nothing detects.
 
 **Infrastructure as code** is platform-owned: provisioning, environment parity, auto-scaling
 configuration and resource tagging are inherited from the platform's deployment tooling and this
-gear declares no infrastructure of its own. The deliberately unchosen policy values of
+gear declares no infrastructure of its own. The Product-owned policy values of
 [07 §4.5](DESIGN.md#contract-07-4-5) and
 [08 §4.5](DESIGN.md#contract-08-4-5) are delivered as
 `orders_state_ttl_policy` rows and gear configuration, promoted through environments with the
-deployment rather than edited at runtime. The same **policy channel** carries the per-tenant date
+deployment rather than edited at runtime. The TTL rows start as migration-seeded provisional
+values, and the channel's promotion validation **refuses any `orders_state_ttl_policy` row with a
+NULL `ttl_duration` bound for a production environment** — a release gate on the promotion, never a
+readiness condition of the running gear (D-181). The same **policy channel** carries the per-tenant date
 policy as `orders_date_policy` rows ([02 §3.7](DESIGN.md#contract-02-3-7), D-121)
 and the acceptance and tolerate-failure elections as `orders_policy_election` rows — no runtime
 endpoint writes them; a seller's election is requested through platform operations and its
@@ -1948,7 +1952,7 @@ applicable**; it consumes an authorization *outcome* only.
 | Audit tampering | A holder of database privilege edits or deletes trail rows | Data boundary | No UPDATE or DELETE grant on the audit role, plus a per-order predecessor-hash chain verified by the audit-chain verifier of [01 §3.8](DESIGN.md#contract-01-3-8); identity removal never rewrites the trail (D-96) | A database owner/migration role can alter protections or rewrite a whole chain; local hashes alone do not prove completeness against that authority. Privileged changes require independent monitoring; identity removal grants no verification exemption |
 | Preview amplification | Basket calls fan out to nine operations and write outcome rows | Cost and dependency boundary | Preview authorizes resource/payer scope before commercial resolution, carries a rate limit, and its outcome rows have a bounded retention | A high-volume authorised caller can still consume port capacity, bounded by the per-port bulkhead |
 | Unbounded audit growth | Repeated refused attempts against one order | Availability boundary | Refusal rows carry 90-day retention and repeated refusals are rate-limited | A distributed low-rate refusal campaign remains possible and is a monitoring concern |
-| An order held in-flight indefinitely | An actor cycles the dwell before each TTL elapses — **hold/resume** with hold permission, or **amendment** with amend permission; both reset `state_entered_at` | Commercial-promise boundary | Two counters no transition resets, each with its own guard: `resume_count` (cap 5, [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2)) and `amendment_count` (cap 20, [04 §4.1](features/04-versioning.md#contract-04-4-1)). At most 74 TTL-covered pre-fulfillment dwell entries; `74 × T_max` sums configured budgets under [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2)'s assumptions, plus scheduler delay—not an unconditional lifetime bound | Where the states' TTLs are **unset** the caps bound nothing, because the dwell they multiply is itself unbounded; disclosed as [`DECISIONS.md`](./DECISIONS.md) Q-27 and alerted per [07 §3.8](DESIGN.md#contract-07-3-8) |
+| An order held in-flight indefinitely | An actor cycles the dwell before each TTL elapses — **hold/resume** with hold permission, or **amendment** with amend permission; both reset `state_entered_at` | Commercial-promise boundary | Two counters no transition resets, each with its own guard: `resume_count` (cap 5, [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2)) and `amendment_count` (cap 20, [04 §4.1](features/04-versioning.md#contract-04-4-1)). At most 74 TTL-covered pre-fulfillment dwell entries; every expirable state carries a finite TTL in production (provisional rows, NULL refused at promotion, D-181), so `74 × T_max` — 74 × 30 days = 2,220 days at the provisional values — sums configured budgets under [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2)'s assumptions, plus scheduler delay | A policy promotion that raises T_max raises the bound with it; the provisional values are long until Product confirms them (Q-06, Q-07), alerted as provisional per [07 §3.8](DESIGN.md#contract-07-3-8). A NULL row in production is reachable only by bypassing the policy channel with database privilege and pages as an integrity alert. `in_fulfillment` and holds from it remain outside both layers (operational SLA) |
 
 ### 4.3 Data protection, residency and retention
 
@@ -6326,8 +6330,8 @@ other branch: if Pricing adds a hold, the activation read passes `hold_until = a
 the `accepted-price-mismatch` path becomes unreachable and fixture F-B2 expects 10; if Pricing
 declines, D-162 stands and F-B2 expects `order-binding-expired`.
 
-A hold or resume changes no deadline. State TTLs may be unset and fulfillment is expiry-exempt;
-they do not bound commercial validity. Before fulfillment, a fresh assessment uses the existing
+A hold or resume changes no deadline. State TTLs are restartable dwell budgets (provisional
+values, D-181) and fulfillment is expiry-exempt; they do not bound commercial validity. Before fulfillment, a fresh assessment uses the existing
 admissible amendment path and re-obtains approval/acceptance for the new version. During fulfillment,
 a refused comparison or a passed deadline stops further dispatch and requires void of drafts and
 compensation of already activated subscriptions before `acknowledge-failed` with
@@ -7091,19 +7095,20 @@ from the order document alone, and process visibility is the sibling gear's to p
 
 <a id="contract-05-a-declined-instrument-exits-by-expiry-and-only-where-the-ttl-is-set"></a>
 
-#### A declined instrument exits by expiry, and only where the TTL is set
+#### A declined instrument exits by expiry at the `approved` TTL
 
 **Contract**: `cpt-cf-bss-orders-lifecycle-constraint-declined-instrument-exit` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 Where authorization fails and the seller has not elected tolerate-failure, Lifecycle refuses
 begin-fulfillment and the order remains `approved` until its TTL elapses. Two qualifications, and both are
-this constraint's real content rather than footnotes. The `approved` TTL is a **Product-owned open
-question with no code default**, so **while it is unset this order has no automatic exit at all** —
-only a caller-driven cancel retires it ([07-hold-and-expiry — Policy values (open)](DESIGN.md#contract-07-4-5)). And
-where it *is* set, the **two re-entry caps** of [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2) are what stop a hold/resume or amendment
+this constraint's real content rather than footnotes. The `approved` TTL is a **Product-owned
+value shipped provisionally at 30 days** as a revisioned platform policy row, and the policy
+channel refuses an unset value in production, so this order always has its automatic exit
+([07-hold-and-expiry — Policy values (open)](DESIGN.md#contract-07-4-5), `DECISIONS.md` D-181); an
+unset value — non-production only — would leave only a caller-driven cancel. And the **two re-entry caps** of [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2) are what stop a hold/resume or amendment
 cycle restarting dwell without limit. The configured pre-fulfillment dwell budgets sum to at
-most `74 × T_max` under [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2)'s assumptions, plus scheduler delay; this is not an unconditional
-calendar exit bound (`DECISIONS.md` D-90). There is no re-authorize
+most `74 × T_max` under [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2)'s assumptions — 2,220 days at the provisional values — plus
+scheduler delay (`DECISIONS.md` D-90, D-181). There is no re-authorize
 operation, no payment failure event and no order-visible outcome, because there is no Payments
 capability to supply one. This is routed as [DECISIONS.md](DECISIONS.md) Q-08 — the PRD
 carries **no** §15 row for it — and stated as a designed limitation rather
@@ -7386,9 +7391,10 @@ instrument, and refund-as-reversal have no owning capability.
 Two consequences follow and are recorded rather than discovered. A **declined instrument** leaves
 the order `approved` with no payment event, no re-authorize operation and expiry as its only
 automatic exit, indistinguishable from a healthy order awaiting its next process step.
-**Compounded with the unset TTL of `DECISIONS.md` Q-27 it has no automatic exit at all**, and
-only a caller-driven cancel retires it — so the two open questions interact, and Q-08 should not be
-read as "the order expires eventually" while Q-06 is unanswered. The Workflow manual-task
+That exit is the `approved` TTL, provisionally **30 days** and never unset in production
+(`DECISIONS.md` D-181, which closed Q-27's no-exit case), so Q-08's order does expire; how soon is
+Product's Q-06 value to confirm, and a hold/resume or amendment cycle can restart it only within
+the caps. The Workflow manual-task
 escalation required by §4.3 makes this wait actionable to operators once that upstream path
 exists, but adds no payment outcome to the order document and no customer re-authorization
 surface. Those missing capabilities remain launch-relevant prerequisites; specifying process
@@ -8063,12 +8069,12 @@ D-172 and receipt retention under D-173.
 <!-- contract:07-hold-and-expiry:1.1 -->
 ### Hold and expiry: Architectural Vision
 
-This slice owns time. It pauses an order and resumes it to exactly where it was, bounds an
-in-flight state by a per-state time-to-live where one is configured, caps how many times an order
+This slice owns time. It pauses an order and resumes it to exactly where it was, bounds every
+in-flight state by a per-state time-to-live, caps how many times an order
 may be resumed so the dwell cannot be restarted without limit, sweeps abandoned drafts, and — for
 the one state it must not bound — hands off to an operational escalation owned elsewhere
-([PRD.md](PRD.md) §6.3). Where a TTL is unset the state is unbounded, and §4.2 says so
-rather than asserting a backstop this design cannot enforce.
+([PRD.md](PRD.md) §6.3). The TTL values ship as provisional, revisioned policy rows that
+Product refines, and a production deployment cannot carry an unset one (§4.2, D-181).
 
 The reason bounded lifetime matters is commercial rather than hygienic. An order sitting
 indefinitely in `submitted` pins a catalog price, holds an open promise to a customer, and
@@ -8084,15 +8090,19 @@ registered guard — so a scheduler defect cannot expire such an order, and the 
 SLA raised by the sibling gear instead of an automatic transition.
 
 The bound has **two layers**, and they answer different questions. The **per-state TTL** is
-Product-owned configuration with no code default, so it is only in force where it has been
-configured. The **re-entry caps** are design-owned baselines on how many times one order may
+Product-owned configuration with no code default: its values ship as **provisional
+migration-seeded rows** (`draft` 90 days, `submitted` and `pending_approval` 14 days, `approved`
+and `on_hold` 30 days) that Product refines by policy revision, and the policy channel refuses an
+unset value in production (D-181). The **re-entry caps** are design-owned baselines on how many times one order may
 restart a dwell — **5** resumes and **20** amendments, enforced as guards on those transitions
 themselves. They exist because a per-state TTL alone bounds nothing an actor can restart: both
 resume and amendment rewrite the dwell input, so either loop was an unbounded lifetime available
 to a permitted actor. With both caps in force an order makes at most **74** TTL-covered pre-fulfillment dwell entries. Their configured budgets sum to at most
-`74 × T_max`, excluding scheduler delay and fulfillment-exempt states; §4.2 gives all assumptions. Where one is **not** configured, that state has no bound at all and the cap does not
-supply one — §4.2 states that residual gap rather than papering over it, which is the difference
-between these two layers and the absolute-lifetime backstop an earlier draft claimed.
+`74 × T_max` — 74 × 30 = 2,220 days at the provisional values — excluding scheduler delay and
+fulfillment-exempt states; §4.2 gives all assumptions. Because every expirable state is finite in
+production, that sum is a real bound rather than `74 × ∞`; only a non-production environment may
+leave a state unset, and there the cap supplies no bound — which is the difference between these
+two layers and the absolute-lifetime backstop an earlier draft claimed.
 
 Hold is narrower than it first appears, and the narrowness is the design. A hold changes **only
 the order**. Already-activated subscriptions keep serving and keep billing, the term does not
@@ -8115,7 +8125,7 @@ compliance hold silently stop a customer's billing.
 | Requirement | Design Response |
 |-------------|------------------|
 | `cpt-cf-bss-orders-lifecycle-fr-order-hold` | Hold stores the outgoing state on the aggregate; resume reads it as the target. The actor, instant and optional reason live on the hold transition's audit entry, not in hold columns (D-138). Resume is a lookup, not an inference, so a state added later cannot break resume. |
-| `cpt-cf-bss-orders-lifecycle-fr-order-expiry` | Expiry is an ordinary transition row with the system actor class, driven by one sweep pass over a per-state TTL that holds where configured. Restarting a dwell is bounded separately, by a cap on the resume transition rather than by a second sweep. `in_fulfillment` has no expiry row; the existing `on_hold` expiry row has a mandatory pre-hold exemption guard. Where a TTL is unset the state is unbounded, disclosed in §4.2 and alerted in §3.8. |
+| `cpt-cf-bss-orders-lifecycle-fr-order-expiry` | Expiry is an ordinary transition row with the system actor class, driven by one sweep pass over a per-state TTL that ships as a provisional, revisioned platform row for every expirable state and cannot be promoted unset to production (D-181). Restarting a dwell is bounded separately, by caps on the resume and amendment transitions rather than by a second sweep. `in_fulfillment` has no expiry row; the existing `on_hold` expiry row has a mandatory pre-hold exemption guard. A provisional value in effect is alerted in §3.8. |
 | `cpt-cf-bss-orders-lifecycle-fr-order-cancel` | Cancel from `on_hold` applies the **pre-hold** state's guards, so a hold cannot be used to widen what cancellation is permitted. |
 | `cpt-cf-bss-orders-lifecycle-nfr-order-retention` | The abandoned-draft sweep auto-voids to `expired` rather than deleting, preserving the audit trail. |
 | `cpt-cf-bss-orders-lifecycle-fr-order-events` | Expiry publishes `OrderExpired`; hold and resume publish `OrderHeld` and `OrderResumed`, which is how the sibling gear knows to suspend or resume its process. |
@@ -8260,14 +8270,37 @@ otherwise.
 
 <a id="contract-07-ttl-values-are-unchosen"></a>
 
-#### TTL values are unchosen
+#### TTL values are provisional
 
 **Contract**: `cpt-cf-bss-orders-lifecycle-constraint-ttl-values-unchosen` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
 
 The per-state TTL defaults, the draft auto-void TTL and the override scope —
 platform versus seller — are all PRD open questions owned by Product. This slice specifies the
-**policy model** and leaves the numbers as configuration with no code default, because a code
-default would quietly become the answer. The override mechanism is specified and ready, but it
+**policy model** and takes **no code default**, because a constant in code would quietly become
+the answer. It does ship **provisional values as data** ([DECISIONS.md](DECISIONS.md) D-181): the
+migration seeds the five permanent platform rows of §3.7 with `draft` **90 days**, `submitted`
+**14 days**, `pending_approval` **14 days**, `approved` **30 days** and `on_hold` **30 days**, at
+`policy_revision` 1 with `provisional = true`. Product refines any of them under Q-06 or Q-07(b) by
+promoting a new revision through the policy channel, which sets `provisional = false`; no code or
+design change follows. This is the Subscriptions posture for its own draft TTL — a 90-day platform
+default shipped while Product's value is TBD (`gears/bss/subscriptions/docs/PRD.md` §15, SUB-D-11
+amendment) — and the Orders posture for unset elections, which read as their safe value
+([05 §3.7](DESIGN.md#contract-05-3-7)). The values are deliberately long so that a
+provisional bound expires only orders that are genuinely abandoned: `submitted` and
+`pending_approval` at 14 days exceed the sibling gear's 72-hour default approval escalation
+(`gears/bss/orders-workflow/docs/PRD.md` §6.2 *Escalation Timer*) several times over, and `approved` and `on_hold` at
+30 days leave a declined instrument or a compliance hold a full month.
+
+**A production deployment cannot run with a TTL unset.** The policy channel's promotion
+validation **MUST** refuse any `orders_state_ttl_policy` row whose `ttl_duration` is NULL when the
+target environment is production, as it already refuses seller rows while
+`ttl_seller_override_enabled` is off (§3.7, D-137). This is a **release gate**, not a readiness
+condition: the running gear **MUST NOT** report not-ready, refuse to start or stop serving because
+of a TTL value, since platform readiness means "can serve traffic"
+(`docs/arch/toolkit-oop/ADR/0005-cpt-cf-adr-eventual-readiness.md`) and an unanswered Product
+question must not become an outage (D-90). `ttl_duration` stays nullable for **non-production**
+environments only, where an unset scope is skipped by the sweep (§3.6 step 2.2). The override
+mechanism is specified and ready, but it
 ships disabled: the gear-level `ttl_seller_override_enabled` flag defaults to **off**, so only
 platform rows take effect until Product answers Q-06, and that answer becomes configuration
 rather than a design change ([DECISIONS.md](DECISIONS.md) D-137).
@@ -8281,13 +8314,17 @@ per-state TTL Product later chooses, whatever those TTLs turn out to be. The ame
 value is additionally a **commercial** judgment about how often a buyer may revise an order, which
 is why [04 §4.1](features/04-versioning.md#contract-04-4-1) owns and argues it rather than this section.
 
-**What remains unbounded, and it is a Product dependency and not a design gap to close here.**
-Where no TTL is configured for a state, that state has **no bound**: the per-state pass skips it
-(§3.6) and the re-entry caps bound restarts of a dwell that is itself unbounded, so `74 × ∞` is
-still ∞. An earlier draft covered this with an absolute order lifetime measured from `created_at`;
-§4.2 records why that backstop was withdrawn rather than kept. Until PRD §15 row 7 is answered the
-gap is **disclosed** — surfaced as the no-configured-TTL metric and alert of §3.8 — rather than
-claimed closed.
+**What the provisional values close, and what stays Product's.** With every expirable state
+finite in production the caps bound total dwell rather than multiplying an unbounded one: at the
+provisional values `74 × T_max` is 74 × 30 = **2,220 days** of configured dwell plus scheduler
+delay, and `draft` lives at most 90 days from `created_at` (§4.2). That figure is long because
+the values are deliberately conservative; shortening it is Product's lever, by policy revision, and
+the §3.8 **provisional-default** gauge and alert keep the fact that Product has not yet confirmed
+them visible rather than letting the provisional numbers pass as the answer. An earlier draft
+closed the gap with an absolute order lifetime measured from `created_at`; §4.2 records why that
+backstop was withdrawn and is not reintroduced. A NULL row found in production can arise only by
+bypassing the channel with database privilege; the sweep then still skips it rather than invent a
+value, and §3.8 pages on it as an integrity condition.
 
 
 <!-- /contract -->
@@ -8310,8 +8347,9 @@ and no guard requires it, unlike the mandatory cancel reason of §4.6.
 
 The per-state time-to-live configuration: the state it bounds, its duration, and its
 configuration scope. Resolved at sweep time rather than stored per order, so a policy change
-takes effect on orders already in flight. It is **per-state and optional**; where it is unset the
-state is unbounded, and the re-entry caps limit restarts rather than supplying a duration.
+takes effect on orders already in flight. It is **per-state** and ships a provisional platform
+value for every state, which Product refines by revision; it may be unset only outside production
+(D-181), and the re-entry caps limit restarts rather than supplying a duration.
 
 **Contract**: `cpt-cf-bss-orders-lifecycle-entity-resume-cap` (`p1`), defined in [§3.1 Slice entities](#register-entities).
 
@@ -8426,8 +8464,9 @@ what a buyer nearly bought.
 ##### Responsibility scope
 
 The advisory-lock-coordinated sweep over `draft` orders past their auto-void TTL, and the auto-void
-transition to `expired` that keeps them readable. Where that TTL is unset the sweep does no work
-and `draft` accumulation is unbounded (§4.4).
+transition to `expired` that keeps them readable. The TTL ships provisionally at 90 days and
+cannot be promoted unset to production (D-181); only in a non-production environment that leaves
+it unset does the sweep do no work and `draft` accumulate without bound (§4.4).
 
 <a id="contract-07-responsibility-boundaries-2"></a>
 
@@ -8537,7 +8576,8 @@ relative to [01-foundation — Database Schemas and Tables](DESIGN.md#contract-0
 | scope | enum | `platform` or `seller` |
 | seller_tenant_id | uuid, nullable | NULL for a platform-scope policy |
 | state | enum | The bounded state: `submitted`, `pending_approval`, `approved`, `on_hold`, or `draft` for the auto-void sweep |
-| ttl_duration | interval, nullable | Positive bound when present; NULL means unset for the permanent platform row. Seller override rows require a positive non-NULL duration; removing one restores platform fallback |
+| ttl_duration | interval, nullable | Positive bound when present; NULL means unset for the permanent platform row, admitted in non-production environments only — the policy channel refuses to promote a NULL duration to production (D-181). Seller override rows require a positive non-NULL duration; removing one restores platform fallback |
+| provisional | boolean | `true` while the platform row carries the design-seeded provisional value rather than a Product-confirmed one; seeded `true`, set `false` by the promotion that carries Product's value. Always `false` on seller rows. Read by the §3.8 provisional-default gauge; it changes no sweep or engine behaviour (D-181) |
 | policy_revision | bigint | Positive revision. Increment a changed row's revision atomically; also increment the permanent platform row's revision on every seller override insertion, update or deletion for this state. Re-creating a deleted seller override uses a fresh `policy_id` |
 | updated_by, updated_at | text, timestamptz | Audit of the policy change itself |
 
@@ -8549,9 +8589,12 @@ permitting duplicate platform policies ([DECISIONS.md](DECISIONS.md) D-28);
 `seller_tenant_id` NOT NULL exactly when `scope` is `seller`; `state` **MUST NOT** be
 `in_fulfillment` — the exemption is a schema constraint as well as a missing transition row, so a
 policy cannot be authored for it. `policy_revision > 0`; `ttl_duration IS NULL` is permitted only
-for platform scope, and a non-NULL duration must be positive. The platform-scope row for each
-of the five admitted states is created by migration with an unset duration and revision 1;
-its identity/scope/state are immutable and it **MUST NOT** be deleted. Startup checks all five
+for platform scope, and a non-NULL duration must be positive; `provisional` is `false` whenever
+`scope` is `seller`. The platform-scope row for each
+of the five admitted states is created by migration with its **provisional duration** — `draft`
+`90 days`, `submitted` `14 days`, `pending_approval` `14 days`, `approved` `30 days`, `on_hold`
+`30 days` — `provisional = true` and revision 1 (D-181); these are seeded data, not code
+constants, and any later value is a promoted revision. Its identity/scope/state are immutable and it **MUST NOT** be deleted. Startup checks all five
 rows exist; a missing row is a configuration-integrity failure, not an unset TTL. Existing
 `NULLS NOT DISTINCT` uniqueness ensures exactly one platform row per state once seeded.
 
@@ -8587,10 +8630,15 @@ seller pass of §3.6 step 2.3, the fallback exclusion of step 2.3a, the draft pa
 in-transaction re-read — ignores every `scope = seller` row, so the seller pass selects nothing and
 the platform rows are effective for every seller. Turning the flag off after seller rows were
 promoted therefore reverts to the platform rows without deleting them. There is **no code
-default** for any per-state TTL; an unconfigured effective scope is not swept, so an unset duration is
-visible as the no-configured-TTL gauge and alert of §3.8 rather than as a silently applied
-constant. It is **not** covered by a fallback duration — §4.2 states why the absolute-lifetime
-backstop that would have supplied one was withdrawn.
+default** for any per-state TTL: the provisional values are the migration-seeded rows above, so
+every value in force is a visible, revisioned row and an expiry's evidence names the
+`policy_revision` it ran under. The same promotion validation **refuses any row with a NULL
+`ttl_duration` bound for production** (D-181), so an unset effective scope exists only in
+non-production, where it is not swept and shows as the no-configured-TTL gauge of §3.8. A NULL
+row observed in production means the channel was bypassed; the sweep still skips it rather than
+apply a constant, §3.8 pages on it, and readiness is unaffected. It is **not** covered by a
+fallback duration — §4.2 states why the absolute-lifetime backstop that would have supplied one
+was withdrawn.
 
 The **resume cap is not a row in this table.** It is a single gear-level configuration value,
 platform-scoped, and the table's `state` enum admits no value for it — because it bounds a count
@@ -8624,24 +8672,32 @@ Inherited from [01-foundation — Deployment Topology](DESIGN.md#contract-01-3-8
 advisory-lock-coordinated workers owned here: the **expiry sweep** and the **draft auto-void sweep**. Both
 take session advisory locks to coordinate discovery. Engine row locks, guards and idempotency
 prevent duplicate effects even if a lock session is lost and passes overlap. Both are idle-cheap: a sweep
-with no configured TTL does no work at all.
+with no due candidate does no work, and in a non-production environment that leaves a TTL unset
+the sweep skips that scope entirely.
 
 **Observability owned here**: expiry counts per state per sweep, sweep duration, last completed
 pass, oldest due candidate and batch saturation, a **sweep-error count** of worker-defect refusals (`idempotency-mismatch`, `authorization-context-changed`) for both sweeps, plus separately scoped counts of **exempt holds**
 (excluded before the page limit, never counted as successful expiry) and guard-race refusals for holds
-taken from `in_fulfillment`, the number of states with **no configured TTL** — the signal that a
-Product-owned value is still unset and those orders are **unbounded**, which is the residual gap
-§4.2 discloses — cancel counts by actor class and reason, hold duration distribution (the hold instant read from
+taken from `in_fulfillment`, the number of states whose effective platform row is still
+**`provisional`** — the signal that a Product-owned value has not been confirmed and the
+design-seeded value of D-181 is the one expiring orders — and, separately, the number of scopes
+with **no configured TTL**, which only a non-production environment may legitimately show
+(D-181), cancel counts by actor class and reason, hold duration distribution (the hold instant read from
 the hold transition's audit entry, or from `state_entered_at` while the order is still `on_hold`;
 D-138), the **hold
 cycles per order** distribution, and the count of `resume` transitions **refused as
 `resume-cap-exhausted`**, which is how the restart bound firing becomes visible rather than
 inferred. Alerts fire on a sweep
 failing to acquire its advisory lock for longer than two cadences, on batch saturation persisting (the
-sweep is falling behind), on any state having no configured TTL in a production environment, and
-on any **`resume-cap-exhausted` refusal** at all — because the cap is a backstop, so a non-zero rate
-means either a per-state TTL is missing or an order is being held and resumed in a loop, and both
-are conditions someone should look at rather than metrics to watch drift.
+sweep is falling behind), on any state running on a **provisional default in production** (a
+standing, non-paging alert owned by Product that clears when the confirming revision is promoted),
+on any state having **no configured TTL in a production environment** (paging: the policy channel
+refuses that promotion, so it means the channel was bypassed — a configuration-integrity
+condition, not a readiness one), and on any **`resume-cap-exhausted` refusal** at all — because the
+cap is a backstop, so a non-zero rate means an order is being held and resumed in a loop, which is
+a condition someone should look at rather than a metric to watch drift. A failed read of the
+policy configuration is reported as a health signal of the worker, never as an unset or
+provisional value.
 
 
 <!-- /contract -->
@@ -8652,18 +8708,21 @@ are conditions someone should look at rather than metrics to watch drift.
 ### Hold and expiry: Policy values (open)
 
 Two groups, distinguished because they have different owners. **PRD open questions owned by
-Product**, each cited by its §15 row:
+Product**, each cited by its §15 row. The durations ship **provisional** — migration-seeded
+platform rows at `policy_revision` 1 with `provisional = true`, not code constants
+([DECISIONS.md](DECISIONS.md) D-181) — and Product's answer is a promoted revision:
 
-| Value | PRD §15 row | Note |
-|-------|-------------|------|
-| `submitted` TTL | row 7 | Must exceed the sibling gear's escalation lead time, since expiry bounds the fail-closed park |
-| `pending_approval` TTL | row 7 | Should relate to the sibling gear's 72-hour default approval escalation window |
-| `approved` TTL | row 7 | The **ordinary** exit for a declined payment instrument, per [05-preconditions — What this design cannot express (normative statement of limitation)](DESIGN.md#contract-05-4-4) — and, while this value is unset, that order's **only** exit is a caller-driven cancel. The resume cap below stops a hold/resume cycle from restarting the TTL without limit, but it supplies no exit where the TTL itself is absent. This is the sharpest consequence of leaving this one value unset, and [05 §4.4](DESIGN.md#contract-05-4-4) states it from the other side |
-| `on_hold` TTL | row 7 | The PRD names this the worst case, being deliberately open-ended in intent |
-| Override scope | row 7 | Whether seller scope may override platform scope per state. The mechanism is specified (§3.6, §3.7) and ready; it ships behind `ttl_seller_override_enabled`, default **off**, so the open choice is answered by turning the flag on or leaving it off ([DECISIONS.md](DECISIONS.md) D-137, Q-06) |
-| `draft` auto-void TTL | row 5 | Bounds unbounded basket accumulation; the same row carries the program retention period, tracked as [DECISIONS.md](DECISIONS.md) Q-07. While unset, the draft sweep does no work and `draft` accumulation is **unbounded** — there is no fallback duration (§4.4) |
+| Value | PRD §15 row | Provisional (D-181) | Note |
+|-------|-------------|---------------------|------|
+| `submitted` TTL | row 7 | **14 days** | Must exceed the sibling gear's escalation lead time, since expiry bounds the fail-closed park; 14 days is several multiples of the 72-hour default escalation |
+| `pending_approval` TTL | row 7 | **14 days** | Should relate to the sibling gear's 72-hour default approval escalation window (`gears/bss/orders-workflow/docs/PRD.md` §6.2) |
+| `approved` TTL | row 7 | **30 days** | The **ordinary** exit for a declined payment instrument, per [05-preconditions — What this design cannot express (normative statement of limitation)](DESIGN.md#contract-05-4-4). Because it is never unset in production, that order always has its automatic exit; the caps below stop a hold/resume or amendment cycle restarting it without limit, and [05 §4.4](DESIGN.md#contract-05-4-4) states it from the other side |
+| `on_hold` TTL | row 7 | **30 days** | The PRD names this the worst case, being deliberately open-ended in intent; does not apply to holds taken from `in_fulfillment` (§4.3) |
+| Override scope | row 7 | off | Whether seller scope may override platform scope per state. The mechanism is specified (§3.6, §3.7) and ready; it ships behind `ttl_seller_override_enabled`, default **off**, so the open choice is answered by turning the flag on or leaving it off ([DECISIONS.md](DECISIONS.md) D-137, Q-06) |
+| `draft` auto-void TTL | row 5 | **90 days** | Bounds basket accumulation; matches the Subscriptions draft auto-void platform default (SUB-D-11 amendment). The same row carries the program retention period, tracked as [DECISIONS.md](DECISIONS.md) Q-07, which stays open |
 
-Rows 5 and 7 are the two §15 questions this slice waits on. Nothing else here is open: the
+Rows 5 and 7 are the two §15 questions this slice waits on for **confirmation**, no longer for a
+bound. Nothing else here is open: the
 idempotency-key window is **24 hours**, settled in [01-foundation — Idempotency Semantics (normative)](features/01-foundation.md#contract-01-4-2)
 ([DECISIONS.md](DECISIONS.md) D-39), and is not a policy value of this slice.
 
@@ -8677,15 +8736,18 @@ idempotency-key window is **24 hours**, settled in [01-foundation — Idempotenc
 | Sweep batch size | 500 orders | Bounds each discovery page; keyset traversal continues within the pass, with one engine transaction per order |
 | Overdue window | **24 hours** past expected fulfillment time | **Not** an open question: the PRD commits this as a business default; it is recorded here as committed rather than as unchosen |
 | **Amendment cap** | **20** amendments per order | The other half of Layer 2, **owned and argued in [04-versioning — Admissibility (normative)](features/04-versioning.md#contract-04-4-1)** because its value is a commercial judgment about how often a buyer may revise an order, not an operational one. Listed here so both re-entry caps are visible in one place |
-| **Resume cap** | **5** resumes per order | Layer 2 of §4.2, enforced as a guard on [01 §4.3](features/01-foundation.md#contract-01-4-3) row 22 against `orders_order.resume_count`, which no transition resets. It bounds a **count**, not a duration, so it pre-empts no per-state TTL Product later chooses whatever that value turns out to be — which is why this design can own it while the durations stay open. Five is set from the operational shape the loop has: a compliance or dispute hold that genuinely needs re-taking more than five times on one order is an escalation, not a workflow, and the sixth attempt refuses with `resume-cap-exhausted` and says so on the audit trail. A deployment **MAY** raise or lower it and **MUST NOT** unset it; there is no "unlimited" value. This qualifies PRD §6.3's "A held order **MUST** be resumable", routed as [DECISIONS.md](DECISIONS.md) Q-31 (§4.1) |
+| **Resume cap** | **5** resumes per order | Layer 2 of §4.2, enforced as a guard on [01 §4.3](features/01-foundation.md#contract-01-4-3) row 22 against `orders_order.resume_count`, which no transition resets. It bounds a **count**, not a duration, so it pre-empts no per-state TTL Product later chooses whatever that value turns out to be — which is why this design can own it while the durations stay provisional. Five is set from the operational shape the loop has: a compliance or dispute hold that genuinely needs re-taking more than five times on one order is an escalation, not a workflow, and the sixth attempt refuses with `resume-cap-exhausted` and says so on the audit trail. A deployment **MAY** raise or lower it and **MUST NOT** unset it; there is no "unlimited" value. This qualifies PRD §6.3's "A held order **MUST** be resumable", routed as [DECISIONS.md](DECISIONS.md) Q-31 (§4.1) |
 
-Leaving the Product-owned values unset means an unconfigured state is **not swept at all**, and
-orders in it **do not expire**. Stated without softening: the re-entry caps bound restarts of a
-dwell, so where the dwell has no bound the total has none either. The failure mode is made
-**visible** instead — the no-configured-TTL gauge and its production alert (§3.8) fire on the
-condition itself rather than on orders eventually reaching a backstop — which is preferable to a
-code default silently becoming the platform answer, and honest about what is at stake in answering
-PRD §15 row 7.
+An unset Product-owned value would mean an unconfigured state is **not swept at all** and orders
+in it **do not expire**, and the re-entry caps would bound nothing, since they multiply the dwell.
+That is why D-181 ships provisional rows and the policy channel refuses an unset value in
+production: with every expirable state finite, the caps bound total configured dwell at
+`74 × T_max` = 74 × 30 = 2,220 days plus scheduler delay, and `draft` at 90 days. Readiness gating
+was rejected because an unanswered Product question must not become an outage (D-90). The
+provisional values do not pass silently as the platform answer: they are revisioned rows carrying
+`provisional = true`, each expiry records the `policy_revision` it ran under, and the
+provisional-default gauge and production alert (§3.8) stand until Product promotes its confirmed
+values under PRD §15 rows 5 and 7.
 
 
 <!-- /contract -->

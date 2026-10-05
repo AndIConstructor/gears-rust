@@ -64,7 +64,7 @@ The two private maintenance workers use configured authenticated system authorit
 - **Dependencies**: [Foundation](01-foundation.md), [Capture](02-capture.md), [Workflow seam](06-workflow-seam.md).
 - **Shared contracts**: [Versioning](04-versioning.md) owns the amendment cap; [Read and authorization](08-read-and-authz.md) declares permissions. Its shared adapter and write enforcement are Foundation prerequisites, not deferred until read delivery.
 
-Product-owned TTL durations have no code default; seller overrides stay disabled by default pending Q-06. Draft TTL and program retention remain Q-07. The resume-cap qualification to PRD resumability remains Q-31, and the Partner Admin hold conflict remains Q-18 in [DECISIONS](../DECISIONS.md). This specification preserves those questions and the design's stricter permission set; it does not resolve them. Workflow integration and operational escalation remain subject to [UPSTREAM_REQS](../UPSTREAM_REQS.md).
+Product-owned TTL durations have no code default; they ship as provisional, migration-seeded platform rows (`draft` 90 days, `submitted` and `pending_approval` 14 days, `approved` and `on_hold` 30 days) that Product refines by revision under Q-06 and Q-07(b), and the policy channel refuses an unset duration in production (D-181). Seller overrides stay disabled by default pending Q-06. Program retention remains Q-07(a). The resume-cap qualification to PRD resumability remains Q-31, and the Partner Admin hold conflict remains Q-18 in [DECISIONS](../DECISIONS.md). This specification preserves those questions and the design's stricter permission set; it does not resolve them. Workflow integration and operational escalation remain subject to [UPSTREAM_REQS](../UPSTREAM_REQS.md).
 
 **UI applicability**: UI layout, keyboard navigation, screen-reader behavior and visual accessibility are not applicable because this feature specifies backend contracts, not a user interface. API usability, actionable errors and non-disclosing diagnostics remain applicable; consuming consoles own their UI requirements.
 
@@ -109,7 +109,7 @@ Workflow uses its separate `/workflow-cancel` endpoint and compensation evidence
 **Input**: configured private worker context, database time, effective TTL policy snapshot. **Output**: committed expiry count and separately classified refusals/failures.
 
 1. On the working five-minute cadence, make one nonblocking toolkit-db advisory-lock attempt for the worker. Skip a contended pass; abandon on observed session loss and reacquire before retry. Coordination is not authorization or fencing.
-2. Snapshot policy scopes with the architecture's policy-row locking protocol. Observe all five policy states, even on empty queues. Missing permanent platform rows are integrity failures; present rows with NULL duration are unset TTLs. Skip unconfigured effective scopes without inventing a fallback.
+2. Snapshot policy scopes with the architecture's policy-row locking protocol. Observe all five policy states, even on empty queues. Missing permanent platform rows are integrity failures; present rows with NULL duration are unset TTLs, which only a non-production environment may carry (the policy channel refuses them for production, D-181). Skip unconfigured effective scopes without inventing a fallback, in any environment.
 3. For state expiry, scan `submitted`, `pending_approval`, `approved`, `on_hold` by `(state_entered_at, order_id)`. Exclude holds from fulfillment in SQL before LIMIT. For auto-void, scan only `draft` by `(created_at, order_id)` and use trigger `auto-void`.
 4. Separate enabled seller scopes from platform fallback; exclude overridden sellers from fallback. While `ttl_seller_override_enabled` is off, ignore seller rows in discovery and engine rechecks. Use a fixed cutoff and finite high-water tuple, keyset batches of 500, advancing past every scanned candidate including refusals.
 5. Derive a versioned canonical key/hash from `(worker_kind, order_id, current_version, audit_sequence, state, dwell_started_at, policy_id, policy_revision, platform_policy_revision)`. Derive correlation deterministically. Preserve the identical contribution, key and correlation on transport retry; exclude fresh time, elapsed age and retry count from fingerprints.
@@ -127,9 +127,9 @@ Workflow uses its separate `/workflow-cancel` endpoint and compensation evidence
 
 **Output**: Serialized revisioned policy or policy rejection without change; conditional dwell-budget bound and Workflow escalation responsibility.
 
-Policy writers lock the permanent platform row first, then any seller row; every override insertion/update/deletion increments the platform revision and an updated seller row's own revision. Recreated overrides receive a fresh identity. Writers never lock order aggregates; multi-state writers acquire platform locks in state-name order. The schema forbids fulfillment TTLs, nonpositive durations, duplicate platform policies and NULL seller durations. Five permanent platform rows start with revision 1 and unset duration.
+Policy writers lock the permanent platform row first, then any seller row; every override insertion/update/deletion increments the platform revision and an updated seller row's own revision. Recreated overrides receive a fresh identity. Writers never lock order aggregates; multi-state writers acquire platform locks in state-name order. The schema forbids fulfillment TTLs, nonpositive durations, duplicate platform policies, NULL seller durations and provisional seller rows. Five permanent platform rows start with revision 1, `provisional = true` and the provisional durations of D-181 (`draft` 90 days, `submitted` 14, `pending_approval` 14, `approved` 30, `on_hold` 30). Policy-channel validation refuses a NULL duration bound for production, as it refuses seller rows while overrides are off; a promotion carrying Product's value sets `provisional = false`. No TTL value affects startup or readiness.
 
-Resume baseline 5 and Versioning's amendment baseline 20 are finite, independent count budgets. With caps A and R the configured pre-fulfillment graph permits at most `3 × (A + 1) + 2 × R + 1` dwell entries: 74 at baseline. `74 × T_max` bounds configured dwell budgets only, excluding draft, fulfillment exemptions and scheduler delay; it requires finite TTLs bounded over the lifetime. An unset TTL leaves its state unbounded. No absolute-lifetime backstop or second sweep is introduced.
+Resume baseline 5 and Versioning's amendment baseline 20 are finite, independent count budgets. With caps A and R the configured pre-fulfillment graph permits at most `3 × (A + 1) + 2 × R + 1` dwell entries: 74 at baseline. `74 × T_max` bounds configured dwell budgets only, excluding draft, fulfillment exemptions and scheduler delay; it requires finite TTLs bounded over the lifetime, which production now always has: at the provisional values T_max is 30 days and the bound 2,220 days, with `draft` separately at most 90 days from creation. An unset TTL — non-production only — leaves its state unbounded. No absolute-lifetime backstop or second sweep is introduced.
 
 A fail-closed approval park stays `submitted` and does not suspend that TTL. Fulfillment and holds from fulfillment instead use Workflow's operational SLA: baseline 24 hours past expected fulfillment time, with the fulfillment operator responsible. SLA exhaustion creates an incident/operator abort, never an automatic terminal state.
 
@@ -168,7 +168,7 @@ The implementation MUST route hold/resume/cancel and their business refusals thr
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-dod-hold-and-expiry-workers`
 
-The implementation MUST provide both bounded workers and the policy serialization protocol, with missing-TTL gauges recomputed for all five states/scopes (clear configured/obsolete labels; unknown reads are errors). Expose committed counts, refusals, worker defects, pass duration/completion, oldest due candidate, saturation, exempt holds and resume-cap refusals. Alert on missing production TTLs, prolonged coordination failure, sustained backlog and cap refusals.
+The implementation MUST provide both bounded workers and the policy serialization protocol, with provisional-default and missing-TTL gauges recomputed for all five states/scopes (clear configured/obsolete labels; unknown reads are errors). Expose committed counts, refusals, worker defects, pass duration/completion, oldest due candidate, saturation, exempt holds and resume-cap refusals. Alert on a provisional default in effect in production (standing, non-paging), a missing production TTL (paging integrity alert: the channel was bypassed), prolonged coordination failure, sustained backlog and cap refusals. The migration MUST seed the D-181 provisional rows and the policy channel MUST refuse a NULL duration bound for production; no TTL value gates startup or readiness.
 
 **Implements**: `cpt-cf-bss-orders-lifecycle-algo-hold-and-expiry-sweep`, `cpt-cf-bss-orders-lifecycle-algo-hold-and-expiry-policy`, `cpt-cf-bss-orders-lifecycle-state-hold-and-expiry-transitions`.
 
@@ -182,8 +182,10 @@ The implementation MUST provide both bounded workers and the policy serializatio
 - [ ] Sweep defects cannot expire fulfillment or a hold from it. Auto-void preserves the draft and audit trail and loses safely to a racing submit.
 - [ ] PostgreSQL concurrency tests cover duplicate workers, coordination-session loss, hold/resume and policy-change races (platform edits and override creation/update/deletion), rollback and interruption/restart; each committed expiry has one audited event effect.
 - [ ] More than 500 exempt holds, multiple batches of mixed refusals, equal timestamps and stale candidates do not block later eligible orders; retries preserve identity while new generations/policies receive new keys.
-- [ ] Unset TTLs perform no expiry, including draft-only missing configuration; configuration gauges clear after values are set and obsolete overrides are removed. Empty queues and restart preserve correct observations.
-- [ ] Graph enumeration confirms 4/64/14/74 dwell entries at caps (0,0)/(20,0)/(0,5)/(20,5); tests retain the conditional bound and Workflow SLA exemption.
+- [ ] A fresh migration yields five platform rows at revision 1 with `provisional = true` and durations `draft` 90 days, `submitted` 14, `pending_approval` 14, `approved` 30, `on_hold` 30; the sweeps expire due orders under them from the first pass, and the provisional-default gauge reads 1 per state until a promoted Product revision sets `provisional = false`, then clears.
+- [ ] The policy channel refuses promotion to production of any row with a NULL `ttl_duration` and changes nothing; the same row promotes to a non-production environment. The gear starts and reports ready with any TTL value, including NULL rows injected directly into a production-tagged store, which raise the paging integrity alert.
+- [ ] In non-production, unset TTLs perform no expiry, including draft-only missing configuration; configuration gauges clear after values are set and obsolete overrides are removed. Empty queues and restart preserve correct observations; a failed configuration read is a health signal, not an unset or provisional value.
+- [ ] Graph enumeration confirms 4/64/14/74 dwell entries at caps (0,0)/(20,0)/(0,5)/(20,5); tests retain the 74 × T_max bound (2,220 days at the provisional values) and Workflow SLA exemption.
 - [ ] Operation latency verification measures the PRD write-and-publish p95 < 1 s, not commit alone; no completion or runtime evidence is claimed by these unchecked specifications.
 
 - [ ] With both an exhausted resume cap and a missing stored target, `resume-cap-exhausted` wins; target validation occurs only after the cap guard passes.
@@ -254,7 +256,7 @@ Output: expired count
 1. [ ] - `p1` - Acquire the sweep advisory lock through toolkit-db under Foundation §3.8; **IF** not acquired, **RETURN** without work. Release explicitly after the bounded pass; on observed session loss abandon the pass and reacquire before retrying - `inst-es-acquire-lease`
 2. [ ] - `p1` - **FOR EACH** expirable state — `submitted`, `pending_approval`, `approved`, `on_hold`: - `inst-es-for-each-state`
    1. [ ] - `p1` - Resolve a consistent policy snapshot for that state at each configuration scope, including its permanent platform row's revision and the effective policy identity/revision/duration. Use §3.7's policy-row locking order in a short SecureTx and release after copying the snapshot - `inst-es-resolve-ttl`
-   2. [ ] - `p1` - **IF** the effective TTL is unset for a scope: set the no-configured-TTL gauge for this scope/state to 1 (set to 0 when configured) of `§3.8` and skip that scope (no code default). An unset platform duration skips fallback only, not configured seller overrides; skip the whole state only when every effective scope is unset - `inst-es-if-no-ttl`
+   2. [ ] - `p1` - **IF** the effective TTL is unset for a scope: set the no-configured-TTL gauge for this scope/state to 1 (set to 0 when configured) of `§3.8` and skip that scope (no code default). Set the provisional-default gauge for the state to the platform row's `provisional` value. An unset scope is reachable only in non-production, or in production by a bypass of the policy channel that §3.8 pages on (D-181); the branch behaves identically in both. An unset platform duration skips fallback only, not configured seller overrides; skip the whole state only when every effective scope is unset - `inst-es-if-no-ttl`
    3. [ ] - `p1` - **FOR EACH** seller scope with its own policy for this state (none while `ttl_seller_override_enabled` is off: effective-policy selection ignores every `scope = seller` row while the flag is off, whether or not such rows exist, so this pass then selects nothing, §3.7): select due orders for that seller, excluding `on_hold` rows with `pre_hold_state = in_fulfillment` **in SQL before ORDER BY/LIMIT**. Traverse batches of at most 500 by `(state_entered_at, order_id)` through the pass cutoff; carry the last scanned tuple to the next batch, including refused/skipped candidates. Use the seller/state/dwell index with `order_id` as its tie-breaker - `inst-es-select-eligible`
    3a. [ ] - `p1` - Apply the same exclusion and keyset traversal to the platform fallback, selecting due orders **whose `seller_tenant_id` has no policy of its own for this state**; while `ttl_seller_override_enabled` is off no seller row counts as a policy of its own, so the fallback covers every seller. Resolve the policy identity/revision used for each candidate; an override must never also enter the fallback pass - `inst-es-select-platform-fallback`
    4. [ ] - `p1` - **FOR EACH** selected order: - `inst-es-for-each-order`
@@ -396,20 +398,25 @@ This qualifies PRD §6.3's resumability MUST and is routed as Q-31.
 <!-- contract:07-hold-and-expiry:4.2 -->
 ### Hold and expiry: Bounded lifetime (normative)
 
-Bounded lifetime is delivered in **two layers**, and **neither is unconditional** — which is the
-point of stating them separately. Together they bound every order whose states have configured
-TTLs, and disclose the orders they do not bound. See [D-90](../DECISIONS.md#hold-and-expiry-alternative-history) for the historical alternatives.
+Bounded lifetime is delivered in **two layers**, and they are stated separately because they
+bound different things. Together they bound every order outside the `in_fulfillment` exemption
+of §4.3 in production, and disclose the orders they do not bound. See [D-90](../DECISIONS.md#hold-and-expiry-alternative-history) for the historical alternatives
+and [D-181](../DECISIONS.md) for the provisional values.
 
-**Layer 1 — the per-state TTL, which holds only where it is configured.** A configurable TTL
-**MAY** be set per state for `submitted`, `pending_approval`, `approved` and `on_hold`. Where a
-TTL **is** configured for a state, an order dwelling in that state past it **MUST** transition to
-`expired`, publish `OrderExpired`, and audit with actor class `system`. Where a TTL is **not**
-configured, that state has **no per-state bound at all**: there is no code default (§3.7), the
-per-state pass skips the state (§3.6 step 2.2), and the gap is surfaced as the no-configured-TTL
-metric and alert of §3.8. This is a **qualified** guarantee, deliberately, because an unset TTL is
-tolerated rather than fatal — a missing TTL **MUST NOT** block startup, since the numbers are
-Product-owned PRD open questions (§2.2, §4.5) and refusing to start would make an unanswered
-question an outage.
+**Layer 1 — the per-state TTL, configured for every state in production.** A configurable TTL is
+held per state for `submitted`, `pending_approval`, `approved` and `on_hold`, and an order
+dwelling in that state past it **MUST** transition to `expired`, publish `OrderExpired`, and audit
+with actor class `system`. The values are Product-owned PRD open questions (§2.2, §4.5), so there
+is no code default (§3.7); instead the migration **MUST** seed each permanent platform row with
+its **provisional** duration — `submitted` 14 days, `pending_approval` 14 days, `approved`
+30 days, `on_hold` 30 days, and `draft` 90 days for §4.4 — at `policy_revision` 1 with
+`provisional = true`, and Product refines them by promoting a new revision. The policy channel
+**MUST** refuse to promote a NULL duration to a production environment, so a production
+deployment always has every state bounded. A TTL value **MUST NOT** block startup or readiness:
+refusing to serve would make an unanswered question an outage, and the production guarantee is
+enforced at promotion — a release gate — instead. Only a non-production environment may leave a
+state unset; that state then has **no per-state bound**, the per-state pass skips it (§3.6 step
+2.2), and the no-configured-TTL gauge of §3.8 shows it.
 
 **Layer 2 — two re-entry caps, which hold unconditionally and bound counts rather than durations.**
 Two transitions restart a dwell by resetting `orders_order.state_entered_at`, and each is capped
@@ -438,18 +445,24 @@ exhaustive traversal of states plus both counters confirmed 4/64/14/74 entries f
 actual expiry includes discovery cadence, backlog, outages and transaction scheduling delay.
 It excludes draft lifetime, `in_fulfillment` and holds from fulfillment. Policy changes can extend
 TTLs, so the formula requires a finite upper bound T_max over policies effective during the
-order's lifetime. Without configured finite TTLs or bounded scheduler delay, no calendar bound
-is claimed. This design adds no new absolute-deadline mechanism.
+order's lifetime. In production every expirable state now has a finite TTL (Layer 1), so with
+the provisional values T_max is 30 days and the configured pre-fulfillment dwell sums to at most
+74 × 30 = **2,220 days**, plus scheduler delay; a `draft` separately lives at most **90 days** from
+`created_at` plus scheduler delay, since nothing re-enters `draft` (§4.4). A promotion that raises
+T_max raises the bound with it, and a confirmed shorter value lowers it. Without bounded scheduler
+delay no calendar deadline is claimed. This design adds no new absolute-deadline mechanism.
 
-**What neither layer bounds, disclosed rather than covered.** Where a state's TTL is unset, that
-state has no bound, and the re-entry caps supply none — they multiply a dwell that is itself
-unbounded. Two states are outside both layers entirely by §4.3's exemption: `in_fulfillment`, and
-an `on_hold` order whose pre-hold state is `in_fulfillment`. Those remain bounded by the
-operational SLA and by no transition in this gear. So the unqualified sentence "an in-flight order
-does not live forever" is **not** asserted by this design. What is asserted is the arithmetic
-above, its precondition (a configured TTL), and the visibility of the precondition failing
-(§3.8's no-configured-TTL alert). Closing the residual gap is PRD §15 row 7, a Product decision,
-and this design **MUST NOT** pre-empt it with a code default (§2.2).
+**What neither layer bounds, disclosed rather than covered.** Two states are outside both layers
+entirely by §4.3's exemption: `in_fulfillment`, and an `on_hold` order whose pre-hold state is
+`in_fulfillment`. Those remain bounded by the operational SLA and by no transition in this gear.
+In a non-production environment a state left unset has no bound, and the re-entry caps supply
+none — they multiply a dwell that is itself unbounded; a NULL row in production is reachable only
+by bypassing the policy channel and pages per §3.8. So what is asserted is the arithmetic above,
+its precondition (a finite TTL per state, guaranteed in production by the promotion gate and the
+seeded provisional rows), and the visibility of the values still being provisional (§3.8's
+provisional-default alert). Confirming the values is PRD §15 rows 5 and 7, a Product decision;
+the provisional rows are data that Product's answer replaces by revision, not a code default that
+pre-empts it (§2.2).
 
 **Caller-visible cap outcome.** An order requiring one more resume or amendment than its cap allows must be cancelled and re-placed, or the cap raised. Return the named, audited refusal. The rationale for selecting re-entry caps is in [D-90](../DECISIONS.md#hold-and-expiry-alternative-history).
 
@@ -532,19 +545,24 @@ candidate invokes the engine as specified above. Count committed expiries separa
 refusals/infrastructure failures. A submit racing the pass wins or loses under the aggregate
 lock; the loser cannot expire a submitted order. Release the discovery lock at pass end.
 
-Both workers recompute the missing-TTL observation for **all five** policy states, including
-draft. Set each scope/state gauge to 1 when unset and 0 when configured, remove obsolete scope
-labels, and replace the aggregate count from the current snapshot; never accumulate it as a
-counter. Observe configuration even when no orders are due. An unknown configuration read is
-an error/health signal, not an unset value. Test draft-only missing TTL, configuring it later
-(alert clears), removed overrides, empty queues and restart.
+Both workers recompute the missing-TTL and provisional-default observations for **all five**
+policy states, including draft. Set each scope/state missing-TTL gauge to 1 when unset and 0 when
+configured, set each state's provisional-default gauge from its platform row's `provisional`
+flag, remove obsolete scope labels, and replace the aggregate counts from the current snapshot;
+never accumulate them as counters. Observe configuration even when no orders are due. An unknown
+configuration read is an error/health signal, not an unset or provisional value. Test the seeded
+provisional rows, a confirming promotion (provisional alert clears), draft-only missing TTL in
+non-production, configuring it later (alert clears), removed overrides, empty queues and restart.
 
-**Where the auto-void TTL is unset, `draft` is unbounded, and there is no fallback.** Neither
+**The auto-void TTL ships provisionally at 90 days, and there is no other fallback.** Neither
 re-entry cap applies — a `draft` is never held, resumed or amended — and the absolute-lifetime
-backstop that once covered this case is withdrawn (D-90). `draft` is therefore the state with the
-largest exposure to an unanswered Product value: baskets accumulate until the auto-void TTL of
-§4.5 is chosen. The §3.8 alert covers it, no code default closes it (§2.2), and
-[`../DECISIONS.md`](../DECISIONS.md) **Q-07** is where it is answered.
+backstop that once covered this case is withdrawn (D-90), so the auto-void TTL is `draft`'s only
+bound. The migration seeds it at **90 days**, `provisional`, matching the Subscriptions draft
+auto-void platform default (`gears/bss/subscriptions/docs/PRD.md` §15, SUB-D-11 amendment), and
+the policy channel refuses it unset in production (D-181), so baskets in production live at most
+90 days from creation plus scheduler delay. Only a non-production environment may leave it unset,
+and there `draft` is unbounded. The value is seeded data, not a code default (§2.2), and
+[`../DECISIONS.md`](../DECISIONS.md) **Q-07(b)** is where Product confirms or replaces it.
 
 
 <!-- /contract -->
@@ -586,7 +604,7 @@ Billing credit note.
 - **Gear design**: [`../DESIGN.md`](../DESIGN.md) — realises `cpt-cf-bss-orders-lifecycle-component-hold-and-expiry`
 - **Engine**: [`01-foundation`](../DESIGN.md#contract-01-1-1) — the hold and expiry transition rows, the pre-hold column, the missing `in_fulfillment` expiry row
 - **Depends on**: [`02-capture`](../DESIGN.md#contract-02-1-1) for the draft creation instant, which is the draft sweep's dwell input; [`06-workflow-seam`](../DESIGN.md#contract-06-1-1) for the spawn signal the hold-cancel guard reads
-- **Consumers**: [`05-preconditions`](../DESIGN.md#contract-05-1-1) relies on the `approved` TTL as a declined instrument's ordinary exit; the resume cap of §4.2 stops that TTL being restarted without limit, and where the TTL is unset there is no automatic exit at all
+- **Consumers**: [`05-preconditions`](../DESIGN.md#contract-05-1-1) relies on the `approved` TTL as a declined instrument's ordinary exit; the re-entry caps of §4.2 stop that TTL being restarted without limit, and the TTL is never unset in production (provisional 30 days, D-181), so that exit always exists there
 - **Sibling gear**: raises the overdue escalation and suspends its process on `OrderHeld`
 - **ADRs**: [`ADR/0001`](../ADR/0001-cpt-cf-bss-orders-lifecycle-adr-transition-through-engine.md) transition through the engine; [`ADR/0002`](../ADR/0002-cpt-cf-bss-orders-lifecycle-adr-slice-decomposition.md) the foundation-plus-seven-slices decomposition; [`ADR/0004`](../ADR/0004-cpt-cf-bss-orders-lifecycle-adr-closed-enumerations.md) the closed state and event enumerations
 
