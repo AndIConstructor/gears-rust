@@ -26,7 +26,7 @@ date: 2026-09-30
 
 ## Context and Problem Statement
 
-Connectors send typed records about subjects. Someone must turn these records into each subject's profile and serve that profile. The profile is a graph: a subject linked to entities that carry properties. It is kept in graph storage, the platform gear that stores and embeds the profile graph. A language model proposes how a record changes the profile and flags sensitive data. Its proposal is a plan: the set of changes built in memory for one record. A sensitive-data check gives a verdict on each value the plan would store: the block, redact or allow answer. Admission, the deterministic checks on a plan, then decides what is stored. Each subject also has a personalization setting, which lets the profile be used, and can make a review request, a mark that a fact is incorrect.
+Connectors send typed records about subjects. Someone must turn these records into each subject's profile and serve that profile. The profile is a graph: a subject linked to entities that carry properties. It is kept in graph storage, the platform gear that stores and embeds the profile graph. A language model proposes how a record changes the profile. Pattern checks in code and the model flag sensitive data. The model's proposal is a plan: the set of changes built in memory for one record. A sensitive-data check gives a verdict on each value the plan would store: the block, redact or allow answer. Admission, the deterministic checks on a plan, then decides what is stored. Each subject also has a personalization setting, which lets the profile be used, and can make a review request, a mark that a fact is incorrect.
 
 Where should this logic live, and who should serve the profile?
 

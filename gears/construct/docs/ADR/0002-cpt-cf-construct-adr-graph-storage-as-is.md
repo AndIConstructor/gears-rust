@@ -84,7 +84,7 @@ Construct uses graph storage's v1 write, compare-and-set and soft delete, and as
 - Good, because compare-and-set keeps two records for one subject from mixing.
 - Good, because Construct asks graph storage for no change.
 - Good, because Construct supplies the node keys, so it can map each value the model sees back to its node key.
-- Neutral, because a write conflict makes the planner run again, up to a small limit. Past the limit, the record is dropped and logged.
+- Neutral, because a write conflict makes the planner run again, up to a small limit. Past the limit, the record is dropped, with an audit event.
 - Neutral, because graph storage cannot enforce the read rules, so Construct's Profile reader applies them.
 - Neutral, because graph storage embeds text on ingest, so Construct must enforce the verdicts before it writes.
 - Bad, because a deleted node key cannot be reused before purge, so a returning entity needs a new key.

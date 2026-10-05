@@ -33,7 +33,7 @@
 
 Construct is a gear. Connectors stay simple: they send typed records and know nothing else. Construct is the one place that decides what a record means for a subject. It asks: is the source trusted, is personalization on, is the record worth keeping, and how does it change the subject's profile? The profile is a graph: a subject linked to entities that carry properties. Construct writes the profile to graph storage. It is the only way applications and agents read it. The profile is read only for its owner: by the owner, and by applications and agents that act for the owner under platform permissions.
 
-A language model proposes how a record changes the profile and flags sensitive data. Construct runs that model step itself. The step is a small agent loop: the model calls a fixed set of tools in rounds. Then deterministic code decides what is stored. The model proposes; code decides.
+A language model proposes how a record changes the profile. Pattern checks in code and the model flag sensitive data. Construct runs that model step itself. The step is a small agent loop: the model calls a fixed set of tools in rounds. Then deterministic code decides what is stored. The model proposes; code decides.
 
 Construct owns the rules around the model step: trust, confidence, allowed entity kinds, write caps, personalization and the sensitive-data verdicts. It also owns its own tables (subject settings, review requests and record IDs), the read path and erasure. The reasoning is in `cpt-cf-construct-adr-construct-is-a-gear`.
 
@@ -47,23 +47,23 @@ Requirements that significantly influence architecture decisions.
 
 | Requirement | Design Response |
 |-------------|------------------|
-| `cpt-cf-construct-fr-record-intake` | Results API checks the record against its GTS type and base types. Before any model call, it refuses a broken envelope or type, a repeat, a connector that is off, or personalization off. It answers received, repeat or refused. It keeps only the received record's identity in `record_ids`; the content stays in memory while the record is processed. If an instance of Construct stops before the record is processed, the record is lost and no drop is logged. Connectors on or off is a tenant setting in the settings service. A new connector is a new registered type and needs no Construct code |
+| `cpt-cf-construct-fr-record-intake` | Results API checks the record against its GTS type and base types. Before any model call, it refuses a broken envelope or type, a repeat, a connector that is off, or personalization off. It answers received, repeat or refused. It keeps only the received record's identity in `construct__record_ids`; the content stays in memory while the record is processed. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Connectors on or off is a tenant setting in the settings service. A new connector is a new registered type and needs no Construct code |
 | `cpt-cf-construct-fr-fact-decisions` | Planner runs the agent loop over the record and the subject's current profile. Its plan adds, replaces or removes entities of that subject only; a replace removes the old value in the same plan. The reference evaluation set measures that no contradicting pair remains (see Risks, "Quality lives in the prompts") |
 | `cpt-cf-construct-fr-deterministic-storage` | Profile writer applies the admitted plan in one write with the profile version the plan was built on. Graph storage rejects the write if the profile changed; the planner runs again, up to a small limit. Each write carries graph storage's idempotency key, and a plan's node keys are fixed when the plan is built. So storing the same changes again gives the same facts. Profile reader serves from graph storage, so the next read returns the stored value |
 | `cpt-cf-construct-fr-fact-origin` | Each plan carries its origin from the record envelope, the MCP call, the reviewer or the tenant administrator. Profile writer stores it and the storing time with each entity. Profile reader and Subject control return it |
-| `cpt-cf-construct-fr-admin-facts` | Subject control serves the admin operations on paths under `admin`. A read returns all facts of the subject with origin, like the subject's own view, and is a read log event. An add or edit becomes a plan with one step and no planner. It passes the sensitive-data checks and Admission, and the Profile writer stores it with the administrator as its origin. A delete works like the subject's delete. A stored edit or a delete of a fact under an open review request closes the request as corrected or deleted. When nothing is stored, the call says so. Each change is a log event without content |
+| `cpt-cf-construct-fr-admin-facts` | Subject control serves the admin operations on paths under `admin`. A read returns all facts of the subject with origin, like the subject's own view, and is a read audit event. An add or edit becomes a plan with one step and no planner. It passes the sensitive-data checks and Admission, and the Profile writer stores it with the administrator as its origin. A delete works like the subject's delete. A stored edit or a delete of a fact under an open review request closes the request as corrected or deleted. When nothing is stored, the call says so. Each change is an audit event without content |
 | `cpt-cf-construct-fr-profile-read` | Profile reader serves the profile only for its owner: to the owner, and to applications and agents that act for the owner. It groups entities by entity kind, which is the PRD's category. It lists only permitted categories with at least one readable fact, and names the subject. Permissions come from the platform on each read |
-| `cpt-cf-construct-fr-subject-access` | Subject control shows all facts with origin, the settings and the review requests. Each read is a log event without content in the platform's log storage. The subject's own view, the export and an administrator's read also write read log events. The data protection officer finds read events there per subject and per application, and gives them to the subject with the export |
-| `cpt-cf-construct-fr-review-request` | Subject control creates a review request keyed by the graph node key. Profile reader hides the fact from applications and agents while the request is open. The planner skips it, so no record or agent changes it. If the subject deletes the fact or retention removes it first, the request closes as deleted. The assigned reviewers are a tenant setting in the settings service. Reviewers resolve a request as corrected, deleted or rejected. A corrected value becomes a plan with one replace step, which passes the sensitive-data checks and Admission. If they block or drop it, nothing is stored and the request stays open. Each correction and each resolution is a log event without content |
-| `cpt-cf-construct-fr-subject-delete` | Subject control deletes one fact in graph storage; each fact delete is a log event without content. Deletion erases everything on request: the subject's entities, review requests and record IDs. It sets personalization off and writes an erasure log event without content. Results API refuses a repeat of a deleted fact's record by its identity in `record_ids`. A deleted entity that returns gets a new node key |
-| `cpt-cf-construct-fr-retention` | Deletion runs retention by age with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader and uses the same code as erasure. It covers facts, review requests and record IDs; log events follow the log's retention period. Profile reader does not serve an item past the period, even before the job removes it. Tenant exit follows the platform's tenant offboarding protocol |
+| `cpt-cf-construct-fr-subject-access` | Subject control shows all facts with origin, the settings and the review requests. Each read is an audit event without content in the Audit gear. The subject's own view, the export and an administrator's read also write read audit events. The data protection officer finds the read audit events there per subject and per application, and gives them to the subject with the export |
+| `cpt-cf-construct-fr-review-request` | Subject control creates a review request keyed by the graph node key. Profile reader hides the fact from applications and agents while the request is open. The planner skips it, so no record or agent changes it. If the subject deletes the fact or retention removes it first, the request closes as deleted. The assigned reviewers are a tenant setting in the settings service. Reviewers resolve a request as corrected, deleted or rejected. A corrected value becomes a plan with one replace step, which passes the sensitive-data checks and Admission. If they block or drop it, nothing is stored and the request stays open. Each correction and each resolution is an audit event without content |
+| `cpt-cf-construct-fr-subject-delete` | Subject control deletes one fact in graph storage; each fact delete is an audit event without content. Deletion erases everything on request: the subject's entities, review requests and record IDs. It sets personalization off and writes an erasure audit event without content. Results API refuses a repeat of a deleted fact's record by its identity in `construct__record_ids`. A deleted entity that returns gets a new node key |
+| `cpt-cf-construct-fr-retention` | Deletion runs retention by age with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader and uses the same code as erasure. It covers facts, review requests and record IDs; audit events follow the Audit gear's retention period. Profile reader does not serve an item past the period, even before the job removes it. Tenant exit follows the platform's tenant offboarding protocol |
 | `cpt-cf-construct-fr-settings` | Subject settings table keeps personalization on or off. The personalization default for new subjects is a tenant setting in the settings service. Results API refuses records while it is off, Admission drops plans built before it went off, and Profile reader serves nothing while it is off |
 | `cpt-cf-construct-fr-mcp-tools` | MCP tools offer a read tool that goes through Profile reader, like any application |
 | `cpt-cf-construct-fr-mcp-manage-facts` | MCP tools offer the manage-facts tool. It takes what the subject said, with the recent conversation, through the same planner, checks and writer. The origin names the agent and the subject. It waits and returns what changed |
 | `cpt-cf-construct-fr-mcp-caller-binding` | MCP tools take the caller and tenant from the platform only. For the subject a call names, the AuthZ resolver decides whether the caller may act for it, as that person or as the profile's owner. A call for a subject or tenant the caller may not act for gets the same answer as a subject that does not exist |
-| `cpt-cf-construct-fr-sensitive-data-guardrails` | Sensitive-data checks run one model check per sensitive-data kind on the values a plan would store. Admission enforces block and redact before Profile writer runs. The checks have no off switch. Each block and redaction is a log event with its sensitive-data kind and without content; the counts come from these events |
-| `cpt-cf-construct-fr-tenant-isolation` | Every component takes the tenant from the platform security context. Graph storage calls and Construct's own tables are scoped to that tenant. Log events carry the tenant, and the log storage confines reads of them to the caller's tenant |
-| `cpt-cf-construct-fr-access-control` | Every REST operation and MCP tool needs a platform-authenticated caller and tenant, and asks the AuthZ resolver for its own separate permission (see 3.3). Exporting a subject's data and administering a subject's facts are permissions of their own. Tenant settings are changed in the settings service, and log events are read in the platform's log storage, under their own permissions |
+| `cpt-cf-construct-fr-sensitive-data-guardrails` | Sensitive-data checks run one check per sensitive-data kind on the values a plan would store: a pattern check in code, a model call, or both. Admission enforces block and redact before Profile writer runs. The checks have no off switch. Each block and redaction is an audit event with its sensitive-data kind and without content; the counts come from these events |
+| `cpt-cf-construct-fr-tenant-isolation` | Every component takes the tenant from the platform security context. Graph storage calls and Construct's own tables are scoped to that tenant. Audit events carry the tenant, and the Audit gear confines reads of them to the caller's tenant |
+| `cpt-cf-construct-fr-access-control` | Every REST operation and MCP tool needs a platform-authenticated caller and tenant, and asks the AuthZ resolver for its own separate permission (see 3.3). Exporting a subject's data and administering a subject's facts are permissions of their own. Tenant settings are changed in the settings service, and audit events are read in the Audit gear, under their own permissions |
 
 #### NFR Allocation
 
@@ -71,8 +71,8 @@ This table maps non-functional requirements from PRD to specific design/architec
 
 | NFR ID | NFR Summary | Allocated To | Design Response | Verification Approach |
 |--------|-------------|--------------|-----------------|----------------------|
-| `cpt-cf-construct-nfr-deletion-time` | Deleted data is not served from the next read, and is gone from all storage within 30 days | `cpt-cf-construct-component-deletion`, `cpt-cf-construct-component-subject-control`, `cpt-cf-construct-component-profile-reader` | A delete or erasure takes effect in graph storage and Construct's tables on the request. Erasure sets personalization off, so Profile reader serves nothing at once. Profile reader does not serve an item past the tenant's retention period, even before the retention job removes it; the job then deletes it. Removal from all storage within 30 days needs graph storage's purge (see Risks). Tenant exit follows the platform's tenant offboarding protocol; graph storage's own offboarding comes after its v1. Log events are outside this threshold; they follow the log's retention period | Acceptance tests for delete, erasure, retention and tenant exit; the 30-day removal is verified once graph storage's purge and offboarding exist |
-| `cpt-cf-construct-nfr-guardrail-detection` | At least 95 % found per sensitive-data kind; 99 % for credentials | `cpt-cf-construct-component-sensitive-data-checks`, `cpt-cf-construct-component-model-client` | One focused check per sensitive-data kind, each with a structured answer, on every value a plan would store | The reference test set shipped with Construct, scored per sensitive-data kind |
+| `cpt-cf-construct-nfr-deletion-time` | Deleted data is not served from the next read, and is gone from all storage within 30 days | `cpt-cf-construct-component-deletion`, `cpt-cf-construct-component-subject-control`, `cpt-cf-construct-component-profile-reader` | A delete or erasure takes effect in graph storage and Construct's tables on the request. Erasure sets personalization off, so Profile reader serves nothing at once. Profile reader does not serve an item past the tenant's retention period, even before the retention job removes it; the job then deletes it. Removal from all storage within 30 days needs graph storage's purge (see Risks). Tenant exit follows the platform's tenant offboarding protocol; graph storage's own offboarding comes after its v1. Audit events are outside this threshold; they follow the Audit gear's retention period | Acceptance tests for delete, erasure, retention and tenant exit; the 30-day removal is verified once graph storage's purge and offboarding exist |
+| `cpt-cf-construct-nfr-guardrail-detection` | At least 95 % found per sensitive-data kind; 99 % for credentials | `cpt-cf-construct-component-sensitive-data-checks`, `cpt-cf-construct-component-model-client` | One check per sensitive-data kind on every value a plan would store: a pattern check in code, a model check with a structured answer, or both; credentials have a pattern check | The reference test set shipped with Construct, scored per sensitive-data kind |
 
 #### Key ADRs
 
@@ -245,7 +245,7 @@ Graph storage only soft-deletes in its v1. A soft delete leaves a tombstone: a m
 
 **Technology**: GTS types for records and for the profile; Rust types in the gear.
 
-**Location**: Construct's GTS profile types (`cpt-cf-construct-contract-person-types`) and the shared record base type (`cpt-cf-construct-contract-gts-record`), registered in the types registry.
+**Location**: Construct's GTS profile types (`cpt-cf-construct-contract-person-types`) and the shared record base type (`cpt-cf-construct-contract-gts-record`), registered in the types registry. The record base type is `gts.cf.connectors.core.record.v1~`. The person types are `gts.cf.construct.person.identity.v1~`, `gts.cf.construct.person.roles.v1~`, `gts.cf.construct.person.skills.v1~` and `gts.cf.construct.person.preferences.v1~`, one per entity kind of a person. A person's subject ID is the UUID of the platform user, `gts.cf.core.am.user.v1~`.
 
 **Core Entities**:
 
@@ -261,7 +261,7 @@ The profile is read only for its owner: by the owner, and by applications and ag
 
 One item a connector sends about one subject. Every connector's record type derives from one base record type. The base fixes the envelope: the type, where the record comes from (the connector and the record's identity), the record's version, when it was observed, the subject, and the payload. A connector's type refines only the payload. Construct implements the base only. It gives the payload, with its schema, to the model as data. A new connector is a new registered type and needs no Construct code.
 
-A received record's content lives only in memory while the record is processed. Construct never writes it to any store. It keeps only the record's identity in its `record_ids` table: the tenant, the connector and the record identity.
+A received record's content lives only in memory while the record is processed. Construct never writes it to any store. It keeps only the record's identity in its `construct__record_ids` table: the tenant, the connector and the record identity.
 
 #### Profile
 
@@ -296,7 +296,7 @@ The answer of one sensitive-data check for the values of a plan: block, redact o
 
 A block or redact verdict changes only the affected values. Blocking drops the value and keeps the rest of the plan. Redacting removes the found content from the value.
 
-These sensitive-data kinds are the special categories of a person's profile: data that must stay secret because of the law, security, safety, industry standards or contracts. Other kinds of subjects may have other sensitive-data kinds, defined with their profile types.
+These sensitive-data kinds are the special categories of a person's profile: data that must stay secret because of the law, security, safety, industry standards or contracts. Construct supports only a person for now. Another kind of subject may have other sensitive-data kinds, which need their own checks, so adding one changes this design.
 
 #### Subject Settings
 
@@ -321,7 +321,7 @@ The subject's mark that a fact is incorrect, with an optional comment. It is key
 
 ### 3.2 Component Model
 
-Construct has ten components. Records and MCP calls flow through the planner, the checks and the writer. All reads flow through the reader. Every operation asks the AuthZ resolver for its permission, and the components write log events without content to the platform's log storage.
+Construct has ten components. Records and MCP calls flow through the planner, the checks and the writer. All reads flow through the reader. Every operation asks the AuthZ resolver for its permission, and the components write audit events without content to the Audit gear.
 
 ```mermaid
 flowchart LR
@@ -368,7 +368,7 @@ flowchart LR
     SC -->|"assigned reviewers"| SS
     DEL -->|"retention period"| SS
     CG -->|"permission for every operation"| AZ["AuthZ resolver"]
-    CG -->|"log events without content"| LS["Platform log storage"]
+    CG -->|"audit events without content"| LS["Audit gear"]
 ```
 
 #### Results API
@@ -381,13 +381,13 @@ Connectors need one simple intake that tells them at once whether a record is ta
 
 ##### Responsibility scope
 
-Takes one record per request. Refuses what is plainly wrong before any model call: a broken envelope or type, a repeat, a connector that is off, or personalization off. It finds a repeat by the record's identity in `record_ids`, also a repeat of a deleted fact's record. The table holds one row per tenant, connector and record identity. Inserting the identity is the repeat check, so two copies sent at once cannot both be received. Connectors on or off comes from the settings service; personalization comes from the subject settings table. A refusal names the type, the place in the record and the broken rule. Answers received, repeat or refused. Processing then runs in the background, best effort. A record that fails later is dropped, and the drop is a log event without content.
+Takes one record per request. Refuses what is plainly wrong before any model call: a broken envelope or type, a repeat, a connector that is off, or personalization off. It finds a repeat by the record's identity in `construct__record_ids`, also a repeat of a deleted fact's record. The table holds one row per tenant, connector and record identity. Inserting the identity is the repeat check, so two copies sent at once cannot both be received. Connectors on or off comes from the settings service; personalization comes from the subject settings table. A refusal names the type, the place in the record and the broken rule. Answers received, repeat or refused. Processing then runs in the background, best effort. A record that fails later is dropped, and the drop is an audit event without content.
 
-A received record's content lives only in memory. If an instance of Construct stops before the record is processed, the record is lost, and no drop is logged. Its identity stays in `record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity. This follows from best effort.
+A received record's content lives only in memory. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Its identity stays in `construct__record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity. This follows from best effort.
 
 ##### Responsibility boundaries
 
-Does not decide what a record means; the planner does. Keeps only the record's identity in `record_ids`; the content stays in memory while the record is processed and is never stored. Makes no model call.
+Does not decide what a record means; the planner does. Keeps only the record's identity in `construct__record_ids`; the content stays in memory while the record is processed and is never stored. Makes no model call.
 
 ##### Related components (by ID)
 
@@ -403,7 +403,7 @@ Someone must decide how a record changes the profile. A language model proposes 
 
 ##### Responsibility scope
 
-Reads the subject's current profile and its version. Runs the agent loop over the record, or the MCP input, and the profile. The tools only add steps to a plan in memory; nothing is written during the loop. The model sees numbered values and plain keys (property names, not node keys), never IDs. Construct maps each number back to its node key, and gives each new entity a new node key. The planner skips a fact under an open review request: it does not change or remove it. It reads the open review requests from Construct's own tables. The loop has caps on rounds and tokens. If it hits a cap or fails, the record is dropped, and the drop is a log event without content. Runs again when the writer reports a conflict, up to a small limit.
+Reads the subject's current profile and its version. Runs the agent loop over the record, or the MCP input, and the profile. The tools only add steps to a plan in memory; nothing is written during the loop. The model sees numbered values and plain keys (property names, not node keys), never IDs. Construct maps each number back to its node key, and gives each new entity a new node key. The planner skips a fact under an open review request: it does not change or remove it. It reads the open review requests from Construct's own tables. The loop has caps on rounds and tokens. If it hits a cap or fails, the record is dropped, and the drop is an audit event without content. Runs again when the writer reports a conflict, up to a small limit.
 
 ##### Responsibility boundaries
 
@@ -425,7 +425,7 @@ The profile must not become a store of sensitive data, and graph storage embeds 
 
 ##### Responsibility scope
 
-Runs one model check per sensitive-data kind: personal IDs, health, finance, biometrics, credentials, contacts, location, politics, sex, and other protected data. Each check is one call with a structured answer. The checks run in parallel on the values the plan would store. Each returns block, redact or allow. If a check fails or hits a cap, the record is dropped, and the drop is a log event without content.
+Runs one check per sensitive-data kind: personal IDs, health, finance, biometrics, credentials, contacts, location, politics, sex, and other protected data. A check is a pattern check in code, such as regular expressions, a model call, or both. Text cannot argue with a pattern check. So the kinds whose content has a fixed form have pattern checks: credentials, personal IDs, card and account numbers under finance, and contacts. A model check is one call with a structured answer. Its prompt holds only the instructions; the values to check reach the model as a tool call result, never inside the prompt. The checks run in parallel on the values the plan would store. Each returns block, redact or allow. If a check fails or hits a cap, the record is dropped, and the drop is an audit event without content.
 
 ##### Responsibility boundaries
 
@@ -433,7 +433,7 @@ Does not change the plan; Admission enforces the verdicts. Cannot be turned off.
 
 ##### Related components (by ID)
 
-- `cpt-cf-construct-component-model-client` — calls, once per sensitive-data kind
+- `cpt-cf-construct-component-model-client` — calls, for each model check
 - `cpt-cf-construct-component-admission` — passes the plan and the verdicts to
 - `cpt-cf-construct-component-subject-control` — is called by, for a reviewer's corrected value and an administrator's value
 
@@ -447,7 +447,7 @@ The model proposes; code decides. Admission is the code that decides.
 
 ##### Responsibility scope
 
-Runs deterministic checks on the plan: source trust, the confidence floor, allowed entity kinds, write caps, personalization still on, and the sensitive-data verdicts. The first four are admission rules, tenant settings in the settings service. Personalization comes from the subject settings table. Five checks drop the whole plan when it fails one: source trust, the confidence floor, allowed entity kinds, write caps, and personalization still on. A block or redact verdict acts only on the affected values: blocking drops the value and keeps the rest of the plan, and redacting removes the found content from the value. Each block, redaction and drop is a log event without content.
+Runs deterministic checks on the plan: source trust, the confidence floor, allowed entity kinds, write caps, personalization still on, and the sensitive-data verdicts. The first four are admission rules, tenant settings in the settings service. Personalization comes from the subject settings table. Five checks drop the whole plan when it fails one: source trust, the confidence floor, allowed entity kinds, write caps, and personalization still on. A block or redact verdict acts only on the affected values: blocking drops the value and keeps the rest of the plan, and redacting removes the found content from the value. Each block, redaction and drop is an audit event without content.
 
 ##### Responsibility boundaries
 
@@ -467,7 +467,7 @@ A plan must land whole, and two records for one subject must not mix.
 
 ##### Responsibility scope
 
-Applies the admitted plan to graph storage in one write. The write also writes the profile's root node, the subject node, with the profile version the plan was built on as its expected version. Each write carries graph storage's idempotency key. The plan's node keys were fixed when the plan was built, so storing the same changes again gives the same facts. Each entity is stored with its origin and the time it was stored. If another change reached the profile in between, graph storage rejects the write. The planner then runs again, up to a small limit. Past the limit, the record is dropped, and the drop is a log event without content.
+Applies the admitted plan to graph storage in one write. The write also writes the profile's root node, the subject node, with the profile version the plan was built on as its expected version. Each write carries graph storage's idempotency key. The plan's node keys were fixed when the plan was built, so storing the same changes again gives the same facts. Each entity is stored with its origin and the time it was stored. If another change reached the profile in between, graph storage rejects the write. The planner then runs again, up to a small limit. Past the limit, the record is dropped, and the drop is an audit event without content.
 
 A reviewer's corrected value has no planner, and neither has a tenant administrator's added or edited fact. The planner skips a fact under review, so a record or an agent does not change it. On a write conflict, the writer reads the profile again and writes the same value again, up to the same small limit. If the fact to correct or edit is gone, because the subject deleted it or retention removed it, nothing is stored; that delete has already closed any review request on it as deleted.
 
@@ -489,7 +489,7 @@ Graph storage cannot enforce Construct's read rules, so Construct needs one read
 
 ##### Responsibility scope
 
-The only read path for applications and agents. Applies owner only, platform permissions per category, personalization off, and hidden-while-under-review. Owner only means the profile is served only for its owner: to the owner, and to applications and agents that act for the owner. Owner only binds applications and agents. Two roles read a subject's facts without acting for the subject, through Subject control: the data protection officer, for an export on the subject's request, and the tenant administrator, through the admin operations. Each of their reads is a read log event too. It reads the subject settings and the review requests from Construct's own tables. It does not serve an item past the tenant's retention period, even before the retention job removes it. Groups entities by entity kind and lists only categories with at least one readable fact. Names the subject in every response. Each read it serves is a log event without content: which application or agent, which subject, which categories, and when.
+The only read path for applications and agents. Applies owner only, platform permissions per category, personalization off, and hidden-while-under-review. Owner only means the profile is served only for its owner: to the owner, and to applications and agents that act for the owner. Owner only binds applications and agents. Two roles read a subject's facts without acting for the subject, through Subject control: the data protection officer, for an export on the subject's request, and the tenant administrator, through the admin operations. Each of their reads is a read audit event too. It reads the subject settings and the review requests from Construct's own tables. It does not serve an item past the tenant's retention period, even before the retention job removes it. Groups entities by entity kind and lists only categories with at least one readable fact. Names the subject in every response. Each read it serves is an audit event without content: which application or agent, which subject, which categories, and when.
 
 ##### Responsibility boundaries
 
@@ -510,11 +510,11 @@ The subject controls their data: they see it, correct it and erase it. A tenant 
 
 ##### Responsibility scope
 
-View: all facts with origin, the settings and the review requests. Mark incorrect: creates a review request keyed by the graph node key. Delete: soft-deletes one fact in graph storage, closes an open review request on the fact as deleted, and writes the root node with its expected version. On a write conflict, it reads the profile again and writes again, up to the same small limit. Erase: hands the request to Deletion. Export: on the subject's request, the data protection officer exports all of the subject's data in Construct as a machine-readable file. This needs the export permission. The data protection officer adds the read events from the platform's log storage. The subject's own view, the export and an administrator's read each write a read log event without content. Also lists open review requests to the assigned reviewers and records their outcome, and keeps the subject's settings. The assigned reviewers are a tenant setting in the settings service.
+View: all facts with origin, the settings and the review requests. Mark incorrect: creates a review request keyed by the graph node key. Delete: soft-deletes one fact in graph storage, closes an open review request on the fact as deleted, and writes the root node with its expected version. On a write conflict, it reads the profile again and writes again, up to the same small limit. Erase: hands the request to Deletion. Export: on the subject's request, the data protection officer exports all of the subject's data in Construct as a machine-readable file. This needs the export permission. The data protection officer adds the read audit events from the Audit gear. The subject's own view, the export and an administrator's read each write a read audit event without content. Also lists open review requests to the assigned reviewers and records their outcome, and keeps the subject's settings. The assigned reviewers are a tenant setting in the settings service.
 
 For a corrected value, the reviewer sets the value by hand. Subject control turns it into a plan with one replace step, without the planner. The plan passes the sensitive-data checks and Admission like any plan, and the Profile writer stores it. Its origin names the reviewer. If the checks block the value or Admission drops the plan, nothing is stored, and the review request stays open.
 
-Admin operations, for a tenant administrator: read all facts of a subject with origin, like the subject's own view; add, edit or delete one fact. An add or edit becomes a plan with one add or replace step, without the planner, and goes through the sensitive-data checks, Admission and the Profile writer like a corrected value. Its origin names the administrator. An add for a subject with no profile yet creates the profile's root node, as a first record does. If the checks block the value, Admission drops the plan (for example because personalization is off), or the fact to edit is gone, nothing is stored and the call says so. A delete works like the subject's delete. A stored edit or a delete of a fact under an open review request closes the request as corrected or deleted; an edit that the checks block or Admission drops leaves it open. Each admin read is a read log event, and each change is a log event without content.
+Admin operations, for a tenant administrator: read all facts of a subject with origin, like the subject's own view; add, edit or delete one fact. An add or edit becomes a plan with one add or replace step, without the planner, and goes through the sensitive-data checks, Admission and the Profile writer like a corrected value. Its origin names the administrator. An add for a subject with no profile yet creates the profile's root node, as a first record does. If the checks block the value, Admission drops the plan (for example because personalization is off), or the fact to edit is gone, nothing is stored and the call says so. A delete works like the subject's delete. A stored edit or a delete of a fact under an open review request closes the request as corrected or deleted; an edit that the checks block or Admission drops leaves it open. Each admin read is a read audit event, and each change is an audit event without content.
 
 ##### Responsibility boundaries
 
@@ -557,7 +557,7 @@ Erasure and retention must remove data from graph storage and from Construct's o
 
 ##### Responsibility scope
 
-One component with two triggers. Retention is automatic, by age, with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader. Erasure is the subject's request to remove everything now. Both use the same code. They remove the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's own tables. Each delete in graph storage also writes the root node with its expected version. On a write conflict, Deletion reads the profile again, works out again what to delete, and writes again, up to the same small limit. So retention keeps a fact that a record changed in between, because it is no longer past the period. Erasure also soft-deletes the root node, the subject node, with the rest of the profile. Graph storage's purge removes it later, and a profile created after the erasure gets a new root key (see the constraint). Erasure sets personalization off and writes an erasure log event without the erased content. Neither trigger removes log events; the log's retention period does. The Profile reader already stops serving an item once it is past the tenant's retention period. The job then deletes it. When retention removes a fact, an open review request on it closes as deleted.
+One component with two triggers. Retention is automatic, by age, with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader. Erasure is the subject's request to remove everything now. Both use the same code. They remove the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's own tables. Each delete in graph storage also writes the root node with its expected version. On a write conflict, Deletion reads the profile again, works out again what to delete, and writes again, up to the same small limit. So retention keeps a fact that a record changed in between, because it is no longer past the period. Erasure also soft-deletes the root node, the subject node, with the rest of the profile. Graph storage's purge removes it later, and a profile created after the erasure gets a new root key (see the constraint). Erasure sets personalization off and writes an erasure audit event without the erased content. Neither trigger removes audit events; the Audit gear's retention period does. The Profile reader already stops serving an item once it is past the tenant's retention period. The job then deletes it. When retention removes a fact, an open review request on it closes as deleted.
 
 Deletion also handles tenant exit. Construct follows the platform's tenant offboarding protocol, as [graph storage does](../../graph-storage/docs/DESIGN.md#tenant-offboarding-and-deletion-monotonicity). Deletion removes the leaving tenant's data from Construct's own tables. Graph storage removes the tenant's graph through its own offboarding.
 
@@ -619,9 +619,11 @@ Construct offers three surfaces. REST and the Rust SDK realize `cpt-cf-construct
 
 A resolution takes the outcome (corrected, deleted, or rejected with a reason) and, for a correction, the value the reviewer sets by hand. An add or edit takes the fact's entity kind and value. Their wire shapes are left to the feature design.
 
+The four list reads are paged: the subject's facts, the subject's review requests, the open review requests and an administrator's read of a subject's facts. They use cursor pagination with a maximum page size, and OData `$filter` and `$orderby`, as in [OData and pagination](../../../docs/toolkit_unified_system/07_odata_pagination_select_filter.md). The page size limit and the fields to filter and order by are left to the feature design.
+
 The reviewer queue and the admin operations sit under `/api/construct/v1/admin/`; the subject's own routes, such as marking a fact incorrect, stay under `subjects`. So a deployment can turn on one route-policy rule on `/api/construct/v1/admin/**` that rejects calls without the scope it chooses at the API gateway, as in [Gateway Scope Enforcement](../../../docs/arch/authorization/DESIGN.md#gateway-scope-enforcement-optional). Reviewers, including a data protection officer, then need that scope too. The AuthZ resolver still checks the permission of each operation.
 
-Each operation has its own permission, checked through the AuthZ resolver. The permission classes come from `cpt-cf-construct-fr-access-control`. For a path with `{subject_id}` outside `admin`, the AuthZ resolver also decides whether the caller may act for that subject. An admin path needs only its permission in the caller's tenant: the administrator does not act for the subject. Everything is scoped to the caller's tenant, so a subject in another tenant gets the same answer as a subject with no profile. Tenant settings are changed in the settings service, not through Construct. Log events are read in the platform's log storage, under its own permissions.
+Each operation has its own permission, checked through the AuthZ resolver. The permission classes come from `cpt-cf-construct-fr-access-control`. For a path with `{subject_id}` outside `admin`, the AuthZ resolver also decides whether the caller may act for that subject. An admin path needs only its permission in the caller's tenant: the administrator does not act for the subject. Everything is scoped to the caller's tenant, so a subject in another tenant gets the same answer as a subject with no profile. Tenant settings are changed in the settings service, not through Construct. Audit events are read in the Audit gear, under its own permissions.
 
 **MCP**
 
@@ -682,15 +684,15 @@ Construct uses graph storage as it is (`cpt-cf-construct-adr-graph-storage-as-is
 
 This is the PRD's LLM gateway actor (`cpt-cf-construct-actor-llm-gateway`): the platform's LLM gateway, or a service with the OpenAI chat completions API that the deployment's configuration sets. The model endpoint gets the record payload with its schema, the numbered profile values, and the tools. It never gets an ID. Configuration chooses the adapter. Construct approves no models and no endpoints. Model policy belongs to the LLM gateway. With the chat completions adapter, the deployment's configuration sets the endpoint.
 
-#### Platform Log Storage
+#### Audit Gear
 
-- **Contract**: the platform's log event interface
+- **Contract**: the Audit gear's SDK
 
 | Dependency Gear | Interface Used | Purpose |
 |-------------------|---------------|---------|
-| Platform log storage | The platform's log interface | Holds Construct's log events |
+| [Audit gear](../../../docs/GEARS.md#audit) | SDK client | Holds Construct's audit events |
 
-This is the PRD's log storage actor (`cpt-cf-construct-actor-log-storage`), a p1 dependency. Construct writes a log event for each read, delete, correction, administrator change, review resolution and erasure, and for each block, redaction and drop. Each event carries the tenant, the subject, the application, agent or administrator, the event type and the time. A read event also names the categories read. A block or redaction event also names the sensitive-data kind. No event holds content. The log storage keeps events for the log's retention period. Erasure and the tenant's retention period do not remove them. The data protection officer reads them there, under the log storage's own permissions. The log storage confines each read to the caller's tenant. The counts of blocks, redactions and drops come from these events.
+This is the PRD's Audit gear actor (`cpt-cf-construct-actor-audit`), a p1 dependency. Construct keeps no audit store of its own. It writes an audit event for each read, delete, correction, administrator change, review resolution and erasure, and for each block, redaction and drop. Each event carries the tenant, the subject, the application, agent or administrator, the event type and the time. A read event also names the categories read. A block or redaction event also names the sensitive-data kind. No event holds content. The Audit gear keeps events for its retention period. Erasure and the tenant's retention period do not remove them. The data protection officer queries them there, per subject and per application, under the Audit gear's own permissions. The Audit gear confines each read to the caller's tenant. The counts of blocks, redactions and drops come from these events.
 
 **Dependency Rules** (per project conventions):
 
@@ -732,7 +734,7 @@ sequenceDiagram
         RA-->>CN: refused
         Note over CN,RA: processing stops
     else passes the checks
-        RA->>T: insert the record ID into record_ids
+        RA->>T: insert the record ID into construct__record_ids
         alt the ID is already there
             T-->>RA: duplicate
             RA-->>CN: repeat
@@ -747,14 +749,15 @@ sequenceDiagram
             end
             PL->>SD: plan
             par one check per sensitive-data kind
-                SD->>ME: values the plan would store
+                SD->>SD: pattern check, for a kind with a fixed form
+                SD->>ME: model check: instructions, then the values as a tool call result
                 ME-->>SD: block, redact or allow
             end
             SD->>AD: plan and verdicts
             AD->>SS: admission rules
             AD->>AD: trust, confidence, entity kinds, caps, personalization, verdicts
             alt planner or a check failed or hit a cap, or Admission dropped the plan
-                Note over PL,AD: dropped, a log event without content, nothing stored
+                Note over PL,AD: dropped, an audit event without content, nothing stored
             else plan admitted
                 AD->>PW: admitted plan
                 PW->>GS: one write with the root node's expected version and an idempotency key
@@ -764,7 +767,7 @@ sequenceDiagram
     end
 ```
 
-**Description**: A connector sends one record. Results API checks its envelope and type, whether the connector is on, and whether personalization is on. A refused record gets its answer, and processing stops. Results API then inserts the record's identity into `record_ids`; the insert is the repeat check. If the identity is already there, the record gets the answer "repeat", and processing stops. Otherwise the record is received and gets that answer. Its content stays in memory while it is processed. In the background, the planner builds a plan, the checks give verdicts, Admission decides, and the writer stores the plan in one write. If the record fails at any step, it is dropped: the drop is a log event without content, and nothing from the record is stored. If an instance of Construct stops before the record is processed, the record is lost, and no drop is logged. Its identity stays in `record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity.
+**Description**: A connector sends one record. Results API checks its envelope and type, whether the connector is on, and whether personalization is on. A refused record gets its answer, and processing stops. Results API then inserts the record's identity into `construct__record_ids`; the insert is the repeat check. If the identity is already there, the record gets the answer "repeat", and processing stops. Otherwise the record is received and gets that answer. Its content stays in memory while it is processed. In the background, the planner builds a plan, the checks give verdicts, Admission decides, and the writer stores the plan in one write. If the record fails at any step, it is dropped: the drop is an audit event without content, and nothing from the record is stored. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Its identity stays in `construct__record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity.
 
 #### Entity Replaced
 
@@ -846,7 +849,7 @@ sequenceDiagram
     MT->>PR: read profile
     PR->>GS: read
     PR->>PR: owner only, permissions, personalization, review
-    PR-->>MT: profile by category, read is a log event
+    PR-->>MT: profile by category, read is an audit event
     MT-->>AG: profile
     AG->>MT: manage-facts tool, what the subject said and recent conversation
     MT->>PL: same path as a record, origin names agent and subject
@@ -930,28 +933,28 @@ sequenceDiagram
     participant DEL as Deletion
     participant T as Own tables
     participant GS as Graph storage
-    participant LS as Platform log storage
+    participant LS as Audit gear
     SU->>SC: erase everything
     SC->>DEL: erasure trigger
     DEL->>T: set personalization off
     Note over DEL,T: from now on the reader serves nothing and Admission drops open plans
     DEL->>GS: soft delete the subject's entities and the root node
     DEL->>T: remove review requests and record IDs
-    DEL->>LS: erasure log event without content
-    Note over DEL,LS: read events stay until the log's retention period ends
+    DEL->>LS: erasure audit event without content
+    Note over DEL,LS: audit events stay until the Audit gear's retention period ends
     DEL-->>SC: done
     SC-->>SU: erasure accepted
 ```
 
-**Description**: The subject asks to erase everything. Deletion first sets personalization off, so nothing is served and records received before it store nothing. It then removes the subject's entities and the root node from graph storage, and the subject's review requests and record IDs from Construct's tables. It writes an erasure log event without content. It does not remove read events; the log's retention period does. Retention runs the same code by age, as a job on the cluster leader. Removal from all storage within 30 days needs graph storage's purge (see Risks).
+**Description**: The subject asks to erase everything. Deletion first sets personalization off, so nothing is served and records received before it store nothing. It then removes the subject's entities and the root node from graph storage, and the subject's review requests and record IDs from Construct's tables. It writes an erasure audit event without content. It does not remove audit events; the Audit gear's retention period does. Retention runs the same code by age, as a job on the cluster leader. Removal from all storage within 30 days needs graph storage's purge (see Risks).
 
 ### 3.7 Database schemas & tables
 
 - [ ] `p3` - **ID**: `cpt-cf-construct-db-own-tables`
 
-Construct keeps three tables of its own through toolkit-db, scoped to the tenant. They are named here, not designed in detail. The columns are left to the feature design. Reads, deletes, corrections, administrator changes, review resolutions, erasures, blocks, redactions and drops are log events, not tables. Who owns a profile, and so who may read it, is kept by the platform's authorization, so no Construct table records it.
+Construct keeps three tables of its own through toolkit-db, scoped to the tenant. Their names carry the gear's `db_namespace`, `construct`, as in [Object Namespacing](../../../docs/arch/database/ADR/0001-cpt-cf-database-adr-object-namespacing.md); the same ADR sets the names of their indexes and constraints, such as `idx_<table>__<purpose>`. They are named here, not designed in detail. The columns are left to the feature design. Reads, deletes, corrections, administrator changes, review resolutions, erasures, blocks, redactions and drops are audit events, not tables. Who owns a profile, and so who may read it, is kept by the platform's authorization, so no Construct table records it.
 
-#### Table: subject_settings
+#### Table: construct__subject_settings
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-dbtable-subject-settings`
 
@@ -959,7 +962,7 @@ Construct keeps three tables of its own through toolkit-db, scoped to the tenant
 
 **Additional info**: erasure sets it to off, and it stays off until the subject turns it on.
 
-#### Table: review_requests
+#### Table: construct__review_requests
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-dbtable-review-requests`
 
@@ -967,7 +970,7 @@ Construct keeps three tables of its own through toolkit-db, scoped to the tenant
 
 **Additional info**: keyed by the graph node key of the entity under review. Profile reader checks it to hide facts under review, and the planner checks it to skip them.
 
-#### Table: record_ids
+#### Table: construct__record_ids
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-dbtable-record-ids`
 
@@ -979,7 +982,7 @@ Construct keeps three tables of its own through toolkit-db, scoped to the tenant
 
 - [ ] `p3` - **ID**: `cpt-cf-construct-topology-deployment`
 
-Construct runs as a gear on the platform. Graph storage, the platform's log storage and the model endpoint are outside it. Model calls leave through OAGW, or go to the LLM gateway when that adapter is configured. The retention job runs on the cluster leader only. Construct serves its own MCP endpoint; it can use the serverless runtime's MCP server once that ships (see Risks).
+Construct runs as a gear on the platform. Graph storage, the Audit gear and the model endpoint are outside it. Model calls leave through OAGW, or go to the LLM gateway when that adapter is configured. The retention job runs on the cluster leader only. Construct serves its own MCP endpoint; it can use the serverless runtime's MCP server once that ships (see Risks).
 
 ```mermaid
 flowchart LR
@@ -994,7 +997,7 @@ flowchart LR
         GS["Graph storage gear"]
         OA["OAGW"]
         LG["LLM gateway"]
-        LS["Platform log storage"]
+        LS["Audit gear"]
     end
     ME["Model endpoint"]
     Callers["Connectors, applications"] --> GW --> C
@@ -1002,8 +1005,8 @@ flowchart LR
     RJ --> CL
     C --> DB
     C --> GS
-    C -->|"log events"| LS
-    RJ -->|"log events"| LS
+    C -->|"audit events"| LS
+    RJ -->|"audit events"| LS
     C --> OA --> ME
     C -.->|"second adapter"| LG
 ```
@@ -1015,22 +1018,24 @@ flowchart LR
 | Risk | What it means |
 |------|---------------|
 | Erasure is a hard gate | A subject must be able to delete any of their data and erase all of it, removed from all storage within 30 days. That depends on graph storage's purge, which comes after its v1 |
-| Quality lives in the prompts | The PRD's reference evaluation set is the only proof that the plan and the sensitive-data checks decide well. It has to exist before the first release |
+| Quality lives in the prompts and patterns | The PRD's reference evaluation set is the only proof that the plan and the sensitive-data checks decide well. It has to exist before the first release |
+| A model check can still be steered by the values it checks | The values come as a tool call result, not in the prompt, which lowers this risk but does not remove it. The kinds with a fixed form also have pattern checks, which text cannot argue with |
 | Every planner round carries the whole current profile | Large profiles make each round heavy. The sensitive-data checks see only the values the plan would store |
-| An instance of Construct stops while it processes a record | The record is lost, and no drop is logged. Its identity stays in `record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity |
+| An instance of Construct stops while it processes a record | The record is lost, without an audit event. Its identity stays in `construct__record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity |
+| The Audit gear is only planned | Construct's first release needs it for its audit events, also for the data protection officer's queries. Construct keeps no audit store of its own to fall back on |
 | No MCP server exists in the platform yet | Construct serves its own MCP endpoint, or uses the serverless runtime's once it ships ([serverless runtime PRD](../../serverless-runtime/docs/PRD.md)) |
 
 ### Scope Notes
 
 - **Security boundaries**: the platform authenticates every caller and supplies the tenant. Construct takes caller and tenant only from the platform, never from a record. Every operation has its own permission. Record text and agent input are untrusted. The model only proposes, Admission's deterministic checks decide, and the model never sees an ID. So text in a record cannot reach another subject's profile or change anything outside its plan. Encryption at rest and in transit follows the platform. [OAGW](../../system/oagw/docs/DESIGN.md) holds outbound credentials through credstore references.
-- **Data protection**: verdicts are enforced before storage; log events hold no content; erasure leaves a log event without content.
-- **Observability**: reads, deletes, corrections, administrator changes, review resolutions, erasures, blocks, redactions and drops are log events without content. Construct writes them to the platform's log storage, which keeps them for the log's retention period. The counts of drops, blocks and redactions come from these events; where the counts are stored is not part of this design. The PRD sets no other telemetry, so it is left to the feature design.
+- **Data protection**: verdicts are enforced before storage; audit events hold no content; erasure leaves an audit event without content.
+- **Observability**: reads, deletes, corrections, administrator changes, review resolutions, erasures, blocks, redactions and drops are audit events without content. Construct writes them to the Audit gear, which keeps them for its retention period. The counts of drops, blocks and redactions come from these events; where the counts are stored is not part of this design. The PRD sets no other telemetry, so it is left to the feature design.
 - **Testability**: the reference evaluation set and the reference test set from the PRD, and the PRD's acceptance tests.
 - **Performance**: out of scope. The PRD sets no targets and inherits graph storage's.
 - **Availability**: follows the platform's standard posture. The PRD sets no higher target.
 - **User interface**: none. Host applications build it.
 - **Cost**: every planner round carries the whole profile; the sensitive-data checks see only the values the plan would store (see Risks). The deployment chooses the endpoint.
-- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check and the write stay in step, so that a record received before personalization is turned off, or before an erasure request, stores nothing, also when personalization is turned off and on again; where the profile GTS types live and which entity kinds and properties they define; backup and recovery of Construct's own tables, which follow the platform default; how source trust and the confidence floor apply to plans from a reviewer, an administrator or an agent; how a review request that opens while a plan is in flight keeps that plan from changing the fact; how the sensitive-data checks take the sensitive-data kinds of a new kind of subject from its registered types; how the root node is created for a new subject so that two first writes never both succeed, because graph storage's compare-and-set covers only nodes that exist; how a profile created after an erasure finds its new root key.
+- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the patterns of the pattern checks, and which sensitive-data kinds also get a model check; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check and the write stay in step, so that a record received before personalization is turned off, or before an erasure request, stores nothing, also when personalization is turned off and on again; the properties of the person types; backup and recovery of Construct's own tables, which follow the platform default; how source trust and the confidence floor apply to plans from a reviewer, an administrator or an agent; how a review request that opens while a plan is in flight keeps that plan from changing the fact; how the root node is created for a new subject so that two first writes never both succeed, because graph storage's compare-and-set covers only nodes that exist; how a profile created after an erasure finds its new root key.
 
 ## 5. Traceability
 

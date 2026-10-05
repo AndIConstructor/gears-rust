@@ -24,7 +24,7 @@ date: 2026-09-30
 
 ## Context and Problem Statement
 
-Construct calls large language models (LLMs) in two places. The planner builds a plan, the set of changes for one record, by running an agent loop: a model calls tools in rounds. The loop runs over the record and the profile, the graph of facts about one subject. The model sees a numbered profile: the profile's values shown as numbers instead of IDs. The sensitive-data checks make one model call per sensitive-data kind, on the values a plan would store. If a model call fails or hits a cap, the record is dropped: a dropped record is a received record from which nothing is stored.
+Construct calls large language models (LLMs) in two places. The planner builds a plan, the set of changes for one record, by running an agent loop: a model calls tools in rounds. The loop runs over the record and the profile, the graph of facts about one subject. The model sees a numbered profile: the profile's values shown as numbers instead of IDs. The sensitive-data checks make one model call for each sensitive-data kind that has a model check, on the values a plan would store; the values go in as a tool call result, not in the prompt. If a model call fails or hits a cap, the record is dropped: a dropped record is a received record from which nothing is stored.
 
 How does Construct call models without tying itself to one model service?
 
@@ -53,11 +53,11 @@ Which adapter is used is configuration.
 
 ### Consequences
 
-- The planner and the sensitive-data checks depend only on the interface.
+- The planner and the sensitive-data model checks depend only on the interface. A pattern check calls no model.
 - Adding an adapter changes no other component.
 - Each record's payload with its schema, and the numbered profile, go to the configured endpoint.
 - Every planner round carries the whole current profile. Large profiles make each round heavy, whichever endpoint is configured. The sensitive-data checks see only the values the plan would store.
-- Quality lives in the prompts. The PRD's reference evaluation set is the only proof that the plan and the checks decide well, whichever endpoint is configured.
+- Quality lives in the prompts, and in the patterns of the pattern checks. The PRD's reference evaluation set is the only proof that the plan and the checks decide well, whichever endpoint is configured.
 - Construct approves no models and no endpoints. Model policy belongs to the LLM gateway. With the chat completions adapter, the deployment's configuration sets the endpoint.
 
 ### Confirmation
@@ -90,7 +90,7 @@ The model client offers the interface and holds both adapters. See `cpt-cf-const
 - Performance: every planner round carries the whole current profile, so large profiles make rounds heavy. The sensitive-data checks see only the values the plan would store.
 - Testing: the PRD's reference evaluation set and reference test set score the outcome on the configured endpoint.
 - Compliance: Construct approves no models and no endpoints; model policy belongs to the LLM gateway.
-- Reliability: if a model call of the planner or of a sensitive-data check fails or hits a cap, the record is dropped and logged, and nothing from it is stored ([DESIGN.md](../DESIGN.md), section 3.2). This decision adds no retry or fallback.
+- Reliability: if a model call of the planner or of a sensitive-data check fails or hits a cap, the record is dropped with an audit event, and nothing from it is stored ([DESIGN.md](../DESIGN.md), section 3.2). This decision adds no retry or fallback.
 - Operations: the adapter and the endpoint are set by configuration.
 - If this decision changes, a later ADR supersedes this one.
 
@@ -102,7 +102,7 @@ The model client offers the interface and holds both adapters. See `cpt-cf-const
 This decision directly addresses the following requirements or design elements:
 
 - `cpt-cf-construct-fr-fact-decisions` — the planner calls models through the interface to decide fact changes.
-- `cpt-cf-construct-fr-sensitive-data-guardrails` — the checks call models through the same interface.
+- `cpt-cf-construct-fr-sensitive-data-guardrails` — the model checks call models through the same interface.
 - `cpt-cf-construct-fr-mcp-manage-facts` — what an agent passes on runs through the same planner and model interface.
 - `cpt-cf-construct-nfr-guardrail-detection` — the reference test set scores the checks on the configured endpoint.
 - `cpt-cf-construct-principle-one-model-interface` — the principle this decision realizes.
@@ -110,4 +110,4 @@ This decision directly addresses the following requirements or design elements:
 - `cpt-cf-construct-principle-model-proposes-code-decides` — the model only proposes, whichever service is behind it.
 - `cpt-cf-construct-component-model-client` — holds the interface and the two adapters.
 - `cpt-cf-construct-component-planner` — depends only on the interface.
-- `cpt-cf-construct-component-sensitive-data-checks` — depend only on the interface.
+- `cpt-cf-construct-component-sensitive-data-checks` — its model checks depend only on the interface.
