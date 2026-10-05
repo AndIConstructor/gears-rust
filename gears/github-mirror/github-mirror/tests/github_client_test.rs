@@ -2137,6 +2137,61 @@ async fn a_request_waiting_for_the_only_slot_waits_out_a_cooldown_set_meanwhile(
     limited_request.abort();
 }
 
+#[tokio::test]
+async fn a_request_waiting_for_a_slot_stops_when_its_run_is_cancelled() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/slow");
+            then.status(200)
+                .json_body(gh_repo_json())
+                .delay(std::time::Duration::from_secs(5));
+        })
+        .await;
+
+    let client = std::sync::Arc::new(
+        GithubClient::new(server.base_url(), None)
+            .expect("client must build")
+            .with_max_concurrent_requests(std::num::NonZeroUsize::MIN),
+    );
+    let holder = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move {
+            client
+                .fetch_repository_metadata("acme", "slow", &opts(ScopeConfig::default()))
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let options = FetchOptions {
+        cancel: cancel.clone(),
+        ..opts(ScopeConfig::default())
+    };
+    let waiter = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move {
+            client
+                .fetch_repository_metadata("acme", "other", &options)
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    cancel.cancel();
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        .await
+        .expect("a request waiting for the only slot must stop as soon as its run is cancelled")
+        .expect("the waiting task must not panic");
+    assert!(
+        matches!(outcome, Err(DomainError::Cancelled)),
+        "expected Cancelled, got {outcome:?}"
+    );
+
+    holder.abort();
+}
+
 /// A revalidated first page must still lead to page two: GitHub sends no
 /// `Link` header on a `304`, so the walk continues from the `next` the cache
 /// stored when the page was fresh.

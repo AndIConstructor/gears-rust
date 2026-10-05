@@ -363,11 +363,11 @@ impl GithubClient {
     ) -> Result<SemaphorePermit<'_>, DomainError> {
         loop {
             self.wait_out_cooldown(cancel).await?;
-            let permit = self
-                .permits
-                .acquire()
-                .await
-                .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?;
+            let permit = tokio::select! {
+                permit = self.permits.acquire() => permit
+                    .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?,
+                () = cancel.cancelled() => return Err(DomainError::Cancelled),
+            };
             if !self.in_cooldown() {
                 return Ok(permit);
             }

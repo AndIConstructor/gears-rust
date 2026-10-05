@@ -480,7 +480,7 @@ Rows are hard-deleted, not tombstoned. After a listing fetched to completion, ro
 
 #### 3.8.4 Scheduler
 
-One in-memory `TaskQueue` per run. Discovery runs alone; indexing, change detection and refinement drain together (indexing seeds refinement as pages arrive); verification runs last. Tasks are claimed by priority, then age, round-robin across three lanes (pull requests, issues, everything else) so a long pull-request backlog cannot starve issues. While 10,000 tasks are pending, a new task is claimed only after a running one finishes. A task that fails on database contention is retried up to three times with a growing delay, counted in `retries`, apart from its repair pass in `attempt`.
+One in-memory `TaskQueue` per run. Discovery runs alone; indexing, change detection and refinement drain together (indexing seeds refinement as pages arrive); verification runs last. Tasks are claimed by priority, then age, round-robin across three lanes (pull requests, issues, everything else) so a long pull-request backlog cannot starve issues. While 10,000 tasks are pending and others are running, no new Indexing task is claimed; refinement keeps every slot busy until the backlog drops. A task that fails on database contention is retried up to three times with a growing delay, counted in `retries`, apart from its repair pass in `attempt`.
 
 #### 3.8.5 Verification
 

@@ -494,8 +494,8 @@ async fn phases_drain_in_order_with_three_tasks_in_flight() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn above_the_backlog_bound_the_runner_claims_one_task_at_a_time() {
-    let per_index = usize::try_from(BACKPRESSURE_HIGH).unwrap().div_euclid(2) + 1;
+async fn above_the_backlog_bound_refinement_still_fills_every_lane() {
+    let per_index = usize::try_from(BACKPRESSURE_HIGH).unwrap();
     let worker = Arc::new(ScriptedWorker::new(per_index, None));
     let runner = runner_over(Arc::clone(&worker), 3, CancellationToken::new());
 
@@ -505,31 +505,36 @@ async fn above_the_backlog_bound_the_runner_claims_one_task_at_a_time() {
         report.tasks_done,
         1 + 2 + 2 * u64::try_from(per_index).unwrap()
     );
-    let starts: Vec<(u64, usize)> = worker
+    let starts: Vec<(TaskKind, u64, usize)> = worker
         .events()
         .into_iter()
         .filter_map(|event| match event {
             Event::Started {
-                pending, in_flight, ..
-            } => Some((pending, in_flight)),
+                kind,
+                pending,
+                in_flight,
+                ..
+            } => Some((kind, pending, in_flight)),
             Event::Finished(_) => None,
         })
         .collect();
-    let throttled: Vec<&(u64, usize)> = starts
+    let above_bound: Vec<&(TaskKind, u64, usize)> = starts
         .iter()
-        .filter(|(pending, _)| *pending >= BACKPRESSURE_HIGH)
+        .filter(|(_, pending, _)| *pending >= BACKPRESSURE_HIGH)
         .collect();
     assert!(
-        throttled.len() >= 2,
+        above_bound.len() >= 2,
         "the backlog must have crossed the bound"
     );
     assert!(
-        throttled.iter().all(|(_, in_flight)| *in_flight == 1),
-        "while the backlog is above the bound only one task runs at a time"
+        above_bound.iter().any(|(_, _, in_flight)| *in_flight == 3),
+        "above the bound refinement must still use every lane"
     );
     assert!(
-        starts.iter().any(|(_, in_flight)| *in_flight == 3),
-        "once the backlog drains the lanes fill up again"
+        above_bound
+            .iter()
+            .all(|(kind, _, _)| !matches!(kind, TaskKind::Index(_))),
+        "no new listing starts while the backlog is above the bound"
     );
 }
 
