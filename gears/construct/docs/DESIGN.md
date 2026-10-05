@@ -47,7 +47,7 @@ Requirements that significantly influence architecture decisions.
 
 | Requirement | Design Response |
 |-------------|------------------|
-| `cpt-cf-construct-fr-record-intake` | Results API checks the record against its GTS type and base types. Before any model call, it refuses a broken envelope or type, a repeat, a connector that is off, or personalization off. It answers received, repeat or refused. It keeps only the received record's identity in `construct__record_ids`; the content stays in memory while the record is processed. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Connectors on or off is a tenant setting in the settings service. A new connector is a new registered type and needs no Construct code |
+| `cpt-cf-construct-fr-record-intake` | Results API checks the record against its GTS type and base types. Before any model call, it refuses a broken envelope or type, a repeat, a connector that is off, or personalization off. It answers received, repeat or refused. It keeps only the received record's identity and its subject in `construct__record_ids`; the content stays in memory while the record is processed. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Connectors on or off is a tenant setting in the settings service. A new connector is a new registered type and needs no Construct code |
 | `cpt-cf-construct-fr-fact-decisions` | Planner runs the agent loop over the record and the subject's current profile. Its plan adds, replaces or removes entities of that subject only; a replace removes the old value in the same plan. The reference evaluation set measures that no contradicting pair remains (see Risks, "Quality lives in the prompts") |
 | `cpt-cf-construct-fr-deterministic-storage` | Profile writer applies the admitted plan in one write with the profile version the plan was built on. Graph storage rejects the write if the profile changed; the planner runs again, up to a small limit. Each write carries graph storage's idempotency key, and a plan's node keys are fixed when the plan is built. So storing the same changes again gives the same facts. Profile reader serves from graph storage, so the next read returns the stored value |
 | `cpt-cf-construct-fr-fact-origin` | Each plan carries its origin from the record envelope, the MCP call, the reviewer or the tenant administrator. Profile writer stores it and the storing time with each entity. Profile reader and Subject control return it |
@@ -261,7 +261,7 @@ The profile is read only for its owner: by the owner, and by applications and ag
 
 One item a connector sends about one subject. Every connector's record type derives from one base record type. The base fixes the envelope: the type, where the record comes from (the connector and the record's identity), the record's version, when it was observed, the subject, and the payload. A connector's type refines only the payload. Construct implements the base only. It gives the payload, with its schema, to the model as data. A new connector is a new registered type and needs no Construct code.
 
-A received record's content lives only in memory while the record is processed. Construct never writes it to any store. It keeps only the record's identity in its `construct__record_ids` table: the tenant, the connector and the record identity.
+A received record's content lives only in memory while the record is processed. Construct never writes it to any store. It keeps only the record's identity in its `construct__record_ids` table: the tenant, the connector and the record identity, with the subject the record names.
 
 #### Profile
 
@@ -387,7 +387,7 @@ A received record's content lives only in memory. If an instance of Construct st
 
 ##### Responsibility boundaries
 
-Does not decide what a record means; the planner does. Keeps only the record's identity in `construct__record_ids`; the content stays in memory while the record is processed and is never stored. Makes no model call.
+Does not decide what a record means; the planner does. Keeps only the record's identity and its subject in `construct__record_ids`; the content stays in memory while the record is processed and is never stored. Makes no model call.
 
 ##### Related components (by ID)
 
@@ -557,7 +557,7 @@ Erasure and retention must remove data from graph storage and from Construct's o
 
 ##### Responsibility scope
 
-One component with two triggers. Retention is automatic, by age, with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader. Erasure is the subject's request to remove everything now. Both use the same code. They remove the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's own tables. Each delete in graph storage also writes the root node with its expected version. On a write conflict, Deletion reads the profile again, works out again what to delete, and writes again, up to the same small limit. So retention keeps a fact that a record changed in between, because it is no longer past the period. Erasure also soft-deletes the root node, the subject node, with the rest of the profile. Graph storage's purge removes it later, and a profile created after the erasure gets a new root key (see the constraint). Erasure sets personalization off and writes an erasure audit event without the erased content. Neither trigger removes audit events; the Audit gear's retention period does. The Profile reader already stops serving an item once it is past the tenant's retention period. The job then deletes it. When retention removes a fact, an open review request on it closes as deleted.
+One component with two triggers. Retention is automatic, by age, with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader. Erasure is the subject's request to remove everything now. Both use the same code. They remove the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's own tables. Each delete in graph storage also writes the root node with its expected version. On a write conflict, Deletion reads the profile again, works out again what to delete, and writes again, up to the same small limit. So retention keeps a fact that a record changed in between, because it is no longer past the period. Erasure also soft-deletes the root node, the subject node, with the rest of the profile. Graph storage's purge removes it later, and a profile created after the erasure gets a new root key (see the constraint). Erasure sets personalization off and writes an erasure audit event without the erased content. It leaves no record identity of the subject behind, also not one that Results API inserts for a record received just before the erasure request. Neither trigger removes audit events; the Audit gear's retention period does. The Profile reader already stops serving an item once it is past the tenant's retention period. The job then deletes it. When retention removes a fact, an open review request on it closes as deleted.
 
 Deletion also handles tenant exit. Construct follows the platform's tenant offboarding protocol, as [graph storage does](../../graph-storage/docs/DESIGN.md#tenant-offboarding-and-deletion-monotonicity). Deletion removes the leaving tenant's data from Construct's own tables. Graph storage removes the tenant's graph through its own offboarding.
 
@@ -974,7 +974,7 @@ Construct keeps three tables of its own through toolkit-db, scoped to the tenant
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-dbtable-record-ids`
 
-**Holds**: the identity of each received record: the tenant, the connector and the record identity. It holds no record content; that lives only in memory while the record is processed.
+**Holds**: the identity of each received record: the tenant, the connector and the record identity, with the subject the record names, so that erasure finds the subject's rows. It holds no record content; that lives only in memory while the record is processed.
 
 **Additional info**: one row per tenant, connector and record identity. Results API inserts the identity when it receives a record, and the insert is the repeat check. So two copies sent at once cannot both be received. This also refuses a repeat of a deleted fact's record. Retention and erasure apply to this table.
 
@@ -1018,7 +1018,7 @@ flowchart LR
 | Risk | What it means |
 |------|---------------|
 | Erasure is a hard gate | A subject must be able to delete any of their data and erase all of it, removed from all storage within 30 days. That depends on graph storage's purge, which comes after its v1 |
-| Quality lives in the prompts and patterns | The PRD's reference evaluation set is the only proof that the plan and the sensitive-data checks decide well. It has to exist before the first release |
+| Quality lives in the prompts and patterns | The PRD's reference evaluation set proves that the plan decides well, and the PRD's reference test set proves that the checks find special-category content. Both have to exist before the first release |
 | A model check can still be steered by the values it checks | The values come as a tool call result, not in the prompt, which lowers this risk but does not remove it. The kinds with a fixed form also have pattern checks, which text cannot argue with |
 | Every planner round carries the whole current profile | Large profiles make each round heavy. The sensitive-data checks see only the values the plan would store |
 | An instance of Construct stops while it processes a record | The record is lost, without an audit event. Its identity stays in `construct__record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity |
@@ -1035,7 +1035,7 @@ flowchart LR
 - **Availability**: follows the platform's standard posture. The PRD sets no higher target.
 - **User interface**: none. Host applications build it.
 - **Cost**: every planner round carries the whole profile; the sensitive-data checks see only the values the plan would store (see Risks). The deployment chooses the endpoint.
-- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the patterns of the pattern checks, and which sensitive-data kinds also get a model check; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check and the write stay in step, so that a record received before personalization is turned off, or before an erasure request, stores nothing, also when personalization is turned off and on again; the properties of the person types; backup and recovery of Construct's own tables, which follow the platform default; how source trust and the confidence floor apply to plans from a reviewer, an administrator or an agent; how a review request that opens while a plan is in flight keeps that plan from changing the fact; how the root node is created for a new subject so that two first writes never both succeed, because graph storage's compare-and-set covers only nodes that exist; how a profile created after an erasure finds its new root key.
+- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the patterns of the pattern checks, and which sensitive-data kinds also get a model check; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check, the identity insert and the write stay in step, so that a record received before personalization is turned off, or before an erasure request, stores nothing, also when personalization is turned off and on again, and an erasure leaves no identity of such a record behind; the properties of the person types; backup and recovery of Construct's own tables, which follow the platform default; how source trust and the confidence floor apply to plans from a reviewer, an administrator or an agent; how a review request that opens while a plan is in flight keeps that plan from changing the fact; how the root node is created for a new subject so that two first writes never both succeed, because graph storage's compare-and-set covers only nodes that exist; how a profile created after an erasure finds its new root key.
 
 ## 5. Traceability
 

@@ -57,7 +57,7 @@ Which adapter is used is configuration.
 - Adding an adapter changes no other component.
 - Each record's payload with its schema, and the numbered profile, go to the configured endpoint.
 - Every planner round carries the whole current profile. Large profiles make each round heavy, whichever endpoint is configured. The sensitive-data checks see only the values the plan would store.
-- Quality lives in the prompts, and in the patterns of the pattern checks. The PRD's reference evaluation set is the only proof that the plan and the checks decide well, whichever endpoint is configured.
+- Quality lives in the prompts, and in the patterns of the pattern checks. The PRD's reference evaluation set proves that the plan decides well, and the PRD's reference test set proves that the checks find special-category content, whichever endpoint is configured.
 - Construct approves no models and no endpoints. Model policy belongs to the LLM gateway. With the chat completions adapter, the deployment's configuration sets the endpoint.
 
 ### Confirmation
