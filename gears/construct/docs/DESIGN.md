@@ -47,7 +47,7 @@ Requirements that significantly influence architecture decisions.
 
 | Requirement | Design Response |
 |-------------|------------------|
-| `cpt-cf-construct-fr-record-intake` | Results API checks the record against its GTS type and base types. Before any model call, it refuses a broken envelope or type, a repeat, a connector that is off, or personalization off. It answers received, repeat or refused. It keeps only the received record's identity and its subject in `construct__record_ids`; the content stays in memory while the record is processed. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Connectors on or off is a tenant setting in the settings service. A new connector is a new registered type and needs no Construct code |
+| `cpt-cf-construct-fr-record-intake` | Results API checks the record against its GTS type and base types. Before any model call, it refuses a broken envelope or type, a repeat, a connector that is off, personalization off, or an erasure under way. It answers received, repeat or refused. It keeps only the received record's identity and its subject in `construct__record_ids`; the content stays in memory while the record is processed. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Connectors on or off is a tenant setting in the settings service. A new connector is a new registered type and needs no Construct code |
 | `cpt-cf-construct-fr-fact-decisions` | Planner runs the agent loop over the record and the subject's current profile. Its plan adds, replaces or removes entities of that subject only; a replace removes the old value in the same plan. The reference evaluation set measures that no contradicting pair remains (see Risks, "Quality lives in the prompts") |
 | `cpt-cf-construct-fr-deterministic-storage` | Profile writer applies the admitted plan in one write with the profile version the plan was built on. Graph storage rejects the write if the profile changed; the planner runs again, up to a small limit. Each write carries graph storage's idempotency key, and a plan's node keys are fixed when the plan is built. So storing the same changes again gives the same facts. Profile reader serves from graph storage, so the next read returns the stored value |
 | `cpt-cf-construct-fr-fact-origin` | Each plan carries its origin from the record envelope, the MCP call, the reviewer or the tenant administrator. Profile writer stores it and the storing time with each entity. Profile reader and Subject control return it |
@@ -55,9 +55,9 @@ Requirements that significantly influence architecture decisions.
 | `cpt-cf-construct-fr-profile-read` | Profile reader serves the profile only for its owner: to the owner, and to applications and agents that act for the owner. It groups entities by entity kind, which is the PRD's category. It lists only permitted categories with at least one readable fact, and names the subject. Permissions come from the platform on each read |
 | `cpt-cf-construct-fr-subject-access` | Subject control shows all facts with origin, the settings and the review requests. Each read is an audit event without content in the Audit gear. The subject's own view, the export and an administrator's read also write read audit events. The data protection officer finds the read audit events there per subject and per application, and gives them to the subject with the export |
 | `cpt-cf-construct-fr-review-request` | Subject control creates a review request keyed by the graph node key. Profile reader hides the fact from applications and agents while the request is open. The planner skips it, so no record or agent changes it. If the subject deletes the fact or retention removes it first, the request closes as deleted. The assigned reviewers are a tenant setting in the settings service. Reviewers resolve a request as corrected, deleted or rejected. A corrected value becomes a plan with one replace step, which passes the sensitive-data checks and Admission. If they block or drop it, nothing is stored and the request stays open. Each correction and each resolution is an audit event without content |
-| `cpt-cf-construct-fr-subject-delete` | Subject control deletes one fact in graph storage; each fact delete is an audit event without content. Deletion erases everything on request: the subject's entities, review requests and record IDs. It sets personalization off and writes an erasure audit event without content. Results API refuses a repeat of a deleted fact's record by its identity in `construct__record_ids`. A deleted entity that returns gets a new node key |
+| `cpt-cf-construct-fr-subject-delete` | Subject control deletes one fact in graph storage; each fact delete is an audit event without content. Deletion erases everything on request: the subject's entities, review requests and record IDs. It sets personalization off, marks the erasure under way until every step is done, and writes an erasure audit event without content. Results API refuses a repeat of a deleted fact's record by its identity in `construct__record_ids`. A deleted entity that returns gets a new node key |
 | `cpt-cf-construct-fr-retention` | Deletion runs retention by age with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader and uses the same code as erasure. It covers facts, review requests and record IDs; audit events follow the Audit gear's retention period. Profile reader does not serve an item past the period, even before the job removes it. Tenant exit follows the platform's tenant offboarding protocol |
-| `cpt-cf-construct-fr-settings` | Subject settings table keeps personalization on or off. The personalization default for new subjects is a tenant setting in the settings service. Results API refuses records while it is off, Admission drops plans built before it went off, and Profile reader serves nothing while it is off |
+| `cpt-cf-construct-fr-settings` | Subject settings table keeps personalization on or off, and whether an erasure is under way. The personalization default for new subjects is a tenant setting in the settings service. While personalization is off or an erasure is under way, Results API refuses records, Admission drops plans, and Profile reader serves nothing |
 | `cpt-cf-construct-fr-mcp-tools` | MCP tools offer a read tool that goes through Profile reader, like any application |
 | `cpt-cf-construct-fr-mcp-manage-facts` | MCP tools offer the manage-facts tool. It takes what the subject said, with the recent conversation, through the same planner, checks and writer. The origin names the agent and the subject. It waits and returns what changed |
 | `cpt-cf-construct-fr-mcp-caller-binding` | MCP tools take the caller and tenant from the platform only. For the subject a call names, the AuthZ resolver decides whether the caller may act for it, as that person or as the profile's owner. A call for a subject or tenant the caller may not act for gets the same answer as a subject that does not exist |
@@ -302,7 +302,7 @@ These sensitive-data kinds are the special categories of a person's profile: dat
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-entity-subject-settings`
 
-Whether personalization is on or off for one subject. A new subject starts with the tenant's default, a tenant setting in the settings service.
+Whether personalization is on or off for one subject, and whether an erasure of the subject is under way. A new subject starts with the tenant's default, a tenant setting in the settings service.
 
 #### Review Request
 
@@ -381,7 +381,7 @@ Connectors need one simple intake that tells them at once whether a record is ta
 
 ##### Responsibility scope
 
-Takes one record per request. Refuses what is plainly wrong before any model call: a broken envelope or type, a repeat, a connector that is off, or personalization off. It finds a repeat by the record's identity in `construct__record_ids`, also a repeat of a deleted fact's record. The table holds one row per tenant, connector and record identity. Inserting the identity is the repeat check, so two copies sent at once cannot both be received. Connectors on or off comes from the settings service; personalization comes from the subject settings table. A refusal names the type, the place in the record and the broken rule. Answers received, repeat or refused. Processing then runs in the background, best effort. A record that fails later is dropped, and the drop is an audit event without content.
+Takes one record per request. Refuses what is plainly wrong before any model call: a broken envelope or type, a repeat, a connector that is off, personalization off, or an erasure under way. It finds a repeat by the record's identity in `construct__record_ids`, also a repeat of a deleted fact's record. The table holds one row per tenant, connector and record identity. Inserting the identity is the repeat check, so two copies sent at once cannot both be received. Connectors on or off comes from the settings service; personalization and an erasure under way come from the subject settings table. A refusal names the type, the place in the record and the broken rule. Answers received, repeat or refused. Processing then runs in the background, best effort. A record that fails later is dropped, and the drop is an audit event without content.
 
 A received record's content lives only in memory. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Its identity stays in `construct__record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity. This follows from best effort.
 
@@ -447,7 +447,7 @@ The model proposes; code decides. Admission is the code that decides.
 
 ##### Responsibility scope
 
-Runs deterministic checks on the plan: source trust, the confidence floor, allowed entity kinds, write caps, personalization still on, and the sensitive-data verdicts. The first four are admission rules, tenant settings in the settings service. Personalization comes from the subject settings table. Five checks drop the whole plan when it fails one: source trust, the confidence floor, allowed entity kinds, write caps, and personalization still on. A block or redact verdict acts only on the affected values: blocking drops the value and keeps the rest of the plan, and redacting removes the found content from the value. Each block, redaction and drop is an audit event without content.
+Runs deterministic checks on the plan: source trust, the confidence floor, allowed entity kinds, write caps, personalization still on with no erasure under way, and the sensitive-data verdicts. The first four are admission rules, tenant settings in the settings service. Personalization and an erasure under way come from the subject settings table. Five checks drop the whole plan when it fails one: source trust, the confidence floor, allowed entity kinds, write caps, and personalization still on with no erasure under way. A block or redact verdict acts only on the affected values: blocking drops the value and keeps the rest of the plan, and redacting removes the found content from the value. Each block, redaction and drop is an audit event without content.
 
 ##### Responsibility boundaries
 
@@ -467,7 +467,7 @@ A plan must land whole, and two records for one subject must not mix.
 
 ##### Responsibility scope
 
-Applies the admitted plan to graph storage in one write. The write also writes the profile's root node, the subject node, with the profile version the plan was built on as its expected version. Each write carries graph storage's idempotency key. The plan's node keys were fixed when the plan was built, so storing the same changes again gives the same facts. Each entity is stored with its origin and the time it was stored. If another change reached the profile in between, graph storage rejects the write. The planner then runs again, up to a small limit. Past the limit, the record is dropped, and the drop is an audit event without content.
+Applies the admitted plan to graph storage in one write. The write also writes the profile's root node, the subject node, with the profile version the plan was built on as its expected version. Each write carries graph storage's idempotency key. A write made again after a conflict, on a fresh read of the profile, is a new write with a new key; a write whose result is unknown is sent again with the same key. The plan's node keys were fixed when the plan was built, so storing the same changes again gives the same facts. Each entity is stored with its origin and the time it was stored. If another change reached the profile in between, graph storage rejects the write. The planner then runs again, up to a small limit. Past the limit, the record is dropped, and the drop is an audit event without content.
 
 A reviewer's corrected value has no planner, and neither has a tenant administrator's added or edited fact. The planner skips a fact under review, so a record or an agent does not change it. On a write conflict, the writer reads the profile again and writes the same value again, up to the same small limit. If the fact to correct or edit is gone, because the subject deleted it or retention removed it, nothing is stored; that delete has already closed any review request on it as deleted.
 
@@ -489,7 +489,7 @@ Graph storage cannot enforce Construct's read rules, so Construct needs one read
 
 ##### Responsibility scope
 
-The only read path for applications and agents. Applies owner only, platform permissions per category, personalization off, and hidden-while-under-review. Owner only means the profile is served only for its owner: to the owner, and to applications and agents that act for the owner. Owner only binds applications and agents. Two roles read a subject's facts without acting for the subject, through Subject control: the data protection officer, for an export on the subject's request, and the tenant administrator, through the admin operations. Each of their reads is a read audit event too. It reads the subject settings and the review requests from Construct's own tables. It does not serve an item past the tenant's retention period, even before the retention job removes it. Groups entities by entity kind and lists only categories with at least one readable fact. Names the subject in every response. Each read it serves is an audit event without content: which application or agent, which subject, which categories, and when.
+The only read path for applications and agents. Applies owner only, platform permissions per category, personalization off, an erasure under way, and hidden-while-under-review. Owner only means the profile is served only for its owner: to the owner, and to applications and agents that act for the owner. Owner only binds applications and agents. Two roles read a subject's facts without acting for the subject, through Subject control: the data protection officer, for an export on the subject's request, and the tenant administrator, through the admin operations. Each of their reads is a read audit event too. It reads the subject settings and the review requests from Construct's own tables. It does not serve an item past the tenant's retention period, even before the retention job removes it. Groups entities by entity kind and lists only categories with at least one readable fact. Names the subject in every response. Each read it serves is an audit event without content: which application or agent, which subject, which categories, and when.
 
 ##### Responsibility boundaries
 
@@ -536,7 +536,7 @@ Agents are a main reader of the profile, and subjects often tell an agent someth
 
 ##### Responsibility scope
 
-Two tools. The read tool reads the profile, like any application does. The manage-facts tool takes what the subject said, with the recent conversation. It runs it through the same planner, checks and writer as a record. The origin names the agent and the subject. The tool waits for the result and returns what changed. When the plan is dropped, or personalization is off, the tool returns that nothing changed. The wire codes are left to the feature design. Every call is bound to the caller and tenant the platform authenticated, and to a subject the AuthZ resolver lets the caller act for, as that person or as the profile's owner.
+Two tools. The read tool reads the profile, like any application does. The manage-facts tool takes what the subject said, with the recent conversation. It runs it through the same planner, checks and writer as a record. The origin names the agent and the subject. The tool waits for the result and returns what changed. When the plan is dropped, or personalization is off or an erasure is under way, the tool returns that nothing changed. The wire codes are left to the feature design. Every call is bound to the caller and tenant the platform authenticated, and to a subject the AuthZ resolver lets the caller act for, as that person or as the profile's owner.
 
 ##### Responsibility boundaries
 
@@ -557,7 +557,7 @@ Erasure and retention must remove data from graph storage and from Construct's o
 
 ##### Responsibility scope
 
-One component with two triggers. Retention is automatic, by age, with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader. Erasure is the subject's request to remove everything now. Both use the same code. They remove the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's own tables. Each delete in graph storage also writes the root node with its expected version. On a write conflict, Deletion reads the profile again, works out again what to delete, and writes again, up to the same small limit. So retention keeps a fact that a record changed in between, because it is no longer past the period. Erasure also soft-deletes the root node, the subject node, with the rest of the profile. Graph storage's purge removes it later, and a profile created after the erasure gets a new root key (see the constraint). Erasure sets personalization off and writes an erasure audit event without the erased content. It leaves no record identity of the subject behind, also not one that Results API inserts for a record received just before the erasure request. Neither trigger removes audit events; the Audit gear's retention period does. The Profile reader already stops serving an item once it is past the tenant's retention period. The job then deletes it. When retention removes a fact, an open review request on it closes as deleted.
+One component with two triggers. Retention is automatic, by age, with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader. Erasure is the subject's request to remove everything now. Both use the same code. They remove the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's own tables. Each delete in graph storage also writes the root node with its expected version. On a write conflict, Deletion reads the profile again, works out again what to delete, and writes again, up to the same small limit. So retention keeps a fact that a record changed in between, because it is no longer past the period. Erasure also soft-deletes the root node, the subject node, with the rest of the profile. Graph storage's purge removes it later, and a profile created after the erasure gets a new root key (see the constraint). Erasure sets personalization off and writes an erasure audit event without the erased content. It leaves no record identity of the subject behind, also not one that Results API inserts for a record received just before the erasure request. Every step can be repeated safely. If a step fails, Deletion runs the erasure again until every step is done. Until then, the subject settings mark the erasure as under way: Profile reader serves nothing about the subject and Admission drops its plans, even if personalization is turned on again. Neither trigger removes audit events; the Audit gear's retention period does. The Profile reader already stops serving an item once it is past the tenant's retention period. The job then deletes it. When retention removes a fact, an open review request on it closes as deleted.
 
 Deletion also handles tenant exit. Construct follows the platform's tenant offboarding protocol, as [graph storage does](../../graph-storage/docs/DESIGN.md#tenant-offboarding-and-deletion-monotonicity). Deletion removes the leaving tenant's data from Construct's own tables. Graph storage removes the tenant's graph through its own offboarding.
 
@@ -728,8 +728,8 @@ sequenceDiagram
     CN->>RA: one record
     RA->>TR: resolve type and base types
     RA->>SS: is the connector on
-    RA->>T: is personalization on
-    RA->>RA: check envelope, type, connector on, personalization on
+    RA->>T: is personalization on, with no erasure under way
+    RA->>RA: check envelope, type, connector on, personalization on, no erasure under way
     alt refused
         RA-->>CN: refused
         Note over CN,RA: processing stops
@@ -767,7 +767,7 @@ sequenceDiagram
     end
 ```
 
-**Description**: A connector sends one record. Results API checks its envelope and type, whether the connector is on, and whether personalization is on. A refused record gets its answer, and processing stops. Results API then inserts the record's identity into `construct__record_ids`; the insert is the repeat check. If the identity is already there, the record gets the answer "repeat", and processing stops. Otherwise the record is received and gets that answer. Its content stays in memory while it is processed. In the background, the planner builds a plan, the checks give verdicts, Admission decides, and the writer stores the plan in one write. If the record fails at any step, it is dropped: the drop is an audit event without content, and nothing from the record is stored. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Its identity stays in `construct__record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity.
+**Description**: A connector sends one record. Results API checks its envelope and type, whether the connector is on, and whether personalization is on with no erasure under way. A refused record gets its answer, and processing stops. Results API then inserts the record's identity into `construct__record_ids`; the insert is the repeat check. If the identity is already there, the record gets the answer "repeat", and processing stops. Otherwise the record is received and gets that answer. Its content stays in memory while it is processed. In the background, the planner builds a plan, the checks give verdicts, Admission decides, and the writer stores the plan in one write. If the record fails at any step, it is dropped: the drop is an audit event without content, and nothing from the record is stored. If an instance of Construct stops before the record is processed, the record is lost, without an audit event. Its identity stays in `construct__record_ids`, so a resend is a repeat. A connector that needs the record processed sends it again with a new identity.
 
 #### Entity Replaced
 
@@ -853,7 +853,7 @@ sequenceDiagram
     MT-->>AG: profile
     AG->>MT: manage-facts tool, what the subject said and recent conversation
     MT->>PL: same path as a record, origin names agent and subject
-    alt personalization off, or the plan dropped
+    alt personalization off, an erasure under way, or the plan dropped
         PL-->>MT: nothing changed
         MT-->>AG: nothing changed
     else plan admitted
@@ -863,7 +863,7 @@ sequenceDiagram
     end
 ```
 
-**Description**: An agent reads the profile through the same reader as any application. Then it passes on what the subject said through the manage-facts tool. That input runs through the same planner, checks and writer as a record. The tool waits and returns what changed. When the plan is dropped, or personalization is off, the tool returns that nothing changed; the wire codes are left to the feature design. A call for another subject or tenant gets the same answer as a subject that does not exist.
+**Description**: An agent reads the profile through the same reader as any application. Then it passes on what the subject said through the manage-facts tool. That input runs through the same planner, checks and writer as a record. The tool waits and returns what changed. When the plan is dropped, or personalization is off or an erasure is under way, the tool returns that nothing changed; the wire codes are left to the feature design. A call for another subject or tenant gets the same answer as a subject that does not exist.
 
 #### Review
 
@@ -936,17 +936,18 @@ sequenceDiagram
     participant LS as Audit gear
     SU->>SC: erase everything
     SC->>DEL: erasure trigger
-    DEL->>T: set personalization off
-    Note over DEL,T: from now on the reader serves nothing and Admission drops open plans
+    DEL->>T: set personalization off, mark the erasure under way
+    Note over DEL,T: until the erasure is done, the reader serves nothing and Admission drops plans
     DEL->>GS: soft delete the subject's entities and the root node
     DEL->>T: remove review requests and record IDs
+    DEL->>T: mark the erasure done
     DEL->>LS: erasure audit event without content
     Note over DEL,LS: audit events stay until the Audit gear's retention period ends
     DEL-->>SC: done
     SC-->>SU: erasure accepted
 ```
 
-**Description**: The subject asks to erase everything. Deletion first sets personalization off, so nothing is served and records received before it store nothing. It then removes the subject's entities and the root node from graph storage, and the subject's review requests and record IDs from Construct's tables. It writes an erasure audit event without content. It does not remove audit events; the Audit gear's retention period does. Retention runs the same code by age, as a job on the cluster leader. Removal from all storage within 30 days needs graph storage's purge (see Risks).
+**Description**: The subject asks to erase everything. Deletion first sets personalization off and marks the erasure as under way, so nothing is served and records received before it store nothing, even if personalization is turned on again before the erasure is done. It then removes the subject's entities and the root node from graph storage, and the subject's review requests and record IDs from Construct's tables. It writes an erasure audit event without content. It does not remove audit events; the Audit gear's retention period does. Retention runs the same code by age, as a job on the cluster leader. Removal from all storage within 30 days needs graph storage's purge (see Risks).
 
 ### 3.7 Database schemas & tables
 
@@ -958,7 +959,7 @@ Construct keeps three tables of its own through toolkit-db, scoped to the tenant
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-dbtable-subject-settings`
 
-**Holds**: whether personalization is on or off, per subject.
+**Holds**: whether personalization is on or off, and whether an erasure is under way, per subject.
 
 **Additional info**: erasure sets it to off, and it stays off until the subject turns it on.
 
@@ -1035,7 +1036,7 @@ flowchart LR
 - **Availability**: follows the platform's standard posture. The PRD sets no higher target.
 - **User interface**: none. Host applications build it.
 - **Cost**: every planner round carries the whole profile; the sensitive-data checks see only the values the plan would store (see Risks). The deployment chooses the endpoint.
-- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the patterns of the pattern checks, and which sensitive-data kinds also get a model check; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check, the identity insert and the write stay in step, so that a record received before personalization is turned off, or before an erasure request, stores nothing, also when personalization is turned off and on again, and an erasure leaves no identity of such a record behind; the properties of the person types; backup and recovery of Construct's own tables, which follow the platform default; how source trust and the confidence floor apply to plans from a reviewer, an administrator or an agent; how a review request that opens while a plan is in flight keeps that plan from changing the fact; how the root node is created for a new subject so that two first writes never both succeed, because graph storage's compare-and-set covers only nodes that exist; how a profile created after an erasure finds its new root key.
+- **Left to the feature design**: the cap values for the loop and the rerun limit; model-call timeouts; the patterns of the pattern checks, and which sensitive-data kinds also get a model check; the MCP tools' names, inputs and outputs, and the wire status codes for received, repeat and refused; how the personalization check, the identity insert and the write stay in step, so that a record received before personalization is turned off, or before an erasure request, stores nothing, also when personalization is turned off and on again, and an erasure leaves no identity of such a record behind; the properties of the person types; backup and recovery of Construct's own tables, which follow the platform default; how an erasure that stopped halfway is found and run again, also after an instance stops; which identity and tenant scope the background processing of a record, the retention job and tenant exit run under; how source trust and the confidence floor apply to plans from a reviewer, an administrator or an agent; how a review request that opens while a plan is in flight keeps that plan from changing the fact; how the root node is created for a new subject so that two first writes never both succeed, because graph storage's compare-and-set covers only nodes that exist; how a profile created after an erasure finds its new root key.
 
 ## 5. Traceability
 
