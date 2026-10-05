@@ -5596,6 +5596,26 @@ that upstream enforcement is agreed — the same seam as the `SUB-O5` occupancy 
 against it in [UPSTREAM_REQS.md](UPSTREAM_REQS.md) — **the subscription axis is open, and
 this design does not bound it.** That is the honest statement and it replaces an earlier one.
 
+**Subscription-side cardinality is advisory at order time, and the path is gated on it (D-180).**
+A predicate-7 pass at submit and a `proceed` from the re-check are pre-checks, **not** admission
+guarantees, and no consumer — Workflow, a buyer surface, an operator report — **MAY** present
+either as one. Orders' own contribution to the open axis is narrow and stated: the claim index
+admits at most **one** in-flight order per `(payer_tenant_id, resource_tenant_id,
+overlap_scope_key)` (D-179), and while Subscriptions' occupancy answer is coarser than that tuple
+(per payer, as its `provenance` says) predicate 7 also counts this payer's *other* in-flight orders
+claiming the same key under another resource tenant ([03 §4.2](features/03-gate-and-pin.md#contract-03-4-2) predicate 7) — a pre-check over
+Orders-owned claim data, so two concurrent submits can still both pass it. The residual race is
+with entries into `active` that do not pass through Orders — a direct subscription, `resume`, an
+ownership `transfer`, a key-altering `changePlan`, each of which Subscriptions'
+`design/03-plan-changes.md` §4.4 already runs detection on — and only Subscriptions can close it,
+at the commit that writes `active`. Workflow **MUST** therefore handle `overlap-collision` on the
+failure-acknowledgement path ([06 §4.4](features/06-workflow-seam.md#contract-06-4-4), D-89) even after both checks passed. **The
+submit/activation path is not production-ready** until
+`cpt-cf-bss-orders-lifecycle-upreq-overlap-activation-atomicity` is agreed by Subscriptions and
+delivered; the recommended mechanism — an in-transaction slot claim mirroring
+[ADR-0007](ADR/0007-cpt-cf-bss-orders-lifecycle-adr-in-transaction-concurrency.md) — and the rejected ones are recorded with that ask in [UPSTREAM_REQS.md](UPSTREAM_REQS.md).
+Development against doubles is unaffected.
+
 **Why no timed window is stated.** An earlier version gave the proceed verdict a 30-second
 validity window and called the result "bounded rather than closed". Two of its four faults are
 design constraints a reader needs here, because they are why no *other* duration would work
@@ -5679,8 +5699,11 @@ the same tuple, with `resourceTenantId` as a default dimension of Subscriptions'
 amendment, `UPSTREAM_REQS.md` `…-upreq-overlap-presence-read`), so both halves of the rule and the
 activation commit count the same thing. Until Subscriptions enforces the resource dimension at its active commit, it answers on the tuple it
 enforces and says so in `provenance`; predicate 7 applies that answer as given, so a per-payer answer
-refuses a partner's second customer at cardinality one at submit rather than passing it into an
-activation refusal. Orders never re-buckets a per-payer count locally (D-83: no local fork).
+refuses a partner's second customer at cardinality one at submit when that customer's subscription
+is already `active` — and, because predicate 7's `proposed` also counts the lines of this payer's
+other in-flight orders claiming the same key under another resource tenant, when two such orders
+are in flight at once (D-180) — rather than passing either into an activation refusal. Orders never
+re-buckets a per-payer count locally (D-83: no local fork); the addend is its own claim data.
 Q-05 stays open for the Subscriptions-side default only.
 
 <a id="contract-03-the-order-time-total-is-incomplete-by-construction"></a>
@@ -5952,7 +5975,7 @@ An expired acceptance or exceeded aggregate capacity contributes `order-binding-
 |-------------------|---------------|---------|
 | `account-management` | SDK client (`AccountManagementClient::get_tenant`); commercial profile **unexposed today** | Tenant-axis validity through the existing `get_tenant`. The payer's commercial profile behind the order market has no Account Management operation — `cpt-cf-bss-orders-lifecycle-upreq-payer-commercial-profile`; until exposed the identity outcome is `identity-party-unavailable` |
 | `contracts` | SDK client — **unexposed today** | Contract status and party eligibility where a reference is present — the sole owner of party eligibility; the same operation also returns the contract's `acceptance_required` declaration, read by `05`'s acceptance guards outside the gate (D-132). The gear is specified but unimplemented, raised as `cpt-cf-bss-orders-lifecycle-upreq-contract-party-eligibility` and `cpt-cf-bss-orders-lifecycle-upreq-contract-acceptance-declaration`; until exposed the gate outcome is `contract-resolution-unavailable` and `05`'s acceptance outcome is `acceptance-requirement-unevaluable` |
-| `subscriptions` | SDK client | The overlap-occupancy read (`SUB-O5`, amended: `(activeCount, maxConcurrentActive, provenance)` per payer/resource tenant/key, D-126, D-179), unagreed and unimplemented |
+| `subscriptions` | SDK client | The overlap-occupancy read (`SUB-O5`, amended: `(activeCount, maxConcurrentActive, provenance)` per payer/resource tenant/key, D-126, D-179), unagreed and unimplemented. Subscription-side cardinality is **advisory at order time**: a predicate-7 or re-check pass is not an admission guarantee, and Workflow **MUST** handle `overlap-collision` on the failure-acknowledgement path (D-89). Enforcement is owed by `cpt-cf-bss-orders-lifecycle-upreq-overlap-activation-atomicity`; the submit/activation path is not production-ready before it is agreed and delivered (D-180) |
 | Billing-chain tax owner | SDK client | The indicative tax figure Preview returns and never stores |
 
 **Dependency Rules** (per project conventions):
@@ -8012,7 +8035,10 @@ needs amendment; the Lifecycle seam does not assume the missing behavior exists.
 
 The seventh ask is `cpt-cf-bss-orders-lifecycle-upreq-overlap-activation-atomicity`: Subscriptions
 must re-evaluate `overlapScopeKey` atomically with committing `active`. Until it does, the §4.3
-activation re-check is an early abort only, with no admission guarantee (D-89).
+activation re-check is an early abort only, with no admission guarantee (D-89), subscription-side
+cardinality is advisory at order time, and the submit/activation path is not production-ready
+(D-180). The mechanism recommended to Subscriptions is an in-transaction slot claim mirroring
+ADR-0007; a `coord` lease and toolkit-db advisory locks are rejected (UPSTREAM_REQS §2.1).
 
 **Reconciled on the Workflow side (2026-10-02).** The Workflow branch (`bss/orders-workflow` @
 `3ccf7793c`) registers the provisioning-intent contract as `SUB-O11`…`SUB-O16`: an envelope with

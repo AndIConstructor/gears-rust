@@ -88,8 +88,11 @@ stability. **Second amendment (D-179):** the tuple carries the resource tenant, 
 the active commit. On self-service sales payer and resource tenant are one tenant, so only the
 partner path changes. Until Subscriptions enforces the resource dimension at its active commit, it answers on the tuple it
 enforces and says so in `provenance`; predicate 7 applies that answer as given, so a per-payer answer
-refuses a partner's second customer at cardinality one at submit rather than passing it into an
-activation refusal. Orders never re-buckets a per-payer count locally (D-83: no local fork). The against-existing-subscriptions half of the
+refuses a partner's second customer at cardinality one at submit when that customer's subscription
+is already `active`, and — because predicate 7's `proposed` also counts the lines of this payer's
+other in-flight orders claiming the same key under another resource tenant (D-180) — when two such
+orders are in flight at once, rather than passing either into an activation refusal. Orders never
+re-buckets a per-payer count locally (D-83: no local fork); the addend is its own claim data. The against-existing-subscriptions half of the
 submit gate's overlap predicate depends on it; until it lands that half is unevaluable and
 therefore a refusal, which fails closed. The same read serves Workflow's pre-wave-2 re-check
 (Workflow D-195); the shape is `occupancy(payer, resource_tenant, keys[]) → [{ key, active_count, draft_count,
@@ -146,6 +149,33 @@ pre-activation abort; one appearing at or after `active` is a fulfillment failur
 `overlap-collision` on the failure-acknowledgement path, whose compensation evidence must show no
 active subscription remains ([03 §2.2](DESIGN.md#contract-03-2-2), `DECISIONS.md` D-89). This is the same seam as `SUB-O5`, which supplies the *read*; this ask is
 the *enforcement*, and the read alone does not make the rule hold.
+
+**Release gate (D-180).** This ask **MUST** be agreed with Subscriptions, scheduled and delivered
+before the submit/activation path is production-ready; until then subscription-side cardinality is
+**advisory at order time** and the gate contract and consumer documents say so. What Orders
+contributes is bounded: at most one in-flight order per claim tuple (D-179), plus predicate 7's
+interim count of this payer's other in-flight orders on the same key while the occupancy answer is
+per payer. The residual race is with entries into `active` that bypass Orders — direct
+subscriptions, `resume`, `transfer`, key-altering `changePlan` — which only Subscriptions can close.
+
+**Mechanism proposed to Subscriptions.** *Recommended*: mirror this gear's
+[ADR-0007](./ADR/0007-cpt-cf-bss-orders-lifecycle-adr-in-transaction-concurrency.md) — an
+in-transaction **slot claim** `(overlapScopeKey, slot)` with a partial UNIQUE over live claims and
+a row CHECK `0 ≤ slot < maxConcurrentActive` (the limit resolved for that key), taken in the same
+transaction that commits `active` and released in the transaction that leaves `active`; a
+transaction that finds no free slot commits nothing and returns `overlap-collision`. Every entry
+into `active` that §4.4 of Subscriptions' `design/03-plan-changes.md` already detects on takes a
+slot, so the rule binds all writers, not only Orders'; how the §4.4 supersedes exemption maps onto
+slots is Subscriptions' design. The slot shape D-83 rejected for Orders is the right shape here:
+Orders' in-flight cap is fixed at one by PRD §6.1(g), whereas Subscriptions' cardinality is
+configurable by PRD §6.1(f), so "at most N" is the rule itself, not unused schema surface.
+*Alternative*: lock one per-key row (`SELECT … FOR UPDATE`) inside that transaction, then count
+and commit. *Rejected*: a `gears/bss/libs/coord` lease — its README, "Don't use `coord` when…",
+excludes hard mutual exclusion with zero tolerance for a TTL-expiry overlap, and the lease is
+TTL-based and not scoped to the committing transaction; toolkit-db advisory locks
+(`libs/toolkit-db/src/advisory_locks.rs`) — session-level `pg_try_advisory_lock` / `GET_LOCK` on a
+pinned connection, not transaction-scoped, and broken by a transaction-pooling proxy. The
+Subscriptions gear's own documents are not edited here (D-126).
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-settle-create`
 
@@ -850,7 +880,7 @@ ADR-0003) at both guards; it never falls back to an election.
 
 | Priority | Requirements |
 |----------|-------------|
-| `p1` (critical) | `…-upreq-subscription-start-instant`, `…-upreq-overlap-presence-read`, `…-upreq-compensation-cancel-reason`, `…-upreq-pre-subscription-evaluation`, `…-upreq-tcv-with-annualisation`, `…-upreq-external-reference-propagation`, `…-upreq-delegation-proof-credential`, `…-upreq-authorization-outcome`, `…-upreq-workflow-amendment-verdict`, `…-upreq-event-broker-runtime`, `…-upreq-event-broker-cursor-retry`, `…-upreq-event-broker-dead-letter-recovery`, `…-upreq-event-broker-root-tenancy`, `…-upreq-event-delivery-observability`, `…-upreq-catalog-subscription-product-key`, `…-upreq-pricing-read-sdk`, `…-upreq-pricing-catalog-tenant-reads`, `…-upreq-products-sku-read-grant`, `…-upreq-pricing-purchase-assessment`, `…-upreq-initial-binding-acceptance`, `…-upreq-sku-protection`, `…-upreq-rating-evaluation`, `…-upreq-payer-commercial-profile`, `…-upreq-contract-party-eligibility`, `…-upreq-contract-acceptance-declaration`, `…-upreq-settle-create`, `…-upreq-intent-status-read`, `…-upreq-transition-outcome-echo` |
+| `p1` (critical) | `…-upreq-subscription-start-instant`, `…-upreq-overlap-presence-read`, `…-upreq-compensation-cancel-reason`, `…-upreq-pre-subscription-evaluation`, `…-upreq-tcv-with-annualisation`, `…-upreq-external-reference-propagation`, `…-upreq-delegation-proof-credential`, `…-upreq-authorization-outcome`, `…-upreq-workflow-amendment-verdict`, `…-upreq-event-broker-runtime`, `…-upreq-event-broker-cursor-retry`, `…-upreq-event-broker-dead-letter-recovery`, `…-upreq-event-broker-root-tenancy`, `…-upreq-event-delivery-observability`, `…-upreq-catalog-subscription-product-key`, `…-upreq-pricing-read-sdk`, `…-upreq-pricing-catalog-tenant-reads`, `…-upreq-products-sku-read-grant`, `…-upreq-pricing-purchase-assessment`, `…-upreq-initial-binding-acceptance`, `…-upreq-sku-protection`, `…-upreq-rating-evaluation`, `…-upreq-payer-commercial-profile`, `…-upreq-contract-party-eligibility`, `…-upreq-contract-acceptance-declaration`, `…-upreq-settle-create`, `…-upreq-intent-status-read`, `…-upreq-transition-outcome-echo`, `…-upreq-overlap-activation-atomicity` (release gate for submit/activation, D-180) |
 | `p2` (important) | `…-upreq-order-reference-on-create`, `…-upreq-two-phase-pair-preserved`, `…-upreq-correlation-propagation`, `…-upreq-indicative-tax-read`, `…-upreq-audit-identity-lifecycle` |
 
 `cpt-cf-bss-orders-lifecycle-upreq-pdp-policy-integration` is also `p1`: verification and

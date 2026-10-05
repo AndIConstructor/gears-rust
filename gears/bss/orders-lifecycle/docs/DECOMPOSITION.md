@@ -865,7 +865,9 @@ derived locally from the stored bindings and a seller-scoped Orders setting (D-1
 has adopted period bindings; it still needs the pinned comparison at activation over the ordinary
 resolve (D-162), the SUB-G1 key answer for a PriceBook line and the SUB-O5 count amendment (D-163),
 `order_compensation` (SUB-O1), the order reference (SUB-O2), the start instant (SUB-O10) and atomic
-activation. SKU protection is inherited from the revision's references (D-164); the only Products/
+activation (`…-upreq-overlap-activation-atomicity`). That last ask is a **release gate** (D-180):
+until Subscriptions agrees and delivers it, subscription-side cardinality is advisory at order time
+and the submit/activation path is not production-ready. SKU protection is inherited from the revision's references (D-164); the only Products/
 Pricing ask is that the release report counts in-flight orders. Workflow needs complete topology and
 the approval/payment owner contracts. The reciprocal amendments specify the missing shapes.
 

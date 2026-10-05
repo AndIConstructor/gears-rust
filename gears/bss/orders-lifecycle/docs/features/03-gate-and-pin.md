@@ -133,7 +133,7 @@ Ensure admission has complete, explainable evidence and consistent per-line revi
 4. Compare active count plus pending lines with the effective maximum, returning `reject(overlap-collision)` on excess. Also reject an elapsed stored activation deadline as `order-binding-expired`; otherwise return `proceed`, subject to Subscriptions' pinned comparison at activation (DESIGN §4.3, D-162).
 5. Workflow handles `reject` by voiding wave-1 drafts and acknowledging failure with reasons and compensation evidence. It handles `not-dispatchable` by rereading/waiting/following supersession or ending terminal work. On `defer`, retry from step 1 under the design baseline of three attempts over at most 60 seconds; dispatch remains stopped. Exhaustion voids drafts and acknowledges failure with the unavailable-port reason.
 
-This is a Workflow integration algorithm, not a Lifecycle endpoint or begin-fulfillment guard. A passing read is only an early-abort check: Subscriptions must enforce concurrent-active cardinality at its own active commit. A collision after active commit is a fulfillment failure requiring rollback evidence, not a fictitious rejected inactive line. That upstream enforcement remains open.
+This is a Workflow integration algorithm, not a Lifecycle endpoint or begin-fulfillment guard. A passing read is only an early-abort check: Subscriptions must enforce concurrent-active cardinality at its own active commit. A collision after active commit is a fulfillment failure requiring rollback evidence, not a fictitious rejected inactive line. That upstream enforcement remains open: until `…-upreq-overlap-activation-atomicity` is delivered, subscription-side cardinality is advisory at order time and the path is not production-ready (D-180).
 
 ## 3. Processes / Business Logic (CDSL)
 
@@ -232,7 +232,7 @@ Each predicate outcome is exactly `passed`, `failed` or `unevaluable`. These are
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-dod-gate-and-pin-assessment`
 
-The system **MUST** implement one authorized, seller-scoped, revision-fixed assessment for submit, amendment and Preview, preserving tri-state diagnostics, every applicable predicate and independently evaluated pin outcomes under operation budgets.
+The system **MUST** implement one authorized, seller-scoped, revision-fixed assessment for submit, amendment and Preview, preserving tri-state diagnostics, every applicable predicate and independently evaluated pin outcomes under operation budgets. Predicate 7 **MUST** include the interim cross-order addend while the occupancy answer is per payer and **MUST NOT** be documented as an admission guarantee (D-180).
 
 **Implements**: `cpt-cf-bss-orders-lifecycle-flow-gate-and-pin-submit`, `cpt-cf-bss-orders-lifecycle-algo-gate-and-pin-assessment`, `cpt-cf-bss-orders-lifecycle-algo-gate-and-pin-fixed-catalog`, `cpt-cf-bss-orders-lifecycle-algo-gate-and-pin-port-budgets`.
 
@@ -256,7 +256,7 @@ The system **MUST** return authorized Preview fields with explicit exclusions an
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-dod-gate-and-pin-activation-recheck`
 
-Workflow integration **MUST** execute the four-outcome re-check with the declared retry budget, preserve held/superseded semantics and report actual collisions through the appropriate compensation path. Release evidence must establish Subscriptions' own atomic enforcement; a passing Lifecycle read cannot satisfy that prerequisite.
+Workflow integration **MUST** execute the four-outcome re-check with the declared retry budget, preserve held/superseded semantics and report actual collisions through the appropriate compensation path. Release evidence must establish Subscriptions' own atomic enforcement; a passing Lifecycle read cannot satisfy that prerequisite. **Release gate (D-180):** the submit/activation path **MUST NOT** be released to production until `cpt-cf-bss-orders-lifecycle-upreq-overlap-activation-atomicity` is agreed by Subscriptions and delivered; until then the gate contract and consumer documents state that subscription-side cardinality is advisory at order time.
 
 **Implements**: `cpt-cf-bss-orders-lifecycle-flow-gate-and-pin-activation-recheck`.
 
@@ -274,7 +274,7 @@ The implementation MUST expose the [design §3.8](../DESIGN.md#contract-03-3-8) 
 - [ ] Partner callers use seller/revision inputs for every catalog-facing operation; denied catalog access yields unavailable diagnostics, never a buyer-facing 403. Revision or price publication mid-run does not mix the assessed bindings and totals.
 - [ ] A 200-line basket invokes each basket-dependent port once per run; validate deadline, bounded retry, breaker, bulkhead and caller-rate behavior through shared facilities.
 - [ ] Concurrent draft change, stale UTC basis and in-transaction claim collision preserve engine precedence, exact refusal evidence and zero commercial effects. Same-key replay performs no upstream calls and returns the same assessment/vector.
-- [ ] Missing occupancy count/limit refuses unevaluable without assuming one; concurrent distinct submits cannot acquire one claim. One payer ordering one key for two resource tenants holds two claims; predicate 7 applies a per-payer occupancy answer as given and never re-buckets it (D-179).
+- [ ] Missing occupancy count/limit refuses unevaluable without assuming one; concurrent distinct submits cannot acquire one claim. One payer ordering one key for two resource tenants holds two claims; predicate 7 applies a per-payer occupancy answer as given and never re-buckets it (D-179), and while the answer is per payer it adds the lines of the payer's other in-flight orders claiming the key under another resource tenant, so a second customer's order submitted while the first is in flight is refused at cardinality one without naming the first (D-180).
 - [ ] Preview authorizes every represented axis before resolving facts; unauthorized callers see no out-of-scope party details. Missing term/cycle returns successful `tcvWithheld`; tax/TCV/total never persist on an order or diagnostic row.
 - [ ] Preview exposes expected fulfillment time, per-line deferral and total exclusions, with no approval verdict or quote-validity claim. Repeated identical previews have distinct run IDs and seven-day diagnostic retention.
 - [ ] Distinct bundle component/key results survive persistence and replay; duplicate identities/incomplete coverage are rejected. Cross-tenant diagnostic lookup is denied and storage failure returns no claimed durable assessment.
@@ -457,7 +457,11 @@ Subscriptions inside the transaction that commits `active`; and until it is, **t
 bound the gap** — §2.2 states why no timed validity window is asserted, and what a closable
 server-side form would need. What remains normative here is that a collision surfaces as
 `overlap-collision` through failure acknowledgement rather than as an over-provision nobody
-refused.
+refused. A `proceed` is advisory at order time; it is not an admission guarantee, and the
+submit/activation path is not production-ready until `…-upreq-overlap-activation-atomicity` is
+agreed and delivered (D-180). `pending` in step 8 stays this order's lines: predicate 7's interim
+cross-order addend has already refused a sibling submitted after this order, and a concurrently
+submitted pair is part of the open axis, not something a second read here could close.
 
 
 <!-- /contract -->
@@ -482,13 +486,23 @@ Nine predicates are this gear's own. Each **MUST** carry its own machine-readabl
    `(activeCount, maxConcurrentActive, provenance)`, the limit resolved using its Catalog/Contract
    policy. The tuple matches predicate 9's claim (D-179). Until Subscriptions enforces the resource
    dimension it answers on the tuple it enforces and says so in `provenance`; this predicate applies
-   that answer as given and never re-buckets a per-payer count locally. For each key, with `proposed` the number of basket lines carrying it, the predicate
+   that answer as given and never re-buckets a per-payer count locally. For each key, `proposed` is
+   the number of basket lines carrying it **plus**, while `provenance` states an answer coarser than
+   the claim tuple (per payer), the lines carrying the same key on the current version of every
+   **other** in-flight order of this payer holding a live `orders_inflight_overlap_claim` on
+   `(payer_tenant_id, overlap_scope_key)` under a different resource tenant (D-180). The addend is
+   Orders-owned claim data, not a re-bucketing of Subscriptions' count; it is dropped once the
+   answer is per the full tuple, and the refusal evidence never names those orders or their count
+   to the caller (D-179). It is read outside the transition transaction, so two concurrent submits
+   can both miss each other — it narrows the race, it does not close it. The predicate
    passes iff `activeCount + proposed ≤ maxConcurrentActive`, preserving declared unbounded
    semantics if supported. A boolean presence read is insufficient, which is why the port is not
    one (D-126). A missing `activeCount` or `maxConcurrentActive` refuses
    `overlap-presence-unevaluable` — the name is kept for stability — and never silently defaults
-   the limit to one. The owning
-   activation commit still enforces concurrency; this read is not a reservation.
+   the limit to one. Subscription-side cardinality is **advisory at order time** (D-180): a pass is
+   a pre-check, **not** an admission guarantee, and this read is not a reservation. The owning
+   activation commit is the enforcement point, owed by `…-upreq-overlap-activation-atomicity`, and
+   Workflow **MUST** handle `overlap-collision` on the failure-acknowledgement path (D-89).
 8. **Required line dates resolvable** — evaluate authored values and the run's snapshot of the resource tenant's effective `orders_date_policy` row, never a future version row. A policy-required service-activation or acceptance-due date must be authored — a cascade default never satisfies the requirement (capture §4.2, D-60); every other field resolves to its authored value or its default, including proposed transition-date defaults prepared before dependent external calls under capture §4.2. The engine checks that those defaults equal the UTC date of its pre-write transition timestamp `t`, then stores the validated dates and identical snapshot with the admitted version. An invalid cascade or stale date basis refuses with `date-cascade-invalid`; an amendment takes a new policy snapshot while retaining carried-forward date values unless its delta changes them.
 9. **One in-flight order per overlap key and resource tenant** — **no other order** in the in-flight set holds the same key for the same payer and resource tenant (D-179); a partner's orders for different customers never collide here. The exclusion of the requesting order itself is load-bearing: an amendment is issued by an order that is *already* in-flight and already holds its key, so a predicate counting all holders without excluding the subject refuses every amendment against itself. Predicate 7 bounds concurrent **subscriptions** and is configurable via `maxConcurrentActive`; this one bounds concurrent **orders** and PRD §6.1(g) fixes it at one with no configurability clause. The two are deliberately separate rules and **MUST NOT** be given a shared cardinality (D-83). **The in-flight set is `submitted`, `pending_approval`, `approved`, `in_fulfillment` and `on_hold`** — `on_hold` is included because a held order resumes onto its pre-hold state and still holds its key, so excluding it would admit a second order that collides at the activation re-check, the expensive path §2.2 refuses to defer failures into. The partial unique index in [01-foundation — Database Schemas and Tables](../DESIGN.md#contract-01-3-7) covers exactly those five states. Idempotency keys protect against a repeated call; this protects against **more distinct orders on one key than the key permits**. The key resolved at `§3.6` *Run Gate and Submit* step 4 is **persisted** on the line and the rule is enforced by an `orders_inflight_overlap_claim`
 **partial unique index over `(payer_tenant_id, resource_tenant_id, overlap_scope_key)` inside the transition

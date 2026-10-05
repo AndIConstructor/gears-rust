@@ -149,7 +149,7 @@ Map `required`, `not_required`, `granted`, `denied` to `reflect-approval-require
 
 | Outcome | Workflow action |
 |---------|-----------------|
-| `proceed` | Request spawn signal; dispatch only after admitted. A proceed result is an early-abort check, not atomic activation admission or a timed validity lease. |
+| `proceed` | Request spawn signal; dispatch only after admitted. A proceed result is an early-abort check, not atomic activation admission or a timed validity lease; subscription-side cardinality is advisory at order time (D-180). |
 | `reject` | Void created drafts and acknowledge failure with `market-divergence` or `overlap-collision`; empty created sets are valid evidence before any draft exists. |
 | `not-dispatchable` | Drive no transition and send no acknowledgement. Re-read; wait for resume if held, follow current version if superseded, stop if terminal. |
 | `defer` | Retry the re-check from its first step with bounded backoff (`activation-recheck-retry-budget`, baseline 3 attempts over ≤ 60 seconds). After exhaustion, void drafts and acknowledge with the unavailable port's reason. |
@@ -569,7 +569,11 @@ an `overlap-collision` raised by Subscriptions at any point after the re-check �
 lines the two-phase barrier deferred, which is precisely the case one window could never have
 covered. Such a collision arrives on the failure-acknowledgement path of §4.4 with compensation
 evidence, rather than as a silent partial activation
-([`../DECISIONS.md`](../DECISIONS.md) D-89).
+([`../DECISIONS.md`](../DECISIONS.md) D-89). Subscription-side cardinality is **advisory at order time**: neither
+predicate 7 at submit nor a `proceed` here admits the line, because entries into `active` that
+bypass Orders (direct subscriptions, `resume`, `transfer`, key-altering `changePlan`) race with
+the wave and only Subscriptions' active commit can refuse them. The submit/activation path is not
+production-ready until `…-upreq-overlap-activation-atomicity` is agreed and delivered (D-180).
 
 **The activation intent carries the start instant.** Each activation intent **MUST** carry the
 **actual activation instant** as the spawned subscription's start, and **MUST NOT** derive that
@@ -668,7 +672,7 @@ would leave orders non-terminal for reasons the order has no visibility into.
 - **Depends on**: [`05-preconditions`](../DESIGN.md#contract-05-1-1) for both begin-fulfillment guards; [`03-gate-and-pin`](../DESIGN.md#contract-03-1-1) for the activation re-check contract (specified by 03, executed by Workflow)
 - **Consumers**: [`08-read-and-authz`](../DESIGN.md#contract-08-1-1) serves the per-line projection; [`07-hold-and-expiry`](../DESIGN.md#contract-07-1-1) exempts `in_fulfillment` (and holds whose `pre_hold_state` is `in_fulfillment`) from expiry by state, and reads the spawn signal only by deferring to §3.6 *Evaluate Cancel From In-Fulfillment (shared guard)* from its ordinary `POST /cancel`
 - **Sibling gear**: [`orders-workflow/docs/PRD.md`](../../../orders-workflow/docs/PRD.md)
-- **Upstream asks**: `SUB-O1`, `SUB-O2`, `SUB-O5`, `SUB-O9`, `SUB-O10`, `…-upreq-workflow-amendment-verdict` and `…-upreq-overlap-activation-atomicity` — per §4.6; additional recheck and progress integration requirements are recorded in UPSTREAM_REQS §2.6
+- **Upstream asks**: `SUB-O1`, `SUB-O2`, `SUB-O5`, `SUB-O9`, `SUB-O10`, `…-upreq-workflow-amendment-verdict` and `…-upreq-overlap-activation-atomicity` (a release gate for submit/activation, D-180) — per §4.6; additional recheck and progress integration requirements are recorded in UPSTREAM_REQS §2.6
 - **ADRs**: [`ADR/0001`](../ADR/0001-cpt-cf-bss-orders-lifecycle-adr-transition-through-engine.md) transition through the engine; [`ADR/0002`](../ADR/0002-cpt-cf-bss-orders-lifecycle-adr-slice-decomposition.md) the foundation-plus-seven-slices decomposition
 
 <!-- /contract -->
