@@ -392,7 +392,7 @@ sequenceDiagram
 | `summary_json` | The `SyncSummary` of a `complete` run |
 | `created_at`, `started_at`, `ended_at`, `updated_at` | `updated_at` is the heartbeat |
 
-Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the run; `in_progress` → `complete`, `failed` (an error, or the deadline) or `interrupted` (cancelled by a shutdown). A `queued` or `in_progress` row whose `updated_at` has not moved for five minutes, and whose `gm_active_syncs` row has gone as long without a refresh, has nobody behind it and is set to `interrupted`: at start-up, and once more five minutes later, for a process that died just before this one started. Another replica keeps both fresh, so its live runs are left alone. A run that starts clears `ended_at` and `error`.
+Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the run, or `queued` → `failed` when it cannot start (its scope or its row cannot be read or written); `in_progress` → `complete`, `failed` (an error, or the deadline) or `interrupted` (cancelled by a shutdown). A `queued` or `in_progress` row whose `updated_at` has not moved for five minutes, and whose `gm_active_syncs` row has gone as long without a refresh, has nobody behind it and is set to `interrupted`: at start-up, and once more five minutes later, for a process that died just before this one started. Another replica keeps both fresh, so its live runs are left alone. A run that starts clears `ended_at` and `error`.
 
 #### Table: gm_repo_sync_status
 

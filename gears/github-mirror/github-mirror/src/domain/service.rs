@@ -364,6 +364,10 @@ const TAKE_ACTIVE_SYNC_ATTEMPTS: usize = 3;
 
 const QUEUE_FULL_RETRY_AFTER_SECS: u64 = 30;
 
+const SESSION_WRITE_ATTEMPTS: u32 = 3;
+
+const SESSION_WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub(crate) const SWEEP_AGAIN_AFTER: std::time::Duration =
     std::time::Duration::from_secs(ABANDONED_AFTER_SECS.unsigned_abs() + HEARTBEAT_SECS);
 
@@ -3896,12 +3900,85 @@ impl Service {
         session.ended_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.ended_at);
         session.error = Some(reason);
-        if let Err(e) = self.sync_sessions.upsert(scope, tenant_id, session).await {
+        if let Err(e) = self
+            .upsert_session_with_retry(scope, tenant_id, session)
+            .await
+        {
             tracing::error!(
                 error = %crate::redact::redacted(&e.to_string()),
-                "a sync that could not be queued could not be marked failed either"
+                "a sync that could not be queued or started could not be marked failed either"
             );
         }
+    }
+
+    async fn upsert_session_with_retry(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        session: SyncSessionRecord,
+    ) -> Result<(), DomainError> {
+        let mut attempt = 1;
+        loop {
+            match self
+                .sync_sessions
+                .upsert(scope, tenant_id, session.clone())
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(e) if attempt < SESSION_WRITE_ATTEMPTS => {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        attempt,
+                        error = %crate::redact::redacted(&e.to_string()),
+                        "could not write the sync session; trying again"
+                    );
+                    tokio::time::sleep(SESSION_WRITE_RETRY_DELAY).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn fail_unstarted_session(&self, job: &SyncJob, error: &DomainError) {
+        let tenant_id = job.ctx.subject_tenant_id();
+        match self
+            .sync_sessions
+            .find_by_id(&job.access_scope, job.session_id)
+            .await
+        {
+            Ok(Some(session)) if session.status == SessionStatus::Queued => {
+                self.fail_session(&job.access_scope, tenant_id, session, error.public_text())
+                    .await;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(
+                session_id = %job.session_id,
+                error = %crate::redact::redacted(&e.to_string()),
+                "a sync that could not start could not be marked failed either"
+            ),
+        }
+    }
+
+    async fn start_session(
+        &self,
+        job: &SyncJob,
+    ) -> Result<(AccessScope, SyncSessionRecord), DomainError> {
+        let scope = self.session_scope(&job.ctx, actions::UPSERT).await?;
+        let mut session = self
+            .sync_sessions
+            .find_by_id(&scope, job.session_id)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+        session.status = SessionStatus::InProgress;
+        session.started_at = Some(now_rfc3339());
+        session.updated_at.clone_from(&session.started_at);
+        session.ended_at = None;
+        session.error = None;
+        self.sync_sessions
+            .upsert(&scope, job.ctx.subject_tenant_id(), session.clone())
+            .await?;
+        Ok((scope, session))
     }
 
     /// Answer a request for a repository a sync already holds: its session
@@ -4064,21 +4141,13 @@ impl Service {
         cancel: &CancellationToken,
     ) -> Result<Result<SyncSummary, DomainError>, DomainError> {
         let tenant_id = job.ctx.subject_tenant_id();
-        let scope = self.session_scope(&job.ctx, actions::UPSERT).await?;
-
-        let mut session = self
-            .sync_sessions
-            .find_by_id(&scope, job.session_id)
-            .await?
-            .ok_or(DomainError::NotFound)?;
-        session.status = SessionStatus::InProgress;
-        session.started_at = Some(now_rfc3339());
-        session.updated_at.clone_from(&session.started_at);
-        session.ended_at = None;
-        session.error = None;
-        self.sync_sessions
-            .upsert(&scope, tenant_id, session.clone())
-            .await?;
+        let (scope, mut session) = match self.start_session(job).await {
+            Ok(started) => started,
+            Err(e) => {
+                self.fail_unstarted_session(job, &e).await;
+                return Err(e);
+            }
+        };
 
         let progress = SyncProgress::new();
         let outcome = self.sync_within_deadline(job, &progress, cancel).await;
@@ -4112,8 +4181,7 @@ impl Service {
         session.ended_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.ended_at);
         let repo_full_name = session.repo_full_name.clone();
-        self.sync_sessions
-            .upsert(&scope, tenant_id, session)
+        self.upsert_session_with_retry(&scope, tenant_id, session)
             .await?;
 
         // A run that failed leaves the repository `in_progress` on purpose:
