@@ -286,6 +286,7 @@ pub struct GithubClient {
     /// of each discovering it in turn.
     cooldown_until: Mutex<Option<Instant>>,
     upstream_backoff: std::time::Duration,
+    max_retry_sleep: std::time::Duration,
 }
 
 impl GithubClient {
@@ -339,12 +340,19 @@ impl GithubClient {
             permits: Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS),
             cooldown_until: Mutex::new(None),
             upstream_backoff: UPSTREAM_BACKOFF,
+            max_retry_sleep: MAX_RETRY_SLEEP,
         })
     }
 
     #[must_use]
     pub fn with_upstream_backoff(mut self, base: std::time::Duration) -> Self {
         self.upstream_backoff = base;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_retry_sleep(mut self, longest: std::time::Duration) -> Self {
+        self.max_retry_sleep = longest;
         self
     }
 
@@ -417,7 +425,7 @@ impl GithubClient {
 
     /// Push the shared cooldown out to at least `delay` from now.
     fn extend_cooldown(&self, delay: std::time::Duration) {
-        let deadline = Instant::now() + delay;
+        let deadline = Instant::now() + delay.min(self.max_retry_sleep);
         let mut slot = self
             .cooldown_until
             .lock()

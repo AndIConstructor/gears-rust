@@ -1696,7 +1696,7 @@ async fn unauthorized_maps_to_access_lost() {
 #[tokio::test]
 async fn plain_forbidden_maps_to_access_lost() {
     let server = MockServer::start_async().await;
-    server
+    let forbidden = server
         .mock_async(|when, then| {
             when.method("GET").path("/repos/acme/gone");
             then.status(403);
@@ -1710,6 +1710,7 @@ async fn plain_forbidden_maps_to_access_lost() {
         matches!(result, Err(DomainError::AccessLost(_))),
         "a 403 without rate-limit headers is lost access, not a rate limit, got {result:?}"
     );
+    forbidden.assert_calls_async(1).await;
 }
 
 #[tokio::test]
@@ -1724,17 +1725,92 @@ async fn a_rate_limited_response_is_retried_before_giving_up() {
         })
         .await;
 
-    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let client = GithubClient::new(server.base_url(), None)
+        .expect("client must build")
+        .with_max_retry_sleep(std::time::Duration::from_millis(1));
     let result = fetch_repository(&client, "acme", "busy", &opts(ScopeConfig::default())).await;
 
     assert!(
         matches!(result, Err(DomainError::Internal(_))),
         "a rate limit that never clears fails after the retries, got {result:?}"
     );
-    assert!(
-        limited.calls_async().await > 1,
-        "the client must retry a rate-limited response rather than give up on the first"
+    limited.assert_calls_async(31).await;
+}
+
+async fn served_after_one_rate_limited_answer(server: &MockServer, limited: httpmock::Mock<'_>) {
+    let client = std::sync::Arc::new(
+        GithubClient::new(server.base_url(), None)
+            .expect("client must build")
+            .with_max_retry_sleep(std::time::Duration::from_millis(500)),
     );
+    let options = opts(ScopeConfig::default());
+    let request = {
+        let client = std::sync::Arc::clone(&client);
+        tokio::spawn(async move {
+            client
+                .fetch_repository_metadata("acme", "limited", &options)
+                .await
+        })
+    };
+
+    wait_for_calls(&limited, 1).await;
+    limited.assert_calls_async(1).await;
+    limited.delete_async().await;
+    let recovered = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/limited");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+
+    request
+        .await
+        .expect("the request task must not panic")
+        .expect("a rate-limited answer must be waited out and retried, not failed");
+    recovered.assert_calls_async(1).await;
+}
+
+#[tokio::test]
+async fn a_bare_429_is_retried_as_a_rate_limit() {
+    let server = MockServer::start_async().await;
+    let limited = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/limited");
+            then.status(429);
+        })
+        .await;
+    served_after_one_rate_limited_answer(&server, limited).await;
+}
+
+#[tokio::test]
+async fn a_403_with_only_retry_after_is_retried_as_a_rate_limit() {
+    let server = MockServer::start_async().await;
+    let limited = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/limited");
+            then.status(403).header("retry-after", "1");
+        })
+        .await;
+    served_after_one_rate_limited_answer(&server, limited).await;
+}
+
+#[tokio::test]
+async fn a_403_with_only_an_exhausted_quota_is_retried_as_a_rate_limit() {
+    let reset = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs()
+        + 1;
+    let server = MockServer::start_async().await;
+    let limited = server
+        .mock_async(move |when, then| {
+            when.method("GET").path("/repos/acme/limited");
+            then.status(403)
+                .header("x-ratelimit-remaining", "0")
+                .header("x-ratelimit-reset", reset.to_string());
+        })
+        .await;
+    served_after_one_rate_limited_answer(&server, limited).await;
 }
 
 #[tokio::test]
