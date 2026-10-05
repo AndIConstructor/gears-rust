@@ -211,9 +211,6 @@ fn is_loopback(url: &url::Url) -> bool {
     }
 }
 
-fn upstream_backoff(attempt: u32) -> std::time::Duration {
-    UPSTREAM_BACKOFF.saturating_mul(1u32 << attempt.min(8))
-}
 /// Requests in flight a client allows before the gear config says otherwise.
 /// Matches the PRD's "parallelism <= 8" rate-limit threshold.
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 8;
@@ -288,6 +285,7 @@ pub struct GithubClient {
     /// told to back off, so one rate limit pauses every task at once instead
     /// of each discovering it in turn.
     cooldown_until: Mutex<Option<Instant>>,
+    upstream_backoff: std::time::Duration,
 }
 
 impl GithubClient {
@@ -340,7 +338,14 @@ impl GithubClient {
             cache,
             permits: Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS),
             cooldown_until: Mutex::new(None),
+            upstream_backoff: UPSTREAM_BACKOFF,
         })
+    }
+
+    #[must_use]
+    pub fn with_upstream_backoff(mut self, base: std::time::Duration) -> Self {
+        self.upstream_backoff = base;
+        self
     }
 
     /// Cap the requests this client keeps in flight at `max`.
@@ -687,7 +692,7 @@ impl GithubClient {
         attempt: u32,
         cancel: &CancellationToken,
     ) -> Result<(), DomainError> {
-        let delay = upstream_backoff(attempt);
+        let delay = self.upstream_backoff.saturating_mul(1u32 << attempt.min(8));
         tracing::warn!(
             url = %redacted_word(url),
             reason,

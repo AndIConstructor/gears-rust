@@ -10,9 +10,12 @@ use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
 use github_mirror::api::rest::routes::{ConcreteService, register_routes};
 use github_mirror::domain::ports::github::{FetchedRepository, ListingCompleteness};
-use github_mirror::domain::repo::{ActiveSyncRepository, RepoRecord, SyncSessionRepository};
+use github_mirror::domain::repo::{
+    ActiveSyncRepository, RepoRecord, RepoRunStatus, RepoSyncStatusRecord,
+    RepoSyncStatusRepository, SessionStatus, SyncSessionRecord, SyncSessionRepository,
+};
 use github_mirror::infra::storage::sea_orm_repo::{
-    SeaOrmActiveSyncRepository, SeaOrmSyncSessionRepository,
+    SeaOrmActiveSyncRepository, SeaOrmRepoSyncStatusRepository, SeaOrmSyncSessionRepository,
 };
 use toolkit::api::OpenApiRegistryImpl;
 use toolkit_db::{DBProvider, DbError};
@@ -387,4 +390,95 @@ async fn a_cursor_from_another_listing_is_refused() {
         StatusCode::OK,
         "a cursor that matches the listing must still be served"
     );
+}
+
+async fn walk_pages(router: &Router, path: &str, key: &str) -> Vec<String> {
+    let mut seen = Vec::new();
+    let mut uri = format!("{path}?limit=2");
+    for _ in 0..4 {
+        let page = body_json(send(router.clone(), Method::GET, &uri).await).await;
+        let items = page["items"].as_array().expect("items");
+        assert!(items.len() <= 2, "{path} served more rows than the limit");
+        seen.extend(
+            items
+                .iter()
+                .map(|item| item[key].as_str().expect("the row key").to_owned()),
+        );
+        match page["page_info"]["next_cursor"].as_str() {
+            Some(cursor) => uri = format!("{path}?limit=2&cursor={cursor}"),
+            None => return seen,
+        }
+    }
+    panic!("{path} kept handing out a next cursor");
+}
+
+#[tokio::test]
+async fn sessions_and_run_statuses_page_past_the_first_page() {
+    let tenant = Uuid::new_v4();
+    let db = common::inmem_db().await;
+    let provider = Arc::new(DBProvider::<DbError>::new(db.clone()));
+    let scope = AccessScope::for_tenant(tenant);
+    let sessions = SeaOrmSyncSessionRepository::new(Arc::clone(&provider));
+    let statuses = SeaOrmRepoSyncStatusRepository::new(provider);
+
+    let mut session_ids = Vec::new();
+    let mut repositories = Vec::new();
+    for n in 1..=3 {
+        let id = Uuid::new_v4();
+        let repository = format!("acme/widget-{n}");
+        sessions
+            .upsert(
+                &scope,
+                tenant,
+                SyncSessionRecord {
+                    id,
+                    repo_full_name: repository.clone(),
+                    repo_id: None,
+                    status: SessionStatus::Complete,
+                    progress_percent: 100,
+                    error: None,
+                    summary_json: None,
+                    created_at: format!("2026-09-0{n}T00:00:00Z"),
+                    started_at: None,
+                    ended_at: None,
+                    updated_at: None,
+                },
+            )
+            .await
+            .expect("the session must write");
+        statuses
+            .upsert(
+                &scope,
+                tenant,
+                RepoSyncStatusRecord {
+                    repo_full_name: repository.clone(),
+                    repo_id: None,
+                    status: RepoRunStatus::Complete,
+                    last_session_id: Some(id),
+                    last_synced_at: None,
+                },
+            )
+            .await
+            .expect("the run status must write");
+        session_ids.push(id.to_string());
+        repositories.push(repository);
+    }
+
+    let service = common::service_with_github(
+        db,
+        "https://api.github.com",
+        Arc::new(common::FakeGithub {
+            result: Some(fetched()),
+        }),
+    );
+    let router = router_for(service, common::caller_in(tenant));
+
+    let mut listed_sessions = walk_pages(&router, "/github-mirror/v1/sessions", "id").await;
+    session_ids.reverse();
+    assert_eq!(listed_sessions, session_ids, "newest first, each once");
+    listed_sessions.dedup();
+    assert_eq!(listed_sessions.len(), 3);
+
+    let listed_statuses = walk_pages(&router, "/github-mirror/v1/sync-status", "repository").await;
+    assert_eq!(listed_statuses, repositories, "by repository, each once");
 }

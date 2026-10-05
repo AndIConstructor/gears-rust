@@ -1291,17 +1291,152 @@ async fn github_404_maps_to_not_found() {
 #[tokio::test]
 async fn github_server_error_maps_to_internal() {
     let server = MockServer::start_async().await;
-    server
+    let unavailable = server
         .mock_async(|when, then| {
             when.method("GET").path("/repos/acme/flaky");
             then.status(503);
         })
         .await;
 
-    let client = GithubClient::new(server.base_url(), None).expect("client must build");
+    let client = GithubClient::new(server.base_url(), None)
+        .expect("client must build")
+        .with_upstream_backoff(std::time::Duration::from_millis(1));
     let result = fetch_repository(&client, "acme", "flaky", &opts(ScopeConfig::default())).await;
 
     assert!(matches!(result, Err(DomainError::Internal(_))));
+    unavailable.assert_calls_async(4).await;
+}
+
+#[tokio::test]
+async fn a_server_error_followed_by_success_is_retried() {
+    let server = MockServer::start_async().await;
+    let unavailable = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust");
+            then.status(503);
+        })
+        .await;
+
+    let client = std::sync::Arc::new(
+        GithubClient::new(server.base_url(), None)
+            .expect("client must build")
+            .with_upstream_backoff(std::time::Duration::from_millis(500)),
+    );
+    let options = opts(ScopeConfig::default());
+    let request = {
+        let client = std::sync::Arc::clone(&client);
+        let options = options.clone();
+        tokio::spawn(async move {
+            client
+                .fetch_repository_metadata("rust-lang", "rust", &options)
+                .await
+        })
+    };
+
+    wait_for_calls(&unavailable, 1).await;
+    unavailable.delete_async().await;
+    let recovered = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+
+    request
+        .await
+        .expect("the request task must not panic")
+        .expect("a 503 followed by a 200 must succeed");
+    recovered.assert_calls_async(1).await;
+}
+
+#[tokio::test]
+async fn a_graphql_server_error_followed_by_success_is_retried() {
+    let server = MockServer::start_async().await;
+
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/rust-lang/rust/pulls/13");
+            then.status(200).json_body(gh_pulls_json()[0].clone());
+        })
+        .await;
+    for tail in ["reviews", "files", "commits"] {
+        let path = format!("/repos/rust-lang/rust/pulls/13/{tail}");
+        server
+            .mock_async(move |when, then| {
+                when.method("GET").path(path);
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+    }
+    let unavailable = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/graphql");
+            then.status(503);
+        })
+        .await;
+
+    let client = std::sync::Arc::new(
+        GithubClient::new(server.base_url(), None)
+            .expect("client must build")
+            .with_upstream_backoff(std::time::Duration::from_millis(500)),
+    );
+    let options = opts(ScopeConfig::default());
+    let refinement = {
+        let client = std::sync::Arc::clone(&client);
+        let options = options.clone();
+        tokio::spawn(async move {
+            client
+                .refine_pull_request(
+                    RepoRef {
+                        owner: "rust-lang",
+                        name: "rust",
+                        repo_id: 42,
+                    },
+                    13,
+                    &options,
+                )
+                .await
+        })
+    };
+
+    wait_for_calls(&unavailable, 1).await;
+    unavailable.delete_async().await;
+    let recovered = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/graphql");
+            then.status(200).json_body(json!({
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                                "nodes": [{
+                                    "id": "PRRT_after_retry",
+                                    "isResolved": false,
+                                    "isOutdated": false,
+                                    "path": "src/lib.rs",
+                                    "line": 3,
+                                    "resolvedBy": null,
+                                    "comments": { "totalCount": 1 }
+                                }]
+                            }
+                        }
+                    }
+                }
+            }));
+        })
+        .await;
+
+    let detail = refinement
+        .await
+        .expect("the refinement task must not panic")
+        .expect("a 503 followed by a 200 must not fail the refinement");
+    recovered.assert_calls_async(1).await;
+    assert!(
+        detail.review_threads_complete,
+        "the retried answer is the whole thread list"
+    );
+    assert_eq!(detail.review_threads.len(), 1);
 }
 
 #[tokio::test]
@@ -1944,6 +2079,60 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
         "the limited request must have retried, which is what proves the cooldown expired"
     );
     assert!(free.calls_async().await >= 1);
+
+    limited_request.abort();
+}
+
+#[tokio::test]
+async fn a_request_waiting_for_the_only_slot_waits_out_a_cooldown_set_meanwhile() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/limited");
+            then.status(403)
+                .header("retry-after", "1")
+                .header("x-ratelimit-remaining", "0")
+                .delay(std::time::Duration::from_millis(500));
+        })
+        .await;
+    let free = server
+        .mock_async(|when, then| {
+            when.method("GET").path("/repos/acme/free");
+            then.status(200).json_body(gh_repo_json());
+        })
+        .await;
+
+    let client = std::sync::Arc::new(
+        GithubClient::new(server.base_url(), None)
+            .expect("client must build")
+            .with_max_concurrent_requests(std::num::NonZeroUsize::MIN),
+    );
+    let options = opts(ScopeConfig::default());
+
+    let limited_request = {
+        let client = std::sync::Arc::clone(&client);
+        let options = options.clone();
+        tokio::spawn(async move {
+            client
+                .fetch_repository_metadata("acme", "limited", &options)
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let started = std::time::Instant::now();
+    client
+        .fetch_repository_metadata("acme", "free", &options)
+        .await
+        .expect("the free request must succeed once the cooldown has passed");
+    let waited = started.elapsed();
+
+    assert!(
+        waited >= std::time::Duration::from_millis(900),
+        "the request that was waiting for the slot must also wait out the cooldown the \
+         slot's holder set before giving it up, waited {waited:?}"
+    );
+    free.assert_calls_async(1).await;
 
     limited_request.abort();
 }
