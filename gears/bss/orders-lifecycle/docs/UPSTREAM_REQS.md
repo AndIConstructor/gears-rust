@@ -83,7 +83,7 @@ policy that cardinality was resolved from. Registered upstream as **`SUB-O5`**, 
 presence"): a boolean cannot evaluate `activeCount + proposed ≤ maxConcurrentActive` when the limit
 exceeds one, so this design asks for the count and the limit; the Subscriptions gear's own seam map
 is not edited here ([`DECISIONS.md`](./DECISIONS.md) D-126). The requirement ID is kept for
-stability. **Second amendment (D-179):** the tuple carries the resource tenant, by making
+stability. **Second amendment (D-179; open as Q-40):** the tuple carries the resource tenant, by making
 `resourceTenantId` a default dimension of `overlapScopeKey` — Subscriptions' own
 `design/03-plan-changes.md` §4.4 already permits extra dimensions — and enforcing the same tuple at
 the active commit. On self-service sales payer and resource tenant are one tenant, so only the
