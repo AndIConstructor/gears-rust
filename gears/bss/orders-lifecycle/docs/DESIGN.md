@@ -219,7 +219,7 @@ Requirements that significantly influence architecture decisions.
 | `cpt-cf-bss-orders-lifecycle-fr-order-payment-auth` | Payment authorization is consumed as a begin-fulfillment guard input supplied by Workflow, not as an order state; the tolerate-failure election is a seller policy read at guard time. |
 | `cpt-cf-bss-orders-lifecycle-fr-order-cancel` | The cancel guard is anchored on the recorded subscription-spawn signal, which is why begin-fulfillment must be durably committed before Workflow issues any activation intent. |
 | `cpt-cf-bss-orders-lifecycle-fr-order-hold` | `on_hold` stores the pre-hold state on the order, so resume is a table lookup rather than an inference. |
-| `cpt-cf-bss-orders-lifecycle-fr-order-expiry` | A coordinated scheduler drives per-state TTL expiry as an ordinary Engine transition; `in_fulfillment` and holds taken from it are excluded by the transition table itself, not by scheduler logic. |
+| `cpt-cf-bss-orders-lifecycle-fr-order-expiry` | A coordinated scheduler drives per-state TTL expiry as an ordinary Engine transition; `in_fulfillment` and holds taken from it are excluded by the transition table itself, not by scheduler logic. Their bound is Workflow's overdue SLA, made a release prerequisite and observed by an Orders-side overdue gauge; after it, a two-person operator-forced `fulfillment_failed` (D-182) is the bounded recovery, never an automatic terminal. |
 | `cpt-cf-bss-orders-lifecycle-fr-order-atomic-fulfillment` | The order carries no per-line fulfillment state machine. Terminals are order-level; per-line create/activate results are a read-only projection fed by Workflow acknowledgements. |
 | `cpt-cf-bss-orders-lifecycle-fr-order-subscription-linkage` | The per-line line→subscription mapping is persisted on acknowledgement and carried in `OrderCompleted`, so acquisition provenance is answerable from the order side. |
 | `cpt-cf-bss-orders-lifecycle-fr-order-events` | The eleven typed state events are enqueued through `event-broker-sdk::DbProducer` backed by `toolkit_db::outbox` inside the transition commit, giving exactly one producer message per committed transition **that declares an event type**, under at-least-once delivery with consumer de-duplication. Six row classes are deliberately event-less (D-15). |
@@ -1190,6 +1190,7 @@ component:
 | `POST` | `/bss-orders-lifecycle/v1/orders/{orderId}/cancel` | hold-and-expiry | unstable |
 | `POST` | `/bss-orders-lifecycle/v1/orders/{orderId}/hold` | hold-and-expiry | unstable |
 | `POST` | `/bss-orders-lifecycle/v1/orders/{orderId}/resume` | hold-and-expiry | unstable |
+| `POST` | `/bss-orders-lifecycle/v1/orders/{orderId}/forced-failure` | hold-and-expiry | unstable |
 | `POST` | `/bss-orders-lifecycle/v1/orders/{orderId}/acceptance` | preconditions | unstable |
 | `GET` | `/bss-orders-lifecycle/v1/orders/{orderId}/acceptance` | preconditions | unstable |
 | `GET` | `/bss-orders-lifecycle/v1/orders/{orderId}/lines` | read-and-authz | unstable |
@@ -1204,7 +1205,9 @@ The line `PATCH` serves two operations: commercial line authoring in `draft`, an
 line fields in every non-terminal state; a request naming a commercial field is `draft-mutate`
 and refuses `not-admissible` outside `draft` (D-117, D-145); the line `DELETE` is draft-only.
 
-Twenty-four endpoints against the PRD's thirteen business operations.
+Twenty-five endpoints against the PRD's thirteen business operations. The operator-forced
+unreconciled failure (`/forced-failure`, D-182) is the twenty-fifth; the D-182 PRD amendment lists
+it in §9.1, so it is not among the eleven below.
 **Eleven** are surfaces the PRD describes in §6 without listing in §9.1 — line authoring
 (three), the administrative edit, the acceptance write and read, the per-line read, the audit
 read, the **version list** (§9.1's *Get order version* covers the single-version read only), the
@@ -1517,7 +1520,10 @@ sequenceDiagram
 
 **Description**: Begin fulfillment commits before Workflow may issue any activation intent,
 which establishes the cancel guard race-free. The order transitions to `fulfillment_failed`
-only on an acknowledgement asserting that operational compensation completed.
+only on an acknowledgement asserting that operational compensation completed, or — after the
+overdue window and only post-spawn — on the two-person operator-forced exit of
+[07 §3.6](features/07-hold-and-expiry.md#contract-07-3-6), whose evidence records compensation as `unknown` and is never read as
+compensated (D-182).
 
 #### Cancellation across the spawn boundary
 
@@ -1646,6 +1652,9 @@ The detailed interaction sequences of each feature are defined here and specifie
 
 **ID**: `cpt-cf-bss-orders-lifecycle-seq-overdue-handoff`
 — Hold and expiry — Overdue escalation handoff ([sequence](features/07-hold-and-expiry.md#contract-07-overdue-escalation-handoff))
+
+**ID**: `cpt-cf-bss-orders-lifecycle-seq-forced-unreconciled-failure`
+— Hold and expiry — Operator-forced unreconciled failure ([sequence](features/07-hold-and-expiry.md#contract-07-operator-forced-unreconciled-failure))
 
 **ID**: `cpt-cf-bss-orders-lifecycle-seq-scoped-read`
 — Reads and authorization — Scoped read ([sequence](features/08-read-and-authz.md#contract-08-scoped-read))
@@ -1997,6 +2006,7 @@ applicable**; it consumes an authorization *outcome* only.
 | Cross-tenant order disclosure | A caller reads or lists an order outside their relationship | Tenant boundary | Scope by relationship not tenant equality; not-found rather than forbidden; delegation proof required and audited | A compromised delegation credential reads within its granted scope until revoked |
 | A partner manufactures customer consent | The commercial placing party records the acceptance instant themselves | Commercial-evidence boundary | On partner-placed orders the placing/selling party cannot attest customer consent; acceptance requires the resource-tenant party. A self-service buyer may accept an amended version | An offline collusion between partner and a customer principal is out of scope for a technical control |
 | State asserted without a guard | A caller reaches a state-setting path directly | Engine boundary | There is no such path: every state change is a guarded transition and the engine is sole writer | A privileged database credential bypasses the engine; mitigated by runtime-owned privilege and the audit hash chain making it detectable |
+| Forced failure abused to close a live order | One operator, or Workflow, forces an order to `fulfillment_failed` to free its key or end a dispute (D-182) | Authorization and integrity boundary | Break-glass, user-only `order × force-fail-unreconciled` grant held by neither Seller Operator nor Workflow; post-spawn and post-overdue-window guards; two distinct principals, both copied onto the committed chained entry; evidence records `unknown`, never compensated; every use alerts | Two colluding grant holders can still close an order whose subscription is active; Workflow's open manual task and reconciliation through Subscriptions are what catch it |
 | Sibling-gear impersonation | A caller that is not the configured Workflow `service` principal attempts a workflow-only operation (the actor class is derived from the authenticated context against configured identities, D-115, and cannot be presented) | Service boundary | Gateway-asserted service principal plus a gear-scoped claim | A compromised platform gateway; out of this gear's control |
 | Audit tampering | A holder of database privilege edits or deletes trail rows | Data boundary | No UPDATE or DELETE grant on the audit role, plus a per-order predecessor-hash chain verified by the audit-chain verifier of [01 §3.8](DESIGN.md#contract-01-3-8); identity removal never rewrites the trail (D-96) | A database owner/migration role can alter protections or rewrite a whole chain; local hashes alone do not prove completeness against that authority. Privileged changes require independent monitoring; identity removal grants no verification exemption |
 | Preview amplification | Basket calls fan out to nine operations and write outcome rows | Cost and dependency boundary | Preview authorizes resource/payer scope before commercial resolution, carries a rate limit, and its outcome rows have a bounded retention | A high-volume authorised caller can still consume port capacity, bounded by the per-port bulkhead |
@@ -2109,8 +2119,14 @@ ask.
 **Alerting** covers both the invariant-bearing signals and latency: write-plus-publish latency
 against the governing PRD baseline, read latency, delayed producer delivery, any audit-append
 failure, any audit-chain verification mismatch, any
-non-zero unaudited-transition count, any pending toolkit producer dead letter, and orders held in `in_fulfillment`
-past the overdue window. Health reporting distinguishes readiness from liveness (§3.8).
+non-zero unaudited-transition count, any pending toolkit producer dead letter, any order overdue
+in fulfillment — the gauge of [07 §3.8](DESIGN.md#contract-07-3-8) counting orders in `in_fulfillment`, or `on_hold` with
+pre-hold `in_fulfillment`, past expected fulfillment time plus the overdue window, alerting when
+non-zero with the oldest age attached — and every operator-forced unreconciled failure (D-182).
+The overdue alert is Orders' own evidence that Workflow's escalation
+(`cpt-cf-bss-orders-lifecycle-upreq-workflow-overdue-escalation`, [`UPSTREAM_REQS.md §2.6`](./UPSTREAM_REQS.md#26-orders-workflow))
+is needed; it is not a substitute for it, and both are production release prerequisites.
+Health reporting distinguishes readiness from liveness (§3.8).
 
 Delayed-delivery and dead-letter detection **MUST** remain enabled regardless of Q-16's numerical
 outcome. Orders owns the delivery objective, queue-specific alert configuration and recovery
@@ -2194,7 +2210,7 @@ disclosure.
 
 | Accepted limit | Why it is accepted | Who acts when it bites |
 |----------------|--------------------|------------------------|
-| A **wedged `in_fulfillment` order holds its overlap key indefinitely**, blocking any new order on that key for that payer | `in_fulfillment` is expiry-exempt because a spawn signal may already have issued and expiry would orphan provisioned resources with no compensation path ([07 §4.3](features/07-hold-and-expiry.md#contract-07-4-3)). No transition in this gear can clear the claim, and ADR-0007 names this its sharpest residual cost | **Orders Workflow operations** — the escalation SLA on an overdue `in_fulfillment` order is the only route. If it proves too slow in practice the fix is an operator-initiated claim release, which is new scope and is not designed |
+| A **wedged `in_fulfillment` order holds its overlap key until an operator acts**, blocking any new order on that `(payer_tenant_id, resource_tenant_id, overlap_scope_key)` tuple (D-179) | `in_fulfillment` is expiry-exempt because a spawn signal may already have issued and expiry would orphan provisioned resources with no compensation path ([07 §4.3](features/07-hold-and-expiry.md#contract-07-4-3)). Workflow's terminals (rows 14, 16, 26, 27) do release the claim, but each needs complete compensation evidence and a healthy Workflow; when neither exists the only exit is the two-person operator-forced `fulfillment_failed` of rows 28 and 29, admitted only post-spawn and after the overdue window past expected fulfillment time, which releases the claim through the ordinary terminal path and records compensation as `unknown` (D-182). ADR-0007 still names the wait up to that point its sharpest residual cost | **The fulfillment operator, named by PRD §6.3** — Workflow's overdue escalation (`…-upreq-workflow-overdue-escalation`, a production release prerequisite) and Orders' overdue gauge and alert ([07 §3.8](DESIGN.md#contract-07-3-8)) raise it; a requester and a distinct approver holding the break-glass forced-failure grant close it; Workflow keeps the orphan-subscription manual task open afterwards |
 | A **permanently rejected producer message may leave a gap before later events** | Deliberate platform ordering posture: transient retry preserves FIFO, but toolkit-db advances a queue-partition cursor after `Reject`. Orders is authoritative state, not an event-sourced ledger; blocking unrelated orders indefinitely on an invalid message is the worse failure mode (D-87, ADR-0006) | **Consumers and platform operations** — Workflow, Subscriptions and Billing each meet the [event consumer contract](#contract-01-event-consumer-contract) (D-186) and pass its `orders-events` golden corpus before integration sign-off (`cpt-cf-bss-orders-lifecycle-upreq-event-consumer-conformance`); operations alert on pending dead letters (`cpt-cf-bss-orders-lifecycle-upreq-event-delivery-observability`) and recover them through the shared tooling and SDK republication required by `cpt-cf-bss-orders-lifecycle-upreq-event-broker-dead-letter-recovery` ([UPSTREAM_REQS §2.7](./UPSTREAM_REQS.md#27-event-broker)). Alerting and recovery remain `p1` production release prerequisites, including for terminal events; the consumer contract makes a gap safe, not absent |
 | **Two principals can each create a duplicate order** from the same request under the same key text | The idempotency key is scoped by principal to close an IDOR (D-88), which makes the same key text from a different principal a different key. For every operation but `create` the fingerprint's `order_id` and `expected_version` still catch the duplicate; on a create there is neither | **Product** — deciding whether a cross-principal create duplicate is a real commercial scenario. If it is, the answer is an upstream de-duplication key on the request, not a change to the registry's scoping |
 | The **stored resolved total is not the amount the customer will be invoiced** — non-authoritative, pre-tax, and excluding subscription-scoped overlays | Tax has no order-time owner and overlays need context a subscription has not yet created. Reporting a total that silently omitted them would be worse than declaring the omission ([03 §4.5](DESIGN.md#contract-03-4-5)) | **Every consumer surface** — a buyer portal, partner console or confirmation email. §4.2 of [08-read-and-authz](DESIGN.md#contract-08-1-1) makes rendering the total without its declared exclusions prohibited on this gear's read, and the same obligation is stated as an expectation on surfaces this gear does not own |
@@ -3228,7 +3244,7 @@ toolkit outbox's 64 KiB payload limit. Capacity tests cover the largest `OrderSu
 | amendment_count | integer, **NOT NULL, `0` from creation** | Amendments appended to this order. Incremented by rows 18, 19 and 20 and by nothing else; **no transition decrements or resets it**. Read by those rows' guard on the already-locked aggregate row. It is a **separate counter from `resume_count` on purpose** — a resume is a seller-side operational act and an amendment a buyer-side commercial one, so a seller's compliance holds **MUST NOT** consume a buyer's ability to revise the order ([04 §4.1](features/04-versioning.md#contract-04-4-1), [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2)) |
 | spawn_signal_at | timestamptz, nullable | Written by the spawn-signal transition; never cleared |
 | authorization_failure_tolerated_at | timestamptz, nullable | The tolerated-authorization risk flag; records a decision taken at an instant and is never cleared |
-| compensation_evidence | jsonb, nullable | Workflow-supplied evidence under the closed schema below — drafts voided, activated subscriptions rolled back, whether activation was dispatched, whether at-sale facts were emitted, and the no-active-subscription assertion; recorded only by failure acknowledgement or workflow-mediated cancellation |
+| compensation_evidence | jsonb, nullable | Workflow-supplied evidence under the closed schema below — drafts voided, activated subscriptions rolled back, whether activation was dispatched, whether at-sale facts were emitted, and the no-active-subscription assertion; recorded only by failure acknowledgement or workflow-mediated cancellation, or — in its forced variant with `unknown` assertions and an operator attestation — by the operator-forced unreconciled failure (rows 28 and 29, D-182) |
 | audit_sequence | bigint | Per-order audit counter, initialized to 0; incremented under this row's lock so the first committed audit entry is sequence 1 (D-99) |
 | created_at | timestamptz | Creation instant |
 
@@ -3249,6 +3265,21 @@ or null evidence refuses `compensation-evidence-missing`; evidence that fails th
 `no_active_subscription_remains` is not `true`, refuses `compensation-evidence-incomplete`.
 Lifecycle validates structure only. It **MUST NOT** reconcile either list against Subscriptions,
 since it holds no adapter to it ([06 §3.5](DESIGN.md#contract-06-3-5)).
+
+**Forced variant (D-182), written only by `force-fail-unreconciled` (§4.3 rows 28 and 29).** The
+same five members plus a sixth, `operator_attestation`, which every other trigger **MUST NOT**
+carry. `drafts_voided` and `activated_rolled_back` are the identifiers the operators attest as
+known, possibly empty, unverified; `activation_dispatched` is `true`, written by the engine from
+the recorded spawn signal the row requires, since dispatch may have followed it;
+`at_sale_facts_emitted` and `no_active_subscription_remains` are the string `unknown`, the only
+place either member may be anything but a boolean. `operator_attestation` is
+`{requested_by, request_audit_id, requested_at, approved_by}`: the requester's actor reference,
+refused-attempt `audit_id` and instant, and the approving caller's actor reference, copied by the
+engine from the locked inputs of [07 §3.6](features/07-hold-and-expiry.md#contract-07-3-6) *Force Fail Unreconciled*, never from caller text. The
+forced variant **MUST NOT** assert compensation complete, and no consumer **MAY** read it as
+compensated: `unknown` means Orders closed the order without knowing whether a subscription is
+still active. The rows-14/16/26/27 guards still refuse `unknown` as
+`compensation-evidence-incomplete`, so Workflow can never submit the forced variant.
 
 This CHECK is why `§3.6` *Attempt Transition* step 20.3 clears `pre_hold_state` on **any** transition whose target is not `on_hold`, not only on resume. Rows 23 (`on_hold → cancelled`) and 24 (`on_hold → expired`) move a held order to a terminal state; clearing only on resume would leave the column populated against a non-`on_hold` state, the UPDATE would fail the constraint, and both transitions — one of them the TTL sweep's main path out of `on_hold` — would be unable to commit at all.
 
@@ -3582,7 +3613,7 @@ storable: a nullable column cannot participate in a primary key.
 | actor_class | enum | `system`, `service` or `user` — the closed Orders actor class defined below (D-115), derived from the authenticated context and configured identities only |
 | delegation_proof_ref | text, nullable | The proof reference PDP reported accepting for a cross-tenant action, else the reference the caller supplied — Orders does not verify it ([08 §4.4](DESIGN.md#contract-08-4-4), D-111) |
 | reason | text | Registered machine reason, never caller text and never composed: on a committed entry exactly one closed token per trigger, listed under *Committed audit reason tokens* below (D-148); on a refused entry the registered refusal reason (§4.7) |
-| caller_reason | text, nullable | What the caller supplied as its explanation, stored as received and never interpreted (D-143): the cancel reason (mandatory, [07 §4.6](features/07-hold-and-expiry.md#contract-07-4-6) *Cancel Order*), the optional hold reason ([07 §3.6](features/07-hold-and-expiry.md#contract-07-3-6) *Hold Then Resume*, D-138), the amendment explanation (the value a committed amendment also stores on `orders_order_version.amendment_reason`, [04 §3.6](features/04-versioning.md#contract-04-3-6)), or, on a failed acknowledgement, the closed `failure_reason` value ([06 §4.4](features/06-workflow-seam.md#contract-06-4-4), D-136). NULL where the trigger carries no such input or an optional one was not supplied, and on every refused entry, whose `reason` records why the attempt failed; a caller value that failed its own validation is therefore never stored |
+| caller_reason | text, nullable | What the caller supplied as its explanation, stored as received and never interpreted (D-143): the cancel reason (mandatory, [07 §4.6](features/07-hold-and-expiry.md#contract-07-4-6) *Cancel Order*), the optional hold reason ([07 §3.6](features/07-hold-and-expiry.md#contract-07-3-6) *Hold Then Resume*, D-138), the amendment explanation (the value a committed amendment also stores on `orders_order_version.amendment_reason`, [04 §3.6](features/04-versioning.md#contract-04-3-6)), or, on a failed acknowledgement, the closed `failure_reason` value ([06 §4.4](features/06-workflow-seam.md#contract-06-4-4), D-136), or, on an operator-forced unreconciled failure, the approver's mandatory forced-failure reason ([07 §3.6](features/07-hold-and-expiry.md#contract-07-3-6), D-182), whose `failure_reason` is the fixed `operator-forced-unreconciled` and not caller text. NULL where the trigger carries no such input or an optional one was not supplied, and on every refused entry, whose `reason` records why the attempt failed; a caller value that failed its own validation is therefore never stored |
 | changed_field, prior_value, new_value | text, nullable | Populated for an administrative edit, one entry per changed field; a line-level field is named with its line, as `lines/<line_id>/<field>` (D-117) |
 | idempotency_key | text | The key in force |
 | correlation_id | uuid, nullable | The sibling gear's process correlation identifier |
@@ -3594,14 +3625,15 @@ storable: a nullable column cannot participate in a primary key.
 `draft-mutate`, `administrative-edit`, `submit`, `cancel`, `auto-void`, `reflect-approval-required`,
 `reflect-approval-not-required`, `reflect-approval-granted`, `reflect-approval-denied`,
 `begin-fulfillment`, `report-spawn-signal`, `acknowledge-completed`, `acknowledge-failed`,
-`cancel-workflow-mediated`, `amendment`, `hold`, `resume`, `expire` and `record-acceptance`. A
+`cancel-workflow-mediated`, `amendment`, `hold`, `resume`, `expire`, `record-acceptance` and
+`force-fail-unreconciled` (D-182). A
 trigger that owns several rows (`cancel`, `amendment`, `acknowledge-failed`,
-`cancel-workflow-mediated`) writes the same token on each; `from_state` and `to_state` tell the
+`cancel-workflow-mediated`, `force-fail-unreconciled`) writes the same token on each; `from_state` and `to_state` tell the
 rows apart. D-82's version-reason vocabulary `{create, submit, amendment}` is unchanged and its
 three tokens are the same strings here. The six PRD §6.2 reasons D-82 places on this column map as:
 approval reflection → the four `reflect-approval-*` tokens; hold → `hold`; resume → `resume`;
-cancel → `cancel` or `cancel-workflow-mediated`; fulfillment outcome → `acknowledge-completed` or
-`acknowledge-failed`; expiry → `expire` or, for a draft, `auto-void`. No detail is composed into the
+cancel → `cancel` or `cancel-workflow-mediated`; fulfillment outcome → `acknowledge-completed`,
+`acknowledge-failed` or, for the operator-forced exit, `force-fail-unreconciled`; expiry → `expire` or, for a draft, `auto-void`. No detail is composed into the
 token: an expiry's expired state is `from_state`, and its TTL, policy identity and revisions are
 carried by the expiry contribution the request fingerprint covers and by the `OrderExpired`
 payload (§4.4, [07 §3.6](features/07-hold-and-expiry.md#contract-07-3-6)), since this table has no detail column. Caller text goes in
@@ -4148,7 +4180,9 @@ the caller never saw ([DECISIONS.md](DECISIONS.md) D-110; `§3.6` *Attempt Trans
 `reflect-approval-required`, `reflect-approval-not-required`, `reflect-approval-granted`,
 `reflect-approval-denied` (rows 7–10), `begin-fulfillment` (row 11), `report-spawn-signal` (row 12),
 `acknowledge-completed` (row 13), `acknowledge-failed` (rows 14, 26) and `cancel-workflow-mediated`
-(rows 16, 27). No draft trigger is in the class, so draft-revision handling is unchanged. A
+(rows 16, 27). No draft trigger is in the class, so draft-revision handling is unchanged.
+`force-fail-unreconciled` (rows 28, 29) is **not** in the class: it is a human operator's trigger
+with the ordinary admissibility-then-version order (D-182). A
 slice **MUST NOT** refuse a request before calling the engine, and **MUST NOT** depend on running
 before another slice's guard for the same row.
 
@@ -4202,7 +4236,7 @@ and by no others:
 | `OrderCancelled` | 5, 15, 16, 17, 23, 27 | the cancelling actor, the mandatory cancel reason carried from the committed audit entry's `caller_reason` (§3.7, D-143), and compensation evidence where the cancel was workflow-mediated |
 | `OrderExpired` | 6, 24 | the state that expired and its TTL, with the effective policy identity and its revisions from the expiry contribution ([07 §3.6](features/07-hold-and-expiry.md#contract-07-3-6)); the audit entry's `reason` is only the token `expire` or `auto-void` (§3.7, D-148) |
 | `OrderCompleted` | 13 | the per-line line-to-subscription mapping and immutable-version reference, and the external reference where present |
-| `OrderFulfillmentFailed` | 14, 26 | the failure reason — one value of the closed `failure_reason` enumeration of [06 §4.4](features/06-workflow-seam.md#contract-06-4-4) (D-136), carried from the committed audit entry's `caller_reason` (§3.7, D-143) — and the compensation evidence under the closed schema of §3.7 |
+| `OrderFulfillmentFailed` | 14, 26, 28, 29 | the failure reason — one value of the closed `failure_reason` enumeration of [06 §4.4](features/06-workflow-seam.md#contract-06-4-4) (D-136): carried from the committed audit entry's `caller_reason` (§3.7, D-143) on rows 14 and 26, and the fixed `operator-forced-unreconciled` on rows 28 and 29, whose `caller_reason` is the operator's forced-failure reason, carried as `forcedReason` — and the compensation evidence under the closed schema of §3.7, in its forced variant with `unknown` assertions and the operator attestation on rows 28 and 29 (D-182) |
 | `OrderAcceptanceRecorded` | 25 | accepted_version, the acceptance instant, the recording actor and the requirement source |
 
 **One disclosed divergence in this table.** PRD §6.5 gives `OrderAmended`'s trigger as "on
@@ -4617,11 +4651,16 @@ additionally a PRD question because both sets are enumerated there.
 **The trigger vocabulary is closed and every row's key is unique.** A row is addressed by
 `(from-state, trigger)`, and `§3.6` *Attempt Transition* step 10 looks up **the** row for that
 pair before any guard runs — so a guard can never disambiguate two rows sharing a key. The
-twenty triggers are therefore named, not described: `create`, `draft-mutate`,
+twenty-one triggers are therefore named, not described: `create`, `draft-mutate`,
 `administrative-edit`, `submit`, `amendment`, `cancel`, `cancel-workflow-mediated`, `auto-void`, `expire`,
 `reflect-approval-required`, `reflect-approval-not-required`, `reflect-approval-granted`,
 `reflect-approval-denied`, `begin-fulfillment`, `report-spawn-signal`, `acknowledge-completed`,
-`acknowledge-failed`, `hold`, `resume`, `record-acceptance`. Where one caller-facing operation can
+`acknowledge-failed`, `hold`, `resume`, `record-acceptance`, `force-fail-unreconciled`.
+`force-fail-unreconciled` and its rows 28 and 29 are the D-182 **engine change** under the rule
+above: two transition rows, one trigger, the forced evidence variant on the engine-owned
+`compensation_evidence` column, and a step-13 refusal that carries its own `audit_id`. No state and
+no event type is added, so PRD §6.1 and §6.5's enumerations are unchanged and only the §6.1, §6.3
+and §6.6 prose is amended. Where one caller-facing operation can
 produce more than one outcome the **slice maps its input to a trigger** and the engine maps
 `(state, trigger)` to a row: *Reflect Verdict* resolves the verdict to one of the four
 `reflect-approval-*` triggers, and *Acknowledge Fulfillment* resolves its outcome to
@@ -4701,7 +4740,9 @@ on a closed shape.
 envelope's `properties.data` to the common order-summary contract. Each concrete schema further
 narrows that same member with its event-specific fields — the deciding authority on
 `OrderApproved`, the deciding authority and denial reason on `OrderRejected`, the failure reason
-and compensation evidence on `OrderFulfillmentFailed`, the cancel reason on `OrderCancelled`, the
+and compensation evidence on `OrderFulfillmentFailed` — whose schema admits the forced variant
+(`unknown` assertions, `operator_attestation`) and the optional `forcedReason` only with
+`failure_reason = operator-forced-unreconciled` (D-182) — the cancel reason on `OrderCancelled`, the
 hold reason on `OrderHeld` as an optional member present only when supplied (D-138, D-143), and the per-line subscription
 mapping on `OrderCompleted`. Orders schemas require `data` and the mandatory common and
 event-specific members. There is no wire member named `payload`; that word elsewhere denotes
@@ -4860,6 +4901,10 @@ pairs distinguish Orders reasons from similarly named failures in other gears.
 | `expiry-candidate-stale` | `EXPIRY_CANDIDATE_STALE` | Aborted | 409 |
 | `cancel-reason-required` | `CANCEL_REASON_REQUIRED` | InvalidArgument | 400 |
 | `direct-cancel-window-closed` | `DIRECT_CANCEL_WINDOW_CLOSED` | FailedPrecondition | 400 |
+| `forced-failure-reason-required` | `FORCED_FAILURE_REASON_REQUIRED` | InvalidArgument | 400 |
+| `spawn-signal-not-recorded` | `SPAWN_SIGNAL_NOT_RECORDED` | FailedPrecondition | 400 |
+| `overdue-window-not-elapsed` | `OVERDUE_WINDOW_NOT_ELAPSED` | FailedPrecondition | 400 |
+| `second-approver-required` | `SECOND_APPROVER_REQUIRED` | FailedPrecondition | 400 |
 | `order-not-found` | `ORDER_NOT_FOUND` | NotFound | 404 |
 | `delegation-proof-required` | `DELEGATION_PROOF_REQUIRED` | PermissionDenied | 403 |
 | `delegation-proof-invalid` | `DELEGATION_PROOF_INVALID` | PermissionDenied | 403 |
@@ -4869,6 +4914,10 @@ pairs distinguish Orders reasons from similarly named failures in other gears.
 | `cursor-invalid` | `CURSOR_INVALID` | InvalidArgument | 400 |
 | `read-store-unavailable` | `READ_STORE_UNAVAILABLE` | ServiceUnavailable | 503 |
 
+`second-approver-required` is the one refusal whose `context.data` carries `requestAuditId`, the
+refusal entry's own `audit_id`, which the engine allocates before settling so a replay returns the
+same value; a second operator names it to approve ([07 §3.6](features/07-hold-and-expiry.md#contract-07-3-6), D-182, after Ledger's
+`DUAL_CONTROL_REQUIRED`). `operator-forced-unreconciled` is a `failure_reason` value, not a refusal.
 `authorization-failed-tolerated` is an admission risk flag, not an error variant; state/version
 audit reasons — the closed committed-entry tokens of §3.7 *Committed audit reason tokens*
 (D-148) — are also outside this refusal table.
@@ -8056,7 +8105,9 @@ mandatory-cancel-reason refusal `cancel-reason-required` are owned and registere
 refuses with the specific reasons of [05-preconditions — API Contracts](DESIGN.md#contract-05-3-3), which this
 slice composes and does not rename (D-134). `line-execution-failed` and `dependency-graph-invalid`
 are values of the closed `failure_reason` enumeration of §4.4, not refusal reasons: no guard
-refuses with them. The activation re-check codes — market-divergence and overlap-collision — are
+refuses with them. The same holds for `operator-forced-unreconciled`, which only 07's
+`force-fail-unreconciled` writes and which this slice's boundary rejects as `request-invalid` on a
+`/fulfillment-acknowledgement` (D-182). The activation re-check codes — market-divergence and overlap-collision — are
 Workflow-supplied failure reasons carried on `acknowledge-failed`; they are owned and registered
 by [03-gate-and-pin — API Contracts](DESIGN.md#contract-03-3-3), and this slice does not run the re-check. A
 re-check `defer` whose `activation-recheck-retry-budget` is exhausted carries the port's own
@@ -8143,7 +8194,9 @@ one requirement verdict and one gate outcome may stand per version. `requirement
 failure-acknowledgement or workflow-cancel transition, under the closed five-member schema of
 [01-foundation — Database Schemas and Tables](DESIGN.md#contract-01-3-7): `drafts_voided`, `activated_rolled_back`,
 `activation_dispatched`, `at_sale_facts_emitted` and `no_active_subscription_remains`. Lifecycle
-validates that structure only and never reconciles the lists against Subscriptions.
+validates that structure only and never reconciles the lists against Subscriptions. The forced
+variant with `unknown` assertions and `operator_attestation` is written only by 07's
+operator-forced exit, never by this slice, whose evidence guards refuse it (D-182).
 
 **Additional info**: superseded versions' reflections are retained, so the trail shows what was
 decided against a version that no longer stands.
@@ -8201,6 +8254,11 @@ Two of them are rows from `on_hold` as well: fulfillment acknowledgement's faile
 row 27) are admitted from `on_hold` only when the stored pre-hold state is `in_fulfillment`, under
 the guards of rows 14 and 16 unchanged. `acknowledge-completed` has no `on_hold` row, so a held
 order **MUST** be resumed before it completes ([DECISIONS.md](DECISIONS.md) D-109).
+
+`fulfillment_failed` has one entry that is **not** a seam operation: 07's operator-forced
+unreconciled failure (rows 28 and 29), a human two-person trigger outside the workflow-trigger
+class, taken when the order is overdue post-spawn and this seam cannot deliver complete evidence.
+It is the repair-as-a-row rule below applied, not an exception to it ([DECISIONS.md](DECISIONS.md) D-182).
 
 No operation **MAY** be added that sets order state without passing a guard, for any purpose
 including data repair. A repair need becomes a new transition row with its own guard and reason.
@@ -8332,7 +8390,11 @@ resources with nothing to compensate them. The same exemption covers a hold take
 `in_fulfillment`. This is the single place in the design where the bounded-lifetime rule is
 deliberately broken, and the engine enforces the exemption through row admissibility and a
 registered guard — so a scheduler defect cannot expire such an order, and the bound becomes an operational
-SLA raised by the sibling gear instead of an automatic transition.
+SLA raised by the sibling gear instead of an automatic transition. That SLA has an owner and a
+bounded end: Orders observes overdue fulfillment itself (§3.8), Workflow's escalation is a release
+prerequisite, and once the window has elapsed post-spawn a requester and a distinct approver may
+force the order to `fulfillment_failed` with compensation recorded as `unknown` — an operator act,
+never an automatic one (D-182).
 
 The bound has **two layers**, and they answer different questions. The **per-state TTL** is
 Product-owned configuration with no code default: its values ship as **provisional
@@ -8370,7 +8432,7 @@ compliance hold silently stop a customer's billing.
 | Requirement | Design Response |
 |-------------|------------------|
 | `cpt-cf-bss-orders-lifecycle-fr-order-hold` | Hold stores the outgoing state on the aggregate; resume reads it as the target. The actor, instant and optional reason live on the hold transition's audit entry, not in hold columns (D-138). Resume is a lookup, not an inference, so a state added later cannot break resume. |
-| `cpt-cf-bss-orders-lifecycle-fr-order-expiry` | Expiry is an ordinary transition row with the system actor class, driven by one sweep pass over a per-state TTL that ships as a provisional, revisioned platform row for every expirable state and cannot be promoted unset to production (D-181). Restarting a dwell is bounded separately, by caps on the resume and amendment transitions rather than by a second sweep. `in_fulfillment` has no expiry row; the existing `on_hold` expiry row has a mandatory pre-hold exemption guard. A provisional value in effect is alerted in §3.8. |
+| `cpt-cf-bss-orders-lifecycle-fr-order-expiry` | The `in_fulfillment` exemption ends in a bounded, operator-owned recovery: an Orders overdue gauge and alert, Workflow's overdue escalation as a release prerequisite, and the two-person operator-forced `fulfillment_failed` of rows 28 and 29 after the window (D-182), so exhausting the SLA still never auto-terminals an order. Expiry is an ordinary transition row with the system actor class, driven by one sweep pass over a per-state TTL that ships as a provisional, revisioned platform row for every expirable state and cannot be promoted unset to production (D-181). Restarting a dwell is bounded separately, by caps on the resume and amendment transitions rather than by a second sweep. `in_fulfillment` has no expiry row; the existing `on_hold` expiry row has a mandatory pre-hold exemption guard. A provisional value in effect is alerted in §3.8. |
 | `cpt-cf-bss-orders-lifecycle-fr-order-cancel` | Cancel from `on_hold` applies the **pre-hold** state's guards, so a hold cannot be used to widen what cancellation is permitted. |
 | `cpt-cf-bss-orders-lifecycle-nfr-order-retention` | The abandoned-draft sweep auto-voids to `expired` rather than deleting, preserving the audit trail. |
 | `cpt-cf-bss-orders-lifecycle-fr-order-events` | Expiry publishes `OrderExpired`; hold and resume publish `OrderHeld` and `OrderResumed`, which is how the sibling gear knows to suspend or resume its process. |
@@ -8498,8 +8560,10 @@ Neither `in_fulfillment` nor a hold taken from it may be auto-expired, because a
 may already have been issued and expiry would orphan provisioned resources with no compensation.
 Its bound is an **operational SLA** — a configurable window with a business default of 24 hours
 past expected fulfillment time, with the fulfillment operator as named owner — raised by the
-sibling gear. Exhausting the SLA **MUST NOT** produce a new order state; the outcome is an
-incident or an operator abort.
+sibling gear. Exhausting the SLA **MUST NOT** produce a new order state and **MUST NOT**
+auto-terminal the order; the outcome is an incident or an operator abort. The operator abort is
+the two-person `force-fail-unreconciled` of rows 28 and 29, which lands in the existing
+`fulfillment_failed` with compensation recorded as `unknown` (D-182).
 
 <a id="contract-07-hold-does-not-pause-the-subscriptions-draft-ttl"></a>
 
@@ -8639,8 +8703,9 @@ and the alternative to a pause is cancelling an order the seller intends to keep
 ##### Responsibility scope
 
 Hold admissibility from `submitted`, `pending_approval`, `approved` and `in_fulfillment`;
-reliance on the engine's storage of the pre-hold state; resume to that stored state; and the cancel-from-`on_hold` path
-that applies the pre-hold state's guards.
+reliance on the engine's storage of the pre-hold state; resume to that stored state; the cancel-from-`on_hold` path
+that applies the pre-hold state's guards; and the `/forced-failure` handler, whose guards gate the
+two-person operator-forced exit of rows 28 and 29 (D-182).
 
 <a id="contract-07-responsibility-boundaries-2"></a>
 
@@ -8673,8 +8738,9 @@ concurrently would double-expire orders.
 ##### Responsibility scope
 
 The advisory-lock-coordinated sweep ([Foundation contract §3.8](DESIGN.md#contract-01-3-8)); TTL policy resolution per state; selection of eligible orders;
-deterministic idempotency keys per expiry; and the batch and cadence controls. It has **one**
-selection pass — the restart bound lives on the resume transition, not here (§4.2).
+deterministic idempotency keys per expiry; the batch and cadence controls; and, on every pass
+independently of any TTL value, the read-only overdue-fulfillment observation of §3.8
+(D-182). It has **one** selection pass — the restart bound lives on the resume transition, not here (§4.2).
 
 <a id="contract-07-responsibility-boundaries-2"></a>
 
@@ -8682,7 +8748,8 @@ selection pass — the restart bound lives on the resume transition, not here (�
 
 Its SQL excludes exempt holds before pagination to preserve progress, while the engine's
 admissibility check and pre-hold guard independently refuse exempt targets regardless of what
-the sweep selects. It raises no escalation; that is the sibling gear's.
+the sweep selects. It raises no escalation and drives no transition on an overdue order; it
+publishes the gauge, and the escalation is the sibling gear's.
 
 <a id="contract-07-related-components-by-id-2"></a>
 
@@ -8743,6 +8810,7 @@ It deletes nothing and touches no order past `draft`.
 | `POST` | `/bss-orders-lifecycle/v1/orders/{orderId}/cancel` | Cancel from any non-terminal state, per guards | unstable |
 | `POST` | `/bss-orders-lifecycle/v1/orders/{orderId}/hold` | Pause from an eligible state, storing the outgoing state | unstable |
 | `POST` | `/bss-orders-lifecycle/v1/orders/{orderId}/resume` | Return to the stored pre-hold state | unstable |
+| `POST` | `/bss-orders-lifecycle/v1/orders/{orderId}/forced-failure` | Two-person operator-forced `fulfillment_failed` from an overdue post-spawn `in_fulfillment` (or a hold over it), compensation recorded as `unknown`; the requester's call refuses `second-approver-required` and returns `requestAuditId`, the approver's call names it (D-182) | unstable |
 
 **State expiry is deliberately not a public operation.** It is scheduler-driven with the system
 as actor class, which is what makes "who expired this order" answerable as `system` rather than
@@ -8751,7 +8819,10 @@ as whichever caller happened to trigger it.
 **Reasons contributed to the registry**: resume-target-missing,
 **resume-cap-exhausted**, **cancel-reason-required**,
 **direct-cancel-window-closed** (shared with the seam slice, defined once here),
-**expiry-exempt-prehold**, **expiry-not-due**, **expiry-candidate-stale**.
+**expiry-exempt-prehold**, **expiry-not-due**, **expiry-candidate-stale**, and for the forced
+exit **forced-failure-reason-required**, **spawn-signal-not-recorded**,
+**overdue-window-not-elapsed** and **second-approver-required** (D-182); the forced exit reuses
+06's `prehold-not-in-fulfillment` unchanged on row 29.
 `expiry-exempt-prehold` is the row-24 guard refusal for a hold from `in_fulfillment`.
 `expiry-not-due` means the current effective TTL is absent or has not elapsed.
 `expiry-candidate-stale` means the observed generation or effective policy identity/revision no
@@ -8794,7 +8865,7 @@ last, in 2026-09-11: a resume against an order that is not `on_hold` is an inadm
 
 None. Both sweeps are internal and neither reaches outside the gear. The `in_fulfillment`
 escalation is raised by the sibling gear, which learns what it needs from the state events this
-slice publishes.
+slice publishes; the forced exit's guard inputs are all stored Orders data (D-182).
 
 
 <!-- /contract -->
@@ -8944,6 +9015,21 @@ a condition someone should look at rather than a metric to watch drift. A failed
 policy configuration is reported as a health signal of the worker, never as an unset or
 provisional value.
 
+**Overdue fulfillment (D-182).** On every pass, independently of any TTL value, the expiry worker computes
+two gauges over orders in `in_fulfillment` or `on_hold` with `pre_hold_state = in_fulfillment`:
+`fulfillment_overdue_orders`, the count whose database time is past expected fulfillment time plus
+the overdue window of §4.5, and `fulfillment_overdue_oldest_age_seconds`, the oldest such
+overrun. Expected fulfillment time is derived as in [07 §3.6](features/07-hold-and-expiry.md#contract-07-3-6) *Force Fail Unreconciled*, never stored.
+The query is read-only, keyset-bounded on the `(state, state_entered_at, order_id)` index and
+drives no transition. **The alert fires while the count is non-zero**, routed to the fulfillment
+operator with the order IDs and ages; it is Orders' own evidence that Workflow's escalation
+(`cpt-cf-bss-orders-lifecycle-upreq-workflow-overdue-escalation`) is owed, and its threshold,
+routing and owner **MUST** be configured and tested before production, as for §4.4's delivery
+alerts. The forced exit adds a counter of `second-approver-required` refusals (a pending forced
+request) and a counter of committed `force-fail-unreconciled` transitions; **every committed one
+alerts individually**, carrying requester, approver and order, because each closes an order whose
+compensation is unknown.
+
 
 <!-- /contract -->
 
@@ -8979,7 +9065,8 @@ idempotency-key window is **24 hours**, settled in [01-foundation — Idempotenc
 |-------|----------|------|
 | Sweep cadence | every 5 minutes per worker | Starts the next pass; completion latency also depends on backlog, failures and pass duration |
 | Sweep batch size | 500 orders | Bounds each discovery page; keyset traversal continues within the pass, with one engine transaction per order |
-| Overdue window | **24 hours** past expected fulfillment time | **Not** an open question: the PRD commits this as a business default; it is recorded here as committed rather than as unchosen |
+| Overdue window | **24 hours** past expected fulfillment time | **Not** an open question: the PRD commits this as a business default; it is recorded here as committed rather than as unchosen. It also opens the forced exit's `overdue-window-not-elapsed` guard and the §3.8 overdue gauge (D-182) |
+| Forced-exit approval window | **24 hours** from the requester's refused attempt | How long a `second-approver-required` request stays approvable; past it, or after any state change, a new request is needed. Design-owned working baseline ratified under Q-26 (D-182) |
 | **Amendment cap** | **20** amendments per order | The other half of Layer 2, **owned and argued in [04-versioning — Admissibility (normative)](features/04-versioning.md#contract-04-4-1)** because its value is a commercial judgment about how often a buyer may revise an order, not an operational one. Listed here so both re-entry caps are visible in one place |
 | **Resume cap** | **5** resumes per order | Layer 2 of §4.2, enforced as a guard on [01 §4.3](features/01-foundation.md#contract-01-4-3) row 22 against `orders_order.resume_count`, which no transition resets. It bounds a **count**, not a duration, so it pre-empts no per-state TTL Product later chooses whatever that value turns out to be — which is why this design can own it while the durations stay provisional. Five is set from the operational shape the loop has: a compliance or dispute hold that genuinely needs re-taking more than five times on one order is an escalation, not a workflow, and the sixth attempt refuses with `resume-cap-exhausted` and says so on the audit trail. A deployment **MAY** raise or lower it and **MUST NOT** unset it; there is no "unlimited" value. This qualifies PRD §6.3's "A held order **MUST** be resumable", routed as [DECISIONS.md](DECISIONS.md) Q-31 (§4.1) |
 
@@ -9925,23 +10012,24 @@ order-scoped read the PDP adapter runs immediately after the aggregate's tenant 
 before anything is returned, since the relationship it decides is evaluated against those axes and
 cannot be decided without them; the row read to reach the decision **MUST NOT** be disclosed to a
 caller the decision refuses (§3.6). Startup **MUST** fail if an operation
-exists with no declaration. The matrix below is exhaustive over the twenty-four endpoints of
-[DESIGN.md](DESIGN.md) §3.3 — ten matrix rows covering twenty-four endpoints, since the
+exists with no declaration. The matrix below is exhaustive over the twenty-five endpoints of
+[DESIGN.md](DESIGN.md) §3.3 — eleven matrix rows covering twenty-five endpoints, since the
 authoring, read and workflow-only endpoints each share one declaration. An operation absent from
 it is a startup failure, not a default-deny.
 
-| Operation | Partner Admin | Direct Customer | Seller Operator | Orders Workflow | Payer Reader | Event Consumers |
-|-----------|---------------|-----------------|-----------------|-----------------|--------------| ---------------- |
-| create order · commercial draft edit (order or line `PATCH`) · line insert/remove · submit | ✓ delegated scope | ✓ own orders | — | — | — | — |
-| amend (append a version) | ✓ delegated scope | — | — | — | — | — |
-| administrative edit (order or line `PATCH`, administrative fields, any non-terminal state) | ✓ delegated scope | ✓ own orders | — | — | — | — |
-| preview | ✓ authorized resource/payer scope; permitted seller relationship, delegation where acting for another party | ✓ own resource/payer axes; permitted seller may differ | — | — | — | — |
-| cancel | ✓ delegated scope | ✓ own orders | ✓ seller scope, reason mandatory | via workflow-cancel only (from `in_fulfillment`, or `on_hold` with pre-hold `in_fulfillment`) | — | — |
-| hold · resume | — | — | ✓ seller scope | ✓ with service principal | — | — |
-| **record acceptance** | ✓ **only as a `resourceTenantId` principal and not the version-1 creator, the submitter or the amender of `expected_version`** (Lifecycle guard, `acceptance-recording-party-barred`, D-130) | ✓ own orders (initial submit records it; amended-version assent uses this operation) | — | — | — | — |
-| read order · list · version list · version read · line read · acceptance read | ✓ delegated scope | ✓ own orders | ✓ seller scope | ✓ with service principal and explicit PDP order-ID constraints | ✓ PDP-granted scope on current `payerTenantId` | ✓ service principal with explicit PDP order-ID constraints |
-| audit read | ✓ delegated scope | — | ✓ seller scope | — | — | — |
-| approval-reflection · begin-fulfillment · spawn-signal · fulfillment-acknowledgement · workflow-cancel | — | — | — | ✓ with service principal | — | — |
+| Operation | Partner Admin | Direct Customer | Seller Operator | Orders Workflow | Payer Reader | Event Consumers | Fulfillment Operator (break-glass) |
+|-----------|---------------|-----------------|-----------------|-----------------|--------------| ---------------- | ---------------- |
+| create order · commercial draft edit (order or line `PATCH`) · line insert/remove · submit | ✓ delegated scope | ✓ own orders | — | — | — | — | — |
+| amend (append a version) | ✓ delegated scope | — | — | — | — | — | — |
+| administrative edit (order or line `PATCH`, administrative fields, any non-terminal state) | ✓ delegated scope | ✓ own orders | — | — | — | — | — |
+| preview | ✓ authorized resource/payer scope; permitted seller relationship, delegation where acting for another party | ✓ own resource/payer axes; permitted seller may differ | — | — | — | — | — |
+| cancel | ✓ delegated scope | ✓ own orders | ✓ seller scope, reason mandatory | via workflow-cancel only (from `in_fulfillment`, or `on_hold` with pre-hold `in_fulfillment`) | — | — | — |
+| hold · resume | — | — | ✓ seller scope | ✓ with service principal | — | — | — |
+| **record acceptance** | ✓ **only as a `resourceTenantId` principal and not the version-1 creator, the submitter or the amender of `expected_version`** (Lifecycle guard, `acceptance-recording-party-barred`, D-130) | ✓ own orders (initial submit records it; amended-version assent uses this operation) | — | — | — | — | — |
+| read order · list · version list · version read · line read · acceptance read | ✓ delegated scope | ✓ own orders | ✓ seller scope | ✓ with service principal and explicit PDP order-ID constraints | ✓ PDP-granted scope on current `payerTenantId` | ✓ service principal with explicit PDP order-ID constraints | — |
+| audit read | ✓ delegated scope | — | ✓ seller scope | — | — | — | — |
+| approval-reflection · begin-fulfillment · spawn-signal · fulfillment-acknowledgement · workflow-cancel | — | — | — | ✓ with service principal | — | — | — |
+| **forced-failure** (operator-forced unreconciled `fulfillment_failed`, D-182) | — | — | — | — | — | — | ✓ seller scope, `user` actor class only, time-boxed break-glass grant, reason mandatory; **two distinct principals** — requester and approver — both recorded (Lifecycle guard `second-approver-required`) |
 
 **The Workflow seam reaches two rows from `on_hold`.** The `fulfillment-acknowledgement` and
 `workflow-cancel` declarations above cover `acknowledge-failed` and `cancel-workflow-mediated` from
@@ -9950,6 +10038,18 @@ it is a startup failure, not a default-deny.
 two endpoints and the same service-only grants apply, so only the Workflow service principal can
 drive either trigger from a hold, and the seller operator's hold/resume grant confers neither
 ([DECISIONS.md](DECISIONS.md) D-109).
+
+**The forced-failure grant is break-glass, and distinct (D-182).** `forced-failure` is the PRD's
+fulfillment operator (`cpt-cf-bss-orders-lifecycle-actor-orders-fulfillment-operator`) acting under a
+separate, time-boxed, individually alerted grant `order × force-fail-unreconciled`, following
+Products' break-glass rule that a write under elevation is separately gated by two persons and a
+distinct alert (`gears/bss/products/docs/PRD.md` *Break-glass action scope*). It is **not** conferred
+by the Seller Operator's cancel or hold grant, and the Workflow service principal **MUST NOT** hold
+it: the exit exists for when Workflow cannot close the order, so its own principal must not be able
+to bypass its evidence guards through it. The engine authorizes it only for actor class `user`.
+Both the requester's refused attempt and the approver's committed one pass this same authorization,
+so neither half can be made without the grant; the read and audit paths it needs are the operator's
+ordinary seller-scope grants under *Combining permissions* below.
 
 **Event-consumer read path.** Event Consumers means the explicitly configured Workflow,
 Subscriptions and Billing service principals validating lifecycle notifications under Foundation
@@ -10069,6 +10169,7 @@ permission catalog and enforcement calls. A grouped matrix row does not imply a 
 | `audit` | `read` | Read the order audit trail under existing order-access requirements |
 | `audit-unresolved` | `read` | Separate operational audit-read permission; append is private persistence, not a PDP action |
 | `order` | `approval-reflection`, `begin-fulfillment`, `spawn-signal`, `fulfillment-acknowledgement`, `workflow-cancel` | Separate service-only grants for the five Workflow seam operations |
+| `order` | `force-fail-unreconciled` | Break-glass, user-only grant for `/forced-failure` (D-182); implied by no other action, never granted to a service principal |
 
 The actor eligibility and all conditions in the matrix remain binding for each mapped action.
 A `PATCH` is authorized under the action of the one trigger its fields select ([02 §4.3](DESIGN.md#contract-02-4-3) *One

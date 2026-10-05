@@ -94,7 +94,7 @@ the six it does name are the ones the audit guarantee rests on. §3.6 *Attempt T
 an audit append and a commit on **every branch that decides an attempt** — all seven refusal
 classes included; the one branch that commits without appending is the **replay** of a settled
 record, which records no new attempt because none occurred. §4.3 holds the state
-machine as data — twenty-seven rows over eleven states — which is what makes edge coverage
+machine as data — twenty-nine rows over eleven states (rows 28 and 29 added by D-182) — which is what makes edge coverage
 enumerable. Review must check that no slice algorithm returns a business refusal ahead of its
 engine call and that no §4.3 row expires from `in_fulfillment`. These document-level checks do
 not establish runtime behavior or imply an existing CI gate.
@@ -108,7 +108,7 @@ asserting exactly one durable effect, a replay check asserting a stored failure 
 failure, and a crash check asserting an expired lease is recoverable.
 
 **Planned, and not yet specified anywhere.** An **edge-coverage check** asserting no transition
-is admissible at runtime outside the twenty-seven rows of §4.3 has no home in the design set —
+is admissible at runtime outside the twenty-nine rows of §4.3 has no home in the design set —
 no document states it and nothing implements it. Until [01 §1.2](../DESIGN.md#contract-01-1-2) records it alongside the other
 verification approaches, the normative exclusions this decision makes structural — notably the
 absent `in_fulfillment → expired` row — rest on the transition table plus the single-writer grant

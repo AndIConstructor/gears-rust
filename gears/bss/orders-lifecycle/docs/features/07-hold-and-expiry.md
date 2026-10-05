@@ -11,6 +11,7 @@
 - [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
   - [2.1 Hold and resume](#21-hold-and-resume)
   - [2.2 Cancel an order](#22-cancel-an-order)
+  - [2.3 Force-fail an overdue unreconciled order](#23-force-fail-an-overdue-unreconciled-order)
 - [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [3.1 Expiry and draft auto-void](#31-expiry-and-draft-auto-void)
   - [3.2 Policy changes and lifetime bounds](#32-policy-changes-and-lifetime-bounds)
@@ -37,7 +38,7 @@
 
 ### 1.1 Overview
 
-Pause and resume an order, cancel it within the permitted window, expire configured state dwells, and auto-void abandoned drafts. Every state change goes through Foundation's engine, including scheduler requests and business refusals.
+Pause and resume an order, cancel it within the permitted window, expire configured state dwells, auto-void abandoned drafts, observe overdue fulfillment, and give the fulfillment operator a two-person forced exit from an overdue, unreconciled fulfillment (D-182). Every state change goes through Foundation's engine, including scheduler requests and business refusals.
 
 ### 1.2 Purpose
 
@@ -52,7 +53,8 @@ Pause and resume an order, cancel it within the permitted window, expire configu
 | `cpt-cf-bss-orders-lifecycle-actor-orders-seller-operator` | Hold/resume and reasoned cancel within authorized seller scope |
 | `cpt-cf-bss-orders-lifecycle-actor-orders-partner-admin` | Cancel within delegated scope; no hold/resume grant |
 | `cpt-cf-bss-orders-lifecycle-actor-orders-direct-customer` | Cancel own orders with the required PDP grant |
-| `cpt-cf-bss-orders-lifecycle-actor-orders-workflow` | Hold/resume; separately owned compensation exits and overdue escalation |
+| `cpt-cf-bss-orders-lifecycle-actor-orders-workflow` | Hold/resume; separately owned compensation exits and overdue escalation; never holds the forced-failure grant |
+| `cpt-cf-bss-orders-lifecycle-actor-orders-fulfillment-operator` | Named owner of the overdue SLA; under a break-glass grant, requests or approves (never both) the operator-forced unreconciled failure |
 
 The two private maintenance workers use configured authenticated system authority; a caller-supplied actor class cannot invoke them.
 
@@ -63,6 +65,8 @@ The two private maintenance workers use configured authenticated system authorit
 - [Detailed architecture](../DESIGN.md#contract-07-1-1): authoritative API, policy schema, transaction protocol and decisions.
 - **Dependencies**: [Foundation](01-foundation.md), [Capture](02-capture.md), [Workflow seam](06-workflow-seam.md).
 - **Shared contracts**: [Versioning](04-versioning.md) owns the amendment cap; [Read and authorization](08-read-and-authz.md) declares permissions. Its shared adapter and write enforcement are Foundation prerequisites, not deferred until read delivery.
+
+The forced exit's precedents are Products' two-person force-completion of a stuck freeze, which records missing participants as explicitly not-frozen (`gears/bss/products/docs/PRD.md` *Freeze recovery & force-completion*, AC 22, *Break-glass action scope*), and Ledger's dual-controlled `unknown_final` refund disposition with its `DUAL_CONTROL_REQUIRED` refusal (`gears/bss/ledger/docs/design/05-adjustments-notes-refunds.md`, `inst-rf-dual-control`, `inst-rf-unknown-final`).
 
 Product-owned TTL durations have no code default; they ship as provisional, migration-seeded platform rows (`draft` 90 days, `submitted` and `pending_approval` 14 days, `approved` and `on_hold` 30 days) that Product refines by revision under Q-06 and Q-07(b), and the policy channel refuses an unset duration in production (D-181). Seller overrides stay disabled by default pending Q-06. Program retention remains Q-07(a). The resume-cap qualification to PRD resumability remains Q-31, and the Partner Admin hold conflict remains Q-18 in [DECISIONS](../DECISIONS.md). This specification preserves those questions and the design's stricter permission set; it does not resolve them. Workflow integration and operational escalation remain subject to [UPSTREAM_REQS](../UPSTREAM_REQS.md).
 
@@ -100,6 +104,19 @@ Hold/resume changes neither subscription entitlement nor billing, extends no ter
 
 Workflow uses its separate `/workflow-cancel` endpoint and compensation evidence, not the public cancel handler. A hold never clears the spawn signal or reopens the direct-cancel window. Completed orders have no cancellation window; subscription rights and Billing reversals remain downstream concerns.
 
+### 2.3 Force-fail an overdue unreconciled order
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-flow-hold-and-expiry-force-fail`
+
+**Actors**: two distinct Fulfillment Operators holding the break-glass `order × force-fail-unreconciled` grant. **Use case**: `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`.
+
+1. The §3.8 overdue alert or Workflow's escalation names an order in `in_fulfillment`, or `on_hold` with pre-hold `in_fulfillment`, past expected fulfillment time plus the overdue window, after the spawn signal, that Workflow can neither complete nor close with complete evidence.
+2. The requester calls `POST /bss-orders-lifecycle/v1/orders/{orderId}/forced-failure` with a mandatory reason, the attested `drafts_voided` and `activated_rolled_back` lists, its own idempotency key and expected version, and no `request_audit_id`. Every guard runs; the last refuses `second-approver-required`, committed and audited, returning `requestAuditId`. That refused entry is the request.
+3. A different operator calls the same endpoint with its own key, the current expected version, its reason and lists, and that `request_audit_id` within the approval window and before any state change.
+4. The engine commits row 28 or 29 to `fulfillment_failed`: `failure_reason = operator-forced-unreconciled`, the forced evidence variant with `no_active_subscription_remains = unknown` and the operator attestation naming both, the claim release of every terminal, audit and `OrderFulfillmentFailed`. A dedicated alert fires.
+
+**Refusals**: `forced-failure-reason-required`, `prehold-not-in-fulfillment` (row 29), `spawn-signal-not-recorded` (use the ordinary cancel instead), `overdue-window-not-elapsed`, `second-approver-required`; authorization denial for any caller without the grant, including Workflow and plain Seller Operators. The exit **MUST NOT** be read as compensation: Workflow keeps the orphan-subscription manual task open.
+
 ## 3. Processes / Business Logic (CDSL)
 
 ### 3.1 Expiry and draft auto-void
@@ -131,7 +148,7 @@ Policy writers lock the permanent platform row first, then any seller row; every
 
 Resume baseline 5 and Versioning's amendment baseline 20 are finite, independent count budgets. With caps A and R the configured pre-fulfillment graph permits at most `3 × (A + 1) + 2 × R + 1` dwell entries: 74 at baseline. `74 × T_max` bounds configured dwell budgets only, excluding draft, fulfillment exemptions and scheduler delay; it requires finite TTLs bounded over the lifetime, which production now always has: at the provisional values T_max is 30 days and the bound 2,220 days, with `draft` separately at most 90 days from creation. An unset TTL — non-production only — leaves its state unbounded. No absolute-lifetime backstop or second sweep is introduced.
 
-A fail-closed approval park stays `submitted` and does not suspend that TTL. Fulfillment and holds from fulfillment instead use Workflow's operational SLA: baseline 24 hours past expected fulfillment time, with the fulfillment operator responsible. SLA exhaustion creates an incident/operator abort, never an automatic terminal state.
+A fail-closed approval park stays `submitted` and does not suspend that TTL. Fulfillment and holds from fulfillment instead use Workflow's operational SLA: baseline 24 hours past expected fulfillment time, with the fulfillment operator responsible. SLA exhaustion creates an incident/operator abort, never an automatic terminal state; the operator abort is the two-person forced exit of §2.3 (D-182), and the §3.8 overdue gauge makes the exhaustion visible from Orders' side.
 
 ## 4. States (CDSL)
 
@@ -149,8 +166,9 @@ Foundation's table remains the sole state authority; the following is this featu
 | submitted, pending_approval, approved | expire → expired | Configured TTL due under lock |
 | on_hold | expire → expired | TTL due; pre-hold state is not in_fulfillment |
 | draft | auto-void → expired | Configured creation-age deadline due; no deletion |
+| in_fulfillment; on_hold with pre-hold in_fulfillment | force-fail-unreconciled → fulfillment_failed | Break-glass user grant; reason; spawn signal recorded; overdue window elapsed; distinct approver naming the requester's refused attempt (rows 28/29, D-182) |
 
-`in_fulfillment` has no expiry row. A capped hold from fulfillment retains Workflow's evidence-guarded failed acknowledgement and compensated cancel exits (Foundation rows 26/27), owned by Workflow seam; it cannot complete while held.
+`in_fulfillment` has no expiry row. A capped hold from fulfillment retains Workflow's evidence-guarded failed acknowledgement and compensated cancel exits (Foundation rows 26/27), owned by Workflow seam; it cannot complete while held. When Workflow cannot supply that evidence and the overdue window has elapsed, rows 28/29 are the operator's bounded exit; they record compensation as `unknown`.
 
 ## 5. Definitions of Done
 
@@ -160,15 +178,15 @@ Foundation's table remains the sole state authority; the following is this featu
 
 The implementation MUST route hold/resume/cancel and their business refusals through the shared engine, preserving authorization, version checks, principal-bound idempotency and atomic state/audit/event effects.
 
-**Implements**: `cpt-cf-bss-orders-lifecycle-flow-hold-and-expiry-hold-resume`, `cpt-cf-bss-orders-lifecycle-flow-hold-and-expiry-cancel`.
+**Implements**: `cpt-cf-bss-orders-lifecycle-flow-hold-and-expiry-hold-resume`, `cpt-cf-bss-orders-lifecycle-flow-hold-and-expiry-cancel`, `cpt-cf-bss-orders-lifecycle-flow-hold-and-expiry-force-fail`.
 
-**Touches**: `/hold`, `/resume`, `/cancel`; `orders_order.pre_hold_state`, `resume_count`, `state_entered_at`; transition audit and producer enqueue. **Constraints**: `cpt-cf-bss-orders-lifecycle-constraint-hold-does-not-pause-draft-ttl`.
+**Touches**: `/hold`, `/resume`, `/cancel`, `/forced-failure`; `orders_order.pre_hold_state`, `resume_count`, `state_entered_at`, `compensation_evidence` (forced variant); transition audit and producer enqueue. **Constraints**: `cpt-cf-bss-orders-lifecycle-constraint-hold-does-not-pause-draft-ttl`.
 
 ### 5.2 Safe, observable maintenance
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-dod-hold-and-expiry-workers`
 
-The implementation MUST provide both bounded workers and the policy serialization protocol, with provisional-default and missing-TTL gauges recomputed for all five states/scopes (clear configured/obsolete labels; unknown reads are errors). Expose committed counts, refusals, worker defects, pass duration/completion, oldest due candidate, saturation, exempt holds and resume-cap refusals. Alert on a provisional default in effect in production (standing, non-paging), a missing production TTL (paging integrity alert: the channel was bypassed), prolonged coordination failure, sustained backlog and cap refusals. The migration MUST seed the D-181 provisional rows and the policy channel MUST refuse a NULL duration bound for production; no TTL value gates startup or readiness.
+The implementation MUST provide both bounded workers and the policy serialization protocol, with provisional-default and missing-TTL gauges recomputed for all five states/scopes (clear configured/obsolete labels; unknown reads are errors). Expose committed counts, refusals, worker defects, pass duration/completion, oldest due candidate, saturation, exempt holds, resume-cap refusals, the overdue-fulfillment count and oldest age, pending forced requests and committed forced exits. Alert on a provisional default in effect in production (standing, non-paging), a missing production TTL (paging integrity alert: the channel was bypassed), prolonged coordination failure, sustained backlog, cap refusals, any non-zero overdue-fulfillment count and every committed forced exit (D-182). The migration MUST seed the D-181 provisional rows and the policy channel MUST refuse a NULL duration bound for production; no TTL value gates startup or readiness.
 
 **Implements**: `cpt-cf-bss-orders-lifecycle-algo-hold-and-expiry-sweep`, `cpt-cf-bss-orders-lifecycle-algo-hold-and-expiry-policy`, `cpt-cf-bss-orders-lifecycle-state-hold-and-expiry-transitions`.
 
@@ -189,6 +207,8 @@ The implementation MUST provide both bounded workers and the policy serializatio
 - [ ] Operation latency verification measures the PRD write-and-publish p95 < 1 s, not commit alone; no completion or runtime evidence is claimed by these unchecked specifications.
 
 - [ ] With both an exhausted resume cap and a missing stored target, `resume-cap-exhausted` wins; target validation occurs only after the cap guard passes.
+- [ ] Forced exit (D-182): before the overdue window, before the spawn signal, without a reason or without a valid request it refuses with the registered reason in guard order; the same principal cannot approve its own request; a request older than the approval window or predating a hold/resume is refused; Workflow and Seller Operator principals are denied. A valid two-person pair commits exactly one `fulfillment_failed` with `operator-forced-unreconciled`, both actors in the attestation, `unknown` assertions, released claims and one alerted event; replay of either call returns its stored outcome.
+- [ ] The overdue gauge counts an `in_fulfillment` order and an exempt hold once each past expected fulfillment time plus 24 hours, honours a future service-activation date, runs independently of any TTL value, and clears when the order terminates.
 
 ## 7. Detailed Behavior Contracts
 
@@ -339,14 +359,76 @@ sequenceDiagram
     S ->> L: select expirable orders
     L -->> S: in_fulfillment and holds from it are not selectable
     Note over L: no transition row exists - the bound is not a transition
+    S ->> L: observe overdue fulfillment (read-only)
+    L -->> S: overdue count and oldest age - alert when non-zero
     W ->> W: measure dwell past expected fulfillment time
     W ->> W: 24 h default exceeded - raise operator escalation
     Note over W: outcome is an incident or operator abort,<br/>never an automatic order terminal
+    Note over L: operator abort = two-person forced-failure,<br/>compensation recorded as unknown
 ```
 
-**Description**: The handoff is by absence. This gear provides no expiry for the state and
-publishes the events the sibling gear needs; that gear measures the window and raises the
-escalation. Exhausting the SLA produces no new order state.
+**Description**: The handoff is by absence of an expiry row, not by absence of an owner. This
+gear provides no expiry for the state and publishes the events the sibling gear needs; that gear
+measures the window and raises the escalation to the fulfillment operator
+(`cpt-cf-bss-orders-lifecycle-upreq-workflow-overdue-escalation`, a production release
+prerequisite). Orders observes the same window itself (§3.8 overdue gauge) so a missing Workflow
+escalation is still visible. Exhausting the SLA produces no new order state and no automatic
+terminal; the operator's abort is *Force Fail Unreconciled* below (D-182).
+
+<a id="contract-07-operator-forced-unreconciled-failure"></a>
+
+#### Operator-forced unreconciled failure
+
+**Contract**: `cpt-cf-bss-orders-lifecycle-seq-forced-unreconciled-failure`, defined in [DESIGN §3.6 Feature sequences](../DESIGN.md#register-sequences).
+
+**Use cases**: `cpt-cf-bss-orders-lifecycle-usecase-order-fulfillment-complete`
+
+**Actors**: `cpt-cf-bss-orders-lifecycle-actor-orders-fulfillment-operator`, `cpt-cf-bss-orders-lifecycle-actor-orders-workflow`
+
+```mermaid
+sequenceDiagram
+    participant R as Fulfillment Operator (requester)
+    participant A as Fulfillment Operator (approver)
+    participant E as Transition Engine
+    participant W as Orders Workflow
+    R ->> E: forced-failure (reason, attested lists, no request_audit_id)
+    E -->> R: refused second-approver-required + requestAuditId (audited)
+    A ->> E: forced-failure (reason, lists, request_audit_id)
+    E ->> E: guards, forced evidence (unknown), release claims, audit
+    E -->> A: fulfillment_failed
+    E -->> W: OrderFulfillmentFailed (operator-forced-unreconciled)
+    W ->> W: stop process, keep orphan-subscription manual task open
+```
+
+**Algorithm: Force Fail Unreconciled**
+
+Input: order_id, forced_reason, drafts_voided, activated_rolled_back, request_audit_id (absent on
+the requester's call), security_context, idempotency_key, expected_version
+Output: fulfillment_failed, or a registered refusal — the requester's call always ends in
+`second-approver-required` carrying `requestAuditId`
+
+1. [ ] - `p1` - Validate at the boundary: `forced_reason` text within the caller-reason bound, both lists arrays of distinct subscription UUIDs (empty allowed), `request_audit_id` a UUID when present; anything else is `request-invalid`, unaudited ([01 §4.7](../DESIGN.md#contract-01-4-7), D-142) - `inst-ff-boundary`
+2. [ ] - `p1` - Declare the guards the engine evaluates and audits, after its authorization pre-guard (`order × force-fail-unreconciled`, actor class `user`, [08 §4.3](../DESIGN.md#contract-08-4-3)), idempotency, admissibility (rows 28 and 29 only; any other state is `not-admissible`) and version check, in this registration order: forced reason present and non-blank (`forced-failure-reason-required`); on row 29, stored pre-hold state `in_fulfillment` (06's `prehold-not-in-fulfillment`); spawn signal recorded (`spawn-signal-not-recorded`); overdue window elapsed (`overdue-window-not-elapsed`); distinct second approver (`second-approver-required`) - `inst-ff-declare-guards`
+3. [ ] - `p1` - Resolve the overdue guard's inputs from stored data under the aggregate lock: `begin_fulfillment_at`, the `created_at` of the order's single committed `begin-fulfillment` audit entry (row 11; no row returns an order to `approved` once it has left it for `in_fulfillment`), and the latest non-null `service_activation_date` among the current version's lines at 00:00 UTC; expected fulfillment time is the later of the two, PRD §6.3's `max(now, latest service-activation date)` at begin-fulfillment, derived and never stored. Admit only when database time is at or past it plus the overdue window of §4.5 - `inst-ff-overdue`
+4. [ ] - `p1` - **IF** `request_audit_id` is absent: refuse `second-approver-required`; the engine allocates the refusal entry's `audit_id` before settling and returns it as `context.data.requestAuditId`, so a replay under the same key returns the same value. That refused, audited entry, which only a caller past every earlier guard can produce, is the request - `inst-ff-request`
+5. [ ] - `p1` - **ELSE** read the referenced audit entry and admit only when it is a `refused` entry with `reason = second-approver-required` and `trigger = force-fail-unreconciled` for this `order_id`, its `from_state` equals the current state and its `created_at` is at or after `state_entered_at` (no state change since), it is within the approval window of §4.5 of database time, and its `actor` differs from the caller's; otherwise refuse `second-approver-required`, which records the caller's own attempt as a new request - `inst-ff-approve`
+6. [ ] - `p1` - Contribute the forced evidence variant of [01 §3.7](../DESIGN.md#contract-01-3-7): the approver's attested lists, `activation_dispatched = true`, `at_sale_facts_emitted` and `no_active_subscription_remains` = `unknown`, and `operator_attestation` = `{requested_by, request_audit_id, requested_at, approved_by}` taken from the referenced entry and the caller's SecurityContext; fix `failure_reason = operator-forced-unreconciled`; the forced reason is the audit `caller_reason` - `inst-ff-contribute`
+7. [ ] - `p1` - Request the `force-fail-unreconciled` transition; the engine resolves row 28 or 29, releases every live claim at [01 §3.6](01-foundation.md#contract-01-3-6) *Attempt Transition* step 17.1 because the target is terminal, writes the committed audit token `force-fail-unreconciled` and publishes `OrderFulfillmentFailed` - `inst-ff-request-transition`
+8. [ ] - `p1` - **RETURN** fulfillment_failed - `inst-ff-return`
+
+**Description**: The two-person rule needs no new table or row: the requester's committed refusal
+is the durable request, as Ledger answers a missing approval with `DUAL_CONTROL_REQUIRED`
+(`gears/bss/ledger/docs/design/05-adjustments-notes-refunds.md`, `inst-rf-dual-control`), and the
+approver's committed transition copies both actors into `operator_attestation`, so the record
+outlives the 90-day refusal retention. A refusal row is outside the hash chain; the attestation on
+the committed, chained entry is the authoritative record. The forced exit records what nobody
+knows rather than asserting it, as Products' force-completion records each missing participant as
+not-frozen and never as frozen (`gears/bss/products/docs/PRD.md` *Freeze recovery &
+force-completion*) and Ledger parks a stuck refund clearing as `unknown_final` under dual control.
+A concurrent Workflow acknowledgement or cancel serializes on the aggregate lock; the loser is
+refused against the terminal state. This is the repair-as-a-row rule of
+`cpt-cf-bss-orders-lifecycle-constraint-single-writer` applied: no manual claim release, no direct
+state write.
 
 
 <!-- /contract -->
@@ -384,7 +466,9 @@ be cancelled through row 23 and its `on_hold` TTL still elapses (row 24). A hold
 shared cancel guard admits no caller but Workflow; its exits are Workflow's failure acknowledgement
 (`acknowledge-failed`, row 26) and workflow-mediated cancel (`cancel-workflow-mediated`, row 27),
 admitted from `on_hold` only for that pre-hold state and under the evidence guards of rows 14 and 16
-([06-workflow-seam — The five operations are ordinary transitions (normative)](../DESIGN.md#contract-06-4-1)). Completion is not among them: a held order is
+([06-workflow-seam — The five operations are ordinary transitions (normative)](../DESIGN.md#contract-06-4-1)),
+and, once the overdue window has elapsed, the two-person operator-forced failure
+(`force-fail-unreconciled`, row 29) of §4.3 (D-182). Completion is not among them: a held order is
 resumed before it completes ([`../DECISIONS.md`](../DECISIONS.md) D-109). See §4.2 for why this is the enforcement
 point and why the absolute-lifetime backstop was withdrawn.
 
@@ -454,7 +538,9 @@ delay no calendar deadline is claimed. This design adds no new absolute-deadline
 
 **What neither layer bounds, disclosed rather than covered.** Two states are outside both layers
 entirely by §4.3's exemption: `in_fulfillment`, and an `on_hold` order whose pre-hold state is
-`in_fulfillment`. Those remain bounded by the operational SLA and by no transition in this gear.
+`in_fulfillment`. Those remain bounded by the operational SLA, and by no automatic transition in this
+gear; the operator-forced exit of §4.3 is the bounded recovery after it, taken by people, not by a
+clock (D-182).
 In a non-production environment a state left unset has no bound, and the re-entry caps supply
 none — they multiply a dwell that is itself unbounded; a NULL row in production is reachable only
 by bypassing the policy channel and pages per §3.8. So what is asserted is the arithmetic above,
@@ -491,8 +577,10 @@ Layer 1 of §4.2 — the per-state TTL — and it does **not** reach Layer 2: ro
 resume-cap guard unconditionally, so a hold taken from `in_fulfillment` and resumed still increments
 `resume_count` and still refuses at the cap like any other.  The cap can stay unconditional because a capped hold from
 `in_fulfillment` is never stranded: [01 §4.3](01-foundation.md#contract-01-4-3) rows 26 and 27 let Workflow move it straight from
-`on_hold` to `fulfillment_failed` or `cancelled` with compensation evidence, without a resume, so
-exhausting the cap removes only the option of restarting fulfillment ([`../DECISIONS.md`](../DECISIONS.md) D-109). The exemption is taken because a
+`on_hold` to `fulfillment_failed` or `cancelled` with compensation evidence, without a resume, and
+row 29 lets two fulfillment operators force it to `fulfillment_failed` after the overdue window when
+that evidence cannot be had, so exhausting the cap removes only the option of restarting fulfillment
+([`../DECISIONS.md`](../DECISIONS.md) D-109, D-182). The exemption is taken because a
 subscription spawn signal may already have been issued and expiry would orphan provisioned
 resources with no compensation path.
 
@@ -510,6 +598,25 @@ begin-fulfillment. A legitimately future-dated line therefore does not start the
 date. The named owner is the fulfillment operator. **Exhausting the SLA MUST NOT auto-terminal
 the order**: the outcome is an incident or an operator abort, not a new order state. The same
 window bounds a stalled operational compensation.
+
+**The SLA has an owner, an Orders-side signal and a bounded end (D-182).** Workflow's overdue
+escalation is a production release prerequisite
+(`cpt-cf-bss-orders-lifecycle-upreq-workflow-overdue-escalation`), and this slice's overdue gauge
+and alert (§3.8) **MUST** be configured and tested before production whatever Workflow's state. The
+operator abort is the trigger `force-fail-unreconciled`, [01 §4.3](01-foundation.md#contract-01-4-3) rows 28 and 29, specified
+by §3.6 *Force Fail Unreconciled*. It **MUST** be operator-initiated, never scheduled; **MUST**
+be admitted only after the spawn signal (before it, the ordinary cancel of rows 15 and 23 is open)
+and only once the overdue window has elapsed past expected fulfillment time; **MUST** carry a
+mandatory reason; **MUST** be two-person, a requester and a distinct approver, both recorded on the
+committed entry; and **MUST** be authorized by the break-glass `order × force-fail-unreconciled`
+grant, which neither the Seller Operator's grants nor the Workflow principal confer. It lands in
+the existing `fulfillment_failed` with `failure_reason = operator-forced-unreconciled` and the
+forced compensation-evidence variant whose `no_active_subscription_remains` is `unknown`; it
+**MUST NOT** assert compensation complete and **MUST NOT** be read as compensated by any consumer.
+It adds no state and no event type ([ADR-0004](../ADR/0004-cpt-cf-bss-orders-lifecycle-adr-closed-enumerations.md)). Its terminal target releases the overlap claim
+like every terminal, which is what bounds ADR-0007's wedged-key cost. After it, Workflow **MUST**
+keep the orphan-subscription manual task open until reconciliation establishes that no active
+subscription remains.
 
 
 <!-- /contract -->
@@ -605,7 +712,8 @@ Billing credit note.
 - **Engine**: [`01-foundation`](../DESIGN.md#contract-01-1-1) — the hold and expiry transition rows, the pre-hold column, the missing `in_fulfillment` expiry row
 - **Depends on**: [`02-capture`](../DESIGN.md#contract-02-1-1) for the draft creation instant, which is the draft sweep's dwell input; [`06-workflow-seam`](../DESIGN.md#contract-06-1-1) for the spawn signal the hold-cancel guard reads
 - **Consumers**: [`05-preconditions`](../DESIGN.md#contract-05-1-1) relies on the `approved` TTL as a declined instrument's ordinary exit; the re-entry caps of §4.2 stop that TTL being restarted without limit, and the TTL is never unset in production (provisional 30 days, D-181), so that exit always exists there
-- **Sibling gear**: raises the overdue escalation and suspends its process on `OrderHeld`
+- **Sibling gear**: raises the overdue escalation (`…-upreq-workflow-overdue-escalation`, release prerequisite), suspends its process on `OrderHeld`, and keeps the orphan-subscription manual task open after an operator-forced failure (D-182)
+- **Precedent**: Products force-completion under the two-person rule and break-glass action scope (`gears/bss/products/docs/PRD.md`); Ledger dual-controlled `unknown_final` (`gears/bss/ledger/docs/design/05-adjustments-notes-refunds.md`)
 - **ADRs**: [`ADR/0001`](../ADR/0001-cpt-cf-bss-orders-lifecycle-adr-transition-through-engine.md) transition through the engine; [`ADR/0002`](../ADR/0002-cpt-cf-bss-orders-lifecycle-adr-slice-decomposition.md) the foundation-plus-seven-slices decomposition; [`ADR/0004`](../ADR/0004-cpt-cf-bss-orders-lifecycle-adr-closed-enumerations.md) the closed state and event enumerations
 
 <!-- /contract -->

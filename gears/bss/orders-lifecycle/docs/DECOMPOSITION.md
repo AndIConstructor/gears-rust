@@ -655,10 +655,10 @@ cannot be closed automatically.
 
 - **Scope**:
   - Caller-initiated cancellation with the recorded spawn-signal guard, and abandoned-draft auto-void to `expired` without deleting commercial evidence.
-  - Hold and resume with the stored pre-hold state; the per-state TTL policy for `submitted`, `pending_approval`, `approved` and `on_hold`; the **resume cap** that stops a hold/resume cycle restarting the dwell without limit — its sibling, the amendment cap, is owned in [04 §4.1](features/04-versioning.md#contract-04-4-1) because its value is a commercial judgment; the coordinated expiry scheduler; and the transition-table exclusion of `in_fulfillment` and of holds taken from it, together with the handoff of those cases to the operational escalation owned by the sibling gear. It supplies **no code-constant fallback** duration: every expirable state ships a provisional platform TTL as a migration-seeded, revisioned policy row, and the policy channel refuses an unset duration in production ([07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2), [`DECISIONS.md`](./DECISIONS.md) D-181, closing Q-27).
+  - Hold and resume with the stored pre-hold state; the per-state TTL policy for `submitted`, `pending_approval`, `approved` and `on_hold`; the **resume cap** that stops a hold/resume cycle restarting the dwell without limit — its sibling, the amendment cap, is owned in [04 §4.1](features/04-versioning.md#contract-04-4-1) because its value is a commercial judgment; the coordinated expiry scheduler; and the transition-table exclusion of `in_fulfillment` and of holds taken from it, together with the handoff of those cases to the operational escalation owned by the sibling gear, the Orders-side overdue-fulfillment gauge and alert, and the two-person operator-forced `fulfillment_failed` that is the bounded end of that escalation (D-182). It supplies **no code-constant fallback** duration: every expirable state ships a provisional platform TTL as a migration-seeded, revisioned policy row, and the policy channel refuses an unset duration in production ([07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2), [`DECISIONS.md`](./DECISIONS.md) D-181, closing Q-27).
 
 - **Out of scope**:
-  - It does not pause entitlement or billing on already-activated subscriptions, does not extend a term, and does not void wave-1 subscription drafts. It never auto-terminals an order whose fulfillment may be in flight.
+  - It does not pause entitlement or billing on already-activated subscriptions, does not extend a term, and does not void wave-1 subscription drafts. It never auto-terminals an order whose fulfillment may be in flight; the forced exit is taken only by two fulfillment operators after the overdue window, never by a sweep.
 
 - **Requirements Covered**:
 
@@ -686,6 +686,7 @@ cannot be closed automatically.
   - `POST /bss-orders-lifecycle/v1/orders/{orderId}/cancel`
   - `POST /bss-orders-lifecycle/v1/orders/{orderId}/hold`
   - `POST /bss-orders-lifecycle/v1/orders/{orderId}/resume`
+  - `POST /bss-orders-lifecycle/v1/orders/{orderId}/forced-failure`
   - Shared contract: `cpt-cf-bss-orders-lifecycle-interface-order-operations`; PRD `cpt-cf-bss-orders-lifecycle-interface-order-ops`.
 
 - **Sequences**:
@@ -725,6 +726,7 @@ cannot be closed automatically.
     - `cpt-cf-bss-orders-lifecycle-seq-hold-resume`
     - `cpt-cf-bss-orders-lifecycle-seq-expiry-sweep`
     - `cpt-cf-bss-orders-lifecycle-seq-overdue-handoff`
+    - `cpt-cf-bss-orders-lifecycle-seq-forced-unreconciled-failure`
   - **Tables**:
     - `cpt-cf-bss-orders-lifecycle-dbtable-state-ttl-policy`
 

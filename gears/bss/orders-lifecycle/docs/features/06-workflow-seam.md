@@ -113,7 +113,7 @@ All five operations use `/bss-orders-lifecycle/v1/orders/{orderId}` and require 
 2. [ ] For completion, validate exact current-version line coverage and distinct subscription identifiers under §3.3. For failure, validate reason and evidence under §3.4.
 3. [ ] Contribute the authoritative line-to-subscription mapping or compensation evidence, plus acknowledgement-derived projection updates, through the engine.
 4. [ ] Commit terminal state, audit, idempotency result and the row's event atomically. `OrderCompleted` carries the mapping; `OrderFulfillmentFailed` carries evidence and failure reason.
-5. [ ] On incomplete compensation, remain non-terminal under Workflow's escalation SLA. Financial reversal through Billing is not a completion guard.
+5. [ ] On incomplete compensation, remain non-terminal under Workflow's escalation SLA; once the overdue window has elapsed post-spawn, the only other exit is the fulfillment operators' two-person forced failure owned by Hold and expiry (D-182), which this seam never drives. Financial reversal through Billing is not a completion guard.
 
 ### 2.4 Cancel after operational compensation
 
@@ -181,10 +181,10 @@ Map `required`, `not_required`, `granted`, `denied` to `reflect-approval-require
 
 **Output**: Validated terminal contribution, plus acknowledgement projection only for acknowledgement requests, or ordered refusal; invalid boundary values are rejected before engine entry.
 
-1. [ ] At boundary validation, reject unknown failure-reason values or any failure reason on a completed outcome as `request-invalid`, unaudited and before authorization. Permit exactly `market-divergence`, `overlap-collision`, `identity-party-unavailable`, `overlap-presence-unevaluable`, `line-execution-failed`, `dependency-graph-invalid`; the last two are received outcomes, not Lifecycle refusal reasons, and `dependency-graph-invalid` is accepted for replay only (D-172).
+1. [ ] At boundary validation, reject unknown failure-reason values or any failure reason on a completed outcome as `request-invalid`, unaudited and before authorization. Permit exactly `market-divergence`, `overlap-collision`, `identity-party-unavailable`, `overlap-presence-unevaluable`, `line-execution-failed`, `dependency-graph-invalid`; the last two are received outcomes, not Lifecycle refusal reasons, and `dependency-graph-invalid` is accepted for replay only (D-172). `operator-forced-unreconciled` is in the closed set but is written only by `force-fail-unreconciled`; on this boundary it is `request-invalid` (D-182).
 2. [ ] After engine authorization, expected-version and admissibility checks, evaluate failed-acknowledgement guards in this order: failure reason present (`failure-reason-missing`), compensation evidence present, evidence valid, then—if held—stored pre-hold state is `in_fulfillment` (`prehold-not-in-fulfillment`). The workflow-cancel guard order is separately defined in §2.4.
 3. [ ] For failed acknowledgement and every workflow cancel, refuse absent evidence with `compensation-evidence-missing`. Validate the closed five-member schema: `drafts_voided`, `activated_rolled_back`, `activation_dispatched`, `at_sale_facts_emitted`, `no_active_subscription_remains`.
-4. [ ] Require the final assertion true; schema-invalid or false evidence refuses `compensation-evidence-incomplete`. Empty lists are valid. Lifecycle validates structure and asserted fact only, never reconciles the lists through Subscriptions calls.
+4. [ ] Require the final assertion true; schema-invalid, false or `unknown` evidence, and any `operator_attestation` member, refuse `compensation-evidence-incomplete`, so the forced variant of D-182 can never enter through this seam. Empty lists are valid. Lifecycle validates structure and asserted fact only, never reconciles the lists through Subscriptions calls.
 5. [ ] Store evidence on the aggregate and audit; failure/cancel caller reasons remain `caller_reason`, separate from registered machine `reason`. Wait for no Billing credit note.
 6. [ ] Build `created`, `activated`, `failed` line projection data only from acknowledgements. No guard reads it, no order state derives from it, and transition-request references are opaque joins. Before acknowledgement, absence means “not acknowledged”; live progress remains Workflow's read surface.
 
@@ -215,7 +215,7 @@ For an already-authorized ordinary or mediated cancel from fulfillment (includin
 | `acknowledge-failed` | `in_fulfillment`, or `on_hold` with pre-hold `in_fulfillment` | `fulfillment_failed` after evidence |
 | `cancel-workflow-mediated` | Same two sources | `cancelled` after reason and evidence |
 
-Completion from hold requires resume first; current-version completion from hold refuses `not-admissible`. Failure/cancel from another hold refuses `prehold-not-in-fulfillment`. A stale workflow trigger always reaches version conflict before state admissibility. No per-line terminal, partial completion or direct state-setting repair path is added.
+Completion from hold requires resume first; current-version completion from hold refuses `not-admissible`. Failure/cancel from another hold refuses `prehold-not-in-fulfillment`. A stale workflow trigger always reaches version conflict before state admissibility. No per-line terminal, partial completion or direct state-setting repair path is added. The one other entry into `fulfillment_failed`, `force-fail-unreconciled` (Foundation rows 28/29), is a two-person operator trigger owned by Hold and expiry, outside this seam and its workflow-trigger class (D-182).
 
 ## 5. Definitions of Done
 
@@ -252,6 +252,7 @@ The system **MUST** supply executable contract scenarios for the pre-dispatch fe
 - [ ] Completion rejects empty payload for nonempty orders, missing/extra/duplicate lines, non-activated results and missing/reused subscription IDs. A valid mapping is persisted and emitted exactly once.
 - [ ] Failure and mediated cancel reject missing/malformed/false compensation evidence before and after spawn; valid empty sets work before activation. Financial reversal is never awaited.
 - [ ] A fulfillment hold can fail or cancel with complete evidence; completion requires resume. Other holds cannot use those terminal rows.
+- [ ] `operator-forced-unreconciled` on `/fulfillment-acknowledgement` and evidence carrying `unknown` or `operator_attestation` on either evidence-guarded operation are refused; a Workflow call after an operator-forced failure is refused against the terminal state (D-182).
 - [ ] Acknowledgement projections cannot influence order guards or mirror downstream request states. Missing projection data cannot claim work has not started.
 - [ ] Commit latency meets p95 < 1 s independently of Workflow re-check duration; fault injection proves atomic rollback, and recovery preserves the committed spawn signal with the order.
 
@@ -505,7 +506,8 @@ contract both require. Subscriptions' `active → cancelled` is Policy-gated and
 unavailability (SUB-O3), so a compensation can stall; the Workflow PRD escalates such a
 compensation rather than inventing a third leg, and while it is escalated the order stays
 `in_fulfillment`, expiry-exempt, until evidence with `no_active_subscription_remains = true`
-exists (D-165). No acknowledgement with a weaker assertion is accepted.
+exists (D-165) or, past the overdue window, the fulfillment operators force it (D-182). No
+acknowledgement with a weaker assertion is accepted.
 
 
 <!-- /contract -->
@@ -620,7 +622,8 @@ in `OrderCompleted`.
 A **failed** acknowledgement **MUST** carry compensation evidence asserting that no active
 subscription remains, and **MUST** be refused where the evidence is absent or does not assert it
 — leaving the order in `in_fulfillment` (or `on_hold`, for row 26), non-terminal, under the sibling
-gear's escalation SLA. A failed acknowledgement **MAY** be made from `on_hold` with pre-hold
+gear's escalation SLA, whose bounded end is 07's two-person operator-forced failure (rows 28/29,
+D-182), never a weaker acknowledgement. A failed acknowledgement **MAY** be made from `on_hold` with pre-hold
 `in_fulfillment` (row 26); a completed one **MUST NOT**, and requires resume first (D-109).
 The evidence **MUST** follow the closed schema of [01 §3.7](../DESIGN.md#contract-01-3-7) — which drafts were voided, which
 activated subscriptions were rolled back, whether activation was dispatched, whether at-sale
@@ -643,9 +646,10 @@ signal as after it (D-134).
 | `overlap-presence-unevaluable` | a re-check `defer` on the overlap-occupancy port exhausted the same budget (D-127) |
 | `line-execution-failed` | a line's provisioning failed and Workflow's remediation was exhausted or its fail-fast policy applied |
 | `dependency-graph-invalid` | **Withdrawn as an emitted value (D-172):** Workflow D-196 removed the plan dependency graph; retained in the closed set so replayed historical payloads still validate, never emitted by the current Workflow design |
+| `operator-forced-unreconciled` | **Not a Workflow value (D-182):** fixed by `force-fail-unreconciled` (Foundation rows 28/29) when two fulfillment operators close an overdue post-spawn order whose compensation is unknown; never accepted on `/fulfillment-acknowledgement`. A consumer **MUST NOT** read it as compensated |
 
 A failed acknowledgement without a failure reason **MUST** be refused `failure-reason-missing`. A
-value outside the enumeration, and a failure reason supplied with a completed acknowledgement,
+value outside the enumeration, `operator-forced-unreconciled`, and a failure reason supplied with a completed acknowledgement,
 are rejected at boundary validation with `request-invalid` ([01 §4.7](../DESIGN.md#contract-01-4-7) *Validation flow at the
 boundary*, D-142), before authorization and unaudited, and never reach the engine. The reason is
 recorded on the committed audit entry as its `caller_reason`, not its registered `reason`

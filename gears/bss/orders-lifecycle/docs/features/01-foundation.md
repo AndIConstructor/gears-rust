@@ -208,9 +208,9 @@ Cross-principal create duplication and post-window re-execution remain disclosed
 
 **Terminal States**: `completed`, `rejected`, `cancelled`, `fulfillment_failed`, `expired`.
 
-Implement the exact **27 rows and 20 trigger tokens** of [`cpt-cf-bss-orders-lifecycle-state-order-lifecycle`](01-foundation.md#contract-01-4-3), including guards, actor classes, versioning behavior and event declarations. Expand multi-state rows into unique `(from-state, trigger)` lookup keys and reject duplicate keys at startup. There are no inferred transitions or terminal exits.
+Implement the exact **29 rows and 21 trigger tokens** of [`cpt-cf-bss-orders-lifecycle-state-order-lifecycle`](01-foundation.md#contract-01-4-3), including guards, actor classes, versioning behavior and event declarations. Expand multi-state rows into unique `(from-state, trigger)` lookup keys and reject duplicate keys at startup. There are no inferred transitions or terminal exits.
 
-Create, submit and amendment append versions; draft and administrative edits do not. Submit materializes version 2. Resume uses stored pre-hold state. `in_fulfillment` has no expiry row, and expiry of a hold from fulfillment is guard-refused. Held fulfillment can fail/cancel through the Workflow rows but cannot acknowledge completion while held. Amendment lands in `submitted` under the design's disclosed PRD reconciliation items.
+Create, submit and amendment append versions; draft and administrative edits do not. Submit materializes version 2. Resume uses stored pre-hold state. `in_fulfillment` has no expiry row, and expiry of a hold from fulfillment is guard-refused. Held fulfillment can fail/cancel through the Workflow rows but cannot acknowledge completion while held. An overdue post-spawn fulfillment, held or not, can also be forced to `fulfillment_failed` by the two-person operator trigger `force-fail-unreconciled` (rows 28 and 29, D-182), which records compensation as `unknown`. Amendment lands in `submitted` under the design's disclosed PRD reconciliation items.
 
 ### 4.2 Idempotency record lifecycle
 
@@ -520,8 +520,13 @@ user SecurityContext.
 | Row 12, `report-spawn-signal` | Set `spawn_signal_at` to the server-recorded report instant; the registered already-recorded guard prevents replacement, and no later transition clears it |
 | Row 11, `begin-fulfillment`, with tolerated authorization failure | Set `authorization_failure_tolerated_at` to the server-recorded tolerance-decision instant only when the registered tolerance guard admits that outcome; otherwise preserve its value, never clear it |
 | Row 14 or 26, `acknowledge-failed`, or row 16 or 27, `cancel-workflow-mediated` | Persist the validated `compensation_evidence` contribution after its evidence guards pass; other transitions preserve the field |
+| Row 28 or 29, `force-fail-unreconciled` | Persist the forced `compensation_evidence` after every row-28 guard passes: the operator-attested lists, `activation_dispatched = true` (the recorded spawn signal), `at_sale_facts_emitted` and `no_active_subscription_remains` both `unknown`, and the `operator_attestation` naming requester and approver ([01 §3.7](../DESIGN.md#contract-01-3-7) *Compensation evidence schema*, D-182); the terminal target releases every live claim at step 17.1 like any terminal |
 
 These writes precede audit and commit. A rollback removes them together with the transition.
+One refusal also carries an engine-allocated value: for `second-approver-required` on rows 28 and
+29 the engine allocates the refusal entry's `audit_id` before step 13.2.1 settles the response and
+settles it as `context.data.requestAuditId`, so a same-key replay returns the identical request
+reference ([07 §3.6](07-hold-and-expiry.md#contract-07-3-6) *Force Fail Unreconciled*, D-182).
 Required implementation tests must show that a committed spawn signal blocks direct cancellation,
 a tolerated failure retains its flag, and failure/workflow-cancel stores its evidence; refused
 or aborted transitions must not leave any of these writes behind.
@@ -1039,7 +1044,7 @@ five callers and naming it per caller is the defect the registry exists to preve
 
 **Terminal states**: `completed`, `rejected`, `cancelled`, `fulfillment_failed`, `expired`
 
-**Transitions** — twenty-seven rows. Each declares its versioning behaviour and its event type;
+**Transitions** — twenty-nine rows. Each declares its versioning behaviour and its event type;
 `—` means the row is deliberately event-less (§4.4).
 
 1. [ ] - `p1` - **FROM** nothing **TO** `draft` **WHEN** `create` (versioning, event —) - `inst-tr-create`
@@ -1069,22 +1074,28 @@ five callers and naming it per caller is the defect the registry exists to preve
 25. [ ] - `p1` - **FROM** any non-terminal state except `draft` **TO** the same state **WHEN** `record-acceptance` — record acceptance of the current immutable version on either sales path, guarded by expected_version (state-only, `OrderAcceptanceRecorded`) - `inst-tr-record-acceptance`
 26. [ ] - `p1` - **FROM** `on_hold` **TO** `fulfillment_failed` **WHEN** `acknowledge-failed` — only when the stored pre-hold state is `in_fulfillment` (else `prehold-not-in-fulfillment`); failure is acknowledged and compensation evidence asserts no active subscription remains, the same evidence guards as row 14 (state-only, `OrderFulfillmentFailed`) - `inst-tr-hold-fulfillment-failed`
 27. [ ] - `p1` - **FROM** `on_hold` **TO** `cancelled` **WHEN** `cancel-workflow-mediated` — only when the stored pre-hold state is `in_fulfillment` (else `prehold-not-in-fulfillment`); the cancel carries a cancel reason and complete compensation evidence, the same evidence guard and shared cancel guard as row 16 (state-only, `OrderCancelled`) - `inst-tr-hold-mediated-cancel`
+28. [ ] - `p1` - **FROM** `in_fulfillment` **TO** `fulfillment_failed` **WHEN** `force-fail-unreconciled` — operator-initiated bounded recovery, never automatic: guarded in this order by a mandatory forced-failure reason (else `forced-failure-reason-required`), a recorded spawn signal (else `spawn-signal-not-recorded`), the overdue window elapsed past expected fulfillment time (else `overdue-window-not-elapsed`) and a distinct second approver referencing the requester's refused attempt (else `second-approver-required`), the guards of [07 §3.6](07-hold-and-expiry.md#contract-07-3-6) *Force Fail Unreconciled*; writes `failure_reason = operator-forced-unreconciled` and compensation evidence whose `no_active_subscription_remains` is `unknown`, plus the operator attestation (actor class user, state-only, `OrderFulfillmentFailed`, D-182) - `inst-tr-forced-unreconciled`
+29. [ ] - `p1` - **FROM** `on_hold` **TO** `fulfillment_failed` **WHEN** `force-fail-unreconciled` — only when the stored pre-hold state is `in_fulfillment` (else `prehold-not-in-fulfillment`); otherwise the guards and writes of row 28 unchanged (actor class user, state-only, `OrderFulfillmentFailed`, D-182) - `inst-tr-hold-forced-unreconciled`
 
 **Normative exclusions**: there is **no** row from `in_fulfillment` to `expired`. The `on_hold`
 expiry row exists, but its guard refuses `expiry-exempt-prehold` when the pre-hold state is
 `in_fulfillment`; it is not a state-table miss. Those exempt orders are bounded by an operational
-SLA raised by the sibling gear, not automatic expiry. There is **no**
+SLA raised by the sibling gear, not automatic expiry; once that SLA has elapsed after the spawn
+signal, rows 28 and 29 give a named operator role a two-person forced exit, which is still never
+automatic (D-182). There is **no**
 amendment row from `in_fulfillment` or from any terminal state, and **no** row out of a terminal
 state at all.
 
-**`on_hold` has five exits, and the resume cap never leaves a held order without a terminal one.** A held order leaves
+**`on_hold` has six exits, and the resume cap never leaves a held order without a terminal one.** A held order leaves
 `on_hold` by resume (row 22), by cancel (row 23), by expiry (row 24, refused for a pre-hold
 `in_fulfillment`), or — only when the stored pre-hold state is `in_fulfillment` — by Workflow's
 failure acknowledgement (row 26) or workflow-mediated cancel (row 27), which carry the guards of
-rows 14 and 16 unchanged. Rows 26 and 27 exist because a hold taken from `in_fulfillment` after
+rows 14 and 16 unchanged, or by the operator-forced unreconciled failure (row 29), which carries
+the guards of row 28 unchanged (D-182). Rows 26 and 27 exist because a hold taken from `in_fulfillment` after
 the spawn signal otherwise has no terminal exit once row 22's resume cap is exhausted: row 23's
 shared cancel guard refuses every non-Workflow caller after the spawn signal, and row 24 refuses the
-expiry. **There is no `on_hold` row for `acknowledge-completed`**: a held order must be resumed
+expiry. Rows 26 and 27 still need complete evidence and a healthy Workflow; row 29 is the exit
+when neither exists and the overdue window has elapsed (D-182). **There is no `on_hold` row for `acknowledge-completed`**: a held order must be resumed
 to `in_fulfillment` (row 22) before it can complete, because completion asserts an activated
 fulfillment that a hold has suspended ([`../DECISIONS.md`](../DECISIONS.md) D-109).
 
@@ -1100,7 +1111,9 @@ do; and there is no direct `approved → pending_approval`
 amendment edge, recorded as [`../DECISIONS.md`](../DECISIONS.md) D-61 and routed as Q-12.
 The third is row 6, `draft → expired` on auto-void, absent from the PRD diagram and routed as Q-22.
 The fourth is row 26, `on_hold → fulfillment_failed`, absent from the PRD diagram and recorded as D-109;
-row 27 is the PRD's own `on_hold → cancelled` edge reached through the workflow-mediated trigger.
+row 29 reuses that same edge on the forced trigger and shares its disclosure (D-182), while row 28 is
+the PRD's `in_fulfillment → fulfillment_failed` edge on the forced trigger the PRD §6.3 amendment of
+D-182 adds. Row 27 is the PRD's own `on_hold → cancelled` edge reached through the workflow-mediated trigger.
 **One requirement divergence, also disclosed.** Row 22's resume-cap guard (`resume-cap-exhausted`)
 qualifies PRD §6.3's "A held order **MUST** be resumable": a held order at the cap exits only by
 cancel, expiry or, from an `in_fulfillment`-origin hold, rows 26 and 27, never by completion. It is
@@ -1134,7 +1147,7 @@ their guard *registrations* and their reason *entries*, never their logic.
 - **Gear design**: [`../DESIGN.md`](../DESIGN.md) — this slice is the Transition Engine named in its §3.2
 - **Design set**: [`./README.md`](../DECOMPOSITION.md) — slice map and dependency order
 - **ADRs**: [`ADR/0001`](../ADR/0001-cpt-cf-bss-orders-lifecycle-adr-transition-through-engine.md) transition through the engine; [`ADR/0003`](../ADR/0003-cpt-cf-bss-orders-lifecycle-adr-fail-closed-gate.md) fail closed on an unevaluable gate input; [`ADR/0004`](../ADR/0004-cpt-cf-bss-orders-lifecycle-adr-closed-enumerations.md) the closed state and event enumerations; [`ADR/0005`](../ADR/0005-cpt-cf-bss-orders-lifecycle-adr-refusals-commit.md) a refusal is a committed outcome; [`ADR/0006`](../ADR/0006-cpt-cf-bss-orders-lifecycle-adr-outbox-publication.md) asynchronous publication from an outbox; [`ADR/0007`](../ADR/0007-cpt-cf-bss-orders-lifecycle-adr-in-transaction-concurrency.md) concurrency enforced by an in-transaction constraint
-- **Decisions**: [`../DECISIONS.md`](../DECISIONS.md) — D-01, D-04…D-17, D-18…D-30, D-39, D-41…D-49, D-59, D-61, D-64…D-69, D-73, D-74, D-78…D-82, D-185
+- **Decisions**: [`../DECISIONS.md`](../DECISIONS.md) — D-01, D-04…D-17, D-18…D-30, D-39, D-41…D-49, D-59, D-61, D-64…D-69, D-73, D-74, D-78…D-82, D-109, D-182, D-185
 - **Review**: the 2026-09-08 wave — resolves R-01…R-03, R-06…R-08, R-10…R-14, R-16…R-30, R-32…R-36, R-46, R-59, R-62, R-68, R-74
 
 <!-- /contract -->

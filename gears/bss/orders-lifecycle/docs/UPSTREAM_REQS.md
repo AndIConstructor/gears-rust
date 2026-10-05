@@ -497,6 +497,41 @@ adapter owns requirement/routing decisions and receives required TCV; embedding 
 is an implementation option, not evidence the policy service exists. Payment authorization amount
 and provenance must be specified separately from TCV and Ledger settlement. See reciprocal amendments.
 
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-workflow-overdue-escalation`
+
+**Overdue fulfillment escalation with a named owner (D-182).** Orders Workflow **MUST** raise the
+PRD §6.3 overdue escalation for every order in `in_fulfillment`, or `on_hold` with pre-hold
+`in_fulfillment`, once database time passes expected fulfillment time — `max(begin-fulfillment
+instant, latest line service-activation date)` — plus the configurable overdue window (business
+default 24 hours), routed to the fulfillment operator (`cpt-cf-bss-orders-workflow-actor-owf-fulfillment-operator`)
+as the named owner, durably, once per order and window, with order, version, age and the
+unreconciled lines. The same escalation covers a stalled `active → cancelled` compensation
+(D-165). It **MUST NOT** auto-terminal the order.
+
+On consuming `OrderFulfillmentFailed` with `failure_reason = operator-forced-unreconciled`, Workflow
+**MUST** terminate the process — cease pending provisioning intents and timers — **without**
+treating the order as compensated: the event's evidence carries
+`no_active_subscription_remains = unknown`. It **MUST** keep, or open, the orphan-subscription
+manual task for that order until reconciliation through Subscriptions establishes that no active
+subscription remains, and **MUST NOT** call Lifecycle again for that order (any call is refused
+against the terminal state). Workflow's own principal **MUST NOT** hold the
+`order × force-fail-unreconciled` grant.
+
+**This is a production release prerequisite**, as the dead-letter recovery ask is: no deployment
+may admit `begin-fulfillment` in production until the escalation, its owner routing and the
+forced-failure handling are delivered and tested, together with Lifecycle's own overdue gauge and
+alert ([07 §3.8](DESIGN.md#contract-07-3-8)).
+
+**Current gap:** the Workflow PRD's process termination on terminal order events
+(`cpt-cf-bss-orders-workflow-fr-owf-terminal-order-events`, `gears/bss/orders-workflow/docs/PRD.md`)
+terminates only on `OrderCancelled`, `OrderExpired` and `OrderRejected`, because every other
+`fulfillment_failed` is Workflow's own acknowledgement; it has no rule for a terminal it did not
+cause, and its "process deadline is the overdue window" row names no escalation owner or
+forced-failure handling. Both need a Workflow PRD amendment by its owner; this document does not
+edit that gear or represent the amendment as agreed.
+
+**Owners:** Orders Workflow maintainers.
+
 ### 2.7 Event Broker
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-event-consumer-conformance`
@@ -919,7 +954,7 @@ removes it when the gateway variant lands. Architecture decides between waiting 
 
 | Priority | Requirements |
 |----------|-------------|
-| `p1` (critical) | `…-upreq-subscription-start-instant`, `…-upreq-overlap-presence-read`, `…-upreq-compensation-cancel-reason`, `…-upreq-pre-subscription-evaluation`, `…-upreq-tcv-with-annualisation`, `…-upreq-external-reference-propagation`, `…-upreq-delegation-proof-credential`, `…-upreq-authorization-outcome`, `…-upreq-event-consumer-conformance`, `…-upreq-workflow-amendment-verdict`, `…-upreq-event-broker-runtime`, `…-upreq-event-broker-cursor-retry`, `…-upreq-event-broker-dead-letter-recovery`, `…-upreq-event-broker-root-tenancy`, `…-upreq-event-delivery-observability`, `…-upreq-catalog-subscription-product-key`, `…-upreq-pricing-read-sdk`, `…-upreq-pricing-catalog-tenant-reads`, `…-upreq-products-sku-read-grant`, `…-upreq-pricing-purchase-assessment`, `…-upreq-initial-binding-acceptance`, `…-upreq-sku-protection`, `…-upreq-rating-evaluation`, `…-upreq-payer-commercial-profile`, `…-upreq-contract-party-eligibility`, `…-upreq-contract-acceptance-declaration`, `…-upreq-settle-create`, `…-upreq-intent-status-read`, `…-upreq-transition-outcome-echo`, `…-upreq-overlap-activation-atomicity` (release gate for submit/activation, D-180) |
+| `p1` (critical) | `…-upreq-subscription-start-instant`, `…-upreq-overlap-presence-read`, `…-upreq-compensation-cancel-reason`, `…-upreq-pre-subscription-evaluation`, `…-upreq-tcv-with-annualisation`, `…-upreq-external-reference-propagation`, `…-upreq-delegation-proof-credential`, `…-upreq-authorization-outcome`, `…-upreq-event-consumer-conformance`, `…-upreq-workflow-amendment-verdict`, `…-upreq-workflow-overdue-escalation`, `…-upreq-event-broker-runtime`, `…-upreq-event-broker-cursor-retry`, `…-upreq-event-broker-dead-letter-recovery`, `…-upreq-event-broker-root-tenancy`, `…-upreq-event-delivery-observability`, `…-upreq-catalog-subscription-product-key`, `…-upreq-pricing-read-sdk`, `…-upreq-pricing-catalog-tenant-reads`, `…-upreq-products-sku-read-grant`, `…-upreq-pricing-purchase-assessment`, `…-upreq-initial-binding-acceptance`, `…-upreq-sku-protection`, `…-upreq-rating-evaluation`, `…-upreq-payer-commercial-profile`, `…-upreq-contract-party-eligibility`, `…-upreq-contract-acceptance-declaration`, `…-upreq-settle-create`, `…-upreq-intent-status-read`, `…-upreq-transition-outcome-echo`, `…-upreq-overlap-activation-atomicity` (release gate for submit/activation, D-180) |
 | `p2` (important) | `…-upreq-order-reference-on-create`, `…-upreq-two-phase-pair-preserved`, `…-upreq-correlation-propagation`, `…-upreq-indicative-tax-read`, `…-upreq-audit-identity-lifecycle`, `…-upreq-gateway-path-param-throttle-key` |
 
 `cpt-cf-bss-orders-lifecycle-upreq-pdp-policy-integration` is also `p1`: verification and
@@ -936,7 +971,7 @@ mitigation exists.
 
 - **PRD**: [`./PRD.md`](./PRD.md) — §13 dependencies, §15 open questions
 - **DESIGN**: [`./DESIGN.md`](./DESIGN.md) §3.5, §3.8; [01 §3.8](DESIGN.md#contract-01-3-8), §4.4; [03 §2.2](DESIGN.md#contract-03-2-2); [06 §4.2](DESIGN.md#contract-06-4-2), §4.6
-- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-179, D-185, D-186, Q-04, Q-05, Q-08, Q-26, Q-32, Q-33
+- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-179, D-182, D-185, D-186, Q-04, Q-05, Q-08, Q-26, Q-32, Q-33
 - **ADRs**: [`./ADR/0003`](./ADR/0003-cpt-cf-bss-orders-lifecycle-adr-fail-closed-gate.md) — the fail-closed posture that makes `SUB-O5` a blocker rather than a degradation; [`./ADR/0006`](./ADR/0006-cpt-cf-bss-orders-lifecycle-adr-outbox-publication.md) — the platform producer path and Event Broker readiness gate
 - **Upstream registers**: `gears/bss/subscriptions/docs/SEAMS.md` §I (`SUB-O1`…`SUB-O6`); the sibling Workflow PRD §13 (`SUB-O5`…`SUB-O9`); `gears/bss/rating/docs/SEAMS.md` for the three Rating asks; `gears/bss/contracts/docs/PRD.md` §6.6 (*Party eligibility predicate*, *Booking instant and acceptance*) for the Contracts asks; `gears/bss/subscriptions/docs/SEAMS.md` `SUB-G1` (PR #4177) for the catalog-registry product key; `gears/bss/pricing/docs` D-419–D-425 and PRD §2.2 for the Pricing reads and system subjects; `gears/bss/products/docs` P-D-189/P-D-194 for SKU lifecycle and references. Rating **is** specified in this repository, with a PRD, a DESIGN, ADRs and its own seam register, so its asks are raised against that specification.
 - **Billing chain ownership (D-168).** The billing chain is **not** `gears/bss/ledger`. The Ledger is built and its `LedgerClientV1` is the GL posting and settlement target (`post_balanced_entry`, `settle_payment`, `allocate_payment`, `return_payment`, `record_dispute_phase`, credit application, AR balances, revenue recognition); it generates no invoices, values no at-sale facts and answers no tax, and settlement is not payment authorization. The capabilities this gear needs are owned as follows:
