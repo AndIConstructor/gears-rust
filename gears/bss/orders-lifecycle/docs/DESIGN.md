@@ -568,6 +568,9 @@ The constraints each slice adds are defined here and specified normatively in [�
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-outbox-at-least-once`
   — Foundation — Delivery is at-least-once; ordering is partition-scoped ([contract](#contract-01-delivery-is-at-least-once-ordering-is-partition-scoped))
 
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-event-consumer-contract`
+  — Foundation — Every event consumer meets one published, fixture-tested contract ([contract](#contract-01-event-consumer-contract))
+
 - [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-guard-input-ports`
   — Foundation — Guard inputs from unimplemented gears are ports ([contract](#contract-01-guard-inputs-from-unimplemented-gears-are-ports))
 
@@ -1865,9 +1868,11 @@ Orders deployment is blocked until that runtime and its integration tests exist.
 
 The event and assessment integration contracts are owned by [Foundation contract §3.6](features/01-foundation.md#contract-01-3-6) / [Foundation contract §3.7](DESIGN.md#contract-01-3-7) / [Foundation contract §4.4](DESIGN.md#contract-01-4-4).
 Settled responses bind replay to an immutable assessment when gate evaluation was reached;
-engine-only refusals expose none. Event payload completeness does not eliminate the mandatory
-consumer applicability read. Its PRD §9.2 departure is open under D-67/Q-25, with service read
-grants and durable unavailable-read recovery required by [UPSTREAM_REQS.md §2.7](UPSTREAM_REQS.md#27-event-broker). Pricing
+engine-only refusals expose none. A business-effect consumer always reads before its effect; the
+event is a trigger and a version reference, and only effect-free consumers may act on payload alone
+([event consumer contract](#contract-01-event-consumer-contract), D-186, closing Q-25's §9.2 half
+in line with PRD §9.2 PB-2026-09-29). Service read grants and durable unavailable-read recovery
+are required by [UPSTREAM_REQS.md §2.7](UPSTREAM_REQS.md#27-event-broker). Pricing
 readiness is split in `DECOMPOSITION.md`: PriceBook revision reads exist behind REST, but the `PricingReadV1` trait, the
 `bss-orders.system` grant, the residual purchase verdict and exact-binding Rating evaluation remain pending. Complete consumed-item coverage is mandatory;
 [UPSTREAM_REQS.md §2.2](UPSTREAM_REQS.md#22-rating--price-evaluation) registers that prerequisite and fail-closed behavior. Assessment identity
@@ -2134,7 +2139,8 @@ total request budget, bounded retry on transient failure only, a **circuit break
 mapping to that port's existing fail-closed reason, and a **concurrency bulkhead** per port, all
 specified in [03 §2.2](DESIGN.md#contract-03-2-2).
 
-Producer delivery is at-least-once with consumer de-duplication on event ID. Broker idempotency
+Producer delivery is at-least-once; consumers meet the
+[event consumer contract](#contract-01-event-consumer-contract) (D-186). Broker idempotency
 instead uses managed Chained producer metadata (`producer_id`, `previous`, `sequence`), not
 `event.id`; the SDK owns sequence assignment and cursor recovery as specified in [Foundation contract §4.4](DESIGN.md#contract-01-4-4).
 The Event Broker SDK
@@ -2189,7 +2195,7 @@ disclosure.
 | Accepted limit | Why it is accepted | Who acts when it bites |
 |----------------|--------------------|------------------------|
 | A **wedged `in_fulfillment` order holds its overlap key indefinitely**, blocking any new order on that key for that payer | `in_fulfillment` is expiry-exempt because a spawn signal may already have issued and expiry would orphan provisioned resources with no compensation path ([07 §4.3](features/07-hold-and-expiry.md#contract-07-4-3)). No transition in this gear can clear the claim, and ADR-0007 names this its sharpest residual cost | **Orders Workflow operations** — the escalation SLA on an overdue `in_fulfillment` order is the only route. If it proves too slow in practice the fix is an operator-initiated claim release, which is new scope and is not designed |
-| A **permanently rejected producer message may leave a gap before later events** | Deliberate platform ordering posture: transient retry preserves FIFO, but toolkit-db advances a queue-partition cursor after `Reject`. Orders is authoritative state, not an event-sourced ledger; blocking unrelated orders indefinitely on an invalid message is the worse failure mode (D-87, ADR-0006) | **Consumers and platform operations** — consumers de-duplicate and reconcile `orderVersion`/state against Orders; operations alert on and recover pending dead letters through the shared tooling and SDK mechanism required by `cpt-cf-bss-orders-lifecycle-upreq-event-broker-dead-letter-recovery` ([UPSTREAM_REQS §2.7](./UPSTREAM_REQS.md#27-event-broker)). This remains a production release prerequisite, including for terminal events |
+| A **permanently rejected producer message may leave a gap before later events** | Deliberate platform ordering posture: transient retry preserves FIFO, but toolkit-db advances a queue-partition cursor after `Reject`. Orders is authoritative state, not an event-sourced ledger; blocking unrelated orders indefinitely on an invalid message is the worse failure mode (D-87, ADR-0006) | **Consumers and platform operations** — Workflow, Subscriptions and Billing each meet the [event consumer contract](#contract-01-event-consumer-contract) (D-186) and pass its `orders-events` golden corpus before integration sign-off (`cpt-cf-bss-orders-lifecycle-upreq-event-consumer-conformance`); operations alert on pending dead letters (`cpt-cf-bss-orders-lifecycle-upreq-event-delivery-observability`) and recover them through the shared tooling and SDK republication required by `cpt-cf-bss-orders-lifecycle-upreq-event-broker-dead-letter-recovery` ([UPSTREAM_REQS §2.7](./UPSTREAM_REQS.md#27-event-broker)). Alerting and recovery remain `p1` production release prerequisites, including for terminal events; the consumer contract makes a gap safe, not absent |
 | **Two principals can each create a duplicate order** from the same request under the same key text | The idempotency key is scoped by principal to close an IDOR (D-88), which makes the same key text from a different principal a different key. For every operation but `create` the fingerprint's `order_id` and `expected_version` still catch the duplicate; on a create there is neither | **Product** — deciding whether a cross-principal create duplicate is a real commercial scenario. If it is, the answer is an upstream de-duplication key on the request, not a change to the registry's scoping |
 | The **stored resolved total is not the amount the customer will be invoiced** — non-authoritative, pre-tax, and excluding subscription-scoped overlays | Tax has no order-time owner and overlays need context a subscription has not yet created. Reporting a total that silently omitted them would be worse than declaring the omission ([03 §4.5](DESIGN.md#contract-03-4-5)) | **Every consumer surface** — a buyer portal, partner console or confirmation email. §4.2 of [08-read-and-authz](DESIGN.md#contract-08-1-1) makes rendering the total without its declared exclusions prohibited on this gear's read, and the same obligation is stated as an expectation on surfaces this gear does not own |
 | **`new_sale` covers net-new acquisition only**; expansion has no order document, no gate at the point of change, no pin and none of this audit trail | Declared PRD phasing — `change` is modeled and refused at creation, with the enum left open (Q-01). Not a design gap | **Product** — "Orders is live" and "commercial changes are governed by Orders" become true at different times, and only the first is true at the end of this phase |
@@ -2516,9 +2522,9 @@ event and at-least-once delivery of that message. It does **not** guarantee glob
 strict per-order barrier. `orderId` is the event partition key, so events for one order route to one
 broker partition and retain FIFO during ordinary processing and transient retries. A permanently
 rejected message is dead-lettered and the toolkit partition cursor advances; later events may then
-proceed. Consumers **MUST** de-duplicate by event ID and **MUST** validate the event's
-`orderVersion` and resulting state against authoritative Orders state before acting. The stream is
-a notification channel, not a reconstruction ledger (§4.4).
+proceed. Consumers therefore see duplicates and gaps; what each consumer **MUST** do about them is
+the [event consumer contract](#contract-01-event-consumer-contract) (§4.4, D-186), not restated
+here. The stream is a notification channel, not a reconstruction ledger.
 
 <a id="contract-01-guard-inputs-from-unimplemented-gears-are-ports"></a>
 
@@ -4205,8 +4211,9 @@ creation of a new order version". Under D-64 **five** rows append a version — 
 `OrderAmended`: creation is event-less (row 1, below) and submit announces itself as
 `OrderSubmitted`. `OrderAmended` therefore fires **only** on an amendment, which is the useful
 contract — a consumer keyed on it wants the supersession, not the first materialisation — but it
-is not the trigger the PRD states. The §6.5 and §9.2 wording is routed to Product as
-[DECISIONS.md](DECISIONS.md) Q-25, alongside Q-24's version-reason narrowing.
+is not the trigger the PRD states. The §6.5 trigger wording is routed to Product as
+[DECISIONS.md](DECISIONS.md) Q-41 (split from Q-25 by D-186, which closed Q-25's §9.2 read
+half), alongside Q-24's version-reason narrowing.
 
 **Six row classes are deliberately event-less**: create (1), draft mutation (2), the
 administrative edit (3), `submitted → pending_approval` (7), `approved → in_fulfillment` (11), and
@@ -4222,15 +4229,17 @@ before its `TypedEvent` compiles; none is registered yet. The
 Workflow branch consumes nine of them (W/design/10:274-276) and reads commercial facts through
 `get_version`; Seam Atlas C09 lists three and must be regenerated from this table. A rejected
 message is dead-lettered and the partition cursor advances (§3.6), so consumers see a gap they
-tolerate and recover through the authorized reads; the atlas's C00 gap-free stream sequence is not
-promised here.
+tolerate and recover through the authorized reads under the
+[event consumer contract](#contract-01-event-consumer-contract) (D-186); the atlas's C00 gap-free
+stream sequence is not promised here.
 
 Every event carries a bounded common summary: `orderId`, `orderVersion`, category, resulting
 state, resource/seller/payer axes, contract reference and external reference where present, plus the
 specific fields above. **D-158 changes the prior draft wire contract:** expanded pins, descriptor
 snapshots and monetary breakdowns are read through the authorized immutable-version SDK, not copied
 into events. The existing UUID/version pair is that reference. Consumer reads never substitute the
-current version, and a separate current-state read establishes applicability before business effects.
+current version, and a separate current-state read establishes applicability before business
+effects (consumer contract C2, D-186).
 
 This adds commercial-content reads as well as freshness reads and supersedes D-67's no-missing-content
 claim. PRD amendment PB-2026-09-29 records it; availability/retention and unavailable-read recovery are
@@ -4481,10 +4490,10 @@ publish as a new message or fall back to Stateless mode. This contract follows
 followed by a lost response/transport timeout. Retry the same durable message, both with the
 worker still running and after restart/cursor recovery; verify stable producer identity and
 `meta.sequence`, SDK predecessor reconciliation, one broker append and eventual queue
-acknowledgement. Separately deliver the same event ID twice to a consumer and verify one
-business effect. Operator republication may use a new valid producer sequence while preserving
-event ID; consumers must still suppress that duplicate. These are implementation/release tests,
-not a claim that the deployed broker has been verified.
+acknowledgement. Operator republication may use a new valid producer sequence while preserving
+event ID; the consumer-side duplicate is the `orders-events` corpus case `duplicate-republished`
+of the [event consumer contract](#contract-01-event-consumer-contract). These are
+implementation/release tests, not a claim that the deployed broker has been verified.
 
 Delivery is at-least-once. `orderId` **MUST** resolve as the GTS event partition key, routing all
 events for an order to one broker partition. FIFO holds during normal processing and transient
@@ -4496,26 +4505,9 @@ an invalid event or unrecoverable producer-chain fault does not become valid thr
 attempts, and blocking an entire producer partition indefinitely would reduce availability for
 unrelated orders.
 
-Consumers **MUST** de-duplicate by event ID and **MUST** use `orderVersion` plus the resulting
-state together with an authoritative Orders read to reject stale or inapplicable work. They
-**MUST NOT** reconstruct order state from the stream or assume every prior event was observed.
-Workflow, Subscriptions and Billing must use an authenticated, explicitly PDP-authorized
-`order × read` service path scoped to the target order; root broker access grants no such read.
-The read verifies applicability, not missing historical event content. A successful read proving
-that the particular intended action is obsolete retires that work without a business effect.
-A different state alone is insufficient: hold may defer work until resume, and a historical
-financial effect may remain applicable. Each consumer must declare its event/action-specific
-applicability rule; without one it may not silently classify work as obsolete.
-A timeout, 503 or authorization/configuration failure is not evidence of stale work: retain the
-event in the consumer's durable retry/reconciliation mechanism, perform no effect, and escalate
-on its bounded retry budget. Do not mark work complete or discard it because verification is
-unavailable. De-duplication marks a business effect complete only after that effect commits;
-a pending freshness check remains retryable after restart. A read is no distributed lock:
-the downstream operation must still enforce its version/state/concurrency guards at execution.
-[UPSTREAM_REQS.md §2.7](UPSTREAM_REQS.md#27-event-broker) records the consumer integration and Q-25 reconciliation requirement.
-Test delayed and duplicate events, a recovered dead letter after newer state, Orders outage,
-missing read grants and restart while validation is pending. A
-dead letter **MUST NOT** alter order state. Recovery uses the shared platform operator interface
+Consumers see the duplicates and gaps this posture produces and meet the
+[event consumer contract](#contract-01-event-consumer-contract) below (D-186); this paragraph
+does not restate it. A dead letter **MUST NOT** alter order state. Recovery uses the shared platform operator interface
 and supported SDK republication required by
 `cpt-cf-bss-orders-lifecycle-upreq-event-broker-dead-letter-recovery`
 ([`UPSTREAM_REQS.md §2.7`](UPSTREAM_REQS.md#27-event-broker)); Orders exposes no REST re-drive
@@ -4524,6 +4516,83 @@ producer identity and chained sequencing. It requires no new Orders transition, 
 parked terminal event such as `OrderCompleted`. The dead letter is resolved only after broker
 acknowledgement; consumer processing is monitored separately. This is a required platform
 capability, not a claim that toolkit's existing dead-letter claim operation republishes events.
+
+<a id="contract-01-event-consumer-contract"></a>
+
+#### Event consumer contract
+
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-event-consumer-contract` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
+
+**Scope and standing (D-186).** This is the single normative statement of what a consumer of the
+eleven Orders events must do; every other passage in this set that mentions consumer de-duplication,
+reconciliation or gap tolerance points here and adds nothing. It binds Workflow, Subscriptions and
+Billing (the **business-effect consumers**) and any later subscriber. Orders cannot enforce it from
+the producer side, so it is a published requirement verified by the `orders-events` golden corpus
+below, and passing that corpus is each consumer's integration sign-off gate
+(`cpt-cf-bss-orders-lifecycle-upreq-event-consumer-conformance`,
+[UPSTREAM_REQS.md §2.7](UPSTREAM_REQS.md#27-event-broker)). It is the consumer half of the delivery
+posture in [§2.2](#contract-01-delivery-is-at-least-once-ordering-is-partition-scoped) and D-87:
+at-least-once delivery plus a dead letter that advances the partition cursor means a consumer sees
+duplicates, gaps and, after recovery, out-of-order events.
+
+A consumer **MUST**:
+
+| # | Obligation | Normative detail |
+|---|------------|------------------|
+| C1 | **De-duplicate by event ID** | Key on the envelope `id`, never on `(orderId, orderVersion)` and never on broker `meta.sequence`, which operator republication may change while preserving `id` (§4.4 *The platform producer outbox*). Keep the processed IDs in a **consumer-owned processed-event store**: the platform supplies none — `event-broker-sdk`'s outbox and `toolkit_db::outbox` are producer-side, and the Event Broker consumer contract puts de-duplication on the consumer ([`0002-consumer-subscription-lifecycle.md` §2.3](../../../system/event-broker/docs/features/0002-consumer-subscription-lifecycle.md): "Consumers MUST handle at-least-once: dedup by event.id on the consumer side"). Mark an event complete **only in the transaction that commits its business effect** (or after it, where the effect is itself idempotent under the event ID); a crash before that commit leaves it retryable. An event retired without effect under C2 or C3 is marked complete the same way; one pending under C5 is not |
+| C2 | **Reconcile through the authorized reads before any business effect** | Read immutable content with `get_version(orderId, orderVersion)` and applicability with the current-order read `get` ([Workflow SDK contract](#orders-lifecycle-workflow-sdk)); compare the current `orderVersion` and `state` with the event's. Apply the consumer's **declared** per-event, per-action applicability rule: a successful read proving the intended action obsolete retires it without effect; a different state alone is insufficient (a hold defers until resume, and a historical financial effect may remain applicable); without a declared rule the consumer may not classify work as obsolete. Reads run on an authenticated, PDP-authorized `order × read` service path scoped to the target order; root broker access grants none (`cpt-cf-bss-orders-lifecycle-upreq-pdp-policy-integration`). A read is no distributed lock: the downstream operation still enforces its own version, state and concurrency guards at execution |
+| C3 | **Tolerate unknown values** | An unknown `state` or event-type value is "not one I act on": no error, no effect, marked complete under C1. No exhaustive match over either enumeration, and no generated client that declares them as closed enums ([Foundation §4.6](#contract-01-4-6), D-69; [Foundation §4.7](#contract-01-4-7) *Wire representation*) |
+| C4 | **Never reconstruct** | Never derive order state, the version chain or commercial content from the sequence of events, and never assume every prior event was observed or that events arrive in version order. Orders is the system of record; the stream is a trigger channel (D-87, D-178) |
+| C5 | **Keep unverifiable work durably pending** | A timeout, 503, authorization denial or configuration failure on a C2 read is not evidence of stale work and not an empty commercial result (PRD §6.5, PB-2026-09-29): perform no effect, keep the event durably pending in the consumer's retry/reconciliation mechanism, retry under a bounded consumer-owned budget and escalate to its operator when the budget is exhausted. Never mark it complete, discard it or retire it because verification is unavailable; a pending check survives restart |
+
+**A read is always required before a business effect (closes Q-25's §9.2 half).** The event is a
+**trigger and a version reference**: its common summary block is enough to route, de-duplicate,
+partition, filter and decide whether to fetch, and never enough to act on. A business effect is any
+write to another system of record keyed on the order — subscription create or activation,
+provisioning, approval routing, invoicing, payment — and is preceded by the C2 reads. Only
+**effect-free consumers** (audit, notification, analytics) may act on the payload alone; they still
+meet C1, C3 and C4 and never build order state from what they receive. This is the position of D-158
+(expanded content by immutable-version read), D-178 (gaps recovered through the authorized reads)
+and PRD §9.2's PB-2026-09-29 amendment, which supersedes the earlier "without a callback read"
+wording; no event-payload widening reopens it.
+
+**Golden conformance corpus `orders-events` (specified here, not built).** The consumer obligations
+are verified by one shared corpus rather than by each consumer's own reading of this table, following
+the joint golden fixture precedent: [`gears/bss/fixtures`](../../fixtures/README.md) holds hand-authored
+TOML under `corpus/<family>/` with a `_family.toml` manifest and a dev-only
+`bss-fixtures-conformance` runner, and Pricing gates publish-contract sign-off on its joint proration
+fixture ([`pricing/docs/design/06-consumer-contracts.md`](../../pricing/docs/design/06-consumer-contracts.md)
+K5 and its conformance criterion). `orders-events` is a new family there: one TOML case per row below,
+each a script of deliveries (envelopes) and stubbed Orders read responses, with the expected effect
+log. Because an event handler is not an arithmetic subject, the runner gains a sibling evaluator
+trait beside `CorpusEvaluator`; each consumer implements it over its real handler and supplies its
+declared C2 applicability rule as case parameters, so expected outcomes are per consumer where the
+rule decides them. The corpus is **built with the first consumer integration** (Workflow, per
+[06 §5.2](features/06-workflow-seam.md#52-cross-gear-safety-and-recovery-evidence)); until then
+no consumer may report it passed.
+
+| Case | Script | Expected | Obligation |
+|------|--------|----------|------------|
+| `duplicate-delivery` | Same envelope delivered twice | One effect; second delivery suppressed | C1 |
+| `duplicate-republished` | Recovered dead letter republished with a new `meta.sequence`, same `id`, after the original was processed | Suppressed | C1 |
+| `gap` | `v3` event dead-lettered and never delivered; `v4` arrives | `v4` handled from the C2 reads; no inferred `v3` effect; no wait for `v3` | C2, C4 |
+| `out-of-order` | `v4` processed, then recovered `v3` arrives | `v3` judged by the declared rule against the current read, never applied as current | C2, C4 |
+| `stale-version` | Event at `v2`; current read at `v5` in another state | Content from `get_version(v2)`, applicability from `get`; effect only if the rule holds | C2 |
+| `hold-defers` | Actionable event; current read `on_hold` | Deferred, not retired; acted on after resume | C2 |
+| `unknown-state` | `state` outside the eleven | No error, no effect, marked complete | C3 |
+| `unknown-event-type` | Event type outside the eleven | No error, no effect, marked complete | C3 |
+| `read-unavailable` | C2 read times out or returns 503 | No effect; pending; bounded retry then escalation; not marked complete | C5 |
+| `read-denied` | C2 read refused for a missing grant | Same as `read-unavailable`; never read as empty or not-found-means-obsolete | C5 |
+| `recovered-dead-letter-after-newer-state` | `OrderApproved` recovered after the order reached `cancelled` | Retired without effect by the declared rule | C2, C4 |
+| `restart-while-pending` | Crash after the C2 read and before the effect commits; redelivery | Exactly one effect after restart | C1, C5 |
+| `effect-free-on-payload` | Audit or notification consumer, no read | Acts on payload; still de-duplicates; builds no state | C1, C4 |
+
+These cases replace the former free-text consumer test list of this section. Producer-side
+regression evidence (lost response, cursor recovery) stays in *The platform producer outbox* above.
+The contract makes a gap **safe**, not absent: dead-letter alerting
+(`cpt-cf-bss-orders-lifecycle-upreq-event-delivery-observability`) and SDK republication with
+operator recovery (`cpt-cf-bss-orders-lifecycle-upreq-event-broker-dead-letter-recovery`) remain
+`p1` production release prerequisites ([§4.7 Accepted residual limits](#47-accepted-residual-limits)).
 
 
 <!-- /contract -->
@@ -4568,7 +4637,9 @@ and renaming — leaving the one §8 criterion about forward compatibility with 
 obligation is therefore stated here: **a consumer MUST tolerate an unknown `state` or event-type
 value**, treating it as "not one I act on" rather than as an error, and MUST NOT exhaustively
 match the enumeration. A consumer that cannot do so is not forward-compatible and its owner must
-say so before the set is extended ([DECISIONS.md](DECISIONS.md) D-69).
+say so before the set is extended ([DECISIONS.md](DECISIONS.md) D-69). This is obligation C3 of
+the [event consumer contract](#contract-01-event-consumer-contract), tested by its
+`unknown-state` and `unknown-event-type` corpus cases.
 
 **Stability zones**: the transition API of §3.3 and the event contract of §4.4 are the gear's two
 stability zones — additive changes are non-breaking, and removal or rename of a state, an event
@@ -7012,7 +7083,7 @@ the version chain. That column holds only these machine reasons; what a caller w
 hold reason, the amendment explanation, a failure reason — goes in `caller_reason` ([01 §3.7](DESIGN.md#contract-01-3-7), D-143). Two of those five append a version **without** publishing `OrderAmended`,
 against PRD §6.5's stated trigger of "on creation of a new order version": creation is event-less
 and submit publishes `OrderSubmitted`. `OrderAmended` fires only on rows 18, 19 and 20
-([01 §4.4](DESIGN.md#contract-01-4-4)), and the §6.5 wording is routed as Q-25. A consumer reconstructing the commercial trail keyed on the PRD's list finds
+([01 §4.4](DESIGN.md#contract-01-4-4)), and the §6.5 wording is routed as Q-41 (split from Q-25, D-186). A consumer reconstructing the commercial trail keyed on the PRD's list finds
 six of eight values on the audit row rather than the version row; the split is stated here so the
 two are not read as one vocabulary ([DECISIONS.md](DECISIONS.md) D-82).
 

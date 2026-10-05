@@ -179,7 +179,7 @@ Cross-principal create duplication and post-window re-execution remain disclosed
 1. Before readiness, prepare the topic/subject and eleven event schemas, explicit root tenancy, broker partition count and managed Chained producer. Startup validation rejects incomplete registrations, unknown guard rows, duplicate transition keys or unmapped reasons.
 2. Enqueue through the bound platform producer using the transition runner. Preserve the [Foundation contract §4.4](../DESIGN.md#contract-01-4-4) payload/envelope contract; validate maximum basket events against the 64 KiB envelope limit.
 3. Let toolkit workers own sequencing, leases, retries, rejection and queue storage. Transient failures retry; permanent faults dead-letter and advance the cursor. Instrument every outcome. Orders owns no drain SQL or re-drive endpoint.
-4. Consumers deduplicate by event ID and verify action applicability against an authorized current read. Read failure keeps work pending; it is not proof of obsolete work. Recovery preserves event identity through the shared platform path.
+4. Consumers meet the [event consumer contract](../DESIGN.md#contract-01-event-consumer-contract) (D-186); Orders does not restate it. Recovery preserves event identity through the shared platform path.
 5. Coordinate exactly the five Orders workers named in [Foundation contract §3.8](../DESIGN.md#contract-01-3-8) through its toolkit advisory keys and lifecycle cancellation. Session locks are not fencing: each write remains protected by transactional eligibility/idempotency checks; verification never repairs evidence.
 
 ### 3.5 Purge bounded-retention rows
@@ -261,7 +261,7 @@ The system **MUST** register and enqueue the existing event/error/category contr
 
 **Implements**: `cpt-cf-bss-orders-lifecycle-algo-foundation-publication-workers`.
 
-**Constraints**: `cpt-cf-bss-orders-lifecycle-constraint-outbox-at-least-once`.
+**Constraints**: `cpt-cf-bss-orders-lifecycle-constraint-outbox-at-least-once`, `cpt-cf-bss-orders-lifecycle-constraint-event-consumer-contract`.
 
 **Touches**: `cpt-cf-bss-orders-lifecycle-dbtable-event-outbox` (platform-managed persistence), typed event/error/category registration, readiness, maintenance and recovery integration.
 
@@ -289,7 +289,7 @@ The system **MUST** ship the `retention-purge` worker with Foundation (phase 0/1
 - [ ] Faults at audit, diagnostics, response serialization, enqueue and commit leave no partial effects; an uncertain commit response is resolved through the original key.
 - [ ] Migration tests enforce append-only grants/triggers and bounded purge authority. Frozen hash/checkpoint vectors, field mutation tests and deletion/tampering tests verify integrity without identity resolution or repairs.
 - [ ] Two-worker lock-session loss tests prove transactional safety despite overlapping passes; cleanup cannot delete a live/reclaimed marker and checkpoint writers cannot fork history.
-- [ ] Event integration verifies eleven schemas, root grants, subject partitioning, retry after broker persistence/lost response, consumer deduplication and dead-letter recovery; pending SDK/runtime/recovery dependencies are not reported as passed.
+- [ ] Event integration verifies eleven schemas, root grants, subject partitioning, retry after broker persistence/lost response, consumer conformance against the `orders-events` corpus of the [event consumer contract](../DESIGN.md#contract-01-event-consumer-contract) and dead-letter recovery; pending SDK/runtime/recovery dependencies are not reported as passed.
 - [ ] Measure resolution, commit and broker acknowledgement separately and together at the design load; include backlog and failed deliveries. Demonstrate RPO zero and RTO ≤60 minutes for committed orders and pending producer messages within the declared residency boundary.
 
 - [ ] Inbound integration tests exercise the per-caller gateway zone (D-185) and, once Q-26's open half is decided, the per-(caller, order) limit, and show that throttled attempts return 429 without entering the engine or writing transition-audit rows, that admitted retries count against the budget, and that workflow-only operations use their own zone.
@@ -853,9 +853,8 @@ invalid data or producer state.
 partition and preserve FIFO in ordinary operation. The toolkit queue has 16 partitions and maps
 `(topic, broker partition)` to one of them; a transient retry consequently blocks that whole
 toolkit partition, not merely one order. Once a permanent message is dead-lettered, the toolkit
-cursor advances and later messages may proceed. Consumers must tolerate that gap by de-duplicating
-on event ID and reconciling `orderVersion` and resulting state against the authoritative Orders
-read. A dead letter is operational evidence, not an order state and not a replayable order ledger.
+cursor advances and later messages may proceed. Consumers tolerate that gap under the
+[event consumer contract](../DESIGN.md#contract-01-event-consumer-contract) (D-186). A dead letter is operational evidence, not an order state and not a replayable order ledger.
 
 
 <!-- /contract -->

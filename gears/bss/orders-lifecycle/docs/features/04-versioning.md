@@ -64,7 +64,7 @@ Append a new immutable commercial version when an order is amended, re-run the f
 - **Dependencies**: [Foundation](01-foundation.md), [Capture](02-capture.md), [Gate and Pin](03-gate-and-pin.md).
 - **Consumers**: [Workflow Seam](06-workflow-seam.md), [Read and Authorization](08-read-and-authz.md).
 
-DESIGN owns schemas and architectural rationale; this feature owns the complete guard registration and behavior contracts. The migration does not resolve [DECISIONS.md](../DECISIONS.md) Q-12 (two-step re-approval), Q-28 (payer/seller rebinding), or Q-25 (event trigger wording). D-82's version/audit reason split also remains explicitly disclosed by the design.
+DESIGN owns schemas and architectural rationale; this feature owns the complete guard registration and behavior contracts. The migration does not resolve [DECISIONS.md](../DECISIONS.md) Q-12 (two-step re-approval), Q-28 (payer/seller rebinding), or Q-41 (`OrderAmended` trigger wording, split from Q-25 by D-186). D-82's version/audit reason split also remains explicitly disclosed by the design.
 
 **UI applicability**: UI layout, keyboard navigation, screen-reader behavior and visual accessibility are not applicable because this feature specifies backend contracts, not a user interface. API usability, actionable errors and non-disclosing diagnostics remain applicable; consuming consoles own their UI requirements.
 

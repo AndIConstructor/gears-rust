@@ -499,21 +499,35 @@ and provenance must be specified separately from TCV and Ledger settlement. See 
 
 ### 2.7 Event Broker
 
-**Consumer freshness integration (D-67 / Q-25).** Workflow, Subscriptions and Billing owners
-must implement Foundation §4.4's applicability read before business effects, with explicit
-PDP `order × read` grants constrained to their authorized target orders. Provisioning and
-verifying those grants is owned by §2.9 (`cpt-cf-bss-orders-lifecycle-upreq-pdp-policy-integration`);
-this section covers consumer-side read and retry behaviour. Platform-root event
-access supplies neither these grants nor business authorization. Use the existing Orders read
-surface; no new endpoint is requested. Unavailable/denied validation retains durable pending
-work, retries under bounded consumer policy and escalates without effects or silent loss.
-Each consumer must declare applicability per event/intended action: a hold can defer work,
-and a historical financial effect need not be obsolete merely because state advanced. A
-successful read proving that action obsolete may retire it; execution still uses downstream guards.
-PB-2026-09-29 amends the PRD callback contract; Product/Architecture must account for
-read load and availability in integration acceptance. This remains open consumer/deployment
-work, not evidence of implemented grants or retries. Verify delayed/duplicate events, recovered
-dead letters, unavailable reads, missing grants and restart during validation.
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-event-consumer-conformance`
+
+**Event consumer conformance (D-186).** Workflow, Subscriptions and Billing owners **MUST** each
+implement the [event consumer contract](DESIGN.md#contract-01-event-consumer-contract) (Foundation
+§4.4: C1 de-duplication by event ID in a consumer-owned processed-event store, C2 reconciliation
+through `get_version` and the current-order read before any business effect, C3 unknown-value
+tolerance, C4 no reconstruction, C5 durably pending work on an unavailable or denied read) and
+**MUST** pass the shared `orders-events` golden corpus specified there against their real handler,
+with their declared per-event applicability rule. **Passing the corpus is the integration
+sign-off gate** for each of the three; no consumer integration is accepted on a reading of the
+contract alone. Precedent: Pricing gates publish-contract sign-off on the joint proration golden
+fixture ([`../../pricing/docs/design/06-consumer-contracts.md`](../../pricing/docs/design/06-consumer-contracts.md)
+K5), held in [`gears/bss/fixtures`](../../fixtures/README.md). The corpus is specified in this gear
+and built with the first consumer integration (Workflow); Orders states the cases, each consumer
+owns its evaluator. The platform supplies no consumer-side processed-event store: the Event Broker
+consumer contract places de-duplication on the consumer
+([`0002-consumer-subscription-lifecycle.md`](../../../system/event-broker/docs/features/0002-consumer-subscription-lifecycle.md) §2.3).
+
+C2 reads need explicit PDP `order × read` grants constrained to each consumer's authorized target
+orders; provisioning and verifying them is owned by §2.9
+(`cpt-cf-bss-orders-lifecycle-upreq-pdp-policy-integration`). Platform-root event access supplies
+neither these grants nor business authorization. The existing Orders read surface is used; no new
+endpoint is requested. Q-25's §9.2 half is closed by D-186 in line with PRD §9.2's PB-2026-09-29
+amendment — a business-effect consumer always reads before its effect — so Product/Architecture
+account for that read load and availability in integration acceptance.
+
+**Owners:** Workflow, Subscriptions and Billing gear owners; Billing is unowned (D-168), so its
+obligation is recorded for whichever specification takes it.
+**Tracking status:** open; no consumer implementation or corpus run has been recorded.
 
 **Shared documentation follow-up — open (2026-09-22).** Event Broker SDK and GTS guideline
 maintainers should reconcile `guidelines/GTS.md` with the canonical declarations in
@@ -603,7 +617,9 @@ The supported SDK republication mechanism and shared operator interface remain o
 Removing the Orders re-drive endpoint does not itself supply either capability.
 
 **Release gate:** Orders production deployment **MUST** have both the supported SDK recovery
-mechanism and an operator interface. Closure **MUST** record their implementation PRs/deployed
+mechanism and an operator interface. Consumer conformance
+(`…-upreq-event-consumer-conformance`) makes a gap safe for consumers; it does not relax this gate,
+because a parked event — a terminal `OrderCompleted` included — still has to be delivered. Closure **MUST** record their implementation PRs/deployed
 revisions, the operator runbook and passing acceptance evidence.
 **Tracking status:** open; no qualifying implementation references have been recorded.
 
@@ -903,7 +919,7 @@ removes it when the gateway variant lands. Architecture decides between waiting 
 
 | Priority | Requirements |
 |----------|-------------|
-| `p1` (critical) | `…-upreq-subscription-start-instant`, `…-upreq-overlap-presence-read`, `…-upreq-compensation-cancel-reason`, `…-upreq-pre-subscription-evaluation`, `…-upreq-tcv-with-annualisation`, `…-upreq-external-reference-propagation`, `…-upreq-delegation-proof-credential`, `…-upreq-authorization-outcome`, `…-upreq-workflow-amendment-verdict`, `…-upreq-event-broker-runtime`, `…-upreq-event-broker-cursor-retry`, `…-upreq-event-broker-dead-letter-recovery`, `…-upreq-event-broker-root-tenancy`, `…-upreq-event-delivery-observability`, `…-upreq-catalog-subscription-product-key`, `…-upreq-pricing-read-sdk`, `…-upreq-pricing-catalog-tenant-reads`, `…-upreq-products-sku-read-grant`, `…-upreq-pricing-purchase-assessment`, `…-upreq-initial-binding-acceptance`, `…-upreq-sku-protection`, `…-upreq-rating-evaluation`, `…-upreq-payer-commercial-profile`, `…-upreq-contract-party-eligibility`, `…-upreq-contract-acceptance-declaration`, `…-upreq-settle-create`, `…-upreq-intent-status-read`, `…-upreq-transition-outcome-echo`, `…-upreq-overlap-activation-atomicity` (release gate for submit/activation, D-180) |
+| `p1` (critical) | `…-upreq-subscription-start-instant`, `…-upreq-overlap-presence-read`, `…-upreq-compensation-cancel-reason`, `…-upreq-pre-subscription-evaluation`, `…-upreq-tcv-with-annualisation`, `…-upreq-external-reference-propagation`, `…-upreq-delegation-proof-credential`, `…-upreq-authorization-outcome`, `…-upreq-event-consumer-conformance`, `…-upreq-workflow-amendment-verdict`, `…-upreq-event-broker-runtime`, `…-upreq-event-broker-cursor-retry`, `…-upreq-event-broker-dead-letter-recovery`, `…-upreq-event-broker-root-tenancy`, `…-upreq-event-delivery-observability`, `…-upreq-catalog-subscription-product-key`, `…-upreq-pricing-read-sdk`, `…-upreq-pricing-catalog-tenant-reads`, `…-upreq-products-sku-read-grant`, `…-upreq-pricing-purchase-assessment`, `…-upreq-initial-binding-acceptance`, `…-upreq-sku-protection`, `…-upreq-rating-evaluation`, `…-upreq-payer-commercial-profile`, `…-upreq-contract-party-eligibility`, `…-upreq-contract-acceptance-declaration`, `…-upreq-settle-create`, `…-upreq-intent-status-read`, `…-upreq-transition-outcome-echo`, `…-upreq-overlap-activation-atomicity` (release gate for submit/activation, D-180) |
 | `p2` (important) | `…-upreq-order-reference-on-create`, `…-upreq-two-phase-pair-preserved`, `…-upreq-correlation-propagation`, `…-upreq-indicative-tax-read`, `…-upreq-audit-identity-lifecycle`, `…-upreq-gateway-path-param-throttle-key` |
 
 `cpt-cf-bss-orders-lifecycle-upreq-pdp-policy-integration` is also `p1`: verification and
@@ -920,7 +936,7 @@ mitigation exists.
 
 - **PRD**: [`./PRD.md`](./PRD.md) — §13 dependencies, §15 open questions
 - **DESIGN**: [`./DESIGN.md`](./DESIGN.md) §3.5, §3.8; [01 §3.8](DESIGN.md#contract-01-3-8), §4.4; [03 §2.2](DESIGN.md#contract-03-2-2); [06 §4.2](DESIGN.md#contract-06-4-2), §4.6
-- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-179, D-185, Q-04, Q-05, Q-08, Q-26, Q-32, Q-33
+- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-179, D-185, D-186, Q-04, Q-05, Q-08, Q-26, Q-32, Q-33
 - **ADRs**: [`./ADR/0003`](./ADR/0003-cpt-cf-bss-orders-lifecycle-adr-fail-closed-gate.md) — the fail-closed posture that makes `SUB-O5` a blocker rather than a degradation; [`./ADR/0006`](./ADR/0006-cpt-cf-bss-orders-lifecycle-adr-outbox-publication.md) — the platform producer path and Event Broker readiness gate
 - **Upstream registers**: `gears/bss/subscriptions/docs/SEAMS.md` §I (`SUB-O1`…`SUB-O6`); the sibling Workflow PRD §13 (`SUB-O5`…`SUB-O9`); `gears/bss/rating/docs/SEAMS.md` for the three Rating asks; `gears/bss/contracts/docs/PRD.md` §6.6 (*Party eligibility predicate*, *Booking instant and acceptance*) for the Contracts asks; `gears/bss/subscriptions/docs/SEAMS.md` `SUB-G1` (PR #4177) for the catalog-registry product key; `gears/bss/pricing/docs` D-419–D-425 and PRD §2.2 for the Pricing reads and system subjects; `gears/bss/products/docs` P-D-189/P-D-194 for SKU lifecycle and references. Rating **is** specified in this repository, with a PRD, a DESIGN, ADRs and its own seam register, so its asks are raised against that specification.
 - **Billing chain ownership (D-168).** The billing chain is **not** `gears/bss/ledger`. The Ledger is built and its `LedgerClientV1` is the GL posting and settlement target (`post_balanced_entry`, `settle_payment`, `allocate_payment`, `return_payment`, `record_dispute_phase`, credit application, AR balances, revenue recognition); it generates no invoices, values no at-sale facts and answers no tax, and settlement is not payment authorization. The capabilities this gear needs are owned as follows:

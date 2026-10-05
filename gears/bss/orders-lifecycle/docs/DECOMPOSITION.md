@@ -148,6 +148,7 @@ unbreakable by a new slice.
     - `cpt-cf-bss-orders-lifecycle-constraint-single-writer`
     - `cpt-cf-bss-orders-lifecycle-constraint-idempotency-window`
     - `cpt-cf-bss-orders-lifecycle-constraint-outbox-at-least-once`
+    - `cpt-cf-bss-orders-lifecycle-constraint-event-consumer-contract`
     - `cpt-cf-bss-orders-lifecycle-constraint-guard-input-ports`
     - `cpt-cf-bss-orders-lifecycle-constraint-db-namespace`
   - **Entities**:
@@ -203,7 +204,7 @@ unbreakable by a new slice.
 
 - **Phase**: 0/1; [detailed design](DESIGN.md#contract-01-1-1). The `retention-purge` worker (`cpt-cf-bss-orders-lifecycle-component-retention-purge`) and the per-caller api-gateway limiter zone ship in this phase: refusal auditing is not enabled without the worker that bounds it (D-185).
 
-- **Event contract**: `cpt-cf-bss-orders-lifecycle-contract-order-events`; eleven typed events and the existing event-less transition classes, with platform producer delivery acceptance.
+- **Event contract**: `cpt-cf-bss-orders-lifecycle-contract-order-events`; eleven typed events and the existing event-less transition classes, with platform producer delivery acceptance; consumers meet the [event consumer contract](DESIGN.md#contract-01-event-consumer-contract) and its `orders-events` corpus gates their integration sign-off (D-186).
 
 ---
 

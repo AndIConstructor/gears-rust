@@ -65,6 +65,8 @@ Receive approval verdicts and fulfillment outcomes through five ordinary guarded
 
 The detailed design remains authoritative for schemas and API contracts. [UPSTREAM_REQS.md](../UPSTREAM_REQS.md) retains missing approval ownership, amendment-verdict behavior, activation re-check SDKs, atomic overlap admission, actual subscription start instant, progress integration, compensation reason, reverse provenance and correlation asks. The forked `SUB-O*` numbering and Workflow PRD's post-acceptance cancellation wording still require reconciliation; this feature does not declare them resolved.
 
+**Workflow as an event consumer (D-186).** Workflow is triggered by nine Orders events (W/design/10:274-276) and is bound, as every consumer is, by the [event consumer contract](../DESIGN.md#contract-01-event-consumer-contract): de-duplicate by event ID in its own processed-event store (C1), read `get_version` and the current-order `get` before reflecting a verdict, beginning fulfillment, acknowledging or cancelling (C2), treat unknown `state` and event-type values as not acted on (C3), never rebuild order state from the stream (C4), and keep a trigger durably pending with bounded retry and escalation when that read is unavailable or denied (C5). Its seam calls already carry `expected_version`, so a stale trigger that slips past C2 still refuses `version-conflict` (§6); the read is not a lock. Workflow declares its per-event applicability rule (for example, a current read of `on_hold` defers dispatch rather than retiring it) as the corpus case parameters.
+
 **UI applicability**: UI layout, keyboard navigation, screen-reader behavior and visual accessibility are not applicable because this feature specifies backend contracts, not a user interface. API usability, actionable errors and non-disclosing diagnostics remain applicable; consuming consoles own their UI requirements.
 
 ## 2. Actor Flows (CDSL)
@@ -232,11 +234,11 @@ The system **MUST** implement all five operations using Foundation's transaction
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-dod-workflow-seam-integration`
 
-The system **MUST** supply executable contract scenarios for the pre-dispatch fence, all re-check outcomes, exact-roster completion and evidence-gated terminals. Local doubles may validate Lifecycle before upstream implementation; production integration remains subject to the documented missing SDKs, cancellation-boundary reconciliation and downstream actual-start/atomic-overlap contracts. Lifecycle adds no outbound provisioning adapter, durable process worker, approval owner or live-progress update endpoint.
+The system **MUST** supply executable contract scenarios for the pre-dispatch fence, all re-check outcomes, exact-roster completion and evidence-gated terminals. Workflow's integration sign-off additionally requires a passing run of the `orders-events` golden corpus against its real event handler, with its declared applicability rule (`cpt-cf-bss-orders-lifecycle-upreq-event-consumer-conformance`); Workflow is the first consumer integration, so the corpus is built with it. Local doubles may validate Lifecycle before upstream implementation; production integration remains subject to the documented missing SDKs, cancellation-boundary reconciliation and downstream actual-start/atomic-overlap contracts. Lifecycle adds no outbound provisioning adapter, durable process worker, approval owner or live-progress update endpoint.
 
 **Implements**: `cpt-cf-bss-orders-lifecycle-algo-workflow-seam-dispatch-fence`, `cpt-cf-bss-orders-lifecycle-algo-workflow-seam-completion`, `cpt-cf-bss-orders-lifecycle-algo-workflow-seam-compensation`, `cpt-cf-bss-orders-lifecycle-algo-workflow-seam-cancel-window`.
-**Constraints**: `cpt-cf-bss-orders-lifecycle-constraint-approval-owner-absent`, `cpt-cf-bss-orders-lifecycle-constraint-compensation-reason-unagreed`, `cpt-cf-bss-orders-lifecycle-constraint-provenance-one-directional`, `cpt-cf-bss-orders-lifecycle-constraint-correlation-propagation-unagreed`.
-**Touches**: Workflow and Subscriptions contract fixtures, recovery tests and Read and Authorization projection contract.
+**Constraints**: `cpt-cf-bss-orders-lifecycle-constraint-approval-owner-absent`, `cpt-cf-bss-orders-lifecycle-constraint-compensation-reason-unagreed`, `cpt-cf-bss-orders-lifecycle-constraint-provenance-one-directional`, `cpt-cf-bss-orders-lifecycle-constraint-correlation-propagation-unagreed`, `cpt-cf-bss-orders-lifecycle-constraint-event-consumer-contract`.
+**Touches**: Workflow and Subscriptions contract fixtures, the `orders-events` corpus family in `gears/bss/fixtures`, recovery tests and Read and Authorization projection contract.
 
 ## 6. Acceptance Criteria
 
@@ -252,6 +254,8 @@ The system **MUST** supply executable contract scenarios for the pre-dispatch fe
 - [ ] A fulfillment hold can fail or cancel with complete evidence; completion requires resume. Other holds cannot use those terminal rows.
 - [ ] Acknowledgement projections cannot influence order guards or mirror downstream request states. Missing projection data cannot claim work has not started.
 - [ ] Commit latency meets p95 < 1 s independently of Workflow re-check duration; fault injection proves atomic rollback, and recovery preserves the committed spawn signal with the order.
+
+- [ ] Workflow's event handler passes every `orders-events` corpus case of the [event consumer contract](../DESIGN.md#contract-01-event-consumer-contract): one effect per event ID including republished duplicates, no inferred effect across a gap, out-of-order and stale triggers judged by the current read, `on_hold` deferring rather than retiring, unknown values ignored, and read 503/denial leaving the trigger pending through restart.
 
 - [ ] Failed acknowledgement with both invalid compensation evidence and a wrong pre-hold origin returns `compensation-evidence-incomplete` first; with valid evidence it reaches `prehold-not-in-fulfillment`. Missing reason and boundary-invalid inputs retain their earlier precedence.
 
@@ -672,7 +676,7 @@ would leave orders non-terminal for reasons the order has no visibility into.
 - **Depends on**: [`05-preconditions`](../DESIGN.md#contract-05-1-1) for both begin-fulfillment guards; [`03-gate-and-pin`](../DESIGN.md#contract-03-1-1) for the activation re-check contract (specified by 03, executed by Workflow)
 - **Consumers**: [`08-read-and-authz`](../DESIGN.md#contract-08-1-1) serves the per-line projection; [`07-hold-and-expiry`](../DESIGN.md#contract-07-1-1) exempts `in_fulfillment` (and holds whose `pre_hold_state` is `in_fulfillment`) from expiry by state, and reads the spawn signal only by deferring to §3.6 *Evaluate Cancel From In-Fulfillment (shared guard)* from its ordinary `POST /cancel`
 - **Sibling gear**: [`orders-workflow/docs/PRD.md`](../../../orders-workflow/docs/PRD.md)
-- **Upstream asks**: `SUB-O1`, `SUB-O2`, `SUB-O5`, `SUB-O9`, `SUB-O10`, `…-upreq-workflow-amendment-verdict` and `…-upreq-overlap-activation-atomicity` (a release gate for submit/activation, D-180) — per §4.6; additional recheck and progress integration requirements are recorded in UPSTREAM_REQS §2.6
+- **Upstream asks**: `SUB-O1`, `SUB-O2`, `SUB-O5`, `SUB-O9`, `SUB-O10`, `…-upreq-event-consumer-conformance` (UPSTREAM_REQS §2.7, D-186), `…-upreq-workflow-amendment-verdict` and `…-upreq-overlap-activation-atomicity` (a release gate for submit/activation, D-180) — per §4.6; additional recheck and progress integration requirements are recorded in UPSTREAM_REQS §2.6
 - **ADRs**: [`ADR/0001`](../ADR/0001-cpt-cf-bss-orders-lifecycle-adr-transition-through-engine.md) transition through the engine; [`ADR/0002`](../ADR/0002-cpt-cf-bss-orders-lifecycle-adr-slice-decomposition.md) the foundation-plus-seven-slices decomposition
 
 <!-- /contract -->
