@@ -6,6 +6,9 @@ pub enum DomainError {
     #[error("Repo not found")]
     NotFound,
 
+    #[error("Sync session not found")]
+    SessionNotFound,
+
     #[error("Validation error on field '{field}': {message}")]
     Validation { field: String, message: String },
 
@@ -53,6 +56,7 @@ impl DomainError {
     pub fn public_text(&self) -> String {
         match self {
             Self::NotFound
+            | Self::SessionNotFound
             | Self::Validation { .. }
             | Self::Conflict(_)
             | Self::Cancelled

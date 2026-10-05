@@ -4051,7 +4051,7 @@ impl Service {
             .sync_sessions
             .find_by_id(&scope, job.session_id)
             .await?
-            .ok_or(DomainError::NotFound)?;
+            .ok_or(DomainError::SessionNotFound)?;
         session.status = SessionStatus::InProgress;
         session.started_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.started_at);
@@ -4469,8 +4469,11 @@ impl Service {
     /// down.
     ///
     /// Best effort throughout. A row that is not there, a status that is not
-    /// `in_progress`, or a read that fails leaves the marker alone, and the
-    /// request goes on to take the lock or to answer 409 exactly as before.
+    /// `in_progress`, a session that is not `in_progress` or `interrupted`
+    /// (a `queued` one never took the lock, a `failed` or `complete` one
+    /// already gave it back), or a read that fails leaves the marker alone,
+    /// and the request goes on to take the lock or to answer 409 exactly as
+    /// before.
     async fn release_lock_left_by_a_dead_run(
         &self,
         scopes: &EnqueueScopes,
@@ -4497,7 +4500,11 @@ impl Service {
         else {
             return;
         };
-        if abandoned(&session, Utc::now()) {
+        let took_the_lock = matches!(
+            session.status,
+            SessionStatus::InProgress | SessionStatus::Interrupted
+        );
+        if took_the_lock && abandoned(&session, Utc::now()) {
             self.release_stale_sync_lock(tenant_id, repo_full_name)
                 .await;
         }
@@ -4506,8 +4513,8 @@ impl Service {
     /// One sync session by id, tenant-scoped.
     ///
     /// # Errors
-    /// `DomainError::NotFound` when the session does not exist for this
-    /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// `DomainError::SessionNotFound` when the session does not exist for
+    /// this tenant; `Forbidden`/`Database`/`Internal` as usual.
     pub async fn get_session(
         &self,
         ctx: &SecurityContext,
@@ -4527,7 +4534,7 @@ impl Service {
         self.sync_sessions
             .find_by_id(&scope, id)
             .await?
-            .ok_or(DomainError::NotFound)
+            .ok_or(DomainError::SessionNotFound)
     }
 
     /// The tenant's sync sessions, newest first.

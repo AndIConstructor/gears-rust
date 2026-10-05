@@ -900,12 +900,25 @@ impl Worker for MirrorWorker {
             TaskKind::Index(Family::Commits) => self.index_commits(ctx).await,
             TaskKind::Index(Family::Metadata) => self.index_metadata().await,
             TaskKind::Index(Family::Actions) => self.index_actions(ctx).await,
-            TaskKind::Refine(entity) | TaskKind::Verify(entity) => match entity {
-                Entity::Issue => self.refine_issue(task).await,
-                Entity::PullRequest => self.refine_pull_request(ctx, task).await,
-                Entity::Commit => self.refine_commit(task).await,
-                Entity::WorkflowRun => self.refine_workflow_run(task).await,
-            },
+            TaskKind::Refine(entity) | TaskKind::Verify(entity) => {
+                let refined = match entity {
+                    Entity::Issue => self.refine_issue(task).await,
+                    Entity::PullRequest => self.refine_pull_request(ctx, task).await,
+                    Entity::Commit => self.refine_commit(task).await,
+                    Entity::WorkflowRun => self.refine_workflow_run(task).await,
+                };
+                match refined {
+                    Err(DomainError::NotFound) => {
+                        tracing::info!(
+                            entity = ?entity,
+                            id = task.entity_id.as_deref().unwrap_or_default(),
+                            "GitHub no longer has this entity; skipping its refinement"
+                        );
+                        Ok(())
+                    }
+                    other => other,
+                }
+            }
         }
     }
 }

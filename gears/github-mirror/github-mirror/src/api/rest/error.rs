@@ -51,6 +51,9 @@ impl From<DomainError> for CanonicalError {
             DomainError::NotFound => RepositoryError::not_found("Repo not found")
                 .with_resource("repository")
                 .create(),
+            DomainError::SessionNotFound => RepositoryError::not_found("Sync session not found")
+                .with_resource("sync_session")
+                .create(),
             DomainError::Validation { field, message } => RepositoryError::invalid_argument()
                 .with_field_violation(field, message, "VALIDATION_ERROR")
                 .create(),
