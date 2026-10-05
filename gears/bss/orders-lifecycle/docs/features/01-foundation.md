@@ -221,7 +221,7 @@ The system **MUST** implement both transition branches, shared guard precedence,
 
 **Implements**: `cpt-cf-bss-orders-lifecycle-flow-foundation-attempt-transition`, `cpt-cf-bss-orders-lifecycle-flow-foundation-create-transition`, `cpt-cf-bss-orders-lifecycle-algo-foundation-overlap-claims`.
 
-**Constraints**: `cpt-cf-bss-orders-lifecycle-constraint-single-writer`, `cpt-cf-bss-orders-lifecycle-constraint-guard-input-ports`.
+**Constraints**: `cpt-cf-bss-orders-lifecycle-constraint-single-writer`, `cpt-cf-bss-orders-lifecycle-constraint-guard-input-ports`, `cpt-cf-bss-orders-lifecycle-constraint-db-namespace`.
 
 **Touches**: internal transition/registration API; `cpt-cf-bss-orders-lifecycle-db-foundation-schema`; aggregate, versions, lines, contributions and claims. Endpoint contracts remain with their owning features.
 

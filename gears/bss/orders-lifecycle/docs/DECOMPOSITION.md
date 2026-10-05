@@ -149,6 +149,7 @@ unbreakable by a new slice.
     - `cpt-cf-bss-orders-lifecycle-constraint-idempotency-window`
     - `cpt-cf-bss-orders-lifecycle-constraint-outbox-at-least-once`
     - `cpt-cf-bss-orders-lifecycle-constraint-guard-input-ports`
+    - `cpt-cf-bss-orders-lifecycle-constraint-db-namespace`
   - **Entities**:
     - `cpt-cf-bss-orders-lifecycle-entity-order-root`
     - `cpt-cf-bss-orders-lifecycle-entity-order-version-chain`

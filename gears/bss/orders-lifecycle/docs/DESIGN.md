@@ -571,6 +571,9 @@ The constraints each slice adds are defined here and specified normatively in [�
 - [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-guard-input-ports`
   — Foundation — Guard inputs from unimplemented gears are ports ([contract](#contract-01-guard-inputs-from-unimplemented-gears-are-ports))
 
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-db-namespace`
+  — Foundation — Database objects carry the `bss_orders` namespace ([contract](#contract-01-database-objects-carry-the-bss_orders-namespace))
+
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-constraint-single-currency-basket`
   — Capture — The basket is single-currency ([contract](#contract-02-the-basket-is-single-currency))
 
@@ -1651,6 +1654,19 @@ The detailed interaction sequences of each feature are defined here and specifie
 
 - [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-db-orders-store`
 
+**Physical names (D-183).** The gear declares the stable database namespace
+`db_namespace = "bss_orders"` under the platform object-namespacing decision
+([database ADR-0001](../../../../docs/arch/database/ADR/0001-cpt-cf-database-adr-object-namespacing.md)).
+Every `orders_*` table name in this design set is a **logical** name; its physical name is
+`bss_orders__` followed by the logical name with the leading `orders_` removed, as the
+**Physical name** column lists. An index or constraint given an explicit name is
+`idx_|uq_|fk_|ck_<physical table>__<purpose>`; the longest physical table name is 35 bytes, inside
+the 63-byte limit with room for a purpose. The ADR's gear-macro `db_namespace` attribute and Dylint
+prefix check do not exist yet, so until they land this is enforced by review; the rule, the alias
+reason and the byte budget are in
+[Foundation: Constraints](#contract-01-database-objects-carry-the-bss_orders-namespace)
+(`cpt-cf-bss-orders-lifecycle-constraint-db-namespace`).
+
 **One ownership rule, stated here and in the foundation and nowhere else:** the **engine owns the
 schema and is the sole writer** of every table below; a **slice owns the content** it contributes
 and the guards that admit it. Column-level definitions, keys, constraints and indexes are
@@ -1660,29 +1676,29 @@ columns are integer minor units at the currency's ISO 4217 scale. Immutability i
 table** rather than globally; the inventory below is authoritative for the Orders-owned tables
 and their mutability. Platform producer/outbox tables are not Orders-owned tables.
 
-| Table | Specified in | Content owner | Mutability |
-|-------|--------------|---------------|------------|
-| `orders_order` | [01 §3.7](DESIGN.md#contract-01-3-7) | engine | mutable — denormalized state, pointers, counters |
-| `orders_order_version` | [01 §3.7](DESIGN.md#contract-01-3-7) | versioning | append-only |
-| `orders_order_line_identity` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | append-only; no application/operational UPDATE or DELETE grant |
-| `orders_order_line` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | append-only |
-| `orders_draft_content` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | **mutable** — the pre-submit working set |
-| `orders_order_admin` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | **mutable** — administrative content |
-| `orders_order_line_admin` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | **mutable** — administrative content |
-| `orders_resolved_total` | [01 §3.7](DESIGN.md#contract-01-3-7) | gate-and-pin | append-only |
-| `orders_transition_audit` | [01 §3.7](DESIGN.md#contract-01-3-7) | engine | append-only, hash-chained over committed entries; no application/operational UPDATE grant or erasure exception (D-96, §4.3), DELETE only to the retention worker for expired refused rows — [01 §3.7](DESIGN.md#contract-01-3-7) is the canonical grant and retention contract |
-| `orders_audit_checkpoint` | [01 §3.7](DESIGN.md#contract-01-3-7) | audit worker | append-only tenant roll-up headers; D-100 |
-| `orders_audit_checkpoint_member` | [01 §3.7](DESIGN.md#contract-01-3-7) | audit worker | append-only expected order-chain heads; D-100 |
-| `orders_idempotency` | [01 §3.7](DESIGN.md#contract-01-3-7) | engine | **mutable** — marker settles |
-| `orders_line_fulfillment` | [01 §3.7](DESIGN.md#contract-01-3-7) | workflow-seam | **mutable** — projection advances |
-| `orders_inflight_overlap_claim` | [01 §3.7](DESIGN.md#contract-01-3-7) | gate-and-pin | **mutable** — only to set `released_at`; claims are never deleted |
-| `orders_acceptance` | [01 §3.7](DESIGN.md#contract-01-3-7) | preconditions | append-only |
-| `orders_gate_outcome` | [03 §3.7](DESIGN.md#contract-03-3-7) | gate-and-pin | append-only; Preview rows bounded retention |
-| `orders_approval_reflection` | [06 §3.7](DESIGN.md#contract-06-3-7) | workflow-seam | append-only |
-| `orders_state_ttl_policy` | [07 §3.7](DESIGN.md#contract-07-3-7) | hold-and-expiry | mutable policy rows |
-| `orders_date_policy` | [02 §3.7](DESIGN.md#contract-02-3-7) | capture | mutable policy rows; D-121 |
-| `orders_policy_election` | [05 §3.7](DESIGN.md#contract-05-3-7) | preconditions | **mutable** — standing policy elections, changed only by deployment promotion (D-133) |
-| `orders_read_access_log` | [08 §3.7](DESIGN.md#contract-08-3-7) | read-and-authz | append-only |
+| Table | Physical name | Specified in | Content owner | Mutability |
+|-------|---------------|--------------|---------------|------------|
+| `orders_order` | `bss_orders__order` | [01 §3.7](DESIGN.md#contract-01-3-7) | engine | mutable — denormalized state, pointers, counters |
+| `orders_order_version` | `bss_orders__order_version` | [01 §3.7](DESIGN.md#contract-01-3-7) | versioning | append-only |
+| `orders_order_line_identity` | `bss_orders__order_line_identity` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | append-only; no application/operational UPDATE or DELETE grant |
+| `orders_order_line` | `bss_orders__order_line` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | append-only |
+| `orders_draft_content` | `bss_orders__draft_content` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | **mutable** — the pre-submit working set |
+| `orders_order_admin` | `bss_orders__order_admin` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | **mutable** — administrative content |
+| `orders_order_line_admin` | `bss_orders__order_line_admin` | [01 §3.7](DESIGN.md#contract-01-3-7) | capture | **mutable** — administrative content |
+| `orders_resolved_total` | `bss_orders__resolved_total` | [01 §3.7](DESIGN.md#contract-01-3-7) | gate-and-pin | append-only |
+| `orders_transition_audit` | `bss_orders__transition_audit` | [01 §3.7](DESIGN.md#contract-01-3-7) | engine | append-only, hash-chained over committed entries; no application/operational UPDATE grant or erasure exception (D-96, §4.3), DELETE only to the retention worker for expired refused rows — [01 §3.7](DESIGN.md#contract-01-3-7) is the canonical grant and retention contract |
+| `orders_audit_checkpoint` | `bss_orders__audit_checkpoint` | [01 §3.7](DESIGN.md#contract-01-3-7) | audit worker | append-only tenant roll-up headers; D-100 |
+| `orders_audit_checkpoint_member` | `bss_orders__audit_checkpoint_member` | [01 §3.7](DESIGN.md#contract-01-3-7) | audit worker | append-only expected order-chain heads; D-100 |
+| `orders_idempotency` | `bss_orders__idempotency` | [01 §3.7](DESIGN.md#contract-01-3-7) | engine | **mutable** — marker settles |
+| `orders_line_fulfillment` | `bss_orders__line_fulfillment` | [01 §3.7](DESIGN.md#contract-01-3-7) | workflow-seam | **mutable** — projection advances |
+| `orders_inflight_overlap_claim` | `bss_orders__inflight_overlap_claim` | [01 §3.7](DESIGN.md#contract-01-3-7) | gate-and-pin | **mutable** — only to set `released_at`; claims are never deleted |
+| `orders_acceptance` | `bss_orders__acceptance` | [01 §3.7](DESIGN.md#contract-01-3-7) | preconditions | append-only |
+| `orders_gate_outcome` | `bss_orders__gate_outcome` | [03 §3.7](DESIGN.md#contract-03-3-7) | gate-and-pin | append-only; Preview rows bounded retention |
+| `orders_approval_reflection` | `bss_orders__approval_reflection` | [06 §3.7](DESIGN.md#contract-06-3-7) | workflow-seam | append-only |
+| `orders_state_ttl_policy` | `bss_orders__state_ttl_policy` | [07 §3.7](DESIGN.md#contract-07-3-7) | hold-and-expiry | mutable policy rows |
+| `orders_date_policy` | `bss_orders__date_policy` | [02 §3.7](DESIGN.md#contract-02-3-7) | capture | mutable policy rows; D-121 |
+| `orders_policy_election` | `bss_orders__policy_election` | [05 §3.7](DESIGN.md#contract-05-3-7) | preconditions | **mutable** — standing policy elections, changed only by deployment promotion (D-133) |
+| `orders_read_access_log` | `bss_orders__read_access_log` | [08 §3.7](DESIGN.md#contract-08-3-7) | read-and-authz | append-only |
 
 There is no destructive path for any **order-linked commercial** row: an abandoned draft is
 auto-voided to `expired` and remains readable. Three stores carry bounded retention by design, each Orders-owned and executed by the retention sweep
@@ -2487,6 +2503,47 @@ party-eligibility check among them — are resolved through ports before the tra
 under the per-port deadlines of [03-gate-and-pin — Constraints](DESIGN.md#contract-03-2-2). The engine treats
 an unresolvable input as a refusal (§2.1) rather than blocking, so an absent counterpart degrades
 a capability instead of stalling the gear.
+
+<a id="contract-01-database-objects-carry-the-bss_orders-namespace"></a>
+
+#### Database objects carry the `bss_orders` namespace
+
+**Contract**: `cpt-cf-bss-orders-lifecycle-constraint-db-namespace` (`p1`), defined in [§2.2 Slice constraints](#register-constraints).
+
+The gear declares the stable database namespace `db_namespace = "bss_orders"` and names every
+database object whose name it can select by the platform object-namespacing decision
+([database ADR-0001](../../../../docs/arch/database/ADR/0001-cpt-cf-database-adr-object-namespacing.md), D-183):
+
+* **Logical and physical names.** The `orders_*` table names used throughout this design set — prose,
+  `#### Table:` headings, anchors, ADRs and features — are **logical names**. A table's physical
+  name is `bss_orders__<local>`, where `<local>` is the logical name with its leading `orders_`
+  removed and nothing else changed: `orders_order` → `bss_orders__order`,
+  `orders_transition_audit` → `bss_orders__transition_audit`. The [§3.7 inventory](#37-database-schemas--tables)
+  lists every physical name; that column is the one migrations and entities use.
+* **Supporting objects.** An index or constraint given an explicit name is
+  `idx_|uq_|fk_|ck_|trg_|seq_<physical table>__<purpose>`, for example
+  `uq_bss_orders__inflight_overlap_claim__open_tuple`; backend-generated names (primary keys,
+  implicit unique indexes) are outside the grammar, as the ADR states.
+* **Why the alias.** `bss_orders` is a shorter storage alias, which the ADR permits (its
+  `usage_tsdb` example). The canonical form `bss_orders_lifecycle` makes the longest table
+  `bss_orders_lifecycle__audit_checkpoint_member` 45 bytes, leaving 13 bytes for a `uq_…__`
+  purpose under the 63-byte limit; bare `orders` would read as belonging to any of the Orders gears
+  (Lifecycle, Workflow, Change Orders). With `bss_orders` the longest table name,
+  `bss_orders__audit_checkpoint_member`, is 35 bytes and a `uq_`/`idx_`/`fk_`/`ck_` name over it
+  has 22 (`idx_`) or 23 (`uq_`, `fk_`, `ck_`) bytes left for its purpose. Changing the namespace after the first migration is an
+  explicit rename migration.
+* **Enforcement today.** The ADR's `db_namespace` attribute on `#[toolkit::gear(...)]` and its
+  Dylint `<db_namespace>__` prefix check do not exist yet. Until they land, the rule is held by
+  review of entity `table_name` values and migration DDL; when they land, the gear declares the
+  attribute and the check applies with no name change.
+* **Precedent.** The shape follows the one compliant design in the repository,
+  [policy-engine](../../../system/policy-engine/docs/DESIGN.md)
+  (`cpt-cf-policy-engine-constraint-db-namespace`, its §3.7 declaration and
+  `uq_policy_engine__decision_record__evaluation`). No BSS gear complies yet: the Ledger's tables
+  are `ledger_*` and Pricing's `pricing_*`, so this gear does not copy its siblings here.
+
+Platform producer and outbox tables keep the names their libraries give them and are not in this
+gear's inventory ([Platform-managed producer persistence](#contract-01-platform-managed-producer-persistence)).
 
 
 <!-- /contract -->
@@ -4422,7 +4479,8 @@ why.
 **Identifier ownership.** This gear owns the namespace `orders` inside the `bss` package:
 `gts.cf.bss.orders.*`. Vendor `cf`, package `bss` and the version suffix follow the platform
 format; the `orders` namespace and every name under it are this gear's to allocate, and no other
-gear may define an identifier in it.
+gear may define an identifier in it. This is the GTS identifier namespace only; the gear's database
+namespace is `bss_orders` ([§3.7](#37-database-schemas--tables), D-183).
 
 <a id="contract-01-the-event-base-type-and-its-derived-types"></a>
 
