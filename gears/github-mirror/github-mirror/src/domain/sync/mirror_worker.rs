@@ -31,7 +31,7 @@ use crate::domain::repo::{
     CommitRecord, ContributorRecord, IssueRecord, PullRequestRecord, PullRequestRepository,
     SyncWriter, WorkflowRunRecord,
 };
-use crate::domain::scope::CollectionMode;
+use crate::domain::scope::{CollectionMode, ScopeConfig};
 
 #[derive(Debug, Clone, Default)]
 pub struct SweptEnd {
@@ -235,6 +235,7 @@ pub struct MirrorWorker {
     watermark: Arc<SweepWatermark>,
     pull_requests: Arc<dyn PullRequestRepository>,
     run: Arc<RunState>,
+    configured_scope: ScopeConfig,
 }
 
 impl MirrorWorker {
@@ -246,6 +247,7 @@ impl MirrorWorker {
         watermark: Arc<SweepWatermark>,
         pull_requests: Arc<dyn PullRequestRepository>,
         run: Arc<RunState>,
+        configured_scope: ScopeConfig,
     ) -> Self {
         Self {
             github,
@@ -254,7 +256,12 @@ impl MirrorWorker {
             watermark,
             pull_requests,
             run,
+            configured_scope,
         }
+    }
+
+    fn moves_watermarks(&self) -> bool {
+        self.run.options.since.is_none() && self.run.options.scope.covers(&self.configured_scope)
     }
 
     async fn seed_refinements(
@@ -419,7 +426,7 @@ impl MirrorWorker {
             if page1_etag.is_none() {
                 page1_etag.clone_from(&listing.page1_etag);
             }
-            if listing.swept_to_end {
+            if listing.swept_to_end && self.moves_watermarks() {
                 run.mark_swept(Family::Issues, page1_etag.clone(), None);
             }
             let seen: Vec<&str> = listing
@@ -541,7 +548,7 @@ impl MirrorWorker {
             if page1_etag.is_none() {
                 page1_etag.clone_from(&listing.page1_etag);
             }
-            if listing.swept_to_end {
+            if listing.swept_to_end && self.moves_watermarks() {
                 run.mark_swept(Family::PullRequests, page1_etag.clone(), None);
             }
             let seen: Vec<&str> = listing
@@ -729,7 +736,7 @@ impl MirrorWorker {
             if head_sha.is_none() {
                 head_sha.clone_from(&listing.head_sha);
             }
-            if listing.swept_to_end {
+            if listing.swept_to_end && self.moves_watermarks() {
                 run.mark_swept(Family::Commits, page1_etag.clone(), head_sha.clone());
             }
             let mut candidates = Vec::new();

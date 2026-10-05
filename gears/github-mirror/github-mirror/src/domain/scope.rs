@@ -223,6 +223,34 @@ impl ScopeConfig {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.objects.validate()
     }
+
+    #[must_use]
+    pub fn covers(&self, other: &Self) -> bool {
+        let (mine, theirs) = (self.objects, other.objects);
+        let objects = [
+            (mine.issues, theirs.issues),
+            (mine.pull_requests, theirs.pull_requests),
+            (mine.commits, theirs.commits),
+            (mine.releases, theirs.releases),
+            (mine.branches, theirs.branches),
+            (mine.labels, theirs.labels),
+            (mine.milestones, theirs.milestones),
+            (mine.github_actions, theirs.github_actions),
+            (mine.contributors, theirs.contributors),
+            (mine.security, theirs.security),
+        ];
+        let modes = [
+            (self.collection.actions, other.collection.actions),
+            (self.collection.reactions, other.collection.reactions),
+            (self.collection.timeline, other.collection.timeline),
+        ];
+        objects.iter().all(|&(mine, theirs)| mine || !theirs)
+            && modes.iter().all(|&(mine, theirs)| {
+                [true, false]
+                    .into_iter()
+                    .all(|open| mine.includes(open) || !theirs.includes(open))
+            })
+    }
 }
 
 #[cfg(test)]

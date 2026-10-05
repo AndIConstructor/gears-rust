@@ -1551,6 +1551,15 @@ pub trait RepoSyncStatusRepository: Send + Sync {
         repo_full_name: &str,
     ) -> Result<Option<RepoSyncStatusRecord>, DomainError>;
 
+    async fn complete_if_last_session(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        session_id: Uuid,
+        repo_id: Option<i64>,
+        synced_at: &str,
+    ) -> Result<bool, DomainError>;
+
     /// Every repository the scope can see in slug order, optionally narrowed
     /// to one status, starting after the slug `after` when a page continues.
     async fn list(

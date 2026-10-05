@@ -197,6 +197,12 @@ impl SyncPoolRunner {
                 self.jobs.close();
             }
         }
+        while let Some(job) = queue.claim_next() {
+            self.service.interrupt_unstarted_job(job).await;
+        }
+        while let Ok(job) = self.jobs.try_recv() {
+            self.service.interrupt_unstarted_job(job).await;
+        }
         info!("github-mirror sync pool stopped");
     }
 }

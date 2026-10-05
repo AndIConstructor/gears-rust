@@ -5203,6 +5203,38 @@ impl RepoSyncStatusRepository for SeaOrmRepoSyncStatusRepository {
         row.map(TryInto::try_into).transpose()
     }
 
+    async fn complete_if_last_session(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        session_id: Uuid,
+        repo_id: Option<i64>,
+        synced_at: &str,
+    ) -> Result<bool, DomainError> {
+        let conn = self.db.conn()?;
+        let mut update = RepoSyncStatusEntity::update_many()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(repo_sync_status::Column::RepoFullName.eq(repo_full_name))
+                    .add(repo_sync_status::Column::LastSessionId.eq(session_id)),
+            )
+            .col_expr(
+                repo_sync_status::Column::Status,
+                Expr::value(RepoRunStatus::Complete.as_str()),
+            )
+            .col_expr(
+                repo_sync_status::Column::LastSyncedAt,
+                Expr::value(synced_at),
+            );
+        if let Some(repo_id) = repo_id {
+            update = update.col_expr(repo_sync_status::Column::RepoId, Expr::value(repo_id));
+        }
+        let result = update.exec(&conn).await.map_err(map_scope_error)?;
+        Ok(result.rows_affected > 0)
+    }
+
     async fn list(
         &self,
         scope: &AccessScope,

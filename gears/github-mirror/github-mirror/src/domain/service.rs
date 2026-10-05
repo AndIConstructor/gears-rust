@@ -3473,17 +3473,26 @@ impl Service {
 
     /// Write the repository's run status, preserving whatever a previous run
     /// recorded in the fields this transition does not own.
-    async fn mark_repo_status(
+    async fn mark_repo_complete(
         &self,
         ctx: &SecurityContext,
         repo_full_name: &str,
         session_id: Uuid,
-        status: RepoRunStatus,
-        synced_at: Option<String>,
     ) -> Result<(), DomainError> {
         let scope = self.repo_status_scope(ctx, actions::UPSERT).await?;
-        self.mark_repo_status_in(&scope, ctx, repo_full_name, session_id, status, synced_at)
-            .await
+        let repo_id = self.stored_repo_id(ctx, repo_full_name).await;
+        let written = self
+            .repo_sync_status
+            .complete_if_last_session(&scope, repo_full_name, session_id, repo_id, &now_rfc3339())
+            .await?;
+        if !written {
+            tracing::info!(
+                repository = repo_full_name,
+                session_id = %session_id,
+                "a newer sync owns this repository's run status; leaving it as it is"
+            );
+        }
+        Ok(())
     }
 
     async fn mark_repo_status_in(
@@ -4026,6 +4035,39 @@ impl Service {
         }
     }
 
+    pub async fn interrupt_unstarted_job(&self, job: SyncJob) {
+        let tenant_id = job.ctx.subject_tenant_id();
+        match self
+            .sync_sessions
+            .find_by_id(&job.access_scope, job.session_id)
+            .await
+        {
+            Ok(Some(mut session)) if session.status == SessionStatus::Queued => {
+                session.status = SessionStatus::Interrupted;
+                session.progress_percent = 100;
+                session.ended_at = Some(now_rfc3339());
+                session.updated_at.clone_from(&session.ended_at);
+                session.error = Some("the gear stopped before this sync started".to_owned());
+                if let Err(e) = self
+                    .upsert_session_with_retry(&job.access_scope, tenant_id, session)
+                    .await
+                {
+                    tracing::error!(
+                        session_id = %job.session_id,
+                        error = %crate::redact::redacted(&e.to_string()),
+                        "a sync dropped at shutdown could not be marked interrupted"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(
+                session_id = %job.session_id,
+                error = %crate::redact::redacted(&e.to_string()),
+                "a sync dropped at shutdown could not be read to mark it interrupted"
+            ),
+        }
+    }
+
     async fn fail_unstarted_session(&self, job: &SyncJob, error: &DomainError) {
         let tenant_id = job.ctx.subject_tenant_id();
         match self
@@ -4275,14 +4317,8 @@ impl Service {
         // A run that failed leaves the repository `in_progress` on purpose:
         // that is the marker the resume operation looks for (PRD §5.2).
         if completed {
-            self.mark_repo_status(
-                &job.ctx,
-                &repo_full_name,
-                job.session_id,
-                RepoRunStatus::Complete,
-                Some(now_rfc3339()),
-            )
-            .await?;
+            self.mark_repo_complete(&job.ctx, &repo_full_name, job.session_id)
+                .await?;
         }
 
         Ok(outcome)
@@ -4700,6 +4736,7 @@ impl Service {
             Arc::clone(&self.sweep_watermark),
             Arc::clone(&self.pull_requests),
             Arc::clone(run),
+            self.config.scope,
         ));
         let runner = RepoPhaseRunner::new(
             vec![worker],
