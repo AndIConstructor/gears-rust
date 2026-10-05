@@ -16,6 +16,7 @@
   - [3.2 Maintain overlap claims](#32-maintain-overlap-claims)
   - [3.3 Append and verify audit evidence](#33-append-and-verify-audit-evidence)
   - [3.4 Publish events and coordinate maintenance](#34-publish-events-and-coordinate-maintenance)
+  - [3.5 Purge bounded-retention rows](#35-purge-bounded-retention-rows)
 - [4. States (CDSL)](#4-states-cdsl)
   - [4.1 Authoritative order lifecycle](#41-authoritative-order-lifecycle)
   - [4.2 Idempotency record lifecycle](#42-idempotency-record-lifecycle)
@@ -24,6 +25,7 @@
   - [5.1 Atomic engine and persistence](#51-atomic-engine-and-persistence)
   - [5.2 Replay and evidence](#52-replay-and-evidence)
   - [5.3 Delivery and operational verification](#53-delivery-and-operational-verification)
+  - [5.4 Retention purge](#54-retention-purge)
 - [6. Acceptance Criteria](#6-acceptance-criteria)
 - [7. Detailed Behavior Contracts](#7-detailed-behavior-contracts)
   - [Foundation: Interactions and Sequences](#foundation-interactions-and-sequences)
@@ -163,7 +165,7 @@ Cross-principal create duplication and post-window re-execution remain disclosed
 3. Keep refused entries outside the committed chain with NULL sequence/predecessor; unresolved targets retain the trusted subject tenant/requested reference without invented target facts or aggregate lookup for enrichment.
 4. Enforce append-only grants and triggers. Only the restricted retention role may purge expired refusal rows under [Foundation contract §3.7](../DESIGN.md#contract-01-3-7)'s canonical retention policy.
 5. Verify committed chains read-only and alert on any mismatch, unsupported hash version or incomplete sequence. The audit worker captures atomic daily namespace checkpoints from one consistent snapshot, reconciles current orders and previous members, and never blesses a discrepancy.
-6. Enforce the shared repeated-refusal limiter at the inbound edge before engine entry: working baselines are 20 per minute per (caller, order) and 200 per minute per caller. A limiter must not enter the engine and append the refusal row it is intended to avoid. Architecture ratification remains Q-26.
+6. Bound engine-entering write requests with the pre-engine request limiter of [Foundation contract §3.7](../DESIGN.md#contract-01-3-7) (D-185). It counts every request, admitted or refused, so it also limits legitimate retries; it is not a repeated-refusal limiter. Per caller: bind the caller-facing engine-entering operations to the api-gateway identity-keyed zone `rl_orders_caller_write` (`rate_limit: 3/s`, `burst_limit: 20`, ≤200 per 60 s) through `ThrottlingSpec { require_security_context: true, dry_run: false }`, and the five workflow-only operations to `rl_orders_workflow_write`; gateway budgets are per replica until throttling ADR-0001 lands. Per (caller, order), 20 per minute: open under Q-26 pending `cpt-cf-bss-orders-lifecycle-upreq-gateway-path-param-throttle-key`, with a gear-local REST-edge limiter keyed `(subject_id, orderId)` as fallback. No limiter may enter the engine and append the refusal row it is intended to avoid.
 7. Meet the design baselines of a checkpoint within 24 hours and full verification within 30 days with measured capacity. Checkpoints detect the specified bounded completeness failures; optional external anchoring and protection against rewriting all local evidence are not presumed delivered.
 
 ### 3.4 Publish events and coordinate maintenance
@@ -179,6 +181,20 @@ Cross-principal create duplication and post-window re-execution remain disclosed
 3. Let toolkit workers own sequencing, leases, retries, rejection and queue storage. Transient failures retry; permanent faults dead-letter and advance the cursor. Instrument every outcome. Orders owns no drain SQL or re-drive endpoint.
 4. Consumers deduplicate by event ID and verify action applicability against an authorized current read. Read failure keeps work pending; it is not proof of obsolete work. Recovery preserves event identity through the shared platform path.
 5. Coordinate exactly the five Orders workers named in [Foundation contract §3.8](../DESIGN.md#contract-01-3-8) through its toolkit advisory keys and lifecycle cancellation. Session locks are not fencing: each write remains protected by transactional eligibility/idempotency checks; verification never repairs evidence.
+
+### 3.5 Purge bounded-retention rows
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-algo-foundation-retention-purge`
+
+**Input**: Fresh database time; the three bounded-retention stores and their retention windows.
+
+**Output**: Expired rows deleted in bounded batches; per-store metrics; committed evidence untouched.
+
+1. Run daily as `cpt-cf-bss-orders-lifecycle-component-retention-purge` under advisory key `retention-purge` ([Foundation contract §3.8](../DESIGN.md#contract-01-3-8)); a contended pass skips, lifecycle cancellation stops it. This is a phase 0/1 deliverable: Foundation does not ship refusal auditing without it (D-185).
+2. Per store, select bounded batches (baseline 5,000 rows each, repeated while the pass budget lasts) in deterministic `(time, primary key)` order through the store's own index, under `SKIP LOCKED`, rechecking eligibility against fresh database time: `orders_gate_outcome` Preview rows with `order_id IS NULL` past **7 days** via `(evaluated_at) WHERE order_id IS NULL`; `orders_transition_audit` rows with `outcome = 'refused'` past **90 days** via `(created_at) WHERE outcome = 'refused'`; `orders_read_access_log` rows past **90 days** via `(accessed_at)`.
+3. Delete under the store's restricted retention grant only; the audit DELETE is granted for expired refused rows and nothing else ([Foundation contract §3.7](../DESIGN.md#contract-01-3-7)). Commit per batch; on failure roll back and retry on the next pass. Never acquire an aggregate lock, delete a committed audit row, an idempotency record (idempotency cleanup's) or a platform outbox row (toolkit vacuum's).
+4. Emit per store: rows purged, batch duration, overdue backlog (eligible rows still present after the pass), oldest overdue row age and last successful pass. [Foundation contract §3.8](../DESIGN.md#contract-01-3-8) alerts on a growing backlog, an overdue refused row older than 1 day and a missed daily run.
+5. Validate batch size and cadence against the [`DESIGN.md §4.1`](../DESIGN.md#41-capacity-and-cost) refusal-audit write baseline: one daily pass must delete at least one day's refused rows at the measured mean rate, or the backlog grows without bound.
 
 ## 4. States (CDSL)
 
@@ -249,6 +265,18 @@ The system **MUST** register and enqueue the existing event/error/category contr
 
 **Touches**: `cpt-cf-bss-orders-lifecycle-dbtable-event-outbox` (platform-managed persistence), typed event/error/category registration, readiness, maintenance and recovery integration.
 
+### 5.4 Retention purge
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-dod-foundation-retention-purge`
+
+The system **MUST** ship the `retention-purge` worker with Foundation (phase 0/1): bounded daily deletion of expired Preview outcomes, refused audit rows and read-access-log rows through their indexes and restricted grants, its per-store metrics and the [Foundation contract §3.8](../DESIGN.md#contract-01-3-8) audit-growth alerts, and the pre-engine request limiter's per-caller gateway zone binding (D-185). Refusal auditing **MUST NOT** be enabled in an environment where the worker is not running.
+
+**Implements**: `cpt-cf-bss-orders-lifecycle-algo-foundation-retention-purge`.
+
+**Constraints**: `cpt-cf-bss-orders-lifecycle-constraint-single-writer`.
+
+**Touches**: `cpt-cf-bss-orders-lifecycle-dbtable-transition-audit`, `cpt-cf-bss-orders-lifecycle-dbtable-gate-outcome`, `cpt-cf-bss-orders-lifecycle-dbtable-read-access-log` (retention deletion only; the latter two remain owned by 03 and 08), inbound gateway zone configuration.
+
 ## 6. Acceptance Criteria
 
 - [ ] Concurrent same-principal/key creates commit one aggregate, empty version 1 and create audit; retries return identical identity/number. Denied/refused creation inserts no placeholder.
@@ -264,7 +292,8 @@ The system **MUST** register and enqueue the existing event/error/category contr
 - [ ] Event integration verifies eleven schemas, root grants, subject partitioning, retry after broker persistence/lost response, consumer deduplication and dead-letter recovery; pending SDK/runtime/recovery dependencies are not reported as passed.
 - [ ] Measure resolution, commit and broker acknowledgement separately and together at the design load; include backlog and failed deliveries. Demonstrate RPO zero and RTO ≤60 minutes for committed orders and pending producer messages within the declared residency boundary.
 
-- [ ] Inbound integration tests exercise both repeated-refusal rate limits and show that throttled attempts do not enter the engine or amplify transition-audit writes. Baseline values remain subject to Q-26; this document does not ratify them.
+- [ ] Inbound integration tests exercise the per-caller gateway zone (D-185) and, once Q-26's open half is decided, the per-(caller, order) limit, and show that throttled attempts return 429 without entering the engine or writing transition-audit rows, that admitted retries count against the budget, and that workflow-only operations use their own zone.
+- [ ] Retention-purge tests seed rows on both sides of each window and prove only expired Preview outcomes, refused audit rows and read-log rows are deleted in bounded batches; committed audit rows and unexpired refused rows survive; overlapping passes after lock-session loss delete nothing twice; metrics report purged count, backlog and oldest overdue age; a paused worker raises the backlog and missed-run alerts.
 
 ## 7. Detailed Behavior Contracts
 
@@ -970,7 +999,8 @@ validate batch/cadence capacity against the request-rate baseline and alert on a
 backlog. Required tests (pending implementation): timestamp initialization, no window extension
 on replay/reclaim, expiry/reuse while the sweep is paused, bounded deletion, preservation of
 live leases, cleanup racing reclaim/settlement and concurrent new claims, crash rollback, and
-absence of cascading deletion. Audit-refusal purge remains a different worker and policy.
+absence of cascading deletion. Expired refused audit rows, Preview outcomes and read-log rows are
+purged by the separate `retention-purge` worker under its own grants and policy (§3.5, D-185).
 
 **PRD reason phrases are descriptors, not identifiers.** The PRD requires *that* a machine-readable
 reason exist and says what condition it denotes — "a machine-readable stale-version reason", "a
@@ -1105,7 +1135,7 @@ their guard *registrations* and their reason *entries*, never their logic.
 - **Gear design**: [`../DESIGN.md`](../DESIGN.md) — this slice is the Transition Engine named in its §3.2
 - **Design set**: [`./README.md`](../DECOMPOSITION.md) — slice map and dependency order
 - **ADRs**: [`ADR/0001`](../ADR/0001-cpt-cf-bss-orders-lifecycle-adr-transition-through-engine.md) transition through the engine; [`ADR/0003`](../ADR/0003-cpt-cf-bss-orders-lifecycle-adr-fail-closed-gate.md) fail closed on an unevaluable gate input; [`ADR/0004`](../ADR/0004-cpt-cf-bss-orders-lifecycle-adr-closed-enumerations.md) the closed state and event enumerations; [`ADR/0005`](../ADR/0005-cpt-cf-bss-orders-lifecycle-adr-refusals-commit.md) a refusal is a committed outcome; [`ADR/0006`](../ADR/0006-cpt-cf-bss-orders-lifecycle-adr-outbox-publication.md) asynchronous publication from an outbox; [`ADR/0007`](../ADR/0007-cpt-cf-bss-orders-lifecycle-adr-in-transaction-concurrency.md) concurrency enforced by an in-transaction constraint
-- **Decisions**: [`../DECISIONS.md`](../DECISIONS.md) — D-01, D-04…D-17, D-18…D-30, D-39, D-41…D-49, D-59, D-61, D-64…D-69, D-73, D-74, D-78…D-82
+- **Decisions**: [`../DECISIONS.md`](../DECISIONS.md) — D-01, D-04…D-17, D-18…D-30, D-39, D-41…D-49, D-59, D-61, D-64…D-69, D-73, D-74, D-78…D-82, D-185
 - **Review**: the 2026-09-08 wave — resolves R-01…R-03, R-06…R-08, R-10…R-14, R-16…R-30, R-32…R-36, R-46, R-59, R-62, R-68, R-74
 
 <!-- /contract -->

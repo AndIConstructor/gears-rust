@@ -856,7 +856,7 @@ its guards, terminal set, hold/resume mapping and expiry eligibility; guard eval
 ordering; the idempotency registry and its non-success outcomes; the optimistic version
 check and its `version-conflict` refusal — the single registered name D-38 consolidated the
 `stale-version` variants into; the append-only transition audit; the typed event contract and the
-one-producer-message-per-event-declaring-transition rule; and the registry of machine-readable business reasons.
+one-producer-message-per-event-declaring-transition rule; the registry of machine-readable business reasons; and the retention purge of the three bounded-retention stores (D-185).
 
 ##### Responsibility boundaries
 
@@ -1099,6 +1099,9 @@ The internal components of each slice are defined here and specified normatively
 
 - [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-component-reason-registry`
   — Foundation — Reason registry ([contract](#contract-01-reason-registry))
+
+- [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-retention-purge`
+  — Foundation — Retention purge worker ([contract](#contract-01-retention-purge-worker))
 
 - [ ] `p1` - **ID**: `cpt-cf-bss-orders-lifecycle-component-capture-line-model`
   — Capture — Line-model authoring ([contract](#contract-02-line-model-authoring))
@@ -1812,7 +1815,11 @@ a daily cadence with a bounded batch per store, and purges Preview gate-outcome 
 refused-attempt audit rows past 90 days, and read-access-log rows past 90 days. It holds the only
 DELETE grant on the audit table and only for refused rows ([01 §3.7](DESIGN.md#contract-01-3-7)). **A declared retention with
 no worker behind it is an unbounded store**, and ADR-0005's cost argument depends on one of these
-three actually running.
+three actually running. The sweep is therefore the named Foundation component
+`cpt-cf-bss-orders-lifecycle-component-retention-purge` and a **phase 0/1 deliverable** (D-185):
+Foundation is not done while refused rows can be written and nothing deletes them. Its algorithm is
+[`features/01-foundation.md` §3.5](features/01-foundation.md#35-purge-bounded-retention-rows); its
+metrics and alerts are [01 §3.8](DESIGN.md#contract-01-3-8)'s.
 
 **Durability and recovery.** A committed transition is synchronously durable before
 acknowledgement, so the write path is served from a primary with **synchronous commit to a quorum
@@ -1888,6 +1895,8 @@ blank because a threshold nobody set is a threshold nobody can verify against
 | Dimension | Baseline | Note |
 |-----------|----------|------|
 | Peak order transitions | **50 / second** | Working production load for validating the PRD's p95 < 1 s write-plus-publish baseline |
+| Peak engine-entering write requests | **250 / second** | Requests to the engine-entering write operations that pass the inbound limiter (D-185); refusals dominate (ADR-0005), so committed transitions are a fifth of them. Idempotent replay of a settled outcome is counted here but writes nothing |
+| Peak refusal-audit writes | **200 / second**; ratio to committed transitions **4 : 1** | Refused rows written by authorization denial, guard refusal, mismatch, still-processing and a new key per attempt; each is one `orders_transition_audit` row with NULL `sequence`. This, not the transition rate, sizes the audit store |
 | Platform producer throughput | **200 events / second** | Across the 16 toolkit queue partitions; must exceed the transition rate because one transition can emit one event |
 | Event-delivery budget | **Unresolved (Q-16)**; 30 s p95 is an unapproved proposal | Borrowed from Orders Workflow's process-event class, not validated for Lifecycle; the PRD's p95 < 1 s write-plus-publish baseline governs until an approved change |
 | Orders row growth | **~11 rows** per order at version 1, **~5** per amendment | Aggregate, identity, lines, totals and audit; platform outbox rows are measured separately |
@@ -1895,9 +1904,28 @@ blank because a threshold nobody set is a threshold nobody can verify against
 | List page size | default **50**, maximum **200** | The 200 ms read budget is per page, so an unbounded page would make it meaningless |
 
 Cost is dominated by the shared `toolkit-db` backend and scales with retained order history. The
-gear is sized by transition rate rather than data volume: an order is a handful of small rows and
-the version chain grows only on amendment, which is rare relative to submit. Read load is absorbed
-by the aggregate row rather than the write path. The Orders-owned workers are advisory-lock-coordinated and idle-cheap; toolkit outbox worker cost is
+**commercial tables** are sized by transition rate rather than data volume: an order is a handful
+of small rows and the version chain grows only on amendment, which is rare relative to submit.
+**The audit store is not**: its growth is driven by request traffic, most of it refused
+(ADR-0005), and is sized by request and refusal volume (D-185):
+
+* **Rule.** Retained refused rows ≈ mean refusal-audit write rate × 7,776,000 s (90 days), times
+  the measured bytes per refused row including its share of the table's four indexes, the
+  `WHERE outcome = 'refused'` partial index among them ([01 §3.7](DESIGN.md#contract-01-3-7)). Committed
+  rows are sized separately by transition rate and the 24-month archival tier. At the 200/s
+  refusal peak sustained the ceiling is ~1.56 × 10⁹ refused rows; capacity is provisioned for the
+  measured mean and the §3.8 refusal-rate alert fires before the ceiling is approached.
+* **Per-caller bound.** The inbound limiter bounds requests, and therefore refusal rows, per
+  authenticated caller: the identity-keyed zone admits at most 200 requests in any 60 s window
+  (sustained 3/s, burst 20), so one caller can hold at most ~2.33 × 10⁷ retained refused rows
+  (3 × 7,776,000 + 20) **per gateway replica** — × N replicas until the gateway's distributed
+  throttling lands ([`docs/arch/throttling/ADR/0001-distributed-throttling-cluster-cache.md`](../../../../docs/arch/throttling/ADR/0001-distributed-throttling-cluster-cache.md), proposed).
+  The per-(caller, order) baseline of 20/min bounds one pair at 2,592,000 rows once enforced (Q-26).
+* **Retention only bounds what the purge deletes.** The bound above holds only while the
+  `retention-purge` worker keeps its overdue backlog at zero; §3.8 alerts on its backlog and on
+  a missed daily run.
+
+Read load is absorbed by the aggregate row rather than the write path. The Orders-owned workers are advisory-lock-coordinated and idle-cheap; toolkit outbox worker cost is
 included in the platform producer profile.
 
 **Latency measurement contract.** Record correlated operation-start, transaction-commit and
@@ -1967,7 +1995,7 @@ applicable**; it consumes an authorization *outcome* only.
 | Sibling-gear impersonation | A caller that is not the configured Workflow `service` principal attempts a workflow-only operation (the actor class is derived from the authenticated context against configured identities, D-115, and cannot be presented) | Service boundary | Gateway-asserted service principal plus a gear-scoped claim | A compromised platform gateway; out of this gear's control |
 | Audit tampering | A holder of database privilege edits or deletes trail rows | Data boundary | No UPDATE or DELETE grant on the audit role, plus a per-order predecessor-hash chain verified by the audit-chain verifier of [01 §3.8](DESIGN.md#contract-01-3-8); identity removal never rewrites the trail (D-96) | A database owner/migration role can alter protections or rewrite a whole chain; local hashes alone do not prove completeness against that authority. Privileged changes require independent monitoring; identity removal grants no verification exemption |
 | Preview amplification | Basket calls fan out to nine operations and write outcome rows | Cost and dependency boundary | Preview authorizes resource/payer scope before commercial resolution, carries a rate limit, and its outcome rows have a bounded retention | A high-volume authorised caller can still consume port capacity, bounded by the per-port bulkhead |
-| Unbounded audit growth | Repeated refused attempts against one order | Availability boundary | Refusal rows carry 90-day retention and repeated refusals are rate-limited | A distributed low-rate refusal campaign remains possible and is a monitoring concern |
+| Unbounded audit growth | Refused attempts — denials, guard refusals, mismatch, still-processing, a new key per attempt — against one or many orders; each writes a durable row (ADR-0005) | Availability boundary | Refusal rows carry 90-day retention, deleted by the phase 0/1 `retention-purge` worker (`cpt-cf-bss-orders-lifecycle-component-retention-purge`); a pre-engine request limiter — the platform api-gateway identity-keyed zone per caller, the per-(caller, order) limit pending Q-26 — bounds rows per caller; the audit store is sized by request and refusal volume ([§4.1](#41-capacity-and-cost)) (D-185) | A distributed low-rate campaign across many callers stays under every per-caller limit, and gateway limits are per replica until throttling ADR-0001 lands; detected by the [01 §3.8](DESIGN.md#contract-01-3-8) **refusal-audit write-rate monitor** (absolute and ratio to committed transitions) and the purge backlog and missed-run alerts |
 | An order held in-flight indefinitely | An actor cycles the dwell before each TTL elapses — **hold/resume** with hold permission, or **amendment** with amend permission; both reset `state_entered_at` | Commercial-promise boundary | Two counters no transition resets, each with its own guard: `resume_count` (cap 5, [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2)) and `amendment_count` (cap 20, [04 §4.1](features/04-versioning.md#contract-04-4-1)). At most 74 TTL-covered pre-fulfillment dwell entries; every expirable state carries a finite TTL in production (provisional rows, NULL refused at promotion, D-181), so `74 × T_max` — 74 × 30 days = 2,220 days at the provisional values — sums configured budgets under [07 §4.2](features/07-hold-and-expiry.md#contract-07-4-2)'s assumptions, plus scheduler delay | A policy promotion that raises T_max raises the bound with it; the provisional values are long until Product confirms them (Q-06, Q-07), alerted as provisional per [07 §3.8](DESIGN.md#contract-07-3-8). A NULL row in production is reachable only by bypassing the policy channel with database privilege and pages as an integrity alert. `in_fulfillment` and holds from it remain outside both layers (operational SLA) |
 
 ### 4.3 Data protection, residency and retention
@@ -2643,6 +2671,7 @@ graph TB
     A[Audit store]
     X[Platform event producer adapter]
     R[Reason registry]
+    P[Retention purge worker]
     S -->|registers| G
     O --> G
     O --> T
@@ -2651,6 +2680,7 @@ graph TB
     O --> X
     O --> R
     X -->|DbProducer + toolkit outbox| BUS[Event Broker]
+    P -->|deletes expired refused rows| A
 ```
 
 <a id="contract-01-transition-orchestrator"></a>
@@ -2908,6 +2938,46 @@ It does not author slice reasons and never carries internal diagnostics into a r
 ##### Related components (by ID)
 
 - `cpt-cf-bss-orders-lifecycle-component-guard-registry` — shares model with
+
+<a id="contract-01-retention-purge-worker"></a>
+
+#### Retention purge worker
+
+**Contract**: `cpt-cf-bss-orders-lifecycle-component-retention-purge` (`p1`), defined in [§3.2 Slice components](#register-components).
+
+<a id="contract-01-why-this-component-exists-6"></a>
+
+##### Why this component exists
+
+ADR-0005 makes every refused transition a durable write and refusals are most traffic; the
+90-day refusal retention, the 7-day Preview retention and the 90-day read-log retention bound
+nothing unless a worker deletes the expired rows (D-185).
+
+<a id="contract-01-responsibility-scope-6"></a>
+
+##### Responsibility scope
+
+The `retention-purge` worker of §3.8: a daily, advisory-lock-coordinated pass with a bounded batch
+per store — Preview gate-outcome rows past 7 days, refused `orders_transition_audit` rows past 90
+days, read-access-log rows past 90 days — through each table's partial or time index and its
+restricted DELETE grant (§3.7); and its metrics (rows purged, batch duration, overdue backlog,
+oldest overdue row age, last success). Algorithm:
+[`features/01-foundation.md` §3.5](features/01-foundation.md#35-purge-bounded-retention-rows).
+
+<a id="contract-01-responsibility-boundaries-6"></a>
+
+##### Responsibility boundaries
+
+It never deletes a committed audit row, a row inside its retention, idempotency records (the
+`idempotency-cleanup` worker's) or platform outbox rows (toolkit vacuum's). It repairs nothing and
+acquires no aggregate lock.
+
+<a id="contract-01-related-components-by-id-6"></a>
+
+##### Related components (by ID)
+
+- `cpt-cf-bss-orders-lifecycle-component-audit-store` — deletes expired refused rows of
+- `cpt-cf-bss-orders-lifecycle-component-gate-preview` — deletes expired outcome rows of
 
 
 <!-- /contract -->
@@ -3630,11 +3700,38 @@ above are the canonical audit-retention contract for the set; every other statem
 and none restates it.** Refusal rows carry a **90-day
 retention** distinct from committed transitions, purged by the retention sweep
 ([DESIGN.md](DESIGN.md) §4.2); committed entries carry the **24-month archival tier** and
-no DELETE grant at all. Repeated refusals are **rate-limited at a working
-baseline of 20 per minute per (caller, order) pair and 200 per minute per caller**, enforced at
-the inbound edge *before* the engine — a limiter refusing inside the engine would write the very
-row it exists to prevent. The values are set here so they can be measured and revised rather than
-invented by an implementer; ratification sits with Architecture (Q-26). A periodic job verifies the
+no DELETE grant at all. The purge is executed by the phase 0/1 `retention-purge` worker
+(`cpt-cf-bss-orders-lifecycle-component-retention-purge`, D-185). Engine-entering write requests are
+bounded by a **pre-engine request limiter** at the inbound edge *before* the engine — a limiter
+refusing inside the engine would write the very row it exists to prevent. It is a request limiter,
+not a repeated-refusal limiter: it counts every request to the bound operations, admitted or not,
+so it also limits legitimate retries and its values must sit above legitimate retry cadence. Two
+limits (D-185):
+
+* **Per caller — 200 per 60 s, adopted from the platform api-gateway.** One identity-keyed
+  rate-limit zone `rl_orders_caller_write` (`key: { type: identity }`, i.e.
+  `SecurityContext::subject_id()`; `rate_limit: 3/s`, `burst_limit: 20`, so at most 200 in any 60 s
+  window; `response_status_code: 429`, `response_retry_after: auto`) is bound through
+  `ThrottlingSpec { rate_limit_zone, require_security_context: true, dry_run: false }` on the
+  caller-facing engine-entering operations — create, header and line edits, submit, amendments,
+  cancel, hold, resume, acceptance. The gateway's `RateSpec` is integer `/s` only, which is why 200/min
+  is expressed as rate plus burst. The five workflow-only operations bind a separate identity zone
+  `rl_orders_workflow_write` (`rate_limit: 50/s`, `burst_limit: 100`, the §4.1 transition baseline),
+  because one service principal carries every order's workflow traffic. Preview stays on its own
+  limit ([03 §2.2](DESIGN.md#contract-03-2-2)); an operation binds one rate zone, so submit's stricter
+  10/min stays with 03 under Q-26. Gateway state is per replica: a deployment of N gateway
+  replicas admits N × the configured budget until throttling ADR-0001 lands. Precedent:
+  `gears/system/api-gateway/src/middleware/throttling.rs`, `libs/toolkit/src/api/operation_builder.rs`
+  `ThrottlingSpec`, the zone shape in `config/quickstart.yaml` and its `mini-chat` binding.
+* **Per (caller, order) — 20 per minute, open (Q-26).** The gateway keys only `Identity` and `Ip`
+  ([`docs/arch/throttling/DESIGN.md`](../../../../docs/arch/throttling/DESIGN.md) D2), so a
+  path-parameter key cannot be expressed there; the ask is
+  `cpt-cf-bss-orders-lifecycle-upreq-gateway-path-param-throttle-key`. If the gateway declines,
+  the fallback is a gear-local limiter at the REST edge keyed `(subject_id, orderId)`, running before
+  the engine call, writing no audit row and answering the same 429.
+
+Values are set here so they can be measured and revised rather than invented by an implementer.
+A periodic job verifies the
 hash chain **over committed entries**; the PRD's "tamper-evident" requirement is met by the chain
 plus the absent UPDATE grant, not by uniqueness alone.
 
@@ -3646,7 +3743,8 @@ a fresh row each time. Were it
 to lock the aggregate — which also serialises audit-sequence allocation (`§3.6` step 5) — a denial
 loop against one order would serialise every legitimate transition on it behind the attacker's lock
 acquisitions. A refused entry takes no sequence and joins no chain, so the lock buys nothing and is
-not taken; repeated denials are bounded by the rate limit above instead.
+not taken; repeated denials are bounded by the pre-engine request limiter above instead — per
+caller today, per (caller, order) once Q-26's open half lands.
 
 **Audit presentation order (D-101).** The mixed audit read orders **all** committed and refused
 entries by `(created_at ASC, audit_id ASC)`, and uses exactly that pair as its exclusive keyset
@@ -3839,7 +3937,7 @@ authoritative roster and coordination contract for the **five Orders-owned worke
 | Per-state TTL expiry | `expiry` | Locked-row eligibility/state/version recheck and deterministic transition idempotency key |
 | Draft auto-void | `draft-auto-void` | Locked-row draft/TTL recheck and deterministic transition idempotency key |
 | Idempotency-window cleanup | `idempotency-cleanup` | Recheck expiry and settlement under row lock; never delete a live/reclaimed in-flight record |
-| Retention purge | `retention-purge` | Conditional bounded deletion of still-eligible rows only; audit deletion restricted to expired refused rows |
+| Retention purge (`cpt-cf-bss-orders-lifecycle-component-retention-purge`, phase 0/1, D-185) | `retention-purge` | Conditional bounded deletion of still-eligible rows only; audit deletion restricted to expired refused rows |
 | Audit verification/checkpointing | `audit/<canonical audit-tenant UUID>` | Read-only verification; consistent checkpoint snapshot and unique next checkpoint sequence (§4.4) |
 
 **Selected primitive: `toolkit_db::Db::lock(gear, key)`**, or bounded non-blocking acquisition
@@ -3957,6 +4055,24 @@ publish outcomes; audit-chain verification results; and sweep outcomes per worke
 write-plus-publish latency against the governing PRD baseline, delayed producer delivery, any pending
 producer dead letter, any audit-append failure, any chain-verification mismatch, and any non-zero
 unaudited-transition count.
+
+**Audit-growth monitors (D-185).** Measured: refusal-audit write rate by refusal class and actor
+class; its ratio to committed transitions; inbound-limiter 429 count per zone; and, for
+`retention-purge` per store, rows purged, batch duration, overdue backlog (rows past their retention
+still present), oldest overdue row age and last successful pass. Alerts, at working baselines
+revised with §4.1 under Q-26:
+
+* **Refusal-audit write-rate monitor** — the rate above the §4.1 refusal peak (200/s), or the
+  refused-to-committed ratio above 4 : 1, sustained for 15 minutes; this is the detector for the
+  distributed low-rate campaign §4.2 leaves as residual risk.
+* **Purge backlog** — oldest overdue refused-audit row older than 1 day (a refused row older than
+  91 days exists), or an overdue backlog growing across two consecutive passes; same for Preview
+  outcomes and read-access-log rows.
+* **Purge not run** — no successful `retention-purge` pass for more than 1 day past its daily
+  schedule (last success older than 26 h).
+
+The overdue-backlog alert follows the idempotency-window cleanup executor's
+([Foundation contract §4.2](features/01-foundation.md#contract-01-4-2) *Idempotency-window cleanup executor*).
 
 The latency boundaries and acceptance method are defined in
 [`DESIGN.md §4.1`](DESIGN.md#41-capacity-and-cost). The former 30-second publication target is

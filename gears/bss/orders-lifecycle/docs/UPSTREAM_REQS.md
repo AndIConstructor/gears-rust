@@ -20,6 +20,7 @@
   - [2.9 Platform authorization policy](#29-platform-authorization-policy)
   - [2.10 Catalog registry (Product & SKU)](#210-catalog-registry-product--sku)
   - [2.11 Contracts](#211-contracts)
+  - [2.12 API Gateway](#212-api-gateway)
 - [3. Priorities](#3-priorities)
 - [4. Traceability](#4-traceability)
 - [PriceBook readiness additions](#pricebook-readiness-additions)
@@ -40,7 +41,7 @@ Orders Workflow PRD ([`DECISIONS.md`](./DECISIONS.md) Q-04).
 | Requesting gear | Why it needs the target |
 |-----------------|-------------------------|
 | `orders-lifecycle` | Owns the order document and its state machine; needs Subscriptions to accept an explicit start instant, expose an overlap-occupancy read, and carry an order reference and a compensation cancellation reason. Needs Pricing to publish its existing reads as `PricingReadV1` and to admit a `bss-orders.system` subject with `plan:read` and `price:read`, as it does for Rating and Subscriptions; the residual purchase verdict is a separate, narrower ask. Needs Rating to expose a batched exact-binding evaluation SDK, a pre-subscription evaluation and an annualised TCV figure. Needs the billing chain to propagate the external reference and to answer an indicative tax read. Needs Account Management to issue verifiable delegation proof and expose the payer's commercial profile, Contracts to answer contract status, party eligibility and the acceptance-required declaration for a referenced contract, and the platform PDP to evaluate it from request context with distinct missing/invalid deny reasons. Needs Subscriptions to answer its `SUB-G1` overlap key for a prospective PriceBook line, and Pricing's revision-reference release report to count in-flight orders; SKU protection itself is inherited from the revision's references. Needs a Payments capability that does not exist, and needs the Event Broker runtime behind the
-landed SDK before event-producing traffic can be accepted. |
+landed SDK before event-producing traffic can be accepted. Needs the API Gateway to key a rate-limit zone by a path parameter so the per-(caller, order) request limit can run at the gateway (D-185). |
 | `orders-workflow` | Must consume `OrderAmended`, obtain the approval-requirement verdict for the new order version, and reflect the new version onward from `submitted`; without this the Lifecycle two-step re-approval seam stalls. |
 
 ## 2. Requirements
@@ -876,12 +877,34 @@ and platform elections ([05 §3.5](DESIGN.md#contract-05-3-5), §4.1, D-107, D-1
 exists, a contract-referenced order resolves `acceptance-requirement-unevaluable` (fail closed,
 ADR-0003) at both guards; it never falls back to an election.
 
+### 2.12 API Gateway
+
+- [ ] `p2` - **ID**: `cpt-cf-bss-orders-lifecycle-upreq-gateway-path-param-throttle-key`
+
+**A rate-limit zone keyed by authenticated subject plus a path parameter (D-185).** Orders bounds
+engine-entering write requests before the engine because every refused attempt writes a durable
+audit row (ADR-0005). The per-caller limit already uses the gateway as it is: an identity-keyed
+zone bound through `ThrottlingSpec { rate_limit_zone, require_security_context: true }`
+(`libs/toolkit/src/api/operation_builder.rs`; `gears/system/api-gateway/src/middleware/throttling.rs`).
+The per-(caller, order) limit — 20 per minute per `(subject_id, orderId)` — cannot be expressed:
+`KeyType` is `{ Identity, Ip }` and further variants are deferred until a consumer asks
+([`docs/arch/throttling/DESIGN.md`](../../../../docs/arch/throttling/DESIGN.md) D1/D2, §4). This is that
+consumer. Shape: an additive `KeyConfig` variant composing the subject id with a named route path
+parameter (`orderId`), resolved after authentication, bounded by `max_keys` like the existing
+variants. The gateway's integer `/s` `RateSpec` cannot express a sustained rate below 1/s (60/min),
+so a per-minute unit or a fractional rate is part of the ask. Cross-replica enforcement is
+the gateway's own open ADR-0001 and is not asked here.
+
+**Fallback until delivered (Q-26)**: a gear-local limiter at the Orders REST edge keyed
+`(subject_id, orderId)`, before the engine call, writing no audit row and answering 429; Orders
+removes it when the gateway variant lands. Architecture decides between waiting and the fallback.
+
 ## 3. Priorities
 
 | Priority | Requirements |
 |----------|-------------|
 | `p1` (critical) | `…-upreq-subscription-start-instant`, `…-upreq-overlap-presence-read`, `…-upreq-compensation-cancel-reason`, `…-upreq-pre-subscription-evaluation`, `…-upreq-tcv-with-annualisation`, `…-upreq-external-reference-propagation`, `…-upreq-delegation-proof-credential`, `…-upreq-authorization-outcome`, `…-upreq-workflow-amendment-verdict`, `…-upreq-event-broker-runtime`, `…-upreq-event-broker-cursor-retry`, `…-upreq-event-broker-dead-letter-recovery`, `…-upreq-event-broker-root-tenancy`, `…-upreq-event-delivery-observability`, `…-upreq-catalog-subscription-product-key`, `…-upreq-pricing-read-sdk`, `…-upreq-pricing-catalog-tenant-reads`, `…-upreq-products-sku-read-grant`, `…-upreq-pricing-purchase-assessment`, `…-upreq-initial-binding-acceptance`, `…-upreq-sku-protection`, `…-upreq-rating-evaluation`, `…-upreq-payer-commercial-profile`, `…-upreq-contract-party-eligibility`, `…-upreq-contract-acceptance-declaration`, `…-upreq-settle-create`, `…-upreq-intent-status-read`, `…-upreq-transition-outcome-echo`, `…-upreq-overlap-activation-atomicity` (release gate for submit/activation, D-180) |
-| `p2` (important) | `…-upreq-order-reference-on-create`, `…-upreq-two-phase-pair-preserved`, `…-upreq-correlation-propagation`, `…-upreq-indicative-tax-read`, `…-upreq-audit-identity-lifecycle` |
+| `p2` (important) | `…-upreq-order-reference-on-create`, `…-upreq-two-phase-pair-preserved`, `…-upreq-correlation-propagation`, `…-upreq-indicative-tax-read`, `…-upreq-audit-identity-lifecycle`, `…-upreq-gateway-path-param-throttle-key` |
 
 `cpt-cf-bss-orders-lifecycle-upreq-pdp-policy-integration` is also `p1`: verification and
 provisioning of platform authorization are required for production caller-driven access, and it
@@ -897,7 +920,7 @@ mitigation exists.
 
 - **PRD**: [`./PRD.md`](./PRD.md) — §13 dependencies, §15 open questions
 - **DESIGN**: [`./DESIGN.md`](./DESIGN.md) §3.5, §3.8; [01 §3.8](DESIGN.md#contract-01-3-8), §4.4; [03 §2.2](DESIGN.md#contract-03-2-2); [06 §4.2](DESIGN.md#contract-06-4-2), §4.6
-- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-179, Q-04, Q-05, Q-08, Q-32, Q-33
+- **Decisions**: [`./DECISIONS.md`](./DECISIONS.md) — D-32, D-56, D-108, D-111, D-122, D-124, D-150–D-179, D-185, Q-04, Q-05, Q-08, Q-26, Q-32, Q-33
 - **ADRs**: [`./ADR/0003`](./ADR/0003-cpt-cf-bss-orders-lifecycle-adr-fail-closed-gate.md) — the fail-closed posture that makes `SUB-O5` a blocker rather than a degradation; [`./ADR/0006`](./ADR/0006-cpt-cf-bss-orders-lifecycle-adr-outbox-publication.md) — the platform producer path and Event Broker readiness gate
 - **Upstream registers**: `gears/bss/subscriptions/docs/SEAMS.md` §I (`SUB-O1`…`SUB-O6`); the sibling Workflow PRD §13 (`SUB-O5`…`SUB-O9`); `gears/bss/rating/docs/SEAMS.md` for the three Rating asks; `gears/bss/contracts/docs/PRD.md` §6.6 (*Party eligibility predicate*, *Booking instant and acceptance*) for the Contracts asks; `gears/bss/subscriptions/docs/SEAMS.md` `SUB-G1` (PR #4177) for the catalog-registry product key; `gears/bss/pricing/docs` D-419–D-425 and PRD §2.2 for the Pricing reads and system subjects; `gears/bss/products/docs` P-D-189/P-D-194 for SKU lifecycle and references. Rating **is** specified in this repository, with a PRD, a DESIGN, ADRs and its own seam register, so its asks are raised against that specification.
 - **Billing chain ownership (D-168).** The billing chain is **not** `gears/bss/ledger`. The Ledger is built and its `LedgerClientV1` is the GL posting and settlement target (`post_balanced_entry`, `settle_payment`, `allocate_payment`, `return_payment`, `record_dispute_phase`, credit application, AR balances, revenue recognition); it generates no invoices, values no at-sale facts and answers no tax, and settlement is not payment authorization. The capabilities this gear needs are owned as follows:

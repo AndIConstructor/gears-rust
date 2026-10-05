@@ -66,7 +66,7 @@ unbreakable by a new slice.
 - **Depends On**: None (feature-level). Platform prerequisites are listed in §3.
 
 - **Scope**:
-  - The order aggregate and its append-only version chain; the declarative state-machine table with its guards, terminal set, hold/resume mapping and expiry eligibility; guard evaluation and ordering; the idempotency registry and its non-success outcomes; the optimistic version check and its `version-conflict` refusal — the single registered name D-38 consolidated the `stale-version` variants into; the append-only transition audit; the typed event contract and the one-producer-message-per-event-declaring-transition rule; and the registry of machine-readable business reasons.
+  - The order aggregate and its append-only version chain; the declarative state-machine table with its guards, terminal set, hold/resume mapping and expiry eligibility; guard evaluation and ordering; the idempotency registry and its non-success outcomes; the optimistic version check and its `version-conflict` refusal — the single registered name D-38 consolidated the `stale-version` variants into; the append-only transition audit; the typed event contract and the one-producer-message-per-event-declaring-transition rule; the registry of machine-readable business reasons; and the retention purge of the three bounded-retention stores (D-185).
 
 - **Out of scope**:
   - It knows nothing commercial: not what a sellability predicate is, not what a price pin means, not whether an approval was warranted. It evaluates guards that slices declare, over document contributions that slices supply. It performs no money arithmetic, approval-policy evaluation, provisioning or commercial input resolution. Capability handlers own commercial input resolution; shared authorization and platform producer integration remain Foundation obligations, with external calls kept outside the transition transaction.
@@ -168,6 +168,7 @@ unbreakable by a new slice.
     - `cpt-cf-bss-orders-lifecycle-component-audit-store`
     - `cpt-cf-bss-orders-lifecycle-component-outbox-publisher`
     - `cpt-cf-bss-orders-lifecycle-component-reason-registry`
+    - `cpt-cf-bss-orders-lifecycle-component-retention-purge`
   - **Interfaces**:
     - `cpt-cf-bss-orders-lifecycle-interface-transition-api`
     - `cpt-cf-bss-orders-lifecycle-interface-guard-registration`
@@ -200,7 +201,7 @@ unbreakable by a new slice.
   - **States**:
     - `cpt-cf-bss-orders-lifecycle-state-order-lifecycle`
 
-- **Phase**: 0/1; [detailed design](DESIGN.md#contract-01-1-1).
+- **Phase**: 0/1; [detailed design](DESIGN.md#contract-01-1-1). The `retention-purge` worker (`cpt-cf-bss-orders-lifecycle-component-retention-purge`) and the per-caller api-gateway limiter zone ship in this phase: refusal auditing is not enabled without the worker that bounds it (D-185).
 
 - **Event contract**: `cpt-cf-bss-orders-lifecycle-contract-order-events`; eleven typed events and the existing event-less transition classes, with platform producer delivery acceptance.
 
