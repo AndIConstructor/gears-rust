@@ -469,7 +469,7 @@ A plan must land whole, and two records for one subject must not mix.
 
 Applies the admitted plan to graph storage in one write. The write also writes the profile's root node, the subject node, with the profile version the plan was built on as its expected version. Each write carries graph storage's idempotency key. A write made again after a conflict, on a fresh read of the profile, is a new write with a new key; a write whose result is unknown is sent again with the same key. The plan's node keys were fixed when the plan was built, so storing the same changes again gives the same facts. Each entity is stored with its origin and the time it was stored. If another change reached the profile in between, graph storage rejects the write. The planner then runs again, up to a small limit. Past the limit, the record is dropped, and the drop is an audit event without content.
 
-A reviewer's corrected value has no planner, and neither has a tenant administrator's added or edited fact. The planner skips a fact under review, so a record or an agent does not change it. On a write conflict, the writer reads the profile again and writes the same value again, up to the same small limit. If the fact to correct or edit is gone, because the subject deleted it or retention removed it, nothing is stored; that delete has already closed any review request on it as deleted.
+A reviewer's corrected value has no planner, and neither has a tenant administrator's added or edited fact. The planner skips a fact under review, so a record or an agent does not change it. On a write conflict, the value goes back through Admission on a fresh read of the profile, and the writer writes it again, up to the same small limit. If the fact to correct or edit is gone, because the subject deleted it or retention removed it, nothing is stored; that delete has already closed any review request on it as deleted.
 
 ##### Responsibility boundaries
 
@@ -559,7 +559,7 @@ Erasure and retention must remove data from graph storage and from Construct's o
 
 One component with two triggers. Retention is automatic, by age, with the tenant's period, a tenant setting in the settings service. It runs as a job on the cluster leader. Erasure is the subject's request to remove everything now. Both use the same code. They remove the subject's entities from graph storage, and the subject's review requests and record IDs from Construct's own tables. Each delete in graph storage also writes the root node with its expected version. On a write conflict, Deletion reads the profile again, works out again what to delete, and writes again, up to the same small limit. So retention keeps a fact that a record changed in between, because it is no longer past the period. Erasure also soft-deletes the root node, the subject node, with the rest of the profile. Graph storage's purge removes it later, and a profile created after the erasure gets a new root key (see the constraint). Erasure sets personalization off and writes an erasure audit event without the erased content. It leaves no record identity of the subject behind, also not one that Results API inserts for a record received just before the erasure request. Every step can be repeated safely. If a step fails, Deletion runs the erasure again until every step is done. Until then, the subject settings mark the erasure as under way: Profile reader serves nothing about the subject and Admission drops its plans, even if personalization is turned on again. Neither trigger removes audit events; the Audit gear's retention period does. The Profile reader already stops serving an item once it is past the tenant's retention period. The job then deletes it. When retention removes a fact, an open review request on it closes as deleted.
 
-Deletion also handles tenant exit. Construct follows the platform's tenant offboarding protocol, as [graph storage does](../../graph-storage/docs/DESIGN.md#tenant-offboarding-and-deletion-monotonicity). Deletion removes the leaving tenant's data from Construct's own tables. Graph storage removes the tenant's graph through its own offboarding.
+Deletion also handles tenant exit. Construct follows the platform's tenant offboarding protocol, as [graph storage does](../../graph-storage/docs/DESIGN.md#tenant-offboarding-and-deletion-monotonicity). Deletion removes the leaving tenant's data from Construct's own tables. Graph storage removes the tenant's graph through its own offboarding. Audit events stay; the Audit gear's retention period removes them.
 
 ##### Responsibility boundaries
 
@@ -906,7 +906,7 @@ sequenceDiagram
         else plan admitted
             AD->>PW: admitted plan
             PW->>GS: one write with the root node's expected version
-            Note over PW,GS: on a write conflict, read the profile again and write again, up to the limit
+            Note over AD,GS: on a write conflict, the value goes back through Admission on a fresh read of the profile and is written again, up to the limit
             GS-->>PW: stored
             PW-->>SC: stored
             SC->>T: close request as corrected
