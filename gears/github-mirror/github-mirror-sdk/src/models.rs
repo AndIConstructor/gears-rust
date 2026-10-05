@@ -265,6 +265,8 @@ pub struct SyncSummary {
     /// when every declared child count was met (PRD `fr-completeness-check`).
     #[serde(default)]
     pub accepted_drift: Vec<CountDrift>,
+    #[serde(default)]
+    pub accepted_drift_total: u64,
 }
 
 /// A mirrored GitHub issue/PR comment (read-slice shape).

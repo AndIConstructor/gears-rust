@@ -928,6 +928,7 @@ pub struct SyncSummaryDto {
     pub stale_rows_deleted: u64,
     /// Count gaps verification could not close after its repair passes.
     pub accepted_drift: Vec<CountDriftDto>,
+    pub accepted_drift_total: u64,
 }
 
 /// One count gap verification gave up on, as served in a session's summary.
@@ -984,6 +985,7 @@ impl From<SyncSummary> for SyncSummaryDto {
             issue_timeline_synced: s.issue_timeline_synced,
             stale_rows_deleted: s.stale_rows_deleted,
             accepted_drift: s.accepted_drift.into_iter().map(Into::into).collect(),
+            accepted_drift_total: s.accepted_drift_total,
         }
     }
 }

@@ -391,6 +391,10 @@ const TAKE_ACTIVE_SYNC_ATTEMPTS: usize = 3;
 
 const QUEUE_FULL_RETRY_AFTER_SECS: u64 = 30;
 
+const MAX_REPORTED_FAILURES: usize = 20;
+
+const MAX_REPORTED_DRIFT: usize = 100;
+
 const SESSION_WRITE_ATTEMPTS: u32 = 3;
 
 const SESSION_WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -4731,17 +4735,32 @@ impl Service {
             return Err(DomainError::Cancelled);
         }
         if !report.failures.is_empty() {
-            let detail: Vec<String> = report
+            let shown: Vec<String> = report
                 .failures
                 .iter()
+                .take(MAX_REPORTED_FAILURES)
                 .map(TaskFailure::public_text)
                 .collect();
-            return Err(DomainError::internal(format!(
-                "{} of {} sync tasks failed: {}",
+            let more = report.failures.len().saturating_sub(shown.len());
+            let rest = if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            };
+            let message = format!(
+                "{} of {} sync tasks failed: {}{rest}",
                 report.tasks_failed(),
                 report.tasks_done + report.tasks_failed(),
-                detail.join("; ")
-            )));
+                shown.join("; ")
+            );
+            if report
+                .failures
+                .iter()
+                .any(|failure| matches!(failure.error, DomainError::AccessLost(_)))
+            {
+                return Err(DomainError::AccessLost(message));
+            }
+            return Err(DomainError::internal(message));
         }
 
         for family in Family::SWEPT {
@@ -4775,7 +4794,9 @@ impl Service {
         let mut summary = run.summary();
         summary.contributors_synced = contributors_synced;
         summary.stale_rows_deleted = stale_rows_deleted;
-        summary.accepted_drift = run.drift();
+        let drift = run.drift();
+        summary.accepted_drift_total = u64::try_from(drift.len()).unwrap_or(u64::MAX);
+        summary.accepted_drift = drift.into_iter().take(MAX_REPORTED_DRIFT).collect();
         Ok(summary)
     }
 }

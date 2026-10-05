@@ -19590,6 +19590,11 @@
             },
             "type": "array"
           },
+          "accepted_drift_total": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "branches_synced": {
             "format": "int64",
             "minimum": 0,
@@ -19753,7 +19758,8 @@
           "check_runs_synced",
           "issue_timeline_synced",
           "stale_rows_deleted",
-          "accepted_drift"
+          "accepted_drift",
+          "accepted_drift_total"
         ],
         "type": "object"
       },
