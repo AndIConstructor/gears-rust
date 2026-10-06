@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use strum::IntoEnumIterator;
 
@@ -41,6 +41,7 @@ pub struct FetchOptions {
     /// rate-limit cooldown.
     pub cancel: CancellationToken,
     pub telemetry: Arc<SessionTelemetry>,
+    pub public_repo: Arc<OnceLock<bool>>,
 }
 
 /// A top-level listing the sync can reconcile deletions for.

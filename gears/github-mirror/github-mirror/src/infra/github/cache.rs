@@ -6,11 +6,12 @@
 //! ones. That is the whole point of the mirror, and this module is where it
 //! happens.
 //!
-//! Entries are **tenant-partitioned**. The design allows public-repository
-//! responses to be shared across tenants ([`PRD` §5.7], ADR-0002), but sharing
-//! needs the visibility and grant machinery that does not exist yet, so every
-//! entry is scoped to the tenant that fetched it. That is strictly safe — it
-//! only forgoes an optimisation.
+//! Entries of a repository Discovery has seen as public live in one shared
+//! partition, [`SHARED_PARTITION`], so every tenant revalidates the same
+//! entry ([`PRD` §5.7], ADR-0002). Entries of a private repository, and every
+//! entry fetched before Discovery has learned the visibility, stay in the
+//! partition of the tenant that fetched them. A shared body is only ever
+//! served after GitHub answers `304` to the caller's own request.
 
 use async_trait::async_trait;
 use aws_lc_rs::digest::{self, SHA256};
@@ -18,12 +19,14 @@ use toolkit_security::AccessScope;
 
 use crate::domain::error::DomainError;
 
+pub const SHARED_PARTITION: uuid::Uuid = uuid::Uuid::nil();
+
 /// A content-addressed cache key: SHA-256 over the request's observable
 /// properties.
 ///
 /// The token is **never** part of the key — two callers with different tokens
 /// requesting the same URL produce the same key, and tenant partitioning
-/// rather than the key is what keeps their entries apart.
+/// rather than the key is what keeps their private-repository entries apart.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey(String);
 

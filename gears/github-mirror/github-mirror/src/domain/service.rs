@@ -4467,6 +4467,7 @@ impl Service {
             since: job.since,
             cancel: cancel.clone(),
             telemetry: Arc::clone(telemetry),
+            public_repo: Arc::default(),
         };
         let stop_beating = CancellationToken::new();
         let _stop_on_drop = stop_beating.clone().drop_guard();
@@ -4794,6 +4795,7 @@ impl Service {
             name,
             FetchOptions {
                 cancel: cancel.clone(),
+                public_repo: Arc::default(),
                 ..options.clone()
             },
         ));

@@ -25,7 +25,9 @@ use crate::domain::repo::{
     WorkflowRunRecord,
 };
 use crate::domain::sync::telemetry::{GithubApi, RequestOutcome, SessionTelemetry, TelemetryEntry};
-use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
+use crate::infra::github::cache::{
+    CacheKey, CachedResponse, HttpCache, NoCache, SHARED_PARTITION,
+};
 use crate::infra::github::compression::MAX_BODY_BYTES;
 use crate::infra::github::metrics::{GithubRequestMetrics, Outcome};
 use crate::infra::github::pagination::parse_link_next;
@@ -344,6 +346,14 @@ fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
         .and_then(parse_link_next)
 }
 
+fn cache_partition(options: &FetchOptions) -> (AccessScope, uuid::Uuid) {
+    if options.public_repo.get() == Some(&true) {
+        (AccessScope::for_tenant(SHARED_PARTITION), SHARED_PARTITION)
+    } else {
+        (options.access_scope.clone(), options.tenant_id)
+    }
+}
+
 /// GitHub REST client for the mirror (gears-rust#4630).
 ///
 /// Conditional requests, `Link`-header pagination and per-token rate-limit
@@ -623,7 +633,8 @@ impl GithubClient {
         if options.force {
             return None;
         }
-        match self.cache.get(&options.access_scope, key).await {
+        let (scope, _) = cache_partition(options);
+        match self.cache.get(&scope, key).await {
             Ok(entry) => entry,
             Err(e) => {
                 tracing::warn!(url = %redacted_word(url), error = %e, "cache read failed; fetching fresh");
@@ -1026,11 +1037,8 @@ impl GithubClient {
         if !entry.is_revalidatable() {
             return;
         }
-        if let Err(e) = self
-            .cache
-            .put(&options.access_scope, options.tenant_id, key, url, entry)
-            .await
-        {
+        let (scope, tenant_id) = cache_partition(options);
+        if let Err(e) = self.cache.put(&scope, tenant_id, key, url, entry).await {
             tracing::warn!(url = %redacted_word(url), error = %e, "cache write failed; the next sync will re-fetch");
         }
     }

@@ -77,9 +77,8 @@ pub mod http_cache {
 
     /// One cached GitHub response, keyed by a content hash of the request.
     ///
-    /// Tenant-partitioned: the design permits sharing public-repository
-    /// responses across tenants, but that needs the visibility tracking and
-    /// access grants of ADR-0002, which do not exist yet, so nothing is shared.
+    /// Tenant-partitioned, except that responses of a public repository share
+    /// the nil-UUID tenant so every tenant revalidates the same entry.
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Scopable)]
     #[sea_orm(table_name = "gm_http_cache")]
     #[secure(

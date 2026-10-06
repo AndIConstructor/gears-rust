@@ -462,6 +462,7 @@ fn opts(scope: ScopeConfig) -> FetchOptions {
         since: None,
         cancel: tokio_util::sync::CancellationToken::new(),
         telemetry: std::sync::Arc::default(),
+        public_repo: std::sync::Arc::default(),
     }
 }
 
@@ -1655,6 +1656,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
         since: None,
         cancel: tokio_util::sync::CancellationToken::new(),
         telemetry: std::sync::Arc::default(),
+        public_repo: std::sync::Arc::default(),
     };
 
     let fresh = fetch_repository(&client, "rust-lang", "rust", &options)
@@ -2304,10 +2306,7 @@ async fn a_rate_limit_seen_by_one_request_pauses_every_other_request() {
         "a request that had nothing to do with the limit must wait out the cooldown another \
          request armed, waited {waited:?}"
     );
-    assert!(
-        limited.calls_async().await >= 2,
-        "the limited request must have retried, which is what proves the cooldown expired"
-    );
+    wait_for_calls(&limited, 2).await;
     assert!(free.calls_async().await >= 1);
 
     limited_request.abort();

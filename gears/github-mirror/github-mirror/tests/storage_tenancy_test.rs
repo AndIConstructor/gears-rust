@@ -209,6 +209,7 @@ async fn every_child_listing_of_a_shared_repository_stays_with_its_tenant() {
                     since: None,
                     cancel: tokio_util::sync::CancellationToken::new(),
                     telemetry: std::sync::Arc::default(),
+                    public_repo: std::sync::Arc::default(),
                 },
                 &SyncProgress::new(),
                 &tokio_util::sync::CancellationToken::new(),

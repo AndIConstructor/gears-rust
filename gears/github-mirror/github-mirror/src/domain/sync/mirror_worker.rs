@@ -368,6 +368,9 @@ impl MirrorWorker {
         run.repo_id.set(stored.id).map_err(|_| {
             DomainError::internal("the repository was discovered twice in one sync")
         })?;
+        run.options.public_repo.set(!stored.private).map_err(|_| {
+            DomainError::internal("the repository was discovered twice in one sync")
+        })?;
         run.tally(|s| s.repository.clone_from(&stored.full_name));
 
         let objects = run.options.scope.objects;

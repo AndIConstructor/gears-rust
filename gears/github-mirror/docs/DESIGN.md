@@ -70,7 +70,7 @@ A sync is designed to be stopped and started again. The task queue lives in memo
 | `cpt-cf-github-mirror-fr-contributor-derivation` | `p2` | Contributors are derived from authors, assignees, reviewers, commenters and committers seen during the sync |
 | `cpt-cf-github-mirror-fr-github-compat-api` | `p1` | GitHub-shaped read endpoints at the root, answering with GitHub's field names and error bodies |
 | `cpt-cf-github-mirror-fr-extended-api` | `p2` | `/github-mirror/v1/...`: sessions, sync status, resume, cache clear, commit files, review threads |
-| `cpt-cf-github-mirror-fr-multi-tenancy` | `p1` | Every table carries `tenant_id`; every query goes through the secure ORM with the caller's `AccessScope` |
+| `cpt-cf-github-mirror-fr-multi-tenancy` | `p1` | Every table carries `tenant_id`; every query goes through the secure ORM with the caller's `AccessScope`; cached responses of a public repository live in one shared `gm_http_cache` partition |
 | `cpt-cf-github-mirror-fr-access-control` | `p1` | The platform policy enforcer decides each read and write; a refused read answers `404`, never `403` |
 | `cpt-cf-github-mirror-fr-public-api` | `p1` | The SDK trait `GithubMirrorClientV1`, served in process by `LocalClient` |
 | `cpt-cf-github-mirror-fr-log-redaction` | `p1` | Tokens and credential-shaped text are redacted before logging; GraphQL error bodies are logged, not stored on the session |
@@ -261,7 +261,7 @@ REST and GraphQL calls with conditional requests, pagination, retries, the rate-
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-component-http-cache`
 
-Tenant-scoped response store with compression and a content hash.
+Response store with compression and a content hash. Responses of a repository Discovery saw as public go to one shared partition (`tenant_id` is the nil UUID) that every tenant reads and writes through a scope for that tenant only. Private repositories, and the repository metadata call made before the visibility is known, stay in the caller's partition. A shared body is served only after GitHub answers `304` to the caller's own request.
 
 ### 3.3 API Contracts
 
@@ -273,7 +273,7 @@ Tenant-scoped response store with compression and a content hash.
 | `POST /sync/resume` | Re-queue repositories still `in_progress` (optionally one, `?repo=owner/name`) |
 | `GET /sessions`, `GET /sessions/{id}` | Session list and one session: status, progress, error, summary |
 | `GET /sync-status` | Per-repository run status; filter `status=in_progress\|complete` |
-| `DELETE /cache` | Clear cached responses for `?owner=` or `?repo=owner/name` |
+| `DELETE /cache` | Clear the caller's cached responses for `?owner=` or `?repo=owner/name`; shared public-repository entries stay, and a sync with `force=true` re-fetches them |
 | `GET /repos` | Mirrored repositories |
 | `GET /repos/{owner}/{name}/commits/{sha}/files`, `GET /repos/{owner}/{name}/pulls/{number}/threads` | Data GitHub's REST paths do not serve in this shape |
 | `GET /health` | Liveness |
@@ -417,7 +417,7 @@ Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the
 
 | Column | Description |
 |---|---|
-| `tenant_id`, `cache_key` | Primary key; the key is computed from method, URL and `Accept` |
+| `tenant_id`, `cache_key` | Primary key; the key is computed from method, URL and `Accept`; `tenant_id` is the nil UUID for shared public-repository entries |
 | `url`, `status` | What was fetched |
 | `etag`, `last_modified`, `next_page` | Validators and the `Link: next` of the page |
 | `body`, `compression` | The body as stored (`gzip` by default, or `none`) |
@@ -573,8 +573,7 @@ The database pool should allow at least `max_concurrent_syncs` × `max_concurren
 
 ### Future Work
 
-- Sharing cached responses of public repositories across tenants (needs per-entry visibility and grants).
-- A token per tenant, with its own rate-limit budget.
+- A token per tenant, with its own rate-limit budget; shared public-repository entries would then need the token in the key, since GitHub's `permissions` field differs per token.
 - An "as of" marker on read endpoints for readers that must not see a repository mid-sync.
 - The CLI, Python bindings and write-back described in the PRD.
 
