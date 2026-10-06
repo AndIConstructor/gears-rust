@@ -99,7 +99,6 @@ A full local mirror that synchronizes incrementally with GitHub, serves a GitHub
 | Task Graph | A directed acyclic graph of synchronization tasks with priority ordering and dependency edges, enabling breadth-first list completion before deep refinement |
 | Refinement | A second-pass synchronization that fills missing details, refreshes stale objects, or repairs failed pages for entities already discovered during the initial fetch |
 | Secondary Rate Limit | An additional GitHub throttle applied when the server detects excessive concurrency or request volume beyond the primary per-token limit |
-| Hybrid Cache | A caching mode that stores raw JSON on the filesystem and normalized entities in a relational database simultaneously |
 | Derived Contributor | A person record deduced from embedded user objects already present in synchronized entities — built during normalization with no additional API calls |
 | Token Pool | A set of GitHub PATs managed by the gear to distribute API requests across multiple tokens, effectively multiplying the available rate-limit budget |
 | Write-Back Operation | A queued mutation (merge PR, post comment, etc.) that the mirror enqueues locally and executes against GitHub when API capacity is available |
@@ -202,7 +201,7 @@ A full local mirror that synchronizes incrementally with GitHub, serves a GitHub
 - Multi-tenancy and access control for both HTTP server and CLI tool
 - Token pool management for distributing API requests across multiple PATs
 - TOML-based configuration for all synchronization, caching, storage, API, and logging options
-- Persistency layer to be implemented as plugins - Filesystem only, DB, hybrid
+- Persistency layer to be implemented as plugins - Filesystem only, DB
 - In-memory task orchestration with priority queue, deduplication, and idempotent tasks
 - ETag and Last-Modified conditional request support
 - Per-endpoint stale TTLs with entity-state-aware refresh policies
@@ -475,7 +474,7 @@ The system **MUST** support PostgreSQL, MariaDB, and SQLite as database backends
 
 - [ ] `p1` - **ID**: `cpt-cf-github-mirror-fr-persistence-plugins`
 
-The persistence layer **MUST** be implemented as plugins with at least three built-in modes: filesystem-only (raw responses on disk, suitable for CLI), database-only (all data in DB, no filesystem dependency, suitable for REST API service), and hybrid (filesystem + database). The gear **MUST** be fully functional without any filesystem access when using the database-only plugin.
+The persistence layer **MUST** be implemented as plugins with at least two built-in modes: filesystem-only (raw responses on disk, suitable for CLI) and database-only (all data in DB, no filesystem dependency, suitable for REST API service). The gear **MUST** be fully functional without any filesystem access when using the database-only plugin.
 
 - **Rationale**: The CLI tool benefits from filesystem caching for manual inspection, while the REST API service deployment should avoid filesystem dependencies for containerized and ephemeral environments.
 - **Actors**: `cpt-cf-github-mirror-actor-lib-consumer`, `cpt-cf-github-mirror-actor-platform-admin`
@@ -1015,7 +1014,7 @@ The mirror is a replica of personal data: every contributor row is a person, and
 
 - **Type**: Rust trait
 - **Stability**: unstable (pre-1.0)
-- **Description**: Async trait defining visibility-aware `get`, validator-only `peek`, `put`, and metadata operations for cache backends. Public repositories use shared org/repo/request cache keys; private or visibility-unknown repositories use tenant-scoped cache keys. Implemented by filesystem, database, hybrid, and plugin cache modules.
+- **Description**: Async trait defining visibility-aware `get`, validator-only `peek`, `put`, and metadata operations for cache backends. Public repositories use shared org/repo/request cache keys; private or visibility-unknown repositories use tenant-scoped cache keys. Implemented by filesystem, database, and plugin cache modules.
 - **Breaking Change Policy**: Semver; trait changes are breaking.
 
 #### MetadataStore Trait
