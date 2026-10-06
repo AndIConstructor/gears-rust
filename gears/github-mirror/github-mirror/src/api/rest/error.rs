@@ -51,6 +51,9 @@ impl From<DomainError> for CanonicalError {
             DomainError::NotFound => RepositoryError::not_found("Repo not found")
                 .with_resource("repository")
                 .create(),
+            DomainError::SessionNotFound => RepositoryError::not_found("Sync session not found")
+                .with_resource("sync_session")
+                .create(),
             DomainError::Validation { field, message } => RepositoryError::invalid_argument()
                 .with_field_violation(field, message, "VALIDATION_ERROR")
                 .create(),
@@ -71,6 +74,16 @@ impl From<DomainError> for CanonicalError {
             DomainError::Cancelled => CanonicalError::service_unavailable()
                 .with_detail(DomainError::Cancelled.public_text())
                 .create(),
+            DomainError::Unavailable {
+                message,
+                retry_after_secs,
+            } => {
+                let unavailable = CanonicalError::service_unavailable().with_detail(message);
+                match retry_after_secs {
+                    Some(seconds) => unavailable.with_retry_after_seconds(seconds).create(),
+                    None => unavailable.create(),
+                }
+            }
             DomainError::Forbidden(msg) => {
                 tracing::warn!(msg = %redacted(&msg), "github-mirror access forbidden");
                 RepositoryError::not_found("Repo not found or not accessible")

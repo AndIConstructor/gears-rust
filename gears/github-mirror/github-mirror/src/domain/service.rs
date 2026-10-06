@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -15,6 +15,7 @@ use github_mirror_sdk::{
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use toolkit_macros::domain_model;
 use toolkit_odata::{CursorV1, ODataQuery, Page, PageInfo, SortDir};
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
@@ -24,19 +25,19 @@ use super::error::DomainError;
 use super::ports::github::{FetchOptions, GithubPort};
 use super::ports::telemetry_sink::TelemetrySink;
 use super::repo::{
-    BranchRecord, BranchRepository, CheckRunRecord, CheckRunRepository, CommentRecord,
-    CommentRepository, CommitCommentRecord, CommitCommentRepository, CommitFileRecord,
-    CommitFileRepository, CommitRecord, CommitRepository, CommitStatusRecord,
-    CommitStatusRepository, ContributorRecord, ContributorRepository, DeploymentRecord,
-    DeploymentRepository, EntityFingerprintRepository, IssueEventRecord, IssueEventRepository,
-    IssueReactionRecord, IssueReactionRepository, IssueRecord, IssueRepository,
-    IssueTimelineEventRecord, IssueTimelineRepository, LabelRecord, LabelRepository, ListingFilter,
-    MilestoneRecord, MilestoneRepository, PageWindow, PullRequestCommitRecord,
-    PullRequestCommitRepository, PullRequestFileRecord, PullRequestFileRepository,
-    PullRequestRecord, PullRequestRepository, ReleaseRecord, ReleaseRepository, RepoRecord,
-    RepoRepository, RepoRunStatus, RepoSyncStatusRecord, RepoSyncStatusRepository,
-    ReviewCommentRecord, ReviewCommentRepository, ReviewRecord, ReviewRepository,
-    ReviewThreadRecord, ReviewThreadRepository, SessionStatus, SyncSessionRecord,
+    ActiveSyncRecord, ActiveSyncRepository, BranchRecord, BranchRepository, CheckRunRecord,
+    CheckRunRepository, CommentRecord, CommentRepository, CommitCommentRecord,
+    CommitCommentRepository, CommitFileRecord, CommitFileRepository, CommitRecord,
+    CommitRepository, CommitStatusRecord, CommitStatusRepository, ContributorRecord,
+    ContributorRepository, DeploymentRecord, DeploymentRepository, EntityFingerprintRepository,
+    IssueEventRecord, IssueEventRepository, IssueReactionRecord, IssueReactionRepository,
+    IssueRecord, IssueRepository, IssueTimelineEventRecord, IssueTimelineRepository, LabelRecord,
+    LabelRepository, ListingFilter, MilestoneRecord, MilestoneRepository, PageWindow,
+    PullRequestCommitRecord, PullRequestCommitRepository, PullRequestFileRecord,
+    PullRequestFileRepository, PullRequestRecord, PullRequestRepository, ReleaseRecord,
+    ReleaseRepository, RepoRecord, RepoRepository, RepoRunStatus, RepoSyncStatusRecord,
+    RepoSyncStatusRepository, ReviewCommentRecord, ReviewCommentRepository, ReviewRecord,
+    ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, SessionStatus, SyncSessionRecord,
     SyncSessionRepository, SyncWatermarkRepository, SyncWriter, TagRecord, TagRepository,
     WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
@@ -142,6 +143,7 @@ fn keyset_page<T>(
 }
 
 struct EnqueueScopes {
+    sync: AccessScope,
     session: AccessScope,
     repo_status: AccessScope,
 }
@@ -189,8 +191,52 @@ fn abandoned(session: &SyncSessionRecord, now: DateTime<Utc>) -> bool {
         .as_deref()
         .or(session.started_at.as_deref())
         .unwrap_or(&session.created_at);
-    DateTime::parse_from_rfc3339(last_seen)
+    silent_too_long(last_seen, now)
+}
+
+fn silent_too_long(stamp: &str, now: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(stamp)
         .is_ok_and(|at| (now - at.with_timezone(&Utc)).num_seconds() > ABANDONED_AFTER_SECS)
+}
+
+fn report_session_closed_meanwhile(session_id: Uuid) {
+    tracing::warn!(
+        session_id = %session_id,
+        "the session was closed while this run was still going; leaving it as it is"
+    );
+}
+
+async fn heartbeat(
+    sessions: Arc<dyn SyncSessionRepository>,
+    scope: AccessScope,
+    session_id: Uuid,
+    percent: Arc<AtomicU8>,
+    telemetry: Arc<SessionTelemetry>,
+    stop: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = stop.cancelled() => return,
+            () = tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_SECS)) => {}
+        }
+        let progress_percent = i32::from(percent.load(Ordering::Relaxed));
+        if let Err(e) = sessions
+            .record_heartbeat(
+                &scope,
+                session_id,
+                progress_percent,
+                &telemetry_json(&telemetry),
+                &now_rfc3339(),
+            )
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "sync heartbeat could not persist progress"
+            );
+        }
+    }
 }
 
 fn stored_summary_json(session_id: Uuid, summary: &SyncSummary) -> Option<String> {
@@ -370,6 +416,23 @@ const HEARTBEAT_SECS: u64 = 2;
 /// keep its lock.
 const ABANDONED_AFTER_SECS: i64 = 300;
 
+pub(crate) const ACTIVE_SYNC_TOUCH_EVERY: std::time::Duration = std::time::Duration::from_mins(1);
+
+const TAKE_ACTIVE_SYNC_ATTEMPTS: usize = 3;
+
+const QUEUE_FULL_RETRY_AFTER_SECS: u64 = 30;
+
+const MAX_REPORTED_FAILURES: usize = 20;
+
+const MAX_REPORTED_DRIFT: usize = 100;
+
+const SESSION_WRITE_ATTEMPTS: u32 = 3;
+
+const SESSION_WRITE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+pub(crate) const SWEEP_AGAIN_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(ABANDONED_AFTER_SECS.unsigned_abs() + HEARTBEAT_SECS);
+
 /// Most repositories one resume call will re-queue: what the sync channel
 /// holds, so a call never queues more than fits; the rest stay `in_progress`
 /// for the next call.
@@ -443,6 +506,18 @@ pub(crate) const SYNC_QUEUE_DEPTH: usize = 64;
 /// The status is read rather than assumed, because a request that collapsed
 /// into a run already going is handed that run's session, which may have left
 /// `queued` some time ago.
+#[derive(Debug, Default)]
+pub struct ResumeOutcome {
+    pub session_ids: Vec<Uuid>,
+    pub refused: Vec<RefusedResume>,
+}
+
+#[derive(Debug)]
+pub struct RefusedResume {
+    pub repository: String,
+    pub error: DomainError,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueuedSync {
     pub session_id: Uuid,
@@ -471,6 +546,7 @@ pub struct SyncJob {
     /// Oldest closed entity worth collecting, from the request.
     pub since: Option<DateTime<Utc>>,
     pub telemetry_file: Option<String>,
+    pub access_scope: AccessScope,
     #[expect(
         dead_code,
         reason = "held for its drop: a job that goes away, run or not, gives its claim back"
@@ -553,7 +629,10 @@ pub struct Service {
     telemetry_sink: Arc<dyn TelemetrySink>,
     sync_tx: mpsc::Sender<SyncJob>,
     sync_rx: Arc<Mutex<Option<mpsc::Receiver<SyncJob>>>>,
-    in_flight: InFlight,
+    active_syncs: Arc<dyn ActiveSyncRepository>,
+    instance_id: Uuid,
+    in_process_syncs: TaskTracker,
+    in_process_slots: Arc<tokio::sync::Semaphore>,
     /// One gate per repository, so the look, the write and the claim that a
     /// queue request makes are serialised for that repository alone rather than
     /// for the whole gear.
@@ -579,18 +658,17 @@ enum PreparedSync {
     },
 }
 
-type InFlight = Arc<std::sync::Mutex<HashMap<InFlightKey, Claim>>>;
-
 pub(crate) struct ClaimRelease {
-    in_flight: InFlight,
-    key: InFlightKey,
+    active_syncs: Arc<dyn ActiveSyncRepository>,
+    scope: AccessScope,
+    repo_full_name: String,
     session_id: Uuid,
 }
 
 impl std::fmt::Debug for ClaimRelease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClaimRelease")
-            .field("key", &self.key)
+            .field("repo_full_name", &self.repo_full_name)
             .field("session_id", &self.session_id)
             .finish_non_exhaustive()
     }
@@ -598,16 +676,26 @@ impl std::fmt::Debug for ClaimRelease {
 
 impl Drop for ClaimRelease {
     fn drop(&mut self) {
-        let mut in_flight = self
-            .in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if in_flight
-            .get(&self.key)
-            .is_some_and(|claim| claim.session_id == self.session_id)
-        {
-            in_flight.remove(&self.key);
-        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let active_syncs = Arc::clone(&self.active_syncs);
+        let scope = self.scope.clone();
+        let repo_full_name = std::mem::take(&mut self.repo_full_name);
+        let session_id = self.session_id;
+        runtime.spawn(async move {
+            if let Err(e) = active_syncs
+                .delete(&scope, &repo_full_name, session_id)
+                .await
+            {
+                tracing::warn!(
+                    repository = %repo_full_name,
+                    session_id = %session_id,
+                    error = %e,
+                    "could not remove the repository's active sync row"
+                );
+            }
+        });
     }
 }
 
@@ -733,7 +821,10 @@ impl Clone for Service {
             telemetry_sink: Arc::clone(&self.telemetry_sink),
             sync_tx: self.sync_tx.clone(),
             sync_rx: Arc::clone(&self.sync_rx),
-            in_flight: Arc::clone(&self.in_flight),
+            active_syncs: Arc::clone(&self.active_syncs),
+            instance_id: self.instance_id,
+            in_process_syncs: self.in_process_syncs.clone(),
+            in_process_slots: Arc::clone(&self.in_process_slots),
             claim_gates: self.claim_gates.clone(),
             shutdown: Arc::clone(&self.shutdown),
         }
@@ -777,6 +868,7 @@ impl Service {
         issue_timeline: Arc<dyn IssueTimelineRepository>,
         sync_sessions: Arc<dyn SyncSessionRepository>,
         repo_sync_status: Arc<dyn RepoSyncStatusRepository>,
+        active_syncs: Arc<dyn ActiveSyncRepository>,
         sync_writer: Arc<dyn SyncWriter>,
         fingerprints: Arc<dyn EntityFingerprintRepository>,
         watermark_store: Arc<dyn SyncWatermarkRepository>,
@@ -786,6 +878,9 @@ impl Service {
         telemetry_sink: Arc<dyn TelemetrySink>,
     ) -> Self {
         let (sync_tx, sync_rx) = mpsc::channel(SYNC_QUEUE_DEPTH);
+        let in_process_slots = Arc::new(tokio::sync::Semaphore::new(
+            config.max_concurrent_syncs.get(),
+        ));
         Self {
             db,
             repo,
@@ -825,7 +920,10 @@ impl Service {
             telemetry_sink,
             sync_tx,
             sync_rx: Arc::new(Mutex::new(Some(sync_rx))),
-            in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            active_syncs,
+            instance_id: Uuid::new_v4(),
+            in_process_syncs: TaskTracker::new(),
+            in_process_slots,
             claim_gates: gate::ClaimGates::default(),
             shutdown: Arc::new(OnceLock::new()),
         }
@@ -3354,6 +3452,20 @@ impl Service {
             .await?)
     }
 
+    async fn sync_access_scope(&self, ctx: &SecurityContext) -> Result<AccessScope, DomainError> {
+        let tenant_id = ctx.subject_tenant_id();
+        Ok(self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &SYNC_RESOURCE,
+                actions::SYNC,
+                None,
+                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
+            )
+            .await?)
+    }
+
     /// Scope for this tenant's per-repository run-status rows.
     /// GitHub's id for a mirrored repository, once Discovery has stored it.
     /// A repository not yet mirrored, or a lookup the caller may not make,
@@ -3398,17 +3510,26 @@ impl Service {
 
     /// Write the repository's run status, preserving whatever a previous run
     /// recorded in the fields this transition does not own.
-    async fn mark_repo_status(
+    async fn mark_repo_complete(
         &self,
         ctx: &SecurityContext,
         repo_full_name: &str,
         session_id: Uuid,
-        status: RepoRunStatus,
-        synced_at: Option<String>,
     ) -> Result<(), DomainError> {
         let scope = self.repo_status_scope(ctx, actions::UPSERT).await?;
-        self.mark_repo_status_in(&scope, ctx, repo_full_name, session_id, status, synced_at)
-            .await
+        let repo_id = self.stored_repo_id(ctx, repo_full_name).await;
+        let written = self
+            .repo_sync_status
+            .complete_if_last_session(&scope, repo_full_name, session_id, repo_id, &now_rfc3339())
+            .await?;
+        if !written {
+            tracing::info!(
+                repository = repo_full_name,
+                session_id = %session_id,
+                "a newer sync owns this repository's run status; leaving it as it is"
+            );
+        }
+        Ok(())
     }
 
     async fn mark_repo_status_in(
@@ -3590,18 +3711,20 @@ impl Service {
     /// run rather than a second one, so calling resume twice is harmless.
     ///
     /// # Errors
-    /// `Forbidden`/`Database` as usual. A repository that cannot be queued is
-    /// skipped, so one full queue does not abandon the rest.
+    /// `Forbidden`/`Database` as usual, and, when `only` names one
+    /// repository, the error that kept it from being queued. Otherwise a
+    /// repository that cannot be queued is listed in `refused`, so one full
+    /// queue does not abandon the rest.
     pub async fn resume_incomplete_syncs(
         &self,
         ctx: &SecurityContext,
         only: Option<&str>,
         force: bool,
-    ) -> Result<Vec<Uuid>, DomainError> {
+    ) -> Result<ResumeOutcome, DomainError> {
         let pending = self.repos_awaiting_resume(ctx, only).await?;
         let scopes = self.enqueue_scopes(ctx).await?;
 
-        let mut resumed = Vec::with_capacity(pending.len());
+        let mut outcome = ResumeOutcome::default();
         for repo in pending {
             let Some((owner, name)) = repo.repo_full_name.split_once('/') else {
                 tracing::warn!(
@@ -3614,16 +3737,23 @@ impl Service {
                 .enqueue_sync_scoped(ctx, &scopes, owner, name, None, force, None)
                 .await
             {
-                Ok(queued) => resumed.push(queued.session_id),
-                Err(e) => tracing::warn!(
-                    repository = %repo.repo_full_name,
-                    error = %e,
-                    "could not queue a resume for this repository"
-                ),
+                Ok(queued) => outcome.session_ids.push(queued.session_id),
+                Err(e) if only.is_some() => return Err(e),
+                Err(e) => {
+                    tracing::warn!(
+                        repository = %repo.repo_full_name,
+                        error = %e,
+                        "could not queue a resume for this repository"
+                    );
+                    outcome.refused.push(RefusedResume {
+                        repository: repo.repo_full_name,
+                        error: e,
+                    });
+                }
             }
         }
 
-        Ok(resumed)
+        Ok(outcome)
     }
 
     /// Record a sync request and hand it to the background worker.
@@ -3646,7 +3776,7 @@ impl Service {
     ///
     /// # Errors
     /// `Conflict` when a sync of this repository is running on other terms,
-    /// `Forbidden`/`Database` as usual, or `Internal` when the queue is full
+    /// `Forbidden`/`Database` as usual, or `Unavailable` when the queue is full
     /// or the background worker is not running; in the last case the session
     /// is left behind in `failed` rather than silently dropped.
     pub async fn enqueue_sync(
@@ -3663,11 +3793,13 @@ impl Service {
             .await
     }
 
-    /// The two write scopes one sync request needs, resolved once so a resume
-    /// of hundreds of repositories asks the policy enforcer once, not per
-    /// repository.
+    /// The scopes one sync request needs, resolved once so a resume of hundreds
+    /// of repositories asks the policy enforcer once, not per repository. The
+    /// sync permission is among them, so a caller without it gets 403 here
+    /// rather than a 202 for a run that fails later.
     async fn enqueue_scopes(&self, ctx: &SecurityContext) -> Result<EnqueueScopes, DomainError> {
         Ok(EnqueueScopes {
+            sync: self.sync_access_scope(ctx).await?,
             session: self.session_scope(ctx, actions::UPSERT).await?,
             repo_status: self.repo_status_scope(ctx, actions::UPSERT).await?,
         })
@@ -3697,19 +3829,56 @@ impl Service {
             PreparedSync::Claimed { job, session } => (job, session),
         };
         let id = session.id;
-        let key = (ctx.subject_tenant_id(), session.repo_full_name.clone());
         if let Err(e) = self.sync_tx.try_send(*job) {
-            self.release_in_flight(&key);
-            let reason = format!("sync could not be queued: {e}");
-            self.fail_session(&scopes.session, key.0, *session, reason.clone())
-                .await;
-            return Err(DomainError::internal(reason));
+            let error = match e {
+                mpsc::error::TrySendError::Full(_) => DomainError::Unavailable {
+                    message: "the sync queue is full; try again shortly".to_owned(),
+                    retry_after_secs: Some(QUEUE_FULL_RETRY_AFTER_SECS),
+                },
+                mpsc::error::TrySendError::Closed(_) => DomainError::Unavailable {
+                    message: "the sync worker is not running".to_owned(),
+                    retry_after_secs: None,
+                },
+            };
+            self.fail_session(
+                &scopes.session,
+                ctx.subject_tenant_id(),
+                *session,
+                error.public_text(),
+            )
+            .await;
+            return Err(error);
         }
 
         Ok(QueuedSync {
             session_id: id,
             status: SessionStatus::Queued,
         })
+    }
+
+    #[must_use]
+    pub fn spawn_sync_now(
+        self: &Arc<Self>,
+        ctx: SecurityContext,
+        owner: String,
+        name: String,
+    ) -> tokio::task::JoinHandle<Result<SyncSummary, DomainError>> {
+        let service = Arc::clone(self);
+        self.in_process_syncs.spawn(async move {
+            let shutdown = service.shutdown_token();
+            let _slot = tokio::select! {
+                slot = service.in_process_slots.acquire() => slot.map_err(|e| {
+                    DomainError::internal(format!("the in-process sync slots are closed: {e}"))
+                })?,
+                () = shutdown.cancelled() => return Err(DomainError::Cancelled),
+            };
+            service.sync_now(&ctx, &owner, &name, None).await
+        })
+    }
+
+    pub async fn wait_for_in_process_syncs(&self) {
+        self.in_process_syncs.close();
+        self.in_process_syncs.wait().await;
     }
 
     /// Sync `owner/name` on the task that calls this and hand back what it
@@ -3785,7 +3954,7 @@ impl Service {
             created_at: now.clone(),
             started_at: None,
             ended_at: None,
-            updated_at: Some(now),
+            updated_at: Some(now.clone()),
         };
         self.release_lock_left_by_a_dead_run(scopes, tenant_id, &key.1)
             .await;
@@ -3793,50 +3962,34 @@ impl Service {
         let claim = {
             // Held for this repository only, so two concurrent requests for it
             // cannot both decide they are the first while a request for
-            // another repository waits on nothing. The row is written before
-            // the claim goes in, so the id a collapsing request is handed
-            // always names a session it can read.
+            // another repository waits on nothing. The session row is written
+            // before the gate is let go, so the id a collapsing request of
+            // this process is handed always names a session it can read.
             let lease = self.claim_gates.lease(&key);
             let claimed = lease.lock().await;
 
-            let running = self
-                .in_flight
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&key)
-                .copied();
-            if let Some(running) = running {
-                // Released first: the claim is already copied out, and reading
-                // the running session's status is a database round trip no
-                // other request for this repository needs to wait behind.
+            let active = ActiveSyncRecord {
+                repo_full_name: key.1.clone(),
+                session_id: id,
+                owner_id: self.instance_id,
+                scope: sync_scope,
+                since,
+                updated_at: now,
+            };
+            if let Some(running) = self.take_active_sync(scopes, tenant_id, &active).await? {
                 drop(claimed);
                 return self
                     .join_or_refuse(scope, &key.1, running, sync_scope, since)
                     .await
                     .map(PreparedSync::Joined);
             }
-            self.sync_sessions
-                .upsert(scope, tenant_id, session.clone())
-                .await?;
-            self.in_flight
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    key.clone(),
-                    Claim {
-                        session_id: id,
-                        scope: sync_scope,
-                        since,
-                    },
-                );
-            ClaimRelease {
-                in_flight: Arc::clone(&self.in_flight),
-                key,
+            let claim = ClaimRelease {
+                active_syncs: Arc::clone(&self.active_syncs),
+                scope: scopes.repo_status.clone(),
+                repo_full_name: key.1,
                 session_id: id,
-            }
-        };
-        if let Err(e) = self
-            .mark_repo_status_in(
+            };
+            self.mark_repo_status_in(
                 &scopes.repo_status,
                 ctx,
                 &session.repo_full_name,
@@ -3844,13 +3997,12 @@ impl Service {
                 RepoRunStatus::InProgress,
                 None,
             )
-            .await
-        {
-            drop(claim);
-            self.fail_session(scope, tenant_id, session, e.public_text())
-                .await;
-            return Err(e);
-        }
+            .await?;
+            self.sync_sessions
+                .upsert(scope, tenant_id, session.clone())
+                .await?;
+            claim
+        };
 
         let job = SyncJob {
             session_id: id,
@@ -3861,6 +4013,7 @@ impl Service {
             force,
             since,
             telemetry_file: None,
+            access_scope: scopes.sync.clone(),
             claim: Some(claim),
         };
         Ok(PreparedSync::Claimed {
@@ -3887,12 +4040,142 @@ impl Service {
         session.ended_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.ended_at);
         session.error = Some(reason);
-        if let Err(e) = self.sync_sessions.upsert(scope, tenant_id, session).await {
+        if let Err(e) = self
+            .upsert_session_with_retry(scope, tenant_id, session)
+            .await
+        {
             tracing::error!(
                 error = %crate::redact::redacted(&e.to_string()),
-                "a sync that could not be queued could not be marked failed either"
+                "a sync that could not be queued or started could not be marked failed either"
             );
         }
+    }
+
+    async fn upsert_session_with_retry(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        session: SyncSessionRecord,
+    ) -> Result<(), DomainError> {
+        let mut attempt = 1;
+        loop {
+            match self
+                .sync_sessions
+                .upsert(scope, tenant_id, session.clone())
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(e) if attempt < SESSION_WRITE_ATTEMPTS => {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        attempt,
+                        error = %crate::redact::redacted(&e.to_string()),
+                        "could not write the sync session; trying again"
+                    );
+                    tokio::time::sleep(SESSION_WRITE_RETRY_DELAY).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn finish_session_with_retry(
+        &self,
+        scope: &AccessScope,
+        session: &SyncSessionRecord,
+    ) -> Result<bool, DomainError> {
+        let mut attempt = 1;
+        loop {
+            match self.sync_sessions.finish_if_running(scope, session).await {
+                Ok(written) => return Ok(written),
+                Err(e) if attempt < SESSION_WRITE_ATTEMPTS => {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        attempt,
+                        error = %crate::redact::redacted(&e.to_string()),
+                        "could not write the sync session; trying again"
+                    );
+                    tokio::time::sleep(SESSION_WRITE_RETRY_DELAY).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub async fn interrupt_unstarted_job(&self, job: SyncJob) {
+        let tenant_id = job.ctx.subject_tenant_id();
+        match self
+            .sync_sessions
+            .find_by_id(&job.access_scope, job.session_id)
+            .await
+        {
+            Ok(Some(mut session)) if session.status == SessionStatus::Queued => {
+                session.status = SessionStatus::Interrupted;
+                session.progress_percent = 100;
+                session.ended_at = Some(now_rfc3339());
+                session.updated_at.clone_from(&session.ended_at);
+                session.error = Some("the gear stopped before this sync started".to_owned());
+                if let Err(e) = self
+                    .upsert_session_with_retry(&job.access_scope, tenant_id, session)
+                    .await
+                {
+                    tracing::error!(
+                        session_id = %job.session_id,
+                        error = %crate::redact::redacted(&e.to_string()),
+                        "a sync dropped at shutdown could not be marked interrupted"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(
+                session_id = %job.session_id,
+                error = %crate::redact::redacted(&e.to_string()),
+                "a sync dropped at shutdown could not be read to mark it interrupted"
+            ),
+        }
+    }
+
+    async fn fail_unstarted_session(&self, job: &SyncJob, error: &DomainError) {
+        let tenant_id = job.ctx.subject_tenant_id();
+        match self
+            .sync_sessions
+            .find_by_id(&job.access_scope, job.session_id)
+            .await
+        {
+            Ok(Some(session)) if session.status == SessionStatus::Queued => {
+                self.fail_session(&job.access_scope, tenant_id, session, error.public_text())
+                    .await;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(
+                session_id = %job.session_id,
+                error = %crate::redact::redacted(&e.to_string()),
+                "a sync that could not start could not be marked failed either"
+            ),
+        }
+    }
+
+    async fn start_session(
+        &self,
+        job: &SyncJob,
+    ) -> Result<(AccessScope, SyncSessionRecord), DomainError> {
+        let scope = self.session_scope(&job.ctx, actions::UPSERT).await?;
+        let mut session = self
+            .sync_sessions
+            .find_by_id(&scope, job.session_id)
+            .await?
+            .ok_or(DomainError::SessionNotFound)?;
+        session.status = SessionStatus::InProgress;
+        session.started_at = Some(now_rfc3339());
+        session.updated_at.clone_from(&session.started_at);
+        session.ended_at = None;
+        session.error = None;
+        self.sync_sessions
+            .upsert(&scope, job.ctx.subject_tenant_id(), session.clone())
+            .await?;
+        Ok((scope, session))
     }
 
     /// Answer a request for a repository a sync already holds: its session
@@ -3961,12 +4244,70 @@ impl Service {
         Ok(session.map_or(SessionStatus::InProgress, |session| session.status))
     }
 
-    /// Give up a repository's claim so the next request queues a fresh sync.
-    fn release_in_flight(&self, key: &InFlightKey) {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(key);
+    async fn take_active_sync(
+        &self,
+        scopes: &EnqueueScopes,
+        tenant_id: Uuid,
+        mine: &ActiveSyncRecord,
+    ) -> Result<Option<Claim>, DomainError> {
+        for _ in 0..TAKE_ACTIVE_SYNC_ATTEMPTS {
+            let held = self
+                .active_syncs
+                .find(&scopes.repo_status, &mine.repo_full_name)
+                .await?;
+            let taken = match held {
+                None => {
+                    self.active_syncs
+                        .insert(&scopes.repo_status, tenant_id, mine)
+                        .await?
+                }
+                Some(held) if self.active_sync_is_live(&scopes.session, &held).await? => {
+                    return Ok(Some(Claim {
+                        session_id: held.session_id,
+                        scope: held.scope,
+                        since: held.since,
+                    }));
+                }
+                Some(held) => {
+                    self.active_syncs
+                        .replace(&scopes.repo_status, mine, held.session_id)
+                        .await?
+                }
+            };
+            if taken {
+                return Ok(None);
+            }
+        }
+        Err(DomainError::Conflict(format!(
+            "another request is starting a sync of {} right now; try again",
+            mine.repo_full_name
+        )))
+    }
+
+    async fn active_sync_is_live(
+        &self,
+        scope: &AccessScope,
+        held: &ActiveSyncRecord,
+    ) -> Result<bool, DomainError> {
+        if silent_too_long(&held.updated_at, Utc::now()) {
+            return Ok(false);
+        }
+        let session = self
+            .sync_sessions
+            .find_by_id(scope, held.session_id)
+            .await?;
+        Ok(session.is_none_or(|session| {
+            matches!(
+                session.status,
+                SessionStatus::Queued | SessionStatus::InProgress
+            )
+        }))
+    }
+
+    pub(crate) async fn touch_active_syncs(&self) -> Result<(), DomainError> {
+        self.active_syncs
+            .touch(&AccessScope::allow_all(), self.instance_id, &now_rfc3339())
+            .await
     }
 
     /// Take sole ownership of the job stream. The gear's background task calls
@@ -3996,27 +4337,20 @@ impl Service {
         job: &SyncJob,
         cancel: &CancellationToken,
     ) -> Result<Result<SyncSummary, DomainError>, DomainError> {
-        let tenant_id = job.ctx.subject_tenant_id();
-        let scope = self.session_scope(&job.ctx, actions::UPSERT).await?;
-
-        let mut session = self
-            .sync_sessions
-            .find_by_id(&scope, job.session_id)
-            .await?
-            .ok_or(DomainError::NotFound)?;
-        session.status = SessionStatus::InProgress;
-        session.started_at = Some(now_rfc3339());
-        session.updated_at.clone_from(&session.started_at);
-        self.sync_sessions
-            .upsert(&scope, tenant_id, session.clone())
-            .await?;
+        let (scope, mut session) = match self.start_session(job).await {
+            Ok(started) => started,
+            Err(e) => {
+                self.fail_unstarted_session(job, &e).await;
+                return Err(e);
+            }
+        };
 
         let progress = SyncProgress::new();
         let telemetry_file = self
             .config
             .telemetry_dir
             .as_deref()
-            .map(|dir| telemetry_file_path(dir, tenant_id, job));
+            .map(|dir| telemetry_file_path(dir, job.ctx.subject_tenant_id(), job));
         let telemetry = Arc::new(match telemetry_file {
             Some(file) => SessionTelemetry::logging_to(
                 Arc::clone(&self.telemetry_sink),
@@ -4027,7 +4361,7 @@ impl Service {
             None => SessionTelemetry::default(),
         });
         let outcome = self
-            .sync_within_deadline(job, &progress, &telemetry, cancel)
+            .sync_within_deadline(job, &scope, &progress, &telemetry, cancel)
             .await;
 
         let completed = outcome.is_ok();
@@ -4060,21 +4394,16 @@ impl Service {
         session.ended_at = Some(now_rfc3339());
         session.updated_at.clone_from(&session.ended_at);
         let repo_full_name = session.repo_full_name.clone();
-        self.sync_sessions
-            .upsert(&scope, tenant_id, session)
-            .await?;
+        if !self.finish_session_with_retry(&scope, &session).await? {
+            report_session_closed_meanwhile(job.session_id);
+            return Ok(outcome);
+        }
 
         // A run that failed leaves the repository `in_progress` on purpose:
         // that is the marker the resume operation looks for (PRD §5.2).
         if completed {
-            self.mark_repo_status(
-                &job.ctx,
-                &repo_full_name,
-                job.session_id,
-                RepoRunStatus::Complete,
-                Some(now_rfc3339()),
-            )
-            .await?;
+            self.mark_repo_complete(&job.ctx, &repo_full_name, job.session_id)
+                .await?;
         }
 
         Ok(outcome)
@@ -4093,13 +4422,14 @@ impl Service {
     async fn sync_within_deadline(
         &self,
         job: &SyncJob,
+        session_scope: &AccessScope,
         progress: &SyncProgress,
         telemetry: &Arc<SessionTelemetry>,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
         let job_cancel = cancel.child_token();
         let deadline = self.config.sync_deadline;
-        let sync = self.sync_with_heartbeat(job, progress, telemetry, &job_cancel);
+        let sync = self.sync_with_heartbeat(job, session_scope, progress, telemetry, &job_cancel);
         let mut sync = std::pin::pin!(sync);
 
         tokio::select! {
@@ -4124,68 +4454,44 @@ impl Service {
     async fn sync_with_heartbeat(
         &self,
         job: &SyncJob,
+        session_scope: &AccessScope,
         progress: &SyncProgress,
         telemetry: &Arc<SessionTelemetry>,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
-        let percent = progress.handle();
         let options = FetchOptions {
             tenant_id: job.ctx.subject_tenant_id(),
-            access_scope: AccessScope::default(),
+            access_scope: job.access_scope.clone(),
             scope: job.scope,
             force: job.force,
             since: job.since,
             cancel: cancel.clone(),
             telemetry: Arc::clone(telemetry),
         };
-        let sync =
-            self.sync_repository(&job.ctx, &job.owner, &job.name, &options, progress, cancel);
-        let mut sync = std::pin::pin!(sync);
+        let stop_beating = CancellationToken::new();
+        let _stop_on_drop = stop_beating.clone().drop_guard();
+        let beat = tokio::spawn(heartbeat(
+            Arc::clone(&self.sync_sessions),
+            session_scope.clone(),
+            job.session_id,
+            progress.handle(),
+            Arc::clone(telemetry),
+            stop_beating.clone(),
+        ));
 
-        loop {
-            tokio::select! {
-                outcome = &mut sync => return outcome,
-                () = tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_SECS)) => {
-                    let progress_percent = i32::from(percent.load(Ordering::Relaxed));
-                    if let Err(e) = self
-                        .save_session_progress(
-                            &job.ctx,
-                            job.session_id,
-                            progress_percent,
-                            &telemetry_json(telemetry),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %job.session_id,
-                            error = %e,
-                            "sync heartbeat could not persist progress"
-                        );
-                    }
-                }
-            }
+        let outcome = self
+            .sync_repository_scoped(&job.ctx, &job.owner, &job.name, &options, progress, cancel)
+            .await;
+
+        stop_beating.cancel();
+        if let Err(e) = beat.await {
+            tracing::warn!(
+                session_id = %job.session_id,
+                error = %e,
+                "sync heartbeat task did not finish cleanly"
+            );
         }
-    }
-
-    /// One heartbeat write, on its own scope: progress, telemetry and
-    /// `updated_at` only.
-    async fn save_session_progress(
-        &self,
-        ctx: &SecurityContext,
-        session_id: Uuid,
-        progress_percent: i32,
-        telemetry_json: &str,
-    ) -> Result<(), DomainError> {
-        let scope = self.session_scope(ctx, actions::UPSERT).await?;
-        self.sync_sessions
-            .record_heartbeat(
-                &scope,
-                session_id,
-                progress_percent,
-                telemetry_json,
-                &now_rfc3339(),
-            )
-            .await
+        outcome
     }
 
     /// Close out sessions left mid-flight by a previous process.
@@ -4196,10 +4502,14 @@ impl Service {
     /// long ago. What is left is what one process had in flight, which the
     /// pool width bounds.
     ///
-    /// The queue is in-memory, so a `queued` or `in_progress` row that survives a
-    /// restart has no worker behind it and never will. Called once at startup,
-    /// across every tenant — hence the unconstrained scope, which is why this
-    /// takes no [`SecurityContext`] and is not reachable from the API.
+    /// Only a row [`abandoned`] says is dead, and whose `gm_active_syncs` row
+    /// has gone as long without a refresh, is closed: during a rolling deploy
+    /// or with two replicas the other process keeps both fresh, so its runs
+    /// are left alone. A row from a process that died moments before this one
+    /// started is not abandoned yet, which is why start-up calls this again after
+    /// [`SWEEP_AGAIN_AFTER`]. Across every tenant — hence the unconstrained
+    /// scope, which is why this takes no [`SecurityContext`] and is not
+    /// reachable from the API.
     ///
     /// # Errors
     /// `Database` when the sweep cannot read or write the session table.
@@ -4213,12 +4523,22 @@ impl Service {
             .await?;
 
         let now = Utc::now();
+        let live: HashSet<Uuid> = self
+            .active_syncs
+            .list(scope)
+            .await?
+            .into_iter()
+            .filter(|active| !silent_too_long(&active.updated_at, now))
+            .map(|active| active.session_id)
+            .collect();
         let mut count = 0;
         for (tenant_id, mut session) in stale {
-            if abandoned(&session, now) {
-                self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
-                    .await;
+            if !abandoned(&session, now) || live.contains(&session.id) {
+                continue;
             }
+            let (repo_full_name, session_id) = (session.repo_full_name.clone(), session.id);
+            self.release_stale_sync_lock(tenant_id, &session.repo_full_name)
+                .await;
             count += 1;
             session.status = SessionStatus::Interrupted;
             session.progress_percent = 100;
@@ -4226,6 +4546,9 @@ impl Service {
             session.updated_at.clone_from(&session.ended_at);
             session.error = Some("the server restarted while this sync was in flight".to_owned());
             self.sync_sessions.upsert(scope, tenant_id, session).await?;
+            self.active_syncs
+                .delete(scope, &repo_full_name, session_id)
+                .await?;
         }
 
         Ok(count)
@@ -4275,8 +4598,11 @@ impl Service {
     /// down.
     ///
     /// Best effort throughout. A row that is not there, a status that is not
-    /// `in_progress`, or a read that fails leaves the marker alone, and the
-    /// request goes on to take the lock or to answer 409 exactly as before.
+    /// `in_progress`, a session that is not `in_progress` or `interrupted`
+    /// (a `queued` one never took the lock, a `failed` or `complete` one
+    /// already gave it back), or a read that fails leaves the marker alone,
+    /// and the request goes on to take the lock or to answer 409 exactly as
+    /// before.
     async fn release_lock_left_by_a_dead_run(
         &self,
         scopes: &EnqueueScopes,
@@ -4303,7 +4629,11 @@ impl Service {
         else {
             return;
         };
-        if abandoned(&session, Utc::now()) {
+        let took_the_lock = matches!(
+            session.status,
+            SessionStatus::InProgress | SessionStatus::Interrupted
+        );
+        if took_the_lock && abandoned(&session, Utc::now()) {
             self.release_stale_sync_lock(tenant_id, repo_full_name)
                 .await;
         }
@@ -4312,8 +4642,8 @@ impl Service {
     /// One sync session by id, tenant-scoped.
     ///
     /// # Errors
-    /// `DomainError::NotFound` when the session does not exist for this
-    /// tenant; `Forbidden`/`Database`/`Internal` as usual.
+    /// `DomainError::SessionNotFound` when the session does not exist for
+    /// this tenant; `Forbidden`/`Database`/`Internal` as usual.
     pub async fn get_session(
         &self,
         ctx: &SecurityContext,
@@ -4333,7 +4663,7 @@ impl Service {
         self.sync_sessions
             .find_by_id(&scope, id)
             .await?
-            .ok_or(DomainError::NotFound)
+            .ok_or(DomainError::SessionNotFound)
     }
 
     /// The tenant's sync sessions, newest first.
@@ -4407,6 +4737,23 @@ impl Service {
         progress: &SyncProgress,
         cancel: &CancellationToken,
     ) -> Result<SyncSummary, DomainError> {
+        let options = FetchOptions {
+            access_scope: self.sync_access_scope(ctx).await?,
+            ..options.clone()
+        };
+        self.sync_repository_scoped(ctx, owner, name, &options, progress, cancel)
+            .await
+    }
+
+    async fn sync_repository_scoped(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: &str,
+        options: &FetchOptions,
+        progress: &SyncProgress,
+        cancel: &CancellationToken,
+    ) -> Result<SyncSummary, DomainError> {
         // Checked here and not only in the REST handler: the tests call this
         // directly, and `owner`/`name` reach a log line below, where a newline
         // would forge a record of its own.
@@ -4414,17 +4761,6 @@ impl Service {
         options.scope.validate()?;
 
         let tenant_id = ctx.subject_tenant_id();
-
-        let scope = self
-            .policy_enforcer
-            .access_scope_with(
-                ctx,
-                &SYNC_RESOURCE,
-                actions::SYNC,
-                None,
-                &AccessRequest::new().resource_property(pep_properties::OWNER_TENANT_ID, tenant_id),
-            )
-            .await?;
 
         let lock_key = format!("sync/{tenant_id}/{owner}/{name}");
         let sync_lock = match self.db.db().lock(GEAR_NAME, &lock_key).await {
@@ -4452,12 +4788,11 @@ impl Service {
 
         let run = Arc::new(RunState::new(
             Uuid::new_v4(),
-            scope.clone(),
+            options.access_scope.clone(),
             tenant_id,
             owner,
             name,
             FetchOptions {
-                access_scope: scope,
                 cancel: cancel.clone(),
                 ..options.clone()
             },
@@ -4490,6 +4825,7 @@ impl Service {
             Arc::clone(&self.sweep_watermark),
             Arc::clone(&self.pull_requests),
             Arc::clone(run),
+            self.config.scope,
         ));
         let runner = RepoPhaseRunner::new(
             vec![worker],
@@ -4526,28 +4862,44 @@ impl Service {
             return Err(DomainError::Cancelled);
         }
         if !report.failures.is_empty() {
-            let detail: Vec<String> = report
+            let shown: Vec<String> = report
                 .failures
                 .iter()
+                .take(MAX_REPORTED_FAILURES)
                 .map(TaskFailure::public_text)
                 .collect();
-            return Err(DomainError::internal(format!(
-                "{} of {} sync tasks failed: {}",
+            let more = report.failures.len().saturating_sub(shown.len());
+            let rest = if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            };
+            let message = format!(
+                "{} of {} sync tasks failed: {}{rest}",
                 report.tasks_failed(),
                 report.tasks_done + report.tasks_failed(),
-                detail.join("; ")
-            )));
+                shown.join("; ")
+            );
+            if report
+                .failures
+                .iter()
+                .any(|failure| matches!(failure.error, DomainError::AccessLost(_)))
+            {
+                return Err(DomainError::AccessLost(message));
+            }
+            return Err(DomainError::internal(message));
         }
 
         for family in Family::SWEPT {
-            if run.is_swept(family) {
+            if let Some(end) = run.swept_end(family) {
                 self.sweep_watermark
                     .promote(
                         &run.scope,
                         run.tenant_id,
                         run.repo_id()?,
                         family,
-                        run.swept_page1_etag(family),
+                        end.page1_etag,
+                        end.head_sha,
                     )
                     .await?;
             }
@@ -4569,7 +4921,9 @@ impl Service {
         let mut summary = run.summary();
         summary.contributors_synced = contributors_synced;
         summary.stale_rows_deleted = stale_rows_deleted;
-        summary.accepted_drift = run.drift();
+        let drift = run.drift();
+        summary.accepted_drift_total = u64::try_from(drift.len()).unwrap_or(u64::MAX);
+        summary.accepted_drift = drift.into_iter().take(MAX_REPORTED_DRIFT).collect();
         Ok(summary)
     }
 }

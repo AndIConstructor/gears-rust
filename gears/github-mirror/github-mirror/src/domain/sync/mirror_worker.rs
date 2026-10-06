@@ -31,7 +31,13 @@ use crate::domain::repo::{
     CommitRecord, ContributorRecord, IssueRecord, PullRequestRecord, PullRequestRepository,
     SyncWriter, WorkflowRunRecord,
 };
-use crate::domain::scope::CollectionMode;
+use crate::domain::scope::{CollectionMode, ScopeConfig};
+
+#[derive(Debug, Clone, Default)]
+pub struct SweptEnd {
+    pub page1_etag: Option<String>,
+    pub head_sha: Option<String>,
+}
 
 /// Everything the tasks of one run share.
 ///
@@ -47,7 +53,7 @@ pub struct RunState {
     pub options: FetchOptions,
     repo_id: OnceLock<i64>,
     complete: Mutex<ListingCompleteness>,
-    swept: Mutex<HashMap<Family, Option<String>>>,
+    swept: Mutex<HashMap<Family, SweptEnd>>,
     summary: Mutex<SyncSummary>,
     drift: Mutex<Vec<CountDrift>>,
     contributors: Mutex<HashMap<i64, ContributorRecord>>,
@@ -146,29 +152,26 @@ impl RunState {
     /// may be promoted. Independent of [`Self::completeness`]: a walk bounded
     /// by `updated_after` saw everything it asked for without seeing everything there
     /// is, so it may advance the watermark but not drive reconciliation.
-    fn mark_swept(&self, family: Family, page1_etag: Option<String>) {
+    fn mark_swept(&self, family: Family, page1_etag: Option<String>, head_sha: Option<String>) {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(family, page1_etag);
+            .insert(
+                family,
+                SweptEnd {
+                    page1_etag,
+                    head_sha,
+                },
+            );
     }
 
     #[must_use]
-    pub fn is_swept(&self, family: Family) -> bool {
-        self.swept
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(&family)
-    }
-
-    #[must_use]
-    pub fn swept_page1_etag(&self, family: Family) -> Option<String> {
+    pub fn swept_end(&self, family: Family) -> Option<SweptEnd> {
         self.swept
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&family)
             .cloned()
-            .flatten()
     }
 
     pub fn accept_drift(&self, drift: CountDrift) {
@@ -232,6 +235,7 @@ pub struct MirrorWorker {
     watermark: Arc<SweepWatermark>,
     pull_requests: Arc<dyn PullRequestRepository>,
     run: Arc<RunState>,
+    configured_scope: ScopeConfig,
 }
 
 impl MirrorWorker {
@@ -243,6 +247,7 @@ impl MirrorWorker {
         watermark: Arc<SweepWatermark>,
         pull_requests: Arc<dyn PullRequestRepository>,
         run: Arc<RunState>,
+        configured_scope: ScopeConfig,
     ) -> Self {
         Self {
             github,
@@ -251,7 +256,12 @@ impl MirrorWorker {
             watermark,
             pull_requests,
             run,
+            configured_scope,
         }
+    }
+
+    fn moves_watermarks(&self) -> bool {
+        self.run.options.since.is_none() && self.run.options.scope.covers(&self.configured_scope)
     }
 
     async fn seed_refinements(
@@ -410,6 +420,7 @@ impl MirrorWorker {
                     ListCursor {
                         updated_after,
                         page1_etag: start.page1_etag.as_deref(),
+                        last_head_sha: None,
                         continue_from: continue_from.as_deref(),
                     },
                     &run.options,
@@ -419,8 +430,8 @@ impl MirrorWorker {
             if page1_etag.is_none() {
                 page1_etag.clone_from(&listing.page1_etag);
             }
-            if listing.swept_to_end {
-                run.mark_swept(Family::Issues, page1_etag.clone());
+            if listing.swept_to_end && self.moves_watermarks() {
+                run.mark_swept(Family::Issues, page1_etag.clone(), None);
             }
             let seen: Vec<&str> = listing
                 .issues
@@ -496,7 +507,10 @@ impl MirrorWorker {
             .github
             .refine_issue(run.repo_ref()?, number, wants, &run.options)
             .await?;
-        let (reactions, timeline) = (count(&detail.reactions), count(&detail.timeline));
+        let (reactions, timeline) = (
+            count(&detail.reactions),
+            count(detail.timeline.as_deref().unwrap_or_default()),
+        );
         self.writer
             .write_issue_detail(&run.scope, run.tenant_id, repo_id, detail)
             .await?;
@@ -528,6 +542,7 @@ impl MirrorWorker {
                     ListCursor {
                         updated_after,
                         page1_etag: start.page1_etag.as_deref(),
+                        last_head_sha: None,
                         continue_from: continue_from.as_deref(),
                     },
                     &run.options,
@@ -537,8 +552,8 @@ impl MirrorWorker {
             if page1_etag.is_none() {
                 page1_etag.clone_from(&listing.page1_etag);
             }
-            if listing.swept_to_end {
-                run.mark_swept(Family::PullRequests, page1_etag.clone());
+            if listing.swept_to_end && self.moves_watermarks() {
+                run.mark_swept(Family::PullRequests, page1_etag.clone(), None);
             }
             let seen: Vec<&str> = listing
                 .pull_requests
@@ -698,10 +713,9 @@ impl MirrorWorker {
             .watermark
             .start_sweep(&run.scope, repo_id, Family::Commits, run.options.force)
             .await?;
-        let updated_after = start.updated_after;
         let with_ci = run.options.scope.collection.actions == CollectionMode::All;
-        let mut high = updated_after;
         let mut page1_etag: Option<String> = None;
+        let mut head_sha: Option<String> = None;
         let mut swept: HashSet<String> = HashSet::new();
         let mut continue_from: Option<String> = None;
 
@@ -711,8 +725,9 @@ impl MirrorWorker {
                 .list_commits(
                     run.repo_ref()?,
                     ListCursor {
-                        updated_after,
+                        updated_after: None,
                         page1_etag: start.page1_etag.as_deref(),
+                        last_head_sha: start.last_head_sha.as_deref(),
                         continue_from: continue_from.as_deref(),
                     },
                     &run.options,
@@ -722,24 +737,15 @@ impl MirrorWorker {
             if page1_etag.is_none() {
                 page1_etag.clone_from(&listing.page1_etag);
             }
-            if listing.swept_to_end {
-                run.mark_swept(Family::Commits, page1_etag.clone());
+            if head_sha.is_none() {
+                head_sha.clone_from(&listing.head_sha);
             }
-            let seen: Vec<&str> = listing
-                .commits
-                .iter()
-                .filter_map(|c| c.committed_at.as_deref())
-                .collect();
-            high = high_water(&seen, high);
-            if listing.unchanged {
-                return Ok(());
+            if listing.swept_to_end && self.moves_watermarks() {
+                run.mark_swept(Family::Commits, page1_etag.clone(), head_sha.clone());
             }
-
             let mut candidates = Vec::new();
             for commit in &listing.commits {
-                if !swept.insert(commit.sha.clone())
-                    || is_stale(commit.committed_at.as_deref(), updated_after)
-                {
+                if !swept.insert(commit.sha.clone()) {
                     continue;
                 }
                 candidates.push(RefinementCandidate {
@@ -768,7 +774,7 @@ impl MirrorWorker {
         }
 
         self.watermark
-            .stage(&run.scope, run.tenant_id, repo_id, Family::Commits, high)
+            .stage(&run.scope, run.tenant_id, repo_id, Family::Commits, None)
             .await?;
         Ok(())
     }
@@ -905,12 +911,25 @@ impl Worker for MirrorWorker {
             TaskKind::Index(Family::Commits) => self.index_commits(ctx).await,
             TaskKind::Index(Family::Metadata) => self.index_metadata().await,
             TaskKind::Index(Family::Actions) => self.index_actions(ctx).await,
-            TaskKind::Refine(entity) | TaskKind::Verify(entity) => match entity {
-                Entity::Issue => self.refine_issue(task).await,
-                Entity::PullRequest => self.refine_pull_request(ctx, task).await,
-                Entity::Commit => self.refine_commit(task).await,
-                Entity::WorkflowRun => self.refine_workflow_run(task).await,
-            },
+            TaskKind::Refine(entity) | TaskKind::Verify(entity) => {
+                let refined = match entity {
+                    Entity::Issue => self.refine_issue(task).await,
+                    Entity::PullRequest => self.refine_pull_request(ctx, task).await,
+                    Entity::Commit => self.refine_commit(task).await,
+                    Entity::WorkflowRun => self.refine_workflow_run(task).await,
+                };
+                match refined {
+                    Err(DomainError::NotFound) => {
+                        tracing::info!(
+                            entity = ?entity,
+                            id = task.entity_id.as_deref().unwrap_or_default(),
+                            "GitHub no longer has this entity; skipping its refinement"
+                        );
+                        Ok(())
+                    }
+                    other => other,
+                }
+            }
         }
     }
 }

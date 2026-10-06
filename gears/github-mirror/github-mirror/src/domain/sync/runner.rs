@@ -21,9 +21,10 @@ use super::telemetry::SessionTelemetry;
 use super::worker::{Worker, WorkerContext, WorkerDispatcher};
 use crate::domain::error::DomainError;
 
-/// Pending tasks above which the runner stops claiming until in-flight work
-/// drains: bounds memory growth when Indexing seeds faster than Refinement
-/// consumes (reference `DESIGN_ALGORITHMS` §8 hysteresis, high side only).
+/// Pending tasks above which the runner claims no new Indexing task while
+/// other work is running, so the backlog is worked down at full width before
+/// more of it is listed (reference `DESIGN_ALGORITHMS` §8 hysteresis, high
+/// side only).
 const BACKPRESSURE_HIGH: u64 = 10_000;
 
 /// The phases that drain together: Indexing seeds Refinement as pages arrive.
@@ -265,17 +266,28 @@ impl RepoPhaseRunner {
             }
             self.publish_progress();
 
-            let saturated = in_flight.len() >= self.max_concurrent_tasks
-                || (self.queue.pending_count(self.run.session_id) >= BACKPRESSURE_HIGH
-                    && !in_flight.is_empty());
-            if saturated {
+            if in_flight.len() >= self.max_concurrent_tasks {
                 if let Some(outcome) = in_flight.join_next_with_id().await {
                     self.account(outcome, &mut running, report);
                 }
                 continue;
             }
 
-            match self.claim_round_robin(phases, &mut next_lane) {
+            let backlogged = !in_flight.is_empty()
+                && self.queue.pending_count(self.run.session_id) >= BACKPRESSURE_HIGH;
+            let without_indexing: Vec<TaskPhase>;
+            let claimable = if backlogged {
+                without_indexing = phases
+                    .iter()
+                    .copied()
+                    .filter(|phase| *phase != TaskPhase::Indexing)
+                    .collect();
+                &without_indexing[..]
+            } else {
+                phases
+            };
+
+            match self.claim_round_robin(claimable, &mut next_lane) {
                 Some(task) => self.spawn(task, &ctx, &mut in_flight, &mut running),
                 // Nothing claimable right now: an in-flight Indexing task may
                 // still seed more, so wait for one to finish before deciding

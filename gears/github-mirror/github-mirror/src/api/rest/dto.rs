@@ -929,6 +929,7 @@ pub struct SyncSummaryDto {
     pub stale_rows_deleted: u64,
     /// Count gaps verification could not close after its repair passes.
     pub accepted_drift: Vec<CountDriftDto>,
+    pub accepted_drift_total: u64,
 }
 
 /// One count gap verification gave up on, as served in a session's summary.
@@ -985,6 +986,7 @@ impl From<SyncSummary> for SyncSummaryDto {
             issue_timeline_synced: s.issue_timeline_synced,
             stale_rows_deleted: s.stale_rows_deleted,
             accepted_drift: s.accepted_drift.into_iter().map(Into::into).collect(),
+            accepted_drift_total: s.accepted_drift_total,
         }
     }
 }
@@ -1061,6 +1063,14 @@ pub struct ResumeAcceptedDto {
     pub resumed: usize,
     /// One session id per re-queued repository, in slug order.
     pub session_ids: Vec<String>,
+    pub failed: Vec<ResumeFailureDto>,
+}
+
+#[derive(Debug)]
+#[toolkit_macros::api_dto(response)]
+pub struct ResumeFailureDto {
+    pub repository: String,
+    pub error: String,
 }
 
 /// Per-repository run status: the durable record resume works from.

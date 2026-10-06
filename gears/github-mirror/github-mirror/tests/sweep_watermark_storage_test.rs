@@ -50,6 +50,7 @@ impl Fixture {
                     family: FAMILY.to_owned(),
                     last_seen_updated_at: last_seen.map(ToOwned::to_owned),
                     page1_etag: etag.map(ToOwned::to_owned),
+                    last_head_sha: None,
                     sweep_in_progress: false,
                     candidate_high_water: None,
                 },
@@ -87,6 +88,7 @@ impl Fixture {
                 REPO,
                 Family::Issues,
                 etag.map(ToOwned::to_owned),
+                None,
             )
             .await
             .unwrap();

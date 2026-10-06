@@ -129,6 +129,7 @@ fn job(telemetry_file: Option<&str>) -> SyncJob {
         force: false,
         since: None,
         telemetry_file: telemetry_file.map(ToOwned::to_owned),
+        access_scope: toolkit_security::AccessScope::default(),
         claim: None,
     }
 }

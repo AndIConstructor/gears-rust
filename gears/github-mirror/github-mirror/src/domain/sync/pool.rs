@@ -191,7 +191,17 @@ impl SyncPoolRunner {
                 break;
             }
             let event = self.next_event(queue.len(), &mut in_flight, draining).await;
+            let was_draining = draining;
             draining = Self::handle_event(event, &mut queue, in_flight.len(), draining);
+            if draining && !was_draining {
+                self.jobs.close();
+            }
+        }
+        while let Some(job) = queue.claim_next() {
+            self.service.interrupt_unstarted_job(job).await;
+        }
+        while let Ok(job) = self.jobs.try_recv() {
+            self.service.interrupt_unstarted_job(job).await;
         }
         info!("github-mirror sync pool stopped");
     }
@@ -204,7 +214,7 @@ impl SyncPoolRunner {
     reason = "a panic in these tests is the failure report"
 )]
 mod tests {
-    use toolkit_security::SecurityContext;
+    use toolkit_security::{AccessScope, SecurityContext};
 
     use super::*;
     use crate::domain::scope::ScopeConfig;
@@ -223,6 +233,7 @@ mod tests {
             force: false,
             since: None,
             telemetry_file: None,
+            access_scope: AccessScope::default(),
             claim: None,
         }
     }

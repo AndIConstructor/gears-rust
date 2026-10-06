@@ -25,17 +25,17 @@ use github_mirror::domain::repo::{
 use github_mirror::domain::service::{Service, ServiceConfig, SyncJob};
 use github_mirror::infra::storage::migrations::Migrator;
 use github_mirror::infra::storage::sea_orm_repo::{
-    SeaOrmBranchRepository, SeaOrmCheckRunRepository, SeaOrmCommentRepository,
-    SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository, SeaOrmCommitRepository,
-    SeaOrmCommitStatusRepository, SeaOrmContributorRepository, SeaOrmDeploymentRepository,
-    SeaOrmEntityFingerprintRepository, SeaOrmIssueEventRepository, SeaOrmIssueReactionRepository,
-    SeaOrmIssueRepository, SeaOrmIssueTimelineRepository, SeaOrmLabelRepository,
-    SeaOrmMilestoneRepository, SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
-    SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
-    SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
-    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmSyncWatermarkRepository,
-    SeaOrmSyncWriter, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
-    SeaOrmWorkflowRunRepository,
+    SeaOrmActiveSyncRepository, SeaOrmBranchRepository, SeaOrmCheckRunRepository,
+    SeaOrmCommentRepository, SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository,
+    SeaOrmCommitRepository, SeaOrmCommitStatusRepository, SeaOrmContributorRepository,
+    SeaOrmDeploymentRepository, SeaOrmEntityFingerprintRepository, SeaOrmIssueEventRepository,
+    SeaOrmIssueReactionRepository, SeaOrmIssueRepository, SeaOrmIssueTimelineRepository,
+    SeaOrmLabelRepository, SeaOrmMilestoneRepository, SeaOrmPullRequestCommitRepository,
+    SeaOrmPullRequestFileRepository, SeaOrmPullRequestRepository, SeaOrmReleaseRepository,
+    SeaOrmRepoRepository, SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository,
+    SeaOrmReviewRepository, SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository,
+    SeaOrmSyncWatermarkRepository, SeaOrmSyncWriter, SeaOrmTagRepository,
+    SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
 };
 use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit::{ClientHub, ConfigProvider, GearCtx};
@@ -200,15 +200,13 @@ impl GithubPort for FakeGithub {
             } else {
                 Vec::new()
             },
-            timeline: if wants.timeline {
+            timeline: wants.timeline.then(|| {
                 f.issue_timeline
                     .iter()
                     .filter(|e| e.issue_number == number)
                     .cloned()
                     .collect()
-            } else {
-                Vec::new()
-            },
+            }),
         })
     }
 
@@ -302,6 +300,7 @@ impl GithubPort for FakeGithub {
             commit_comments: f.commit_comments.clone(),
             contributors: Vec::new(),
             page1_etag: None,
+            head_sha: None,
             unchanged: false,
             swept_to_end: true,
             next: None,
@@ -505,6 +504,7 @@ pub fn service_with_deadline(
         Arc::new(SeaOrmIssueTimelineRepository::new(Arc::clone(&db))),
         Arc::new(SeaOrmSyncSessionRepository::new(Arc::clone(&db))),
         Arc::new(SeaOrmRepoSyncStatusRepository::new(Arc::clone(&db))),
+        Arc::new(SeaOrmActiveSyncRepository::new(Arc::clone(&db))),
         Arc::new(SeaOrmSyncWriter::new(Arc::clone(&db))),
         Arc::new(SeaOrmEntityFingerprintRepository::new(Arc::clone(&db))),
         Arc::new(SeaOrmSyncWatermarkRepository::new(Arc::clone(&db))),

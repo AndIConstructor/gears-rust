@@ -157,7 +157,7 @@ pub struct IssueDetailWants {
 pub struct IssueDetail {
     pub issue_number: i64,
     pub reactions: Vec<IssueReactionRecord>,
-    pub timeline: Vec<IssueTimelineEventRecord>,
+    pub timeline: Option<Vec<IssueTimelineEventRecord>>,
 }
 
 /// What indexing the pull-request family lists.
@@ -216,6 +216,7 @@ pub struct CommitListing {
     /// The validator page one of the commits listing carried, for the next
     /// sweep to compare against.
     pub page1_etag: Option<String>,
+    pub head_sha: Option<String>,
     /// Page one matched the validator the caller passed, so no page was
     /// walked and every vector above is empty.
     pub unchanged: bool,
@@ -323,6 +324,7 @@ pub struct RepoRef<'a> {
 pub struct ListCursor<'a> {
     pub updated_after: Option<DateTime<Utc>>,
     pub page1_etag: Option<&'a str>,
+    pub last_head_sha: Option<&'a str>,
     pub continue_from: Option<&'a str>,
 }
 

@@ -149,7 +149,7 @@ Unlike repotap, raw bodies are kept only as the HTTP cache. Reads are answered f
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-toolkit-gear`
 
-The gear is started and stopped by the framework. `stop()` cancels the pool and waits for running syncs; when the framework's hard-stop deadline fires first, the pool task is aborted. A job cut short gives its claim back through a drop guard, and its session is closed out as `interrupted` by the next start-up sweep.
+The gear is started and stopped by the framework. `stop()` cancels the pool and waits for running syncs, then for the in-process syncs `LocalClient` started; when the framework's hard-stop deadline fires first, the pool task is aborted. A job cut short gives its claim back through a drop guard, and its session is closed out as `interrupted` by the next start-up sweep.
 
 #### One GitHub Token
 
@@ -196,7 +196,7 @@ SeaORM through toolkit-db, with SQLite and PostgreSQL in the migrations. The mig
                  │                                   │
                  ▼                                   ▼
 ┌────────────────────────────── Service ──────────────────────────────┐
-│ policy enforcer · claims (in_flight) · claim gates · sessions        │
+│ policy enforcer · active syncs · claim gates · sessions              │
 │ prepare_sync ──► enqueue_sync_scoped ──► sync channel (64)           │
 │             └──► sync_now ──► run_and_record (on its own task)       │
 └──────────────────────────────────────────────────────────────────────┘
@@ -341,19 +341,19 @@ sequenceDiagram
     S-->>C: status, progress, summary
 ```
 
-A second request for the same repository while the first is queued or running gets the same session on the same terms, and `409` on other terms. A full queue or a stopped pool fails the new session at once and answers with an internal error.
+A second request for the same repository while the first is queued or running gets the same session on the same terms, and `409` on other terms. A full queue or a stopped pool fails the new session at once and answers `503`; a full queue adds `Retry-After: 30`.
 
 #### In-Process Sync
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-seq-in-process-sync`
 
-`LocalClient::sync_repository` calls `Service::sync_now`: the same `prepare_sync` (claim, session row, repository status), then the run itself on a task of its own that `LocalClient` spawns and awaits, so a caller that drops the call does not stop it, then the run's `SyncSummary` or its own error. It gets the deadline, the heartbeat and a `/sessions` row; it does not take a pool slot. A sync of the same repository already in flight answers `Conflict`.
+`LocalClient::sync_repository` calls `Service::sync_now`: the same `prepare_sync` (claim, session row, repository status), then the run itself on a task of its own that the service starts and tracks (`spawn_sync_now`) and `LocalClient` awaits, so a caller that drops the call does not stop it, then the run's `SyncSummary` or its own error. It gets the deadline, the heartbeat and a `/sessions` row; it does not take a pool slot, but at most `max_concurrent_syncs` in-process syncs run at once, and `stop()` waits for them. A sync of the same repository already in flight answers `Conflict`.
 
 #### Resume
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-seq-resume`
 
-`POST /sync/resume` lists repositories whose run status is `in_progress` and queues each with the configured scope. The repository status stays `in_progress` after a failed or interrupted run on purpose; only a completed run moves it to `complete`.
+`POST /sync/resume` lists repositories whose run status is `in_progress` and queues each with the configured scope. A repository that cannot be queued (another run on different terms, or a full queue) is listed in the answer's `failed` with its error; with `?repo=owner/name` that one repository's error is returned instead. The repository status stays `in_progress` after a failed or interrupted run on purpose; only a completed run moves it to `complete`.
 
 #### Cache-Before-Network Request
 
@@ -392,7 +392,7 @@ sequenceDiagram
 | `summary_json` | The `SyncSummary` of a `complete` run |
 | `created_at`, `started_at`, `ended_at`, `updated_at` | `updated_at` is the heartbeat |
 
-Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the run; `in_progress` → `complete`, `failed` (an error, or the deadline) or `interrupted` (cancelled by a shutdown). A `queued` or `in_progress` row found at start-up has nobody behind it and is set to `interrupted`.
+Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the run, or `queued` → `failed` when it cannot start (its scope or its row cannot be read or written); `in_progress` → `complete`, `failed` (an error, or the deadline) or `interrupted` (cancelled by a shutdown). A `queued` or `in_progress` row whose `updated_at` has not moved for five minutes, and whose `gm_active_syncs` row has gone as long without a refresh, has nobody behind it and is set to `interrupted`: at start-up, and once more five minutes later, for a process that died just before this one started. Another replica keeps both fresh, so its live runs are left alone. A run that starts clears `ended_at` and `error`.
 
 #### Table: gm_repo_sync_status
 
@@ -403,6 +403,15 @@ Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the
 | `status` | `in_progress` or `complete` |
 | `last_session_id` | The session that last touched it; used to tell whether its holder is still alive |
 | `last_synced_at` | When a run last completed |
+
+#### Table: gm_active_syncs
+
+| Column | Description |
+|---|---|
+| `tenant_id`, `repo_full_name` | Primary key: at most one queued or running sync per repository, across every process |
+| `session_id` | The session holding the repository |
+| `scope_json`, `since` | The terms it runs on; a request on the same terms joins it, others get `409` |
+| `owner_id`, `updated_at` | The process that holds it, which refreshes `updated_at` every minute |
 
 #### Table: gm_http_cache
 
@@ -421,6 +430,7 @@ Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the
 |---|---|
 | `tenant_id`, `repo_id`, `family` | Primary key (`issues`, `pull_requests`, `commits`) |
 | `last_seen_updated_at` | High-water mark promoted after a complete sweep |
+| `page1_etag`, `last_head_sha` | Page one's `ETag` and, for commits, the head commit, both from the last complete sweep |
 | `sweep_in_progress`, `candidate_high_water` | The sweep under way and the mark it will promote |
 
 #### Table: gm_entity_fingerprints
@@ -445,7 +455,11 @@ Tasks have no table: the queue is in memory.
 
 #### 3.8.1 Incremental Listing Sweep
 
-Issues, pull requests and commits are listed newest first. A sweep starts from the family's `last_seen_updated_at` minus a five-minute overlap and stops at the first page whose rows are all older. The newest `updated_at` seen is staged as the candidate; it is promoted only when the whole family, including its refinements, has finished. A run that stops early promotes nothing, so the next run walks the listing again and the gate re-seeds whatever was left `pending`. `force` ignores the watermark.
+Issues and pull requests are listed newest first. A sweep starts from the family's `last_seen_updated_at` minus a five-minute overlap and stops at the first page whose rows are all older. The newest `updated_at` seen is staged as the candidate; it is promoted only when the whole family, including its refinements, has finished. A run that stops early promotes nothing, so the next run walks the listing again and the gate re-seeds whatever was left `pending`. `force` ignores the watermark. A run narrowed by `since`, or run on a scope narrower than the gear's configured one in any object type or collection mode, moves no watermark: it may have skipped rows a default run would store, so the next default sync walks from where the last default one stopped.
+
+Commits have no date watermark. Their only date is `committer.date`, which the committer's machine sets: a commit dated in the future would push the bound past every later commit, and one made before the last sync but pushed after it would fall below the bound. The commits sweep keeps the head commit instead. When page one's `ETag` has changed and a head from the last complete sweep is stored, it asks `GET /repos/{owner}/{name}/compare/{last_head}...{head}` for the commits added since, whatever their dates, and then walks the commit comments as usual. The first sync, `force`, and a head GitHub no longer has below the new one (a force push answers `diverged` or `404`) walk the whole listing instead. The new head is promoted with the page-one `ETag`, at the same family-complete point.
+
+Workflow runs have no watermark either: a sync reads the newest ten pages of `/actions/runs` (1,000 runs) and stops there, and older runs keep what was stored. Runs are never reconciled away, so the cap removes nothing.
 
 #### 3.8.2 Change Gate
 
@@ -466,7 +480,7 @@ Rows are hard-deleted, not tombstoned. After a listing fetched to completion, ro
 
 #### 3.8.4 Scheduler
 
-One in-memory `TaskQueue` per run. Discovery runs alone; indexing, change detection and refinement drain together (indexing seeds refinement as pages arrive); verification runs last. Tasks are claimed by priority, then age, round-robin across three lanes (pull requests, issues, everything else) so a long pull-request backlog cannot starve issues. While 10,000 tasks are pending, a new task is claimed only after a running one finishes. A task that fails on database contention is retried up to three times with a growing delay, counted in `retries`, apart from its repair pass in `attempt`.
+One in-memory `TaskQueue` per run. Discovery runs alone; indexing, change detection and refinement drain together (indexing seeds refinement as pages arrive); verification runs last. Tasks are claimed by priority, then age, round-robin across three lanes (pull requests, issues, everything else) so a long pull-request backlog cannot starve issues. While 10,000 tasks are pending and others are running, no new Indexing task is claimed; refinement keeps every slot busy until the backlog drops. A task that fails on database contention is retried up to three times with a growing delay, counted in `retries`, apart from its repair pass in `attempt`.
 
 #### 3.8.5 Verification
 
@@ -485,7 +499,7 @@ An issue is refined when either its reactions or its timeline scope wants it.
 
 | Mechanism | Scope | Purpose |
 |---|---|---|
-| Claim (`in_flight`) | this process, per tenant and repository | One queued or running sync per repository; a request is joined or refused against it. Released by a guard carried in the job, so a job that ends, is dropped from the queue or is aborted gives it back |
+| Active sync (`gm_active_syncs`) | the database, per tenant and repository | One queued or running sync per repository, across every process; a request is joined or refused against it. Inserted before the session row; deleted by a guard carried in the job, so a job that ends, is dropped from the queue or is aborted gives it back. A row whose owner has not refreshed it for 300 seconds, or whose session has ended, is taken over |
 | Claim gate | this process, per repository | Serializes the check, the session write and the claim of concurrent requests for one repository; dropped when nobody holds it |
 | Advisory lock `sync/{tenant}/{owner}/{name}` | toolkit-db, across processes | One run per repository; held for the whole run; a held lock answers `409` |
 | Heartbeat | the session row | `updated_at` every 2 seconds; a row silent for 300 seconds is abandoned, and its lock may be taken |

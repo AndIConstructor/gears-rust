@@ -317,7 +317,11 @@ impl RateLimitController {
                 self.sleep_until_reset(reset, remaining, reserve).await;
                 Ok(true)
             }
-            _ => Err(RateLimitError::BudgetExhausted),
+            Some(_) => {
+                self.refill().await;
+                Ok(true)
+            }
+            None => Err(RateLimitError::BudgetExhausted),
         }
     }
 
@@ -367,12 +371,15 @@ impl RateLimitController {
             "GitHub rate limit reached; pausing until the quota window resets"
         );
         tokio::time::sleep(delay).await;
+        self.refill().await;
+        trace!(reset_at = %reset, "quota sleep complete; rechecking admission");
+    }
+
+    async fn refill(&self) {
         let mut g = self.inner.lock().await;
         g.remaining = g.limit;
         g.authoritative = None;
         g.authoritative_at = None;
-        drop(g);
-        trace!(reset_at = %reset, "quota sleep complete; rechecking admission");
     }
 
     /// Return the authoritative core quota, refreshing it via the injected

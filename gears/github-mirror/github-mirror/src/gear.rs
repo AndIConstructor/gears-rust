@@ -19,21 +19,22 @@ use crate::api::rest::routes;
 use crate::config::{GithubMirrorConfig, GithubTokenSecret};
 use crate::domain::local_client::LocalClient;
 use crate::domain::ports::github::GithubPort;
-use crate::domain::service::{Service, ServiceConfig};
+use crate::domain::service::{ACTIVE_SYNC_TOUCH_EVERY, SWEEP_AGAIN_AFTER, Service, ServiceConfig};
 use crate::domain::sync::SyncPoolRunner;
 use crate::infra::github::client::GithubClient;
 use crate::infra::storage::sea_orm_repo::{
-    SeaOrmBranchRepository, SeaOrmCheckRunRepository, SeaOrmCommentRepository,
-    SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository, SeaOrmCommitRepository,
-    SeaOrmCommitStatusRepository, SeaOrmContributorRepository, SeaOrmDeploymentRepository,
-    SeaOrmEntityFingerprintRepository, SeaOrmHttpCache, SeaOrmIssueEventRepository,
-    SeaOrmIssueReactionRepository, SeaOrmIssueRepository, SeaOrmIssueTimelineRepository,
-    SeaOrmLabelRepository, SeaOrmMilestoneRepository, SeaOrmPullRequestCommitRepository,
-    SeaOrmPullRequestFileRepository, SeaOrmPullRequestRepository, SeaOrmReleaseRepository,
-    SeaOrmRepoRepository, SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository,
-    SeaOrmReviewRepository, SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository,
-    SeaOrmSyncWatermarkRepository, SeaOrmSyncWriter, SeaOrmTagRepository,
-    SeaOrmWorkflowJobRepository, SeaOrmWorkflowRunRepository,
+    SeaOrmActiveSyncRepository, SeaOrmBranchRepository, SeaOrmCheckRunRepository,
+    SeaOrmCommentRepository, SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository,
+    SeaOrmCommitRepository, SeaOrmCommitStatusRepository, SeaOrmContributorRepository,
+    SeaOrmDeploymentRepository, SeaOrmEntityFingerprintRepository, SeaOrmHttpCache,
+    SeaOrmIssueEventRepository, SeaOrmIssueReactionRepository, SeaOrmIssueRepository,
+    SeaOrmIssueTimelineRepository, SeaOrmLabelRepository, SeaOrmMilestoneRepository,
+    SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
+    SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
+    SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
+    SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmSyncWatermarkRepository,
+    SeaOrmSyncWriter, SeaOrmTagRepository, SeaOrmWorkflowJobRepository,
+    SeaOrmWorkflowRunRepository,
 };
 use crate::infra::telemetry_sink::JsonlTelemetrySink;
 
@@ -190,6 +191,7 @@ impl Gear for GithubMirrorGear {
             issue_timeline,
             sync_sessions,
             repo_sync_status,
+            Arc::new(SeaOrmActiveSyncRepository::new(Arc::clone(&db))),
             Arc::new(SeaOrmSyncWriter::new(Arc::clone(&db))),
             Arc::new(SeaOrmEntityFingerprintRepository::new(Arc::clone(&db))),
             Arc::new(SeaOrmSyncWatermarkRepository::new(Arc::clone(&db))),
@@ -229,6 +231,17 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+async fn sweep_interrupted_sessions(service: &ConcreteService) {
+    match service
+        .sweep_interrupted_sessions(&toolkit_security::AccessScope::allow_all())
+        .await
+    {
+        Ok(0) => {}
+        Ok(swept) => info!(sessions = swept, "closed out interrupted sync sessions"),
+        Err(e) => warn!(error = %e, "could not sweep interrupted sync sessions"),
+    }
+}
+
 #[async_trait]
 impl RunnableCapability for GithubMirrorGear {
     /// Start the sync worker pool: up to `max_concurrent_syncs` repositories
@@ -257,18 +270,15 @@ impl RunnableCapability for GithubMirrorGear {
             anyhow::bail!("{} sync worker already started", Self::MODULE_NAME);
         };
 
-        match service
-            .sweep_interrupted_sessions(&toolkit_security::AccessScope::allow_all())
-            .await
-        {
-            Ok(0) => {}
-            Ok(swept) => info!(sessions = swept, "closed out interrupted sync sessions"),
-            Err(e) => warn!(error = %e, "could not sweep interrupted sync sessions"),
-        }
+        sweep_interrupted_sessions(&service).await;
 
         let new_cancel_token = cancel.child_token();
         service.bind_shutdown(new_cancel_token.clone());
         let max_concurrent = service.max_concurrent_syncs();
+        let late_sweep = Arc::clone(&service);
+        let late_cancel = new_cancel_token.clone();
+        let toucher = Arc::clone(&service);
+        let touch_cancel = new_cancel_token.clone();
         let runner = SyncPoolRunner::new(service, jobs, max_concurrent, new_cancel_token.clone());
         let handle = tokio::spawn(runner.run());
 
@@ -283,6 +293,29 @@ impl RunnableCapability for GithubMirrorGear {
 
         let mut sync_handle = lock(&self.sync_handle);
         *sync_handle = Some(handle);
+
+        tokio::spawn(async move {
+            tokio::select! {
+                () = late_cancel.cancelled() => {}
+                () = tokio::time::sleep(SWEEP_AGAIN_AFTER) => {
+                    sweep_interrupted_sessions(&late_sweep).await;
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(ACTIVE_SYNC_TOUCH_EVERY);
+            loop {
+                tokio::select! {
+                    () = touch_cancel.cancelled() => break,
+                    _ = every.tick() => {
+                        if let Err(e) = toucher.touch_active_syncs().await {
+                            warn!(error = %e, "could not refresh this process's active sync rows");
+                        }
+                    }
+                }
+            }
+        });
 
         info!("github-mirror sync worker started");
         Ok(())
@@ -315,6 +348,15 @@ impl RunnableCapability for GithubMirrorGear {
                 () = deadline_token.cancelled() => {
                     handle.abort();
                     info!("github-mirror sync worker aborted by the framework's stop deadline");
+                }
+            }
+        }
+
+        if let Some(service) = self.service.get() {
+            tokio::select! {
+                () = service.wait_for_in_process_syncs() => {}
+                () = deadline_token.cancelled() => {
+                    info!("github-mirror in-process syncs still running at the framework's stop deadline");
                 }
             }
         }
@@ -385,6 +427,6 @@ mod tests {
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 43);
+        assert_eq!(gear.migrations().len(), 44);
     }
 }

@@ -102,6 +102,10 @@ fn continue_after(stages: &[Stage], stage: usize, page_next: Option<String>) -> 
     page_next.or_else(|| stages.get(stage + 1).map(|next| next.first.clone()))
 }
 
+fn is_compare_url(url: &str) -> bool {
+    url.split('?').next().unwrap_or(url).contains("/compare/")
+}
+
 const USER_AGENT: &str = concat!("cf-gears-github-mirror/", env!("CARGO_PKG_VERSION"));
 
 /// The REST API version every request pins (DESIGN 3.5). Without it the
@@ -153,22 +157,51 @@ fn graphql_refused(errors: &[serde_json::Value]) -> DomainError {
     ))
 }
 
-async fn read_capped(mut response: reqwest::Response) -> Result<Vec<u8>, DomainError> {
+enum ReadFailure {
+    Transport(reqwest::Error),
+    TooLarge,
+}
+
+impl ReadFailure {
+    fn into_error(self) -> DomainError {
+        match self {
+            Self::Transport(e) => {
+                DomainError::internal(format!("GitHub response read failed: {e}"))
+            }
+            Self::TooLarge => DomainError::internal(format!(
+                "GitHub response is larger than {MAX_BODY_BYTES} bytes"
+            )),
+        }
+    }
+}
+
+async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, ReadFailure> {
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(ReadFailure::Transport)? {
         let size = body.len().saturating_add(chunk.len());
         if u64::try_from(size).unwrap_or(u64::MAX) > MAX_BODY_BYTES {
-            return Err(DomainError::internal(format!(
-                "GitHub response is larger than {MAX_BODY_BYTES} bytes"
-            )));
+            return Err(ReadFailure::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+#[cfg(test)]
+async fn read_capped(response: reqwest::Response) -> Result<Vec<u8>, DomainError> {
+    read_body(response).await.map_err(ReadFailure::into_error)
+}
+
+fn graphql_rate_limited(body: &serde_json::Value) -> bool {
+    body.get("data").is_none_or(serde_json::Value::is_null)
+        && body
+            .get("errors")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|errors| {
+                errors.iter().any(|error| {
+                    error.get("type").and_then(serde_json::Value::as_str) == Some("RATE_LIMITED")
+                })
+            })
 }
 
 /// Whether the URL points at this machine, where plain `http` carries no token
@@ -183,9 +216,6 @@ fn is_loopback(url: &url::Url) -> bool {
     }
 }
 
-fn upstream_backoff(attempt: u32) -> std::time::Duration {
-    UPSTREAM_BACKOFF.saturating_mul(1u32 << attempt.min(8))
-}
 /// Requests in flight a client allows before the gear config says otherwise.
 /// Matches the PRD's "parallelism <= 8" rate-limit threshold.
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 8;
@@ -279,6 +309,19 @@ impl QuotaProbe for RateLimitProbe {
     }
 }
 
+fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> std::time::Duration {
+    let seconds = header_string(headers, "retry-after")
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| {
+            let reset = header_string(headers, "x-ratelimit-reset")?
+                .parse::<i64>()
+                .ok()?;
+            u64::try_from(reset - Utc::now().timestamp()).ok()
+        })
+        .unwrap_or(1u64 << attempt.min(8));
+    std::time::Duration::from_secs(seconds.max(1)).min(MAX_RETRY_SLEEP)
+}
+
 /// One response header as an owned string, when it is present and printable.
 fn header_string(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
     headers
@@ -323,6 +366,8 @@ pub struct GithubClient {
     /// Ceiling the controller's adaptive soft cap may grow to.
     max_cap: u32,
     metrics: GithubRequestMetrics,
+    upstream_backoff: std::time::Duration,
+    max_retry_sleep: std::time::Duration,
 }
 
 impl GithubClient {
@@ -345,14 +390,24 @@ impl GithubClient {
         token: Option<String>,
         cache: Arc<dyn HttpCache>,
     ) -> Result<Self, DomainError> {
+        let parsed = url::Url::parse(&api_base_url)
+            .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?;
+        let redirect_origin = parsed.origin();
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() < MAX_REDIRECTS
+                    && attempt.url().origin() == redirect_origin
+                {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .build()
             .map_err(|e| DomainError::internal(format!("failed to build HTTP client: {e}")))?;
-        let parsed = url::Url::parse(&api_base_url)
-            .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?;
         if parsed.scheme() == "http" && token.is_some() && !is_loopback(&parsed) {
             return Err(DomainError::internal(format!(
                 "the GitHub API base URL {} uses http, which would send the token in cleartext; \
@@ -383,7 +438,21 @@ impl GithubClient {
             controller,
             max_cap: u32::try_from(DEFAULT_MAX_CONCURRENT_REQUESTS).unwrap_or(u32::MAX),
             metrics: GithubRequestMetrics::from_global(),
+            upstream_backoff: UPSTREAM_BACKOFF,
+            max_retry_sleep: MAX_RETRY_SLEEP,
         })
+    }
+
+    #[must_use]
+    pub fn with_upstream_backoff(mut self, base: std::time::Duration) -> Self {
+        self.upstream_backoff = base;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_retry_sleep(mut self, longest: std::time::Duration) -> Self {
+        self.max_retry_sleep = longest;
+        self
     }
 
     /// Cap the requests this client keeps in flight at `max`.
@@ -419,11 +488,11 @@ impl GithubClient {
             let admission = Admission {
                 controller: &self.controller,
             };
-            let permit = self
-                .permits
-                .acquire()
-                .await
-                .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?;
+            let permit = tokio::select! {
+                permit = self.permits.acquire() => permit
+                    .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?,
+                () = cancel.cancelled() => return Err(DomainError::Cancelled),
+            };
             if !self.controller.backing_off().await {
                 return Ok((admission, permit));
             }
@@ -521,11 +590,22 @@ impl GithubClient {
         cancel: &CancellationToken,
     ) -> Result<(), DomainError> {
         if seen.retry_after_secs.is_none() && seen.remaining.is_none_or(|left| left > 0) {
-            let delay = fallback_delay(attempt);
-            tokio::select! {
-                () = tokio::time::sleep(delay) => telemetry.add_rate_limit_wait(delay),
-                () = cancel.cancelled() => return Err(DomainError::Cancelled),
-            }
+            self.pause(fallback_delay(attempt), telemetry, cancel)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn pause(
+        &self,
+        delay: std::time::Duration,
+        telemetry: &SessionTelemetry,
+        cancel: &CancellationToken,
+    ) -> Result<(), DomainError> {
+        let delay = delay.min(self.max_retry_sleep);
+        tokio::select! {
+            () = tokio::time::sleep(delay) => telemetry.add_rate_limit_wait(delay),
+            () = cancel.cancelled() => return Err(DomainError::Cancelled),
         }
         Ok(())
     }
@@ -546,7 +626,7 @@ impl GithubClient {
         match self.cache.get(&options.access_scope, key).await {
             Ok(entry) => entry,
             Err(e) => {
-                tracing::warn!(%url, error = %e, "cache read failed; fetching fresh");
+                tracing::warn!(url = %redacted_word(url), error = %e, "cache read failed; fetching fresh");
                 None
             }
         }
@@ -578,6 +658,48 @@ impl GithubClient {
         }
     }
 
+    async fn compare_page(
+        &self,
+        repo_id: i64,
+        stages: &[Stage],
+        url: &str,
+        first: bool,
+        options: &FetchOptions,
+    ) -> Result<Option<CommitListing>, DomainError> {
+        let page: FetchedPage<GhComparison> = match self.get_page(url, options).await {
+            Ok(page) => page,
+            Err(DomainError::NotFound) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let GhComparison {
+            status,
+            total_commits,
+            commits,
+        } = page.parsed;
+        let linear = matches!(status.as_str(), "ahead" | "identical");
+        let cut_short = first && page.next.is_none() && total_commits > commits.len();
+        if !linear || cut_short {
+            tracing::debug!(
+                url = %redacted_word(url),
+                status,
+                "the commits since the stored head cannot be listed; walking every commit"
+            );
+            return Ok(None);
+        }
+        let contributors = derive_commit_people(repo_id, &commits, &[]).into_records();
+        let mut listing = CommitListing {
+            commits: commits
+                .into_iter()
+                .map(|c| commit_record(repo_id, c))
+                .collect(),
+            contributors,
+            next: continue_after(stages, 0, page.next),
+            ..CommitListing::default()
+        };
+        listing.swept_to_end = listing.next.is_none();
+        Ok(Some(listing))
+    }
+
     /// One response: what it parsed to, plus the `rel="next"` URL if the list
     /// continues.
     ///
@@ -587,6 +709,10 @@ impl GithubClient {
     /// `Retry-After`; an exhausted budget is confirmed against `/rate_limit`
     /// and waited out until the reset. Only [`RATE_LIMIT_RETRIES`] refusals in
     /// a row fail the request.
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "inflated by the tracing and tokio::select! macros; each branch is one retry rule"
+    )]
     async fn get_page<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,
@@ -607,7 +733,7 @@ impl GithubClient {
         // request counts against both ceilings until its body has been read.
         // A retry gives them up first: a request asleep on a backoff is not
         // in flight.
-        let (response, rate_limited, _admission, _permit, mut line) = loop {
+        let (body, etag, last_modified, next_page, _admission, _permit, mut line) = loop {
             let (admission, permit) = self.admit(&options.telemetry, &options.cancel).await?;
             let (outcome, took) = self
                 .send(
@@ -684,44 +810,35 @@ impl GithubClient {
                 took,
                 &seen,
             );
-            break (response, rate_limited, admission, permit, line);
+
+            if status == reqwest::StatusCode::NOT_MODIFIED {
+                return Self::serve_from_cache(
+                    url,
+                    cached.as_ref(),
+                    response.headers(),
+                    &options.telemetry,
+                );
+            }
+            if let Some(refusal) = unusable_answer(status, rate_limited, url) {
+                return Err(refusal);
+            }
+
+            let etag = header_string(response.headers(), "etag");
+            let last_modified = header_string(response.headers(), "last-modified");
+            let next_page = next_link(response.headers());
+            match read_body(response).await {
+                Ok(body) => break (body, etag, last_modified, next_page, admission, permit, line),
+                Err(ReadFailure::Transport(e)) if upstream_attempt < UPSTREAM_RETRIES => {
+                    drop(permit);
+                    drop(admission);
+                    self.back_off_upstream(url, &e.to_string(), upstream_attempt, &options.cancel)
+                        .await?;
+                    upstream_attempt += 1;
+                }
+                Err(failure) => return Err(failure.into_error()),
+            }
         };
 
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_MODIFIED {
-            return Self::serve_from_cache(
-                url,
-                cached.as_ref(),
-                response.headers(),
-                &options.telemetry,
-            );
-        }
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(DomainError::NotFound);
-        }
-        if rate_limited {
-            return Err(DomainError::internal(format!(
-                "GitHub rate limit persisted through {RATE_LIMIT_RETRIES} retries for {url}"
-            )));
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            // Not a rate limit (checked above): the mirror's own token no
-            // longer sees this resource - the repo went private, the token
-            // was revoked, or its scopes shrank.
-            return Err(DomainError::AccessLost(format!(
-                "GitHub answered {status} for {url}"
-            )));
-        }
-        if !status.is_success() {
-            return Err(DomainError::internal(format!(
-                "GitHub responded with {status} for {url}"
-            )));
-        }
-
-        let etag = header_string(response.headers(), "etag");
-        let last_modified = header_string(response.headers(), "last-modified");
-        let next_page = next_link(response.headers());
-        let body = read_capped(response).await?;
         let entry = CachedResponse {
             body: String::from_utf8(body)
                 .map_err(|e| DomainError::internal(format!("GitHub response read failed: {e}")))?,
@@ -756,7 +873,7 @@ impl GithubClient {
             DomainError::internal(format!("GitHub answered 304 for {url} with nothing cached"))
         })?;
         telemetry.add_saved(entry.body.len());
-        tracing::debug!(%url, "304 Not Modified - served from cache, no quota spent");
+        tracing::debug!(url = %redacted_word(url), "304 Not Modified - served from cache, no quota spent");
 
         let parsed = serde_json::from_str(&entry.body).map_err(|e| {
             DomainError::internal(format!(
@@ -794,7 +911,7 @@ impl GithubClient {
         attempt: u32,
         cancel: &CancellationToken,
     ) -> Result<(), DomainError> {
-        let delay = upstream_backoff(attempt);
+        let delay = self.upstream_backoff.saturating_mul(1u32 << attempt.min(8));
         tracing::warn!(
             url = %redacted_word(url),
             reason,
@@ -817,7 +934,7 @@ impl GithubClient {
         }
         Err(DomainError::internal(format!(
             "refusing to follow a link off {}: {}",
-            self.api_base_url,
+            redacted_word(&self.api_base_url),
             redacted_word(url)
         )))
     }
@@ -849,6 +966,31 @@ impl GithubClient {
                 None => return Ok((items, true)),
             }
         }
+    }
+
+    async fn get_json_newest_wrapped<P: serde::de::DeserializeOwned, T>(
+        &self,
+        path: &str,
+        options: &FetchOptions,
+        max_pages: usize,
+        unwrap: impl Fn(P) -> Vec<T>,
+    ) -> Result<Vec<T>, DomainError> {
+        let mut url = self.absolute(path);
+        let mut items: Vec<T> = Vec::new();
+        for _ in 0..max_pages {
+            let fetched: FetchedPage<P> = self.get_page(&url, options).await?;
+            items.extend(unwrap(fetched.parsed));
+            match fetched.next {
+                Some(next) => url = next,
+                None => return Ok(items),
+            }
+        }
+        tracing::debug!(
+            path = %redacted_word(path),
+            max_pages,
+            "stopped after the newest pages; older entries keep what was stored"
+        );
+        Ok(items)
     }
 
     async fn get_json_all_wrapped<P: serde::de::DeserializeOwned, T>(
@@ -889,10 +1031,14 @@ impl GithubClient {
             .put(&options.access_scope, options.tenant_id, key, url, entry)
             .await
         {
-            tracing::warn!(%url, error = %e, "cache write failed; the next sync will re-fetch");
+            tracing::warn!(url = %redacted_word(url), error = %e, "cache write failed; the next sync will re-fetch");
         }
     }
 
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "inflated by the tracing and tokio::select! macros; each branch is one retry rule"
+    )]
     async fn post_graphql(
         &self,
         query: &str,
@@ -912,7 +1058,7 @@ impl GithubClient {
         let mut upstream_attempt: u32 = 0;
         // GraphQL shares the REST ceilings: both spend the same token's
         // budget, though the controller only reads the core budget headers.
-        let (response, _admission, _permit, mut line) = loop {
+        let (body, _admission, _permit, mut line) = loop {
             let (admission, permit) = self.admit(telemetry, cancel).await?;
             let mut request = self
                 .http
@@ -982,7 +1128,7 @@ impl GithubClient {
                 attempt += 1;
                 continue;
             }
-            let line = self.count(
+            let mut line = self.count(
                 telemetry,
                 &sent,
                 status.as_u16(),
@@ -990,27 +1136,70 @@ impl GithubClient {
                 took,
                 &seen,
             );
-            break (response, admission, permit, line);
+
+            match read_graphql(response, attempt).await? {
+                GraphqlRead::Unread(e) if upstream_attempt < UPSTREAM_RETRIES => {
+                    drop(permit);
+                    drop(admission);
+                    self.back_off_upstream(&url, &e.to_string(), upstream_attempt, cancel)
+                        .await?;
+                    upstream_attempt += 1;
+                }
+                GraphqlRead::Unread(e) => return Err(ReadFailure::Transport(e).into_error()),
+                GraphqlRead::RateLimited { delay, .. } if attempt < RATE_LIMIT_RETRIES => {
+                    report_graphql_budget(attempt, delay);
+                    drop(permit);
+                    drop(admission);
+                    self.pause(delay, telemetry, cancel).await?;
+                    attempt += 1;
+                }
+                GraphqlRead::RateLimited { body, bytes, .. } | GraphqlRead::Answer { body, bytes } => {
+                    line.entry.response_bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+                    self.metrics.response_bytes("POST", bytes);
+                    telemetry.add_downloaded(bytes);
+                    break (body, admission, permit, line);
+                }
+            }
         };
 
-        let status = response.status();
-        if !status.is_success() {
-            return Err(DomainError::internal(format!(
-                "GitHub GraphQL responded with {status}"
-            )));
+        let answer = graphql_answer(body);
+        if let Ok(value) = &answer {
+            line.entry.graphql_points = record_graphql_cost(value, telemetry);
         }
-
-        let bytes = read_capped(response).await?;
-        self.metrics.response_bytes("POST", bytes.len());
-        telemetry.add_downloaded(bytes.len());
-        line.entry.response_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        let answer = graphql_answer(&bytes)?;
-        if let Some(cost) = answer["data"]["rateLimit"]["cost"].as_u64() {
-            telemetry.add_graphql_points(cost);
-            line.entry.graphql_points = Some(cost);
-        }
-        Ok(answer)
+        answer
     }
+}
+
+fn record_graphql_cost(answer: &serde_json::Value, telemetry: &SessionTelemetry) -> Option<u64> {
+    let cost = answer["data"]["rateLimit"]["cost"].as_u64()?;
+    telemetry.add_graphql_points(cost);
+    Some(cost)
+}
+
+fn unusable_answer(
+    status: reqwest::StatusCode,
+    rate_limited: bool,
+    url: &str,
+) -> Option<DomainError> {
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Some(DomainError::NotFound);
+    }
+    if rate_limited {
+        return Some(DomainError::internal(format!(
+            "GitHub rate limit persisted through {RATE_LIMIT_RETRIES} retries for {url}"
+        )));
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        // Not a rate limit (checked above): the mirror's own token no
+        // longer sees this resource - the repo went private, the token
+        // was revoked, or its scopes shrank.
+        return Some(DomainError::AccessLost(format!(
+            "GitHub answered {status} for {url}"
+        )));
+    }
+    (!status.is_success()).then(|| {
+        DomainError::internal(format!("GitHub responded with {status} for {url}"))
+    })
 }
 
 struct Sent<'a> {
@@ -1046,10 +1235,57 @@ const fn request_outcome(outcome: Outcome) -> RequestOutcome {
     }
 }
 
-fn graphql_answer(bytes: &[u8]) -> Result<serde_json::Value, DomainError> {
-    let body: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|e| DomainError::internal(format!("GitHub GraphQL decode failed: {e}")))?;
+enum GraphqlRead {
+    Answer {
+        body: serde_json::Value,
+        bytes: usize,
+    },
+    Unread(reqwest::Error),
+    RateLimited {
+        delay: std::time::Duration,
+        body: serde_json::Value,
+        bytes: usize,
+    },
+}
 
+async fn read_graphql(
+    response: reqwest::Response,
+    attempt: u32,
+) -> Result<GraphqlRead, DomainError> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(DomainError::internal(format!(
+            "GitHub GraphQL responded with {status}"
+        )));
+    }
+    let headers = response.headers().clone();
+    let raw = match read_body(response).await {
+        Ok(raw) => raw,
+        Err(ReadFailure::Transport(e)) => return Ok(GraphqlRead::Unread(e)),
+        Err(failure) => return Err(failure.into_error()),
+    };
+    let bytes = raw.len();
+    let body: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|e| DomainError::internal(format!("GitHub GraphQL decode failed: {e}")))?;
+    if graphql_rate_limited(&body) {
+        return Ok(GraphqlRead::RateLimited {
+            delay: retry_delay(&headers, attempt),
+            body,
+            bytes,
+        });
+    }
+    Ok(GraphqlRead::Answer { body, bytes })
+}
+
+fn report_graphql_budget(attempt: u32, delay: std::time::Duration) {
+    tracing::warn!(
+        attempt,
+        delay_secs = delay.as_secs(),
+        "GitHub GraphQL budget exhausted; backing off before retrying"
+    );
+}
+
+fn graphql_answer(body: serde_json::Value) -> Result<serde_json::Value, DomainError> {
     if let Some(errors) = body.get("errors").and_then(serde_json::Value::as_array)
         && !errors.is_empty()
     {
@@ -1573,6 +1809,13 @@ struct GhReview {
     commit_id: Option<String>,
     submitted_at: Option<String>,
     html_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhComparison {
+    status: String,
+    total_commits: usize,
+    commits: Vec<GhCommit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2108,6 +2351,10 @@ const REVIEW_THREADS_QUERY: &str = "query($owner: String!, $name: String!, $numb
 /// cursor GitHub never ends cannot keep one refinement going for ever.
 const REVIEW_THREAD_PAGES: usize = 20;
 
+const MAX_REDIRECTS: usize = 10;
+
+const WORKFLOW_RUN_PAGES: usize = 10;
+
 fn review_threads_variables(
     owner: &str,
     name: &str,
@@ -2371,6 +2618,7 @@ impl GithubPort for GithubClient {
             updated_after,
             page1_etag,
             continue_from,
+            ..
         } = cursor;
         if !options.scope.objects.issues {
             return Ok(IssueListing::default());
@@ -2407,7 +2655,7 @@ impl GithubPort for GithubClient {
                 if continue_from.is_none() {
                     listing.page1_etag.clone_from(&page.etag);
                     if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
-                        tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                        tracing::debug!(url = %redacted_word(&url), "page one is unchanged; the sweep stops here");
                         listing.unchanged = true;
                         return Ok(listing);
                     }
@@ -2494,11 +2742,15 @@ impl GithubPort for GithubClient {
                     options,
                 )
                 .await?;
-            detail.timeline = entries
-                .iter()
-                .enumerate()
-                .map(|(position, entry)| issue_timeline_record(repo_id, number, position, entry))
-                .collect();
+            detail.timeline = Some(
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(position, entry)| {
+                        issue_timeline_record(repo_id, number, position, entry)
+                    })
+                    .collect(),
+            );
         }
         Ok(detail)
     }
@@ -2518,6 +2770,7 @@ impl GithubPort for GithubClient {
             updated_after,
             page1_etag,
             continue_from,
+            ..
         } = cursor;
         if !options.scope.objects.pull_requests {
             return Ok(PullListing::default());
@@ -2547,7 +2800,7 @@ impl GithubPort for GithubClient {
             if continue_from.is_none() {
                 listing.page1_etag.clone_from(&page.etag);
                 if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
-                    tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                    tracing::debug!(url = %redacted_word(&url), "page one is unchanged; the sweep stops here");
                     listing.unchanged = true;
                     return Ok(listing);
                 }
@@ -2758,6 +3011,7 @@ impl GithubPort for GithubClient {
         let ListCursor {
             updated_after,
             page1_etag,
+            last_head_sha,
             continue_from,
         } = cursor;
         if !options.scope.objects.commits {
@@ -2779,6 +3033,15 @@ impl GithubPort for GithubClient {
             },
         ];
         let url = continue_from.map_or_else(|| stages[0].first.clone(), str::to_owned);
+        if is_compare_url(&url) {
+            let compared = self
+                .compare_page(repo_id, &stages, &url, false, options)
+                .await?;
+            return Ok(compared.unwrap_or_else(|| CommitListing {
+                next: Some(stages[0].first.clone()),
+                ..CommitListing::default()
+            }));
+        }
         let stage = stage_of(&stages, &url)?;
         let bounded = updated_after.is_some();
 
@@ -2788,9 +3051,26 @@ impl GithubPort for GithubClient {
             if continue_from.is_none() {
                 listing.page1_etag.clone_from(&page.etag);
                 if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
-                    tracing::debug!(%url, "page one is unchanged; the sweep stops here");
+                    tracing::debug!(url = %redacted_word(&url), "page one is unchanged; the sweep stops here");
                     listing.unchanged = true;
+                    listing.next = continue_after(&stages, 0, None);
                     return Ok(listing);
+                }
+                listing.head_sha = page.parsed.first().map(|c| c.sha.clone());
+                if let (Some(base), Some(head)) = (last_head_sha, listing.head_sha.as_deref()) {
+                    let compare = self.absolute(&format!(
+                        "/repos/{owner}/{name}/compare/{base}...{head}?per_page={FIRST_PAGE_SIZE}"
+                    ));
+                    if let Some(compared) = self
+                        .compare_page(repo_id, &stages, &compare, true, options)
+                        .await?
+                    {
+                        return Ok(CommitListing {
+                            page1_etag: listing.page1_etag,
+                            head_sha: listing.head_sha,
+                            ..compared
+                        });
+                    }
                 }
             }
             listing.contributors = derive_commit_people(repo_id, &page.parsed, &[]).into_records();
@@ -2985,9 +3265,10 @@ impl GithubPort for GithubClient {
         }
 
         let runs = self
-            .get_json_all_wrapped(
+            .get_json_newest_wrapped(
                 &format!("/repos/{owner}/{name}/actions/runs?per_page={FIRST_PAGE_SIZE}"),
                 options,
+                WORKFLOW_RUN_PAGES,
                 |page: GhWorkflowRunsPage| page.workflow_runs,
             )
             .await?;

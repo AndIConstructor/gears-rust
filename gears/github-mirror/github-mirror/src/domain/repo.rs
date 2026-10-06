@@ -16,6 +16,7 @@ use super::ports::github::{
     ActionsListing, CommitDetail, CommitListing, IssueDetail, IssueListing, ListingCompleteness,
     MetadataListing, PullDetail, PullListing,
 };
+use super::scope::ScopeConfig;
 
 /// Write-side record for a mirrored repository (what sync knows about it).
 #[domain_model]
@@ -1550,6 +1551,15 @@ pub trait RepoSyncStatusRepository: Send + Sync {
         repo_full_name: &str,
     ) -> Result<Option<RepoSyncStatusRecord>, DomainError>;
 
+    async fn complete_if_last_session(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        session_id: Uuid,
+        repo_id: Option<i64>,
+        synced_at: &str,
+    ) -> Result<bool, DomainError>;
+
     /// Every repository the scope can see in slug order, optionally narrowed
     /// to one status, starting after the slug `after` when a page continues.
     async fn list(
@@ -1634,6 +1644,12 @@ pub trait SyncSessionRepository: Send + Sync {
         updated_at: &str,
     ) -> Result<(), DomainError>;
 
+    async fn finish_if_running(
+        &self,
+        scope: &AccessScope,
+        record: &SyncSessionRecord,
+    ) -> Result<bool, DomainError>;
+
     /// Sessions newest first, `created_at` then `id` descending, starting
     /// after the `(created_at, id)` pair in `after` when a page continues.
     async fn list_recent(
@@ -1655,6 +1671,56 @@ pub trait SyncSessionRepository: Send + Sync {
     ) -> Result<Vec<(Uuid, SyncSessionRecord)>, DomainError>;
 }
 
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSyncRecord {
+    pub repo_full_name: String,
+    pub session_id: Uuid,
+    pub owner_id: Uuid,
+    pub scope: ScopeConfig,
+    pub since: Option<DateTime<Utc>>,
+    pub updated_at: String,
+}
+
+#[async_trait]
+pub trait ActiveSyncRepository: Send + Sync {
+    async fn find(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+    ) -> Result<Option<ActiveSyncRecord>, DomainError>;
+
+    async fn insert(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: &ActiveSyncRecord,
+    ) -> Result<bool, DomainError>;
+
+    async fn replace(
+        &self,
+        scope: &AccessScope,
+        record: &ActiveSyncRecord,
+        previous_session_id: Uuid,
+    ) -> Result<bool, DomainError>;
+
+    async fn delete(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        session_id: Uuid,
+    ) -> Result<(), DomainError>;
+
+    async fn touch(
+        &self,
+        scope: &AccessScope,
+        owner_id: Uuid,
+        updated_at: &str,
+    ) -> Result<(), DomainError>;
+
+    async fn list(&self, scope: &AccessScope) -> Result<Vec<ActiveSyncRecord>, DomainError>;
+}
+
 /// Incremental-sweep watermark for one `(repository, endpoint family)` pair.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1663,6 +1729,7 @@ pub struct SyncWatermarkRecord {
     pub family: String,
     pub last_seen_updated_at: Option<String>,
     pub page1_etag: Option<String>,
+    pub last_head_sha: Option<String>,
     pub sweep_in_progress: bool,
     pub candidate_high_water: Option<String>,
 }

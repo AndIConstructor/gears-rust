@@ -155,6 +155,29 @@ mod tests {
     }
 
     #[test]
+    fn gzip_decodes_a_body_at_the_cap_and_refuses_one_past_it() {
+        let cap = usize::try_from(MAX_BODY_BYTES).unwrap();
+        let at_cap = Compression::Gzip.compress(&vec![0; cap]).unwrap();
+        assert_eq!(Compression::Gzip.decompress(&at_cap).unwrap().len(), cap);
+
+        let past_cap = Compression::Gzip.compress(&vec![0; cap + 1]).unwrap();
+        let error = Compression::Gzip.decompress(&past_cap).unwrap_err();
+        assert!(error.to_string().contains("expands past"), "{error}");
+    }
+
+    #[test]
+    fn none_returns_a_body_at_the_cap_and_refuses_one_past_it() {
+        let cap = usize::try_from(MAX_BODY_BYTES).unwrap();
+        assert_eq!(
+            Compression::None.decompress(&vec![0; cap]).unwrap().len(),
+            cap
+        );
+
+        let error = Compression::None.decompress(&vec![0; cap + 1]).unwrap_err();
+        assert!(error.to_string().contains("larger than"), "{error}");
+    }
+
+    #[test]
     fn modes_parse_and_round_trip_their_names() {
         for (text, mode) in [("none", Compression::None), ("GZIP", Compression::Gzip)] {
             let parsed = Compression::parse(text).unwrap();

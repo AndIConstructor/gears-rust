@@ -29,9 +29,9 @@ use super::dto::{
     CommitCommentDto, CommitDto, CommitFileDto, CommitStatsDto, CommitStatusDto, ContributorDto,
     DeploymentDto, GithubMirrorHealthDto, IssueDto, IssueEventDto, IssueReactionDto,
     IssueTimelineEventDto, LabelDto, MilestoneDto, PullRequestDto, PullRequestFileDto, ReleaseDto,
-    RepoDto, RepoSyncStatusDto, ResumeAcceptedDto, ReviewCommentDto, ReviewDto, ReviewThreadDto,
-    SyncAcceptedDto, SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto, WorkflowRunDto,
-    WorkflowRunsPageDto,
+    RepoDto, RepoSyncStatusDto, ResumeAcceptedDto, ResumeFailureDto, ReviewCommentDto, ReviewDto,
+    ReviewThreadDto, SyncAcceptedDto, SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto,
+    WorkflowRunDto, WorkflowRunsPageDto,
 };
 
 const DEFAULT_PER_PAGE: u64 = 30;
@@ -980,14 +980,26 @@ pub async fn resume_syncs(
     Extension(svc): Extension<Arc<ConcreteService>>,
     Query(query): Query<ResumeQuery>,
 ) -> ApiResult<(StatusCode, JsonBody<ResumeAcceptedDto>)> {
-    let ids = svc
+    let outcome = svc
         .resume_incomplete_syncs(&ctx, query.repo.as_deref(), query.force.unwrap_or(false))
         .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(ResumeAcceptedDto {
-            resumed: ids.len(),
-            session_ids: ids.iter().map(ToString::to_string).collect(),
+            resumed: outcome.session_ids.len(),
+            session_ids: outcome
+                .session_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            failed: outcome
+                .refused
+                .into_iter()
+                .map(|refused| ResumeFailureDto {
+                    repository: refused.repository,
+                    error: refused.error.public_text(),
+                })
+                .collect(),
         }),
     ))
 }
