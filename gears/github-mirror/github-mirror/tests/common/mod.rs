@@ -411,6 +411,14 @@ impl GithubPort for FakeGithub {
     ) -> Result<u64, DomainError> {
         Ok(0)
     }
+
+    async fn expire_cache(
+        &self,
+        _scope: &AccessScope,
+        _fetched_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DomainError> {
+        Ok(0)
+    }
 }
 
 pub async fn inmem_db() -> Db {
@@ -517,6 +525,8 @@ pub fn service_with_deadline(
             max_concurrent_tasks: std::num::NonZeroUsize::MIN,
             sync_deadline,
             telemetry_dir: None,
+            cache_max_age_days: None,
+            tenant_cache_max_age_days: std::collections::HashMap::new(),
         },
         std::sync::Arc::new(github_mirror::infra::telemetry_sink::JsonlTelemetrySink),
     ))

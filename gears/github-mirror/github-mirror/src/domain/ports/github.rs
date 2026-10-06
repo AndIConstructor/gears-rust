@@ -21,6 +21,8 @@ use crate::domain::repo::{
 use crate::domain::scope::ScopeConfig;
 use crate::domain::sync::telemetry::SessionTelemetry;
 
+pub const SHARED_CACHE_PARTITION: uuid::Uuid = uuid::Uuid::nil();
+
 /// Everything one fetch needs beyond the repository's name.
 #[domain_model]
 #[derive(Debug, Clone)]
@@ -430,5 +432,13 @@ pub trait GithubPort: Send + Sync {
         owner: &str,
         name: Option<&str>,
         repo_ids: &[i64],
+    ) -> Result<u64, DomainError>;
+
+    /// # Errors
+    /// Storage failures.
+    async fn expire_cache(
+        &self,
+        scope: &AccessScope,
+        fetched_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }

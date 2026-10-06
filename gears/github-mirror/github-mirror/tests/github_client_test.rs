@@ -1606,6 +1606,14 @@ impl HttpCache for MemCache {
         entries.clear();
         Ok(removed)
     }
+
+    async fn expire(
+        &self,
+        _scope: &AccessScope,
+        _fetched_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DomainError> {
+        Ok(0)
+    }
 }
 
 /// Only the repository endpoint is in scope, so one sync is exactly one call.
@@ -1958,7 +1966,7 @@ async fn a_403_with_only_an_exhausted_quota_is_retried_as_a_rate_limit() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("the clock is after 1970")
         .as_secs()
-        + 1;
+        + 2;
     let server = MockServer::start_async().await;
     let limited = server
         .mock_async(move |when, then| {

@@ -124,6 +124,14 @@ impl GithubPort for NeverAnswers {
     ) -> Result<u64, DomainError> {
         unreachable!("this test never clears the cache")
     }
+
+    async fn expire_cache(
+        &self,
+        _scope: &AccessScope,
+        _fetched_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DomainError> {
+        Ok(0)
+    }
 }
 
 /// The deadline is the only thing that ends a run which will not end itself.

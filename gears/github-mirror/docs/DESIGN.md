@@ -89,7 +89,7 @@ Not covered by this design yet: the CLI (`cpt-cf-github-mirror-fr-cli-*`), Pytho
 | `cpt-cf-github-mirror-nfr-memory-efficiency` | Page-by-page writes; 64 MiB cap on any single response body; queue backpressure |
 | `cpt-cf-github-mirror-nfr-security` | Tenant scoping in storage, policy checks per operation, token read from the credential store and sent only over HTTPS (or loopback) |
 | `cpt-cf-github-mirror-nfr-parallel-sync` | Tenant-fair pool of `max_concurrent_syncs` workers |
-| `cpt-cf-github-mirror-nfr-data-governance` | Per-repository and per-owner cache clear; additive migrations with `down()` |
+| `cpt-cf-github-mirror-nfr-data-governance` | Per-repository and per-owner cache clear; a maximum cache age, gear-wide or per tenant; additive migrations with `down()` |
 
 ### 1.3 Architecture Layers
 
@@ -566,6 +566,10 @@ Configuration (`config` of the gear):
 | `max_concurrent_requests` | 8 |
 | `sync_deadline_minutes` | 360 |
 | `telemetry_dir` | none; no telemetry file is written |
+| `cache_max_age_days` | none; cached responses are kept until cleared |
+| `tenants.<tenant_id>.cache_max_age_days` | `cache_max_age_days` |
+
+At the start of each sync the gear deletes the syncing tenant's `gm_http_cache` rows whose `fetched_at` is older than that tenant's `cache_max_age_days`, and the shared public-repository rows older than the gear-wide `cache_max_age_days`. A `304` does not rewrite a row, so `fetched_at` is the time of the last `200`. A delete that fails is logged and the sync goes on.
 
 With `telemetry_dir` set, every GitHub call of a sync, retries included, appends one JSON line to `<telemetry_dir>/<tenant_id>/<owner>/<name>.jsonl`: `session_id`, `repository`, `api`, `method`, `url` (query string removed), `status`, `outcome`, `duration_ms`, `rate_limit_remaining`, `rate_limit_reset`, `cache_hit`, `etag_used`, `response_bytes`, `graphql_points`, `requested_at`, and `tasks_pending`, the queue depth when the call was made. An in-process caller of `Service::sync_now` may pass its own file name in place of `<name>.jsonl`. It stays in the same folder, must be 1-100 characters from `[A-Za-z0-9._-]`, and nothing is written without `telemetry_dir`; a REST request cannot name a file. The gear only appends; rotating and deleting the files is the operator's. A write that fails is logged once per session and the sync goes on. The session's own totals, `cache_hit_ratio` included, are on `GET /github-mirror/v1/sessions/{id}`.
 

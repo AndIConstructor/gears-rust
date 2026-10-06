@@ -206,6 +206,14 @@ impl Gear for GithubMirrorGear {
                     cfg.sync_deadline_minutes.get().saturating_mul(60),
                 ),
                 telemetry_dir: cfg.telemetry_dir,
+                cache_max_age_days: cfg.cache_max_age_days,
+                tenant_cache_max_age_days: cfg
+                    .tenants
+                    .into_iter()
+                    .filter_map(|(tenant_id, tenant)| {
+                        tenant.cache_max_age_days.map(|days| (tenant_id, days))
+                    })
+                    .collect(),
             },
             Arc::new(JsonlTelemetrySink),
         ));

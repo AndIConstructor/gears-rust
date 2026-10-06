@@ -7,7 +7,7 @@
 //! happens.
 //!
 //! Entries of a repository Discovery has seen as public live in one shared
-//! partition, [`SHARED_PARTITION`], so every tenant revalidates the same
+//! partition, [`SHARED_CACHE_PARTITION`](crate::domain::ports::github::SHARED_CACHE_PARTITION), so every tenant revalidates the same
 //! entry ([`PRD` §5.7], ADR-0002). Entries of a private repository, and every
 //! entry fetched before Discovery has learned the visibility, stay in the
 //! partition of the tenant that fetched them. A shared body is only ever
@@ -15,11 +15,10 @@
 
 use async_trait::async_trait;
 use aws_lc_rs::digest::{self, SHA256};
+use chrono::{DateTime, Utc};
 use toolkit_security::AccessScope;
 
 use crate::domain::error::DomainError;
-
-pub const SHARED_PARTITION: uuid::Uuid = uuid::Uuid::nil();
 
 /// A content-addressed cache key: SHA-256 over the request's observable
 /// properties.
@@ -121,6 +120,14 @@ pub trait HttpCache: Send + Sync {
     /// # Errors
     /// Storage failures.
     async fn clear(&self, scope: &AccessScope, url_prefixes: &[&str]) -> Result<u64, DomainError>;
+
+    /// # Errors
+    /// Storage failures.
+    async fn expire(
+        &self,
+        scope: &AccessScope,
+        fetched_before: DateTime<Utc>,
+    ) -> Result<u64, DomainError>;
 }
 
 /// A cache that stores nothing, for callers that do not want one.
@@ -154,6 +161,14 @@ impl HttpCache for NoCache {
         &self,
         _scope: &AccessScope,
         _url_prefixes: &[&str],
+    ) -> Result<u64, DomainError> {
+        Ok(0)
+    }
+
+    async fn expire(
+        &self,
+        _scope: &AccessScope,
+        _fetched_before: DateTime<Utc>,
     ) -> Result<u64, DomainError> {
         Ok(0)
     }

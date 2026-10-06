@@ -228,6 +228,14 @@ impl GithubPort for GatedGithub {
     ) -> Result<u64, DomainError> {
         self.inner.clear_cache(scope, owner, name, repo_ids).await
     }
+
+    async fn expire_cache(
+        &self,
+        scope: &AccessScope,
+        fetched_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DomainError> {
+        self.inner.expire_cache(scope, fetched_before).await
+    }
 }
 
 async fn queue_sync(service: &Arc<ConcreteService>) -> (Router, String) {

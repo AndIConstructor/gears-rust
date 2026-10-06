@@ -5103,6 +5103,25 @@ impl HttpCache for SeaOrmHttpCache {
 
         Ok(result.rows_affected)
     }
+
+    async fn expire(
+        &self,
+        scope: &AccessScope,
+        fetched_before: chrono::DateTime<Utc>,
+    ) -> Result<u64, DomainError> {
+        let conn = self.db.conn()?;
+        let cutoff = fetched_before.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        let result = HttpCacheEntity::delete_many()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(http_cache::Column::FetchedAt.lt(cutoff)))
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(result.rows_affected)
+    }
 }
 
 pub struct SeaOrmRepoSyncStatusRepository {

@@ -1,5 +1,5 @@
-use std::collections::HashSet;
-use std::num::NonZeroUsize;
+use std::collections::{HashMap, HashSet};
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -22,7 +22,7 @@ use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
 use super::error::DomainError;
-use super::ports::github::{FetchOptions, GithubPort};
+use super::ports::github::{FetchOptions, GithubPort, SHARED_CACHE_PARTITION};
 use super::ports::telemetry_sink::TelemetrySink;
 use super::repo::{
     ActiveSyncRecord, ActiveSyncRepository, BranchRecord, BranchRepository, CheckRunRecord,
@@ -177,6 +177,13 @@ fn telemetry_file_path(dir: &Path, tenant_id: Uuid, job: &SyncJob) -> PathBuf {
             .clone()
             .unwrap_or_else(|| format!("{}.jsonl", job.name)),
     )
+}
+
+fn cache_cutoff(max_age_days: NonZeroU64) -> Option<DateTime<Utc>> {
+    i64::try_from(max_age_days.get())
+        .ok()
+        .and_then(chrono::Duration::try_days)
+        .and_then(|age| Utc::now().checked_sub_signed(age))
 }
 
 /// Whether the process that was running `session` is gone.
@@ -587,6 +594,8 @@ pub struct ServiceConfig {
     /// How long one repository's sync may run before it is stopped.
     pub sync_deadline: std::time::Duration,
     pub telemetry_dir: Option<PathBuf>,
+    pub cache_max_age_days: Option<NonZeroU64>,
+    pub tenant_cache_max_age_days: HashMap<Uuid, NonZeroU64>,
 }
 
 #[domain_model]
@@ -4787,6 +4796,8 @@ impl Service {
             Err(e) => return Err(DomainError::Database(e)),
         };
 
+        self.expire_cache(&options.access_scope, tenant_id).await;
+
         let run = Arc::new(RunState::new(
             Uuid::new_v4(),
             options.access_scope.clone(),
@@ -4806,6 +4817,31 @@ impl Service {
         // and the sync itself succeeded or failed on its own merits.
         release_sync_lock(sync_lock, owner, name).await;
         outcome
+    }
+
+    async fn expire_cache(&self, scope: &AccessScope, tenant_id: Uuid) {
+        let shared = self.config.cache_max_age_days;
+        let own = self
+            .config
+            .tenant_cache_max_age_days
+            .get(&tenant_id)
+            .copied()
+            .or(shared);
+        self.expire_partition(scope, own).await;
+        self.expire_partition(&AccessScope::for_tenant(SHARED_CACHE_PARTITION), shared)
+            .await;
+    }
+
+    async fn expire_partition(&self, scope: &AccessScope, max_age_days: Option<NonZeroU64>) {
+        let Some(fetched_before) = max_age_days.and_then(cache_cutoff) else {
+            return;
+        };
+        match self.github.expire_cache(scope, fetched_before).await {
+            Ok(removed) => tracing::debug!(removed, "expired old cached responses"),
+            Err(e) => {
+                tracing::warn!(error = %e, "expiring old cached responses failed; the next sync tries again");
+            }
+        }
     }
 
     /// The part of a sync that runs under the lock: phases, then reconciliation.

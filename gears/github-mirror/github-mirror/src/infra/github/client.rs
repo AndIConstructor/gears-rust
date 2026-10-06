@@ -14,7 +14,7 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, GithubPort,
     IssueDetail, IssueDetailWants, IssueListing, ListCursor, Listing, MetadataListing, PullDetail,
-    PullListing, RepoRef,
+    PullListing, RepoRef, SHARED_CACHE_PARTITION,
 };
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -25,9 +25,7 @@ use crate::domain::repo::{
     WorkflowRunRecord,
 };
 use crate::domain::sync::telemetry::{GithubApi, RequestOutcome, SessionTelemetry, TelemetryEntry};
-use crate::infra::github::cache::{
-    CacheKey, CachedResponse, HttpCache, NoCache, SHARED_PARTITION,
-};
+use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
 use crate::infra::github::compression::MAX_BODY_BYTES;
 use crate::infra::github::metrics::{GithubRequestMetrics, Outcome};
 use crate::infra::github::pagination::parse_link_next;
@@ -348,7 +346,10 @@ fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
 
 fn cache_partition(options: &FetchOptions) -> (AccessScope, uuid::Uuid) {
     if options.public_repo.get() == Some(&true) {
-        (AccessScope::for_tenant(SHARED_PARTITION), SHARED_PARTITION)
+        (
+            AccessScope::for_tenant(SHARED_CACHE_PARTITION),
+            SHARED_CACHE_PARTITION,
+        )
     } else {
         (options.access_scope.clone(), options.tenant_id)
     }
@@ -3346,6 +3347,14 @@ impl GithubPort for GithubClient {
         let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
 
         self.cache.clear(scope, &prefixes).await
+    }
+
+    async fn expire_cache(
+        &self,
+        scope: &AccessScope,
+        fetched_before: DateTime<Utc>,
+    ) -> Result<u64, DomainError> {
+        self.cache.expire(scope, fetched_before).await
     }
 }
 

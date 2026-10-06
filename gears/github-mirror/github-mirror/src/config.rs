@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 
@@ -58,6 +59,17 @@ pub struct GithubMirrorConfig {
     pub sync_deadline_minutes: NonZeroU64,
     #[serde(default)]
     pub telemetry_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub cache_max_age_days: Option<NonZeroU64>,
+    #[serde(default)]
+    pub tenants: HashMap<Uuid, TenantConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantConfig {
+    #[serde(default)]
+    pub cache_max_age_days: Option<NonZeroU64>,
 }
 
 /// Repositories synced at once when the config says nothing: enough to keep
@@ -178,6 +190,8 @@ impl Default for GithubMirrorConfig {
             max_concurrent_requests: default_max_concurrent_requests(),
             sync_deadline_minutes: default_sync_deadline_minutes(),
             telemetry_dir: None,
+            cache_max_age_days: None,
+            tenants: HashMap::new(),
         }
     }
 }

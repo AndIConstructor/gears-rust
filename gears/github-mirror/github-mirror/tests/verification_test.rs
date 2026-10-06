@@ -176,6 +176,14 @@ impl GithubPort for ShortPullWalk {
     ) -> Result<u64, DomainError> {
         self.inner.clear_cache(scope, owner, name, repo_ids).await
     }
+
+    async fn expire_cache(
+        &self,
+        scope: &AccessScope,
+        fetched_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DomainError> {
+        self.inner.expire_cache(scope, fetched_before).await
+    }
 }
 
 async fn sync_with(github: Arc<ShortPullWalk>) -> SyncSummary {
