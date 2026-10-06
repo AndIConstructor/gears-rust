@@ -227,6 +227,8 @@ impl Gear for GithubMirrorGear {
             .set(service.clone())
             .map_err(|_| anyhow::anyhow!("{} gear already initialized", Self::MODULE_NAME))?;
 
+        ctx.client_hub()
+            .register::<ConcreteService>(Arc::clone(&service));
         let client: Arc<dyn GithubMirrorClientV1> = Arc::new(LocalClient::new(service));
         ctx.client_hub()
             .register::<dyn GithubMirrorClientV1>(client);

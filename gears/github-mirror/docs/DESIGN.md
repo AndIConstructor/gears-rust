@@ -37,7 +37,7 @@
 
 GitHub Mirror keeps a local, tenant-scoped copy of GitHub repositories and serves it back. A tenant asks for a repository to be synced; the gear queues the sync, walks the repository's listings, fetches the details of what changed, and writes everything into its own `gm_` tables. Reads never call GitHub: they answer from those tables, either on GitHub's own paths (`/repos/{owner}/{name}/issues`, …) or on the gear's own API (`/github-mirror/v1/...`).
 
-The gear is a ToolKit gear (`github-mirror`) in the DDD-light layout: `api/rest` for the endpoints, `domain` for the service, the sync engine and the ports, `infra` for the GitHub client, the HTTP cache and the SeaORM storage. It is built from the reference implementation repotap, whose design document it adapts; the parts of repotap that belong to a single-token command-line tool (Python bindings, the GraphQL batcher, per-token rate controllers, a filesystem response store) are not part of this gear.
+The gear is a ToolKit gear (`github-mirror`) in the DDD-light layout: `api/rest` for the endpoints, `domain` for the service, the sync engine and the ports, `infra` for the GitHub client, the HTTP cache and the SeaORM storage. It is built from the reference implementation repotap, whose design document it adapts; the parts of repotap that belong to a single-token command-line tool (Python bindings, the GraphQL batcher, per-token rate controllers) are not part of this gear.
 
 A sync is designed to be stopped and started again. The task queue lives in memory and is never persisted; what survives is the HTTP cache (so unchanged pages come back as `304` and cost no quota), the per-family watermarks and the per-entity fingerprints (so unchanged entities are skipped), and a per-repository run status that `POST /sync/resume` uses to find the repositories left unfinished.
 
@@ -79,7 +79,7 @@ A sync is designed to be stopped and started again. The task queue lives in memo
 | `cpt-cf-github-mirror-fr-progress` | `p2` | `progress_percent` is weighted by phase, never goes down, and is written by the heartbeat |
 | `cpt-cf-github-mirror-fr-env-independence` | `p1` | All settings come from the gear config; the GitHub token comes from the credential store |
 
-Not covered by this design yet: the CLI (`cpt-cf-github-mirror-fr-cli-*`), Python bindings (`cpt-cf-github-mirror-fr-python-bindings`), write-back (`cpt-cf-github-mirror-fr-write-back`), the token pool (`cpt-cf-github-mirror-fr-token-pool`) and security-alert collection (`cpt-cf-github-mirror-fr-security-sync`, refused by scope validation today).
+Not covered by this design yet: the rest of the CLI (`clear-cache`, `check-rate-limit`, the sync flags of `cpt-cf-github-mirror-fr-cli-sync`, `--database-placement` and storage metrics; see [CLI](#cli)), Python bindings (`cpt-cf-github-mirror-fr-python-bindings`), write-back (`cpt-cf-github-mirror-fr-write-back`), the token pool (`cpt-cf-github-mirror-fr-token-pool`) and security-alert collection (`cpt-cf-github-mirror-fr-security-sync`, refused by scope validation today).
 
 #### NFR Allocation
 
@@ -578,6 +578,18 @@ With `cache_dir` set, cached responses are files instead of `gm_http_cache` rows
 With `telemetry_dir` set, every GitHub call of a sync, retries included, appends one JSON line to `<telemetry_dir>/<tenant_id>/<owner>/<name>.jsonl`: `session_id`, `repository`, `api`, `method`, `url` (query string removed), `status`, `outcome`, `duration_ms`, `rate_limit_remaining`, `rate_limit_reset`, `cache_hit`, `etag_used`, `response_bytes`, `graphql_points`, `requested_at`, and `tasks_pending`, the queue depth when the call was made. An in-process caller of `Service::sync_now` may pass its own file name in place of `<name>.jsonl`. It stays in the same folder, must be 1-100 characters from `[A-Za-z0-9._-]`, and nothing is written without `telemetry_dir`; a REST request cannot name a file. The gear only appends; rotating and deleting the files is the operator's. A write that fails is logged once per session and the sync goes on. The session's own totals, `cache_hit_ratio` included, are on `GET /github-mirror/v1/sessions/{id}`.
 
 The database pool should allow at least `max_concurrent_syncs` × `max_concurrent_tasks` connections plus one per sync for its heartbeat and session writes (20 with the defaults).
+
+### CLI
+
+`github-mirror-cli` builds the `github-mirror` binary. It starts the same gear runtime in its own process (github-mirror, credstore, the AuthN, AuthZ and tenant resolvers with their plugins, and types-registry), takes the gear's `Service` from ClientHub, runs one command and stops. The runtime refuses to start without an HTTP gateway when a linked gear has REST routes, so `api-gateway` is linked too, bound to `127.0.0.1:0` and never called.
+
+| Command | What it does |
+|---|---|
+| `sync <ORG/REPO>`, `resume <ORG/REPO>` | `Service::sync_now`; a repeat continues from the stored watermarks |
+| `query <ENTITY> <ORG/REPO>` | Reads mirrored rows; `--number` for comments, reviews, review comments, review threads, reactions and timeline; `--limit` |
+| `status <ORG/REPO>` | The repository's run status and its latest session |
+
+Configuration is one TOML file (`--config`, default `./github-mirror.toml`) merged over the built-in template that `--print-config` prints; its tables are the runtime's own settings, plus `[cli] tenant_id`. The GitHub token comes from `--token`, `GITHUB_TOKEN` or `~/.github-mirror/gh_token.txt` and reaches the gear through an in-memory static credstore secret. The platform token comes from `--platform-token`, `CF_PLATFORM_TOKEN` or `~/.github-mirror/platform_token.txt`; the AuthN resolver turns it into the `SecurityContext`, and when `cli.tenant_id` is set it must match the token's tenant. The `static-authn` feature (default) accepts any non-empty platform token as the plugin's configured identity, for local use; `oidc-authn` checks it against the platform's login server.
 
 ### Future Work
 

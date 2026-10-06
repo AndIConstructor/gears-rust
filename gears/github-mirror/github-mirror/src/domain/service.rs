@@ -3430,6 +3430,11 @@ impl Service {
         self.shutdown.get().cloned().unwrap_or_default()
     }
 
+    #[must_use]
+    pub fn started(&self) -> bool {
+        self.shutdown.get().is_some()
+    }
+
     /// What a sync collects when the request does not narrow it.
     #[must_use]
     pub fn default_scope(&self) -> ScopeConfig {
