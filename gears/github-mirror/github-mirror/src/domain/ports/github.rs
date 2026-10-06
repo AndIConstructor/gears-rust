@@ -429,6 +429,7 @@ pub trait GithubPort: Send + Sync {
     async fn clear_cache(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         owner: &str,
         name: Option<&str>,
         repo_ids: &[i64],
@@ -439,6 +440,7 @@ pub trait GithubPort: Send + Sync {
     async fn expire_cache(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         fetched_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }

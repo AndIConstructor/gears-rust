@@ -63,6 +63,8 @@ pub struct GithubMirrorConfig {
     pub cache_max_age_days: Option<NonZeroU64>,
     #[serde(default)]
     pub tenants: HashMap<Uuid, TenantConfig>,
+    #[serde(default)]
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -192,6 +194,7 @@ impl Default for GithubMirrorConfig {
             telemetry_dir: None,
             cache_max_age_days: None,
             tenants: HashMap::new(),
+            cache_dir: None,
         }
     }
 }

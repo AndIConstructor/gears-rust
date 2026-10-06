@@ -58,6 +58,7 @@ A sync is designed to be stopped and started again. The task queue lives in memo
 | `cpt-cf-github-mirror-fr-sync-deadline` | `p1` | `sync_deadline_minutes` (default 360) stops a run in order; the session ends `failed` with the reason |
 | `cpt-cf-github-mirror-fr-idempotent` | `p1` | Every write is an upsert keyed on the GitHub id and the tenant |
 | `cpt-cf-github-mirror-fr-raw-storage` | `p1` | `gm_http_cache` keeps each fetched page body (compressed) with its validators and content hash |
+| `cpt-cf-github-mirror-fr-persistence-plugins` | `p1` | `HttpCache` has a database store (default, no disk use) and a filesystem store chosen by `cache_dir`; mirrored rows always stay in the database, so there is no hybrid mode yet |
 | `cpt-cf-github-mirror-fr-normalized-storage` | `p1` | 31 `gm_` tables, one per entity family |
 | `cpt-cf-github-mirror-fr-multi-db` | `p1` | SeaORM through toolkit-db; migrations cover SQLite and PostgreSQL |
 | `cpt-cf-github-mirror-fr-repo-discovery` | `p1` | Phase 1 fetches the repository row and seeds one indexing task per enabled family |
@@ -261,7 +262,7 @@ REST and GraphQL calls with conditional requests, pagination, retries, the rate-
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-component-http-cache`
 
-Response store with compression and a content hash. Responses of a repository Discovery saw as public go to one shared partition (`tenant_id` is the nil UUID) that every tenant reads and writes through a scope for that tenant only. Private repositories, and the repository metadata call made before the visibility is known, stay in the caller's partition. A shared body is served only after GitHub answers `304` to the caller's own request.
+Response store with compression and a content hash, in `gm_http_cache` or, with `cache_dir` set, in files. Responses of a repository Discovery saw as public go to one shared partition (`tenant_id` is the nil UUID) that every tenant reads and writes through a scope for that tenant only. Private repositories, and the repository metadata call made before the visibility is known, stay in the caller's partition. A shared body is served only after GitHub answers `304` to the caller's own request.
 
 ### 3.3 API Contracts
 
@@ -567,9 +568,12 @@ Configuration (`config` of the gear):
 | `sync_deadline_minutes` | 360 |
 | `telemetry_dir` | none; no telemetry file is written |
 | `cache_max_age_days` | none; cached responses are kept until cleared |
+| `cache_dir` | none; cached responses go to `gm_http_cache` |
 | `tenants.<tenant_id>.cache_max_age_days` | `cache_max_age_days` |
 
 At the start of each sync the gear deletes the syncing tenant's `gm_http_cache` rows whose `fetched_at` is older than that tenant's `cache_max_age_days`, and the shared public-repository rows older than the gear-wide `cache_max_age_days`. A `304` does not rewrite a row, so `fetched_at` is the time of the last `200`. A delete that fails is logged and the sync goes on.
+
+With `cache_dir` set, cached responses are files instead of `gm_http_cache` rows: `<cache_dir>/<tenant_id>/<first two characters of the key>/<key>` holds the body, compressed as `cache_compression` says, and `<key>.meta.json` next to it holds `url`, `etag`, `last_modified`, `next_page`, `compression`, `content_hash` and `fetched_at`. Shared public-repository entries use the nil-UUID folder. Both files are written to a temporary name and renamed into place. `DELETE /cache` and `cache_max_age_days` read every `.meta.json` file of the tenant's folder to find what to delete.
 
 With `telemetry_dir` set, every GitHub call of a sync, retries included, appends one JSON line to `<telemetry_dir>/<tenant_id>/<owner>/<name>.jsonl`: `session_id`, `repository`, `api`, `method`, `url` (query string removed), `status`, `outcome`, `duration_ms`, `rate_limit_remaining`, `rate_limit_reset`, `cache_hit`, `etag_used`, `response_bytes`, `graphql_points`, `requested_at`, and `tasks_pending`, the queue depth when the call was made. An in-process caller of `Service::sync_now` may pass its own file name in place of `<name>.jsonl`. It stays in the same folder, must be 1-100 characters from `[A-Za-z0-9._-]`, and nothing is written without `telemetry_dir`; a REST request cannot name a file. The gear only appends; rotating and deleting the files is the operator's. A write that fails is logged once per session and the sync goes on. The session's own totals, `cache_hit_ratio` included, are on `GET /github-mirror/v1/sessions/{id}`.
 

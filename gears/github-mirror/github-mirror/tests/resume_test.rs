@@ -125,19 +125,25 @@ impl GithubPort for StopsAfterDiscovery {
     async fn clear_cache(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         owner: &str,
         name: Option<&str>,
         repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
-        self.inner.clear_cache(scope, owner, name, repo_ids).await
+        self.inner
+            .clear_cache(scope, tenant_id, owner, name, repo_ids)
+            .await
     }
 
     async fn expire_cache(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         fetched_before: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64, DomainError> {
-        self.inner.expire_cache(scope, fetched_before).await
+        self.inner
+            .expire_cache(scope, tenant_id, fetched_before)
+            .await
     }
 }
 
@@ -449,19 +455,25 @@ impl GithubPort for ListingWithEtag {
     async fn clear_cache(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         owner: &str,
         name: Option<&str>,
         repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
-        self.inner.clear_cache(scope, owner, name, repo_ids).await
+        self.inner
+            .clear_cache(scope, tenant_id, owner, name, repo_ids)
+            .await
     }
 
     async fn expire_cache(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         fetched_before: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64, DomainError> {
-        self.inner.expire_cache(scope, fetched_before).await
+        self.inner
+            .expire_cache(scope, tenant_id, fetched_before)
+            .await
     }
 }
 

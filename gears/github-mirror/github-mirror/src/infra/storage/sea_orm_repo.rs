@@ -4986,6 +4986,7 @@ impl HttpCache for SeaOrmHttpCache {
     async fn get(
         &self,
         scope: &AccessScope,
+        _tenant_id: Uuid,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
         let conn = self.db.conn()?;
@@ -5069,7 +5070,12 @@ impl HttpCache for SeaOrmHttpCache {
         Ok(())
     }
 
-    async fn clear(&self, scope: &AccessScope, url_prefixes: &[&str]) -> Result<u64, DomainError> {
+    async fn clear(
+        &self,
+        scope: &AccessScope,
+        _tenant_id: Uuid,
+        url_prefixes: &[&str],
+    ) -> Result<u64, DomainError> {
         // Guarded because an empty `Condition::any()` matches every row, and
         // a clear with nothing to clear must delete nothing.
         if url_prefixes.is_empty() {
@@ -5107,6 +5113,7 @@ impl HttpCache for SeaOrmHttpCache {
     async fn expire(
         &self,
         scope: &AccessScope,
+        _tenant_id: Uuid,
         fetched_before: chrono::DateTime<Utc>,
     ) -> Result<u64, DomainError> {
         let conn = self.db.conn()?;

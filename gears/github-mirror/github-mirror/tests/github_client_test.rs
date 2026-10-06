@@ -1576,6 +1576,7 @@ impl HttpCache for MemCache {
     async fn get(
         &self,
         _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
         Ok(self.entries.lock().unwrap().get(key.as_str()).cloned())
@@ -1599,6 +1600,7 @@ impl HttpCache for MemCache {
     async fn clear(
         &self,
         _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
         _url_prefixes: &[&str],
     ) -> Result<u64, DomainError> {
         let mut entries = self.entries.lock().unwrap();
@@ -1610,6 +1612,7 @@ impl HttpCache for MemCache {
     async fn expire(
         &self,
         _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
         _fetched_before: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64, DomainError> {
         Ok(0)

@@ -118,6 +118,7 @@ impl GithubPort for NeverAnswers {
     async fn clear_cache(
         &self,
         _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
         _owner: &str,
         _name: Option<&str>,
         _repo_ids: &[i64],
@@ -128,6 +129,7 @@ impl GithubPort for NeverAnswers {
     async fn expire_cache(
         &self,
         _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
         _fetched_before: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64, DomainError> {
         Ok(0)

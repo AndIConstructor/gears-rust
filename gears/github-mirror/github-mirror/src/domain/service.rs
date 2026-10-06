@@ -3399,7 +3399,7 @@ impl Service {
 
         let removed = self
             .github
-            .clear_cache(&scope, owner, name, &repo_ids)
+            .clear_cache(&scope, tenant_id, owner, name, &repo_ids)
             .await?;
         tracing::info!(
             owner,
@@ -4827,16 +4827,29 @@ impl Service {
             .get(&tenant_id)
             .copied()
             .or(shared);
-        self.expire_partition(scope, own).await;
-        self.expire_partition(&AccessScope::for_tenant(SHARED_CACHE_PARTITION), shared)
-            .await;
+        self.expire_partition(scope, tenant_id, own).await;
+        self.expire_partition(
+            &AccessScope::for_tenant(SHARED_CACHE_PARTITION),
+            SHARED_CACHE_PARTITION,
+            shared,
+        )
+        .await;
     }
 
-    async fn expire_partition(&self, scope: &AccessScope, max_age_days: Option<NonZeroU64>) {
+    async fn expire_partition(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        max_age_days: Option<NonZeroU64>,
+    ) {
         let Some(fetched_before) = max_age_days.and_then(cache_cutoff) else {
             return;
         };
-        match self.github.expire_cache(scope, fetched_before).await {
+        match self
+            .github
+            .expire_cache(scope, tenant_id, fetched_before)
+            .await
+        {
             Ok(removed) => tracing::debug!(removed, "expired old cached responses"),
             Err(e) => {
                 tracing::warn!(error = %e, "expiring old cached responses failed; the next sync tries again");

@@ -634,8 +634,8 @@ impl GithubClient {
         if options.force {
             return None;
         }
-        let (scope, _) = cache_partition(options);
-        match self.cache.get(&scope, key).await {
+        let (scope, tenant_id) = cache_partition(options);
+        match self.cache.get(&scope, tenant_id, key).await {
             Ok(entry) => entry,
             Err(e) => {
                 tracing::warn!(url = %redacted_word(url), error = %e, "cache read failed; fetching fresh");
@@ -3329,6 +3329,7 @@ impl GithubPort for GithubClient {
     async fn clear_cache(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         owner: &str,
         name: Option<&str>,
         repo_ids: &[i64],
@@ -3346,15 +3347,16 @@ impl GithubPort for GithubClient {
         );
         let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
 
-        self.cache.clear(scope, &prefixes).await
+        self.cache.clear(scope, tenant_id, &prefixes).await
     }
 
     async fn expire_cache(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         fetched_before: DateTime<Utc>,
     ) -> Result<u64, DomainError> {
-        self.cache.expire(scope, fetched_before).await
+        self.cache.expire(scope, tenant_id, fetched_before).await
     }
 }
 

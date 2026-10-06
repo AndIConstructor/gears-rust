@@ -21,7 +21,9 @@ use crate::domain::local_client::LocalClient;
 use crate::domain::ports::github::GithubPort;
 use crate::domain::service::{ACTIVE_SYNC_TOUCH_EVERY, SWEEP_AGAIN_AFTER, Service, ServiceConfig};
 use crate::domain::sync::SyncPoolRunner;
+use crate::infra::github::cache::HttpCache;
 use crate::infra::github::client::GithubClient;
+use crate::infra::storage::fs_cache::FilesystemHttpCache;
 use crate::infra::storage::sea_orm_repo::{
     SeaOrmActiveSyncRepository, SeaOrmBranchRepository, SeaOrmCheckRunRepository,
     SeaOrmCommentRepository, SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository,
@@ -148,7 +150,10 @@ impl Gear for GithubMirrorGear {
         // Conditional requests: a stored ETag replayed as If-None-Match turns a
         // repeat sync into 304s, which GitHub does not charge against the rate
         // limit (#4630).
-        let http_cache = Arc::new(SeaOrmHttpCache::new(Arc::clone(&db), cfg.cache_compression));
+        let http_cache: Arc<dyn HttpCache> = match cfg.cache_dir {
+            Some(dir) => Arc::new(FilesystemHttpCache::new(dir, cfg.cache_compression)),
+            None => Arc::new(SeaOrmHttpCache::new(Arc::clone(&db), cfg.cache_compression)),
+        };
         let token = github_token(ctx, cfg.github_token_secret.as_ref()).await?;
         let github: Arc<dyn GithubPort> = Arc::new(
             GithubClient::with_cache(cfg.api_base_url.clone(), token, http_cache)?

@@ -81,13 +81,15 @@ impl CachedResponse {
 /// drive it in memory.
 #[async_trait]
 pub trait HttpCache: Send + Sync {
-    /// The entry for `key` within `scope`, if one exists.
+    /// The entry for `key` in the partition of `tenant_id`, which `scope` must
+    /// cover, if one exists.
     ///
     /// # Errors
     /// Storage failures. A cache miss is `Ok(None)`, not an error.
     async fn get(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError>;
 
@@ -119,13 +121,19 @@ pub trait HttpCache: Send + Sync {
     ///
     /// # Errors
     /// Storage failures.
-    async fn clear(&self, scope: &AccessScope, url_prefixes: &[&str]) -> Result<u64, DomainError>;
+    async fn clear(
+        &self,
+        scope: &AccessScope,
+        tenant_id: uuid::Uuid,
+        url_prefixes: &[&str],
+    ) -> Result<u64, DomainError>;
 
     /// # Errors
     /// Storage failures.
     async fn expire(
         &self,
         scope: &AccessScope,
+        tenant_id: uuid::Uuid,
         fetched_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
 }
@@ -141,6 +149,7 @@ impl HttpCache for NoCache {
     async fn get(
         &self,
         _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
         _key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
         Ok(None)
@@ -160,6 +169,7 @@ impl HttpCache for NoCache {
     async fn clear(
         &self,
         _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
         _url_prefixes: &[&str],
     ) -> Result<u64, DomainError> {
         Ok(0)
@@ -168,6 +178,7 @@ impl HttpCache for NoCache {
     async fn expire(
         &self,
         _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
         _fetched_before: DateTime<Utc>,
     ) -> Result<u64, DomainError> {
         Ok(0)
