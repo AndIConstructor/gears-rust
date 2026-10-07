@@ -60,7 +60,7 @@ A sync is designed to be stopped and started again. The task queue lives in memo
 | `cpt-cf-github-mirror-fr-raw-storage` | `p1` | `gm_http_cache` keeps each fetched page body (compressed) with its validators and content hash |
 | `cpt-cf-github-mirror-fr-persistence-plugins` | `p1` | `HttpCache` has a database store (default, no disk use) and a filesystem store chosen by `cache_dir`; mirrored rows always stay in the database |
 | `cpt-cf-github-mirror-fr-normalized-storage` | `p1` | 31 `gm_` tables, one per entity family |
-| `cpt-cf-github-mirror-fr-multi-db` | `p1` | SeaORM through toolkit-db; migrations cover SQLite and PostgreSQL |
+| `cpt-cf-github-mirror-fr-multi-db` | `p1` | SeaORM through toolkit-db; migrations cover SQLite, PostgreSQL and MariaDB, and `make test-github-mirror-db` runs the suite on the last two |
 | `cpt-cf-github-mirror-fr-repo-discovery` | `p1` | Phase 1 fetches the repository row and seeds one indexing task per enabled family |
 | `cpt-cf-github-mirror-fr-issue-refinement` | `p1` | Comments and events come with the issue listing; `Refine(Issue)` fetches reactions and timeline, each by its scope |
 | `cpt-cf-github-mirror-fr-pr-refinement` | `p1` | Review comments come with the pull listing; `Refine(PullRequest)` fetches reviews, files, commits and review threads (GraphQL) |
