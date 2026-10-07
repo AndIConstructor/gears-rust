@@ -352,7 +352,7 @@ arch_status_svg_update: py-env
 
 # -------- Tests --------
 
-.PHONY: test-no-macros test-macros test-db test-integration test-graph-storage test-graph-storage-pg test-cluster-k8s coverage-cluster-k8s test-fips
+.PHONY: test-no-macros test-macros test-db test-integration test-graph-storage test-graph-storage-pg test-cluster-k8s coverage-cluster-k8s test-durable-execution-pg coverage-durable-execution-pg test-fips
 
 # Run the workspace tests except the macro test crates (CI test job)
 test-no-macros: install-tools
@@ -673,6 +673,25 @@ test-cluster-k8s: install-tools
 coverage-cluster-k8s:
 	$(call print_target_banner)
 	$(call k8s_cluster_suite,cargo llvm-cov test --no-report,coverage: )
+
+# Use one test binary so PostgreSQL scenarios share the testcontainers fixture.
+DURABLE_EXECUTION_PG_TEST_ARGS := -p cf-gears-durable-execution --lib --features integration \
+	-- --skip infra::storage::process_tests::worker_child --test-threads=4
+
+## Run the durable-execution gear's PostgreSQL and subprocess recovery suites (Docker required)
+## Uses `cargo test`, not `nextest`: the scenarios live in one test binary so
+## they share a single testcontainers PostgreSQL fixture.
+test-durable-execution-pg: install-tools
+	$(call print_target_banner)
+	cargo test $(DURABLE_EXECUTION_PG_TEST_ARGS)
+
+## Add the durable-execution PostgreSQL coverage to the current cargo-llvm-cov session
+## The coverage sibling of `test-durable-execution-pg`. Like
+## `coverage-cluster-k8s`, it does not clean or report: the coverage job in
+## .github/workflows/ci.yml brackets it.
+coverage-durable-execution-pg:
+	$(call print_target_banner)
+	cargo llvm-cov test --no-rustc-wrapper --no-report $(DURABLE_EXECUTION_PG_TEST_ARGS)
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:
