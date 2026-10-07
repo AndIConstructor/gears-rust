@@ -37,11 +37,12 @@ static-authn-plugin = { workspace = true, optional = true }
 oidc-authn-plugin = { package = "cf-gears-oidc-authn-plugin", path = "../../system/authn-resolver/plugins/oidc-authn-plugin", optional = true }
 
 toolkit = { workspace = true, features = ["bootstrap"] }
-toolkit-db = { workspace = true, features = ["sqlite"] }
+toolkit-db = { workspace = true, features = ["sqlite", "pg", "mysql"] }
 toolkit-odata = { workspace = true }
 toolkit-security = { workspace = true }
 
 anyhow = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 figment = { workspace = true }
 serde = { workspace = true }

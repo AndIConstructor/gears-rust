@@ -1,6 +1,9 @@
 [server]
 home_dir = "~/.github-mirror"
 
+[cli]
+database_placement = "per_repo"
+
 [database.servers.sqlite]
 engine = "sqlite"
 

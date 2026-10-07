@@ -22,7 +22,9 @@ use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
 use super::error::DomainError;
-use super::ports::github::{FetchOptions, ForceMode, GithubPort, SHARED_CACHE_PARTITION};
+use super::ports::github::{
+    FetchOptions, ForceMode, GithubPort, RateLimitQuota, SHARED_CACHE_PARTITION,
+};
 use super::ports::telemetry_sink::TelemetrySink;
 use super::repo::{
     ActiveSyncRecord, ActiveSyncRepository, BranchRecord, BranchRepository, CheckRunRecord,
@@ -553,6 +555,9 @@ pub struct SyncJob {
     /// Oldest closed entity worth collecting, from the request.
     pub since: Option<DateTime<Utc>>,
     pub telemetry_file: Option<String>,
+    /// Tasks in flight inside this run, when the caller narrows the gear's
+    /// `max_concurrent_tasks` for it.
+    pub max_concurrent_tasks: Option<NonZeroUsize>,
     pub access_scope: AccessScope,
     #[expect(
         dead_code,
@@ -654,6 +659,17 @@ pub struct Service {
     /// do not come from the pool — the in-process client's — carry it too, so
     /// a shutdown reaches them as well.
     shutdown: Arc<OnceLock<CancellationToken>>,
+}
+
+/// What an in-process caller asks a sync to do beyond naming the repository.
+#[domain_model]
+#[derive(Debug, Clone, Default)]
+pub struct SyncRequest {
+    /// `None` collects the gear's configured default.
+    pub scope: Option<ScopeConfig>,
+    pub force: ForceMode,
+    pub since: Option<DateTime<Utc>>,
+    pub max_concurrent_tasks: Option<NonZeroUsize>,
 }
 
 /// One repository of one tenant: what a queued or running sync occupies.
@@ -3459,6 +3475,42 @@ impl Service {
         Ok(rows + cached)
     }
 
+    /// Bytes the HTTP cache holds for one repository, for `status`. Guarded
+    /// like `clear_cache`, since it reads exactly what a clear would drop.
+    ///
+    /// # Errors
+    /// `Validation` when `owner/name` is not a usable path; `Forbidden`/
+    /// `Database` as usual.
+    pub async fn cache_size(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: &str,
+    ) -> Result<u64, DomainError> {
+        validate_repo_path(owner, name)?;
+        let tenant_id = ctx.subject_tenant_id();
+        let scope = self.sync_access_scope(ctx).await?;
+        let repo_ids = self.cached_repo_ids(ctx, owner, Some(name)).await;
+        self.github
+            .cache_size(&scope, tenant_id, owner, name, &repo_ids)
+            .await
+    }
+
+    /// The GitHub token's remaining quotas, for an operator deciding whether
+    /// a sync fits in the hour. Guarded like a sync, since it is the sync's
+    /// budget being read.
+    ///
+    /// # Errors
+    /// `Forbidden` when the caller may not sync; `Internal` when GitHub cannot
+    /// be asked.
+    pub async fn rate_limit(
+        &self,
+        ctx: &SecurityContext,
+    ) -> Result<Vec<RateLimitQuota>, DomainError> {
+        self.sync_access_scope(ctx).await?;
+        self.github.rate_limit().await
+    }
+
     /// Hand the service the token the gear cancels on shutdown. Called once,
     /// when the sync pool starts.
     ///
@@ -3936,7 +3988,7 @@ impl Service {
                 () = shutdown.cancelled() => return Err(DomainError::Cancelled),
             };
             service
-                .sync_now(&ctx, &owner, &name, None, ForceMode::None)
+                .sync_now(&ctx, &owner, &name, None, SyncRequest::default())
                 .await
         })
     }
@@ -3962,7 +4014,7 @@ impl Service {
         owner: &str,
         name: &str,
         telemetry_file: Option<String>,
-        force: ForceMode,
+        request: SyncRequest,
     ) -> Result<SyncSummary, DomainError> {
         validate_repo_path(owner, name)?;
         telemetry_file
@@ -3971,7 +4023,15 @@ impl Service {
             .transpose()?;
         let scopes = self.enqueue_scopes(ctx).await?;
         let mut job = match self
-            .prepare_sync(ctx, &scopes, owner, name, None, force, None)
+            .prepare_sync(
+                ctx,
+                &scopes,
+                owner,
+                name,
+                request.scope,
+                request.force,
+                request.since,
+            )
             .await?
         {
             PreparedSync::Joined(running) => {
@@ -3984,6 +4044,7 @@ impl Service {
             PreparedSync::Claimed { job, .. } => job,
         };
         job.telemetry_file = telemetry_file;
+        job.max_concurrent_tasks = request.max_concurrent_tasks;
         self.run_and_record(&job, &self.shutdown_token()).await?
     }
 
@@ -4079,6 +4140,7 @@ impl Service {
             force,
             since,
             telemetry_file: None,
+            max_concurrent_tasks: None,
             access_scope: scopes.sync.clone(),
             claim: Some(claim),
         };
@@ -4534,6 +4596,7 @@ impl Service {
             cancel: cancel.clone(),
             telemetry: Arc::clone(telemetry),
             public_repo: Arc::default(),
+            max_concurrent_tasks: job.max_concurrent_tasks,
         };
         let stop_beating = CancellationToken::new();
         let _stop_on_drop = stop_beating.clone().drop_guard();
@@ -4938,7 +5001,9 @@ impl Service {
         let runner = RepoPhaseRunner::new(
             vec![worker],
             run.identity(),
-            self.config.max_concurrent_tasks,
+            run.options
+                .max_concurrent_tasks
+                .unwrap_or(self.config.max_concurrent_tasks),
             cancel.child_token(),
             progress.handle(),
         )

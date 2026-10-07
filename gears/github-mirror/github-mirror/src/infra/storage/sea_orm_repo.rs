@@ -22,7 +22,7 @@ use github_mirror_sdk::{
     ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 use sea_orm::prelude::DateTimeUtc;
-use sea_orm::sea_query::{Expr, LikeExpr};
+use sea_orm::sea_query::{Alias, Expr, Func, LikeExpr};
 use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, Order, QuerySelect};
 use toolkit_db::odata::sea_orm_filter::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
@@ -5200,26 +5200,10 @@ impl HttpCache for SeaOrmHttpCache {
         }
 
         let conn = self.db.conn()?;
-        let mut matching = sea_orm::Condition::any();
-        for url_prefix in url_prefixes {
-            let escaped = url_prefix
-                .replace('!', "!!")
-                .replace('%', "!%")
-                .replace('_', "!_");
-            let below = |boundary: char| {
-                http_cache::Column::Url
-                    .like(LikeExpr::new(format!("{escaped}{boundary}%")).escape('!'))
-            };
-            matching = matching
-                .add(http_cache::Column::Url.eq(*url_prefix))
-                .add(below('/'))
-                .add(below('?'));
-        }
-
         let result = HttpCacheEntity::delete_many()
             .secure()
             .scope_with(scope)
-            .filter(matching)
+            .filter(url_below_any(url_prefixes))
             .exec(&conn)
             .await
             .map_err(map_scope_error)?;
@@ -5246,6 +5230,68 @@ impl HttpCache for SeaOrmHttpCache {
 
         Ok(result.rows_affected)
     }
+
+    async fn size(
+        &self,
+        scope: &AccessScope,
+        _tenant_id: Uuid,
+        url_prefixes: &[&str],
+    ) -> Result<u64, DomainError> {
+        #[derive(sea_orm::FromQueryResult)]
+        struct Total {
+            bytes: Option<i64>,
+        }
+
+        if url_prefixes.is_empty() {
+            return Ok(0);
+        }
+
+        let conn = self.db.conn()?;
+        let stored = Func::sum(
+            Func::cust(Alias::new("LENGTH"))
+                .arg(Expr::col((HttpCacheEntity, http_cache::Column::Body))),
+        );
+        let total = match self.db.db().backend() {
+            sea_orm::DbBackend::MySql => Expr::cust_with_expr("CAST(? AS SIGNED)", stored),
+            _ => Expr::from(stored),
+        };
+        let rows: Vec<Total> = HttpCacheEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(url_below_any(url_prefixes))
+            .project_all(&conn, |select| {
+                select
+                    .select_only()
+                    .column_as(total, "bytes")
+                    .into_model::<Total>()
+            })
+            .await
+            .map_err(map_scope_error)?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.bytes)
+            .map(|bytes| u64::try_from(bytes).unwrap_or(0))
+            .sum())
+    }
+}
+
+fn url_below_any(url_prefixes: &[&str]) -> sea_orm::Condition {
+    let mut matching = sea_orm::Condition::any();
+    for url_prefix in url_prefixes {
+        let escaped = url_prefix
+            .replace('!', "!!")
+            .replace('%', "!%")
+            .replace('_', "!_");
+        let below = |boundary: char| {
+            http_cache::Column::Url.like(LikeExpr::new(format!("{escaped}{boundary}%")).escape('!'))
+        };
+        matching = matching
+            .add(http_cache::Column::Url.eq(*url_prefix))
+            .add(below('/'))
+            .add(below('?'));
+    }
+    matching
 }
 
 pub struct SeaOrmRepoSyncStatusRepository {

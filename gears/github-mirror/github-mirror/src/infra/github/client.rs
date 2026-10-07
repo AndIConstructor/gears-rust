@@ -14,7 +14,7 @@ use crate::domain::error::DomainError;
 use crate::domain::ports::github::{
     ActionsListing, CommitDetail, CommitListing, DeclaredCounts, FetchOptions, GithubPort,
     IssueDetail, IssueDetailWants, IssueListing, ListCursor, Listing, MetadataListing, PullDetail,
-    PullListing, RepoRef, SHARED_CACHE_PARTITION,
+    PullListing, RateLimitQuota, RepoRef, SHARED_CACHE_PARTITION,
 };
 use crate::domain::repo::{
     BranchRecord, CheckRunRecord, CommentRecord, CommitCommentRecord, CommitFileRecord,
@@ -342,6 +342,23 @@ fn next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
     header_string(headers, "link")
         .as_deref()
         .and_then(parse_link_next)
+}
+
+impl GithubClient {
+    fn cache_prefixes(&self, owner: &str, name: Option<&str>, repo_ids: &[i64]) -> Vec<String> {
+        let base = self.api_base_url.trim_end_matches('/');
+        let prefix = match name {
+            Some(name) => format!("{base}/repos/{owner}/{name}"),
+            None => format!("{base}/repos/{owner}"),
+        };
+        std::iter::once(prefix)
+            .chain(
+                repo_ids
+                    .iter()
+                    .map(|id| format!("{base}/repositories/{id}")),
+            )
+            .collect()
+    }
 }
 
 fn cache_partition(options: &FetchOptions) -> (AccessScope, uuid::Uuid) {
@@ -3344,20 +3361,22 @@ impl GithubPort for GithubClient {
         name: Option<&str>,
         repo_ids: &[i64],
     ) -> Result<u64, DomainError> {
-        let base = self.api_base_url.trim_end_matches('/');
-        let prefix = match name {
-            Some(name) => format!("{base}/repos/{owner}/{name}"),
-            None => format!("{base}/repos/{owner}"),
-        };
-        let mut prefixes = vec![prefix];
-        prefixes.extend(
-            repo_ids
-                .iter()
-                .map(|id| format!("{base}/repositories/{id}")),
-        );
+        let prefixes = self.cache_prefixes(owner, name, repo_ids);
         let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
-
         self.cache.clear(scope, tenant_id, &prefixes).await
+    }
+
+    async fn cache_size(
+        &self,
+        scope: &AccessScope,
+        tenant_id: uuid::Uuid,
+        owner: &str,
+        name: &str,
+        repo_ids: &[i64],
+    ) -> Result<u64, DomainError> {
+        let prefixes = self.cache_prefixes(owner, Some(name), repo_ids);
+        let prefixes: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+        self.cache.size(scope, tenant_id, &prefixes).await
     }
 
     async fn expire_cache(
@@ -3367,6 +3386,58 @@ impl GithubPort for GithubClient {
         fetched_before: DateTime<Utc>,
     ) -> Result<u64, DomainError> {
         self.cache.expire(scope, tenant_id, fetched_before).await
+    }
+
+    async fn rate_limit(&self) -> Result<Vec<RateLimitQuota>, DomainError> {
+        let url = format!("{}/rate_limit", self.api_base_url.trim_end_matches('/'));
+        let mut request = self
+            .http
+            .get(&url)
+            .header("Accept", ACCEPT_JSON)
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+        let body: serde_json::Value = request
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|e| DomainError::internal(format!("GET /rate_limit failed: {e}")))?
+            .json()
+            .await
+            .map_err(|e| DomainError::internal(format!("GET /rate_limit decode failed: {e}")))?;
+        let resources = body
+            .get("resources")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| DomainError::internal("GET /rate_limit answered without resources"))?;
+        let mut quotas: Vec<RateLimitQuota> = resources
+            .iter()
+            .map(|(resource, pool)| RateLimitQuota {
+                resource: resource.clone(),
+                limit: pool
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                remaining: pool
+                    .get("remaining")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                used: pool
+                    .get("used")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                reset_at: pool
+                    .get("reset")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|secs| Utc.timestamp_opt(secs, 0).single()),
+            })
+            .collect();
+        quotas.sort_by_key(|quota| match quota.resource.as_str() {
+            "core" => (0, String::new()),
+            "graphql" => (1, String::new()),
+            other => (2, other.to_owned()),
+        });
+        Ok(quotas)
     }
 }
 

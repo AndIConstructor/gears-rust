@@ -45,12 +45,8 @@ impl FilesystemHttpCache {
         (dir.join(key), dir.join(format!("{key}{META_SUFFIX}")))
     }
 
-    async fn remove_where(
-        &self,
-        tenant_id: Uuid,
-        doomed: impl Fn(&Meta) -> bool + Send + Sync,
-    ) -> Result<u64, DomainError> {
-        let mut removed = 0;
+    async fn entries(&self, tenant_id: Uuid) -> Result<Vec<(PathBuf, PathBuf, Meta)>, DomainError> {
+        let mut entries = Vec::new();
         for dir in list_dir(&self.partition(tenant_id)).await? {
             for (body_path, meta_path) in list_dir(&dir)
                 .await?
@@ -63,11 +59,23 @@ impl FilesystemHttpCache {
                 let Ok(meta) = serde_json::from_slice::<Meta>(&raw) else {
                     continue;
                 };
-                if doomed(&meta) {
-                    remove_optional(&body_path).await?;
-                    remove_optional(&meta_path).await?;
-                    removed += 1;
-                }
+                entries.push((body_path, meta_path, meta));
+            }
+        }
+        Ok(entries)
+    }
+
+    async fn remove_where(
+        &self,
+        tenant_id: Uuid,
+        doomed: impl Fn(&Meta) -> bool + Send + Sync,
+    ) -> Result<u64, DomainError> {
+        let mut removed = 0;
+        for (body_path, meta_path, meta) in self.entries(tenant_id).await? {
+            if doomed(&meta) {
+                remove_optional(&body_path).await?;
+                remove_optional(&meta_path).await?;
+                removed += 1;
             }
         }
         Ok(removed)
@@ -84,6 +92,10 @@ fn below(url: &str, prefix: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || rest.starts_with('?'))
 }
 
+fn below_any(url: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| below(url, prefix))
+}
+
 fn io_failure(action: &str, e: &std::io::Error) -> DomainError {
     DomainError::internal(format!("cache file {action} failed: {e}"))
 }
@@ -92,6 +104,14 @@ async fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, DomainError> {
     match tokio::fs::read(path).await {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_failure("read", &e)),
+    }
+}
+
+async fn size_of(path: &Path) -> Result<u64, DomainError> {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => Ok(meta.len()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(0),
         Err(e) => Err(io_failure("read", &e)),
     }
 }
@@ -221,10 +241,8 @@ impl HttpCache for FilesystemHttpCache {
         if scope.is_deny_all() || url_prefixes.is_empty() {
             return Ok(0);
         }
-        self.remove_where(tenant_id, |meta| {
-            url_prefixes.iter().any(|prefix| below(&meta.url, prefix))
-        })
-        .await
+        self.remove_where(tenant_id, |meta| below_any(&meta.url, url_prefixes))
+            .await
     }
 
     async fn expire(
@@ -238,5 +256,23 @@ impl HttpCache for FilesystemHttpCache {
         }
         self.remove_where(tenant_id, |meta| meta.fetched_at < fetched_before)
             .await
+    }
+
+    async fn size(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        url_prefixes: &[&str],
+    ) -> Result<u64, DomainError> {
+        if scope.is_deny_all() || url_prefixes.is_empty() {
+            return Ok(0);
+        }
+        let mut total = 0;
+        for (body_path, meta_path, meta) in self.entries(tenant_id).await? {
+            if below_any(&meta.url, url_prefixes) {
+                total += size_of(&body_path).await? + size_of(&meta_path).await?;
+            }
+        }
+        Ok(total)
     }
 }

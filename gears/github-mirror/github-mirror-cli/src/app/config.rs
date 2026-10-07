@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use figment::Figment;
 use figment::providers::Serialized;
+use github_mirror::domain::validate::validate_repo_path;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use toolkit::bootstrap::AppConfig;
 use uuid::Uuid;
@@ -14,7 +16,36 @@ pub struct CliConfig {
     pub tenant_id: Option<Uuid>,
 }
 
-pub fn load(path: &Path, github_token: Option<&str>) -> Result<CliConfig> {
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabasePlacement {
+    #[value(name = "per_repo")]
+    PerRepo,
+    #[value(name = "per_org")]
+    PerOrg,
+    #[value(name = "shared")]
+    Shared,
+}
+
+pub struct StorageFlags<'a> {
+    pub storage_dir: Option<PathBuf>,
+    pub database_url: Option<String>,
+    pub database_placement: Option<DatabasePlacement>,
+    pub repo: Option<&'a str>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CliTable {
+    tenant_id: Option<Uuid>,
+    database_placement: Option<DatabasePlacement>,
+}
+
+pub fn load(
+    path: &Path,
+    github_token: Option<&str>,
+    storage: StorageFlags<'_>,
+) -> Result<CliConfig> {
     let mut merged: Value =
         toml::from_str(DEFAULT_TEMPLATE).context("the built-in configuration does not parse")?;
     if path.is_file() {
@@ -25,7 +56,19 @@ pub fn load(path: &Path, github_token: Option<&str>) -> Result<CliConfig> {
         merge(&mut merged, overrides);
     }
 
-    let tenant_id = take_cli_tenant(&mut merged)?;
+    let cli = take_cli_table(&mut merged)?;
+    if let Some(dir) = storage.storage_dir {
+        merged["server"]["home_dir"] = Value::String(dir.to_string_lossy().into_owned());
+    }
+    place_database(
+        &mut merged,
+        storage.database_url,
+        storage
+            .database_placement
+            .or(cli.database_placement)
+            .unwrap_or(DatabasePlacement::PerRepo),
+        storage.repo,
+    )?;
     match github_token {
         Some(token) => add_github_token(&mut merged, token)?,
         None => drop_github_token(&mut merged),
@@ -37,7 +80,32 @@ pub fn load(path: &Path, github_token: Option<&str>) -> Result<CliConfig> {
         .merge(Serialized::defaults(merged))
         .extract()
         .context("the configuration does not match the runtime's settings")?;
-    Ok(CliConfig { app, tenant_id })
+    Ok(CliConfig {
+        app,
+        tenant_id: cli.tenant_id,
+    })
+}
+
+pub fn sqlite_file(app: &AppConfig) -> Option<PathBuf> {
+    let database = app.gears.get("github-mirror")?.get("database")?;
+    if let Some(dsn) = database.get("dsn").and_then(Value::as_str) {
+        let path = dsn
+            .strip_prefix("sqlite://")
+            .or_else(|| dsn.strip_prefix("sqlite:"))?
+            .split('?')
+            .next()?;
+        return (!path.is_empty() && path != ":memory:").then(|| PathBuf::from(path));
+    }
+    let file = database
+        .get("path")
+        .or_else(|| database.get("file"))?
+        .as_str()?;
+    let path = PathBuf::from(file);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        app.server.home_dir.join("github-mirror").join(path)
+    })
 }
 
 pub fn resolve_token(given: Option<String>, file_name: &str) -> Option<String> {
@@ -70,18 +138,46 @@ fn merge(base: &mut Value, overrides: Value) {
     }
 }
 
-fn take_cli_tenant(config: &mut Value) -> Result<Option<Uuid>> {
-    let Some(cli) = config.as_object_mut().and_then(|root| root.remove("cli")) else {
-        return Ok(None);
+fn take_cli_table(config: &mut Value) -> Result<CliTable> {
+    match config.as_object_mut().and_then(|root| root.remove("cli")) {
+        Some(cli) => serde_json::from_value(cli).context("the [cli] table is not valid"),
+        None => Ok(CliTable::default()),
+    }
+}
+
+fn place_database(
+    config: &mut Value,
+    url: Option<String>,
+    placement: DatabasePlacement,
+    repo: Option<&str>,
+) -> Result<()> {
+    let database = config
+        .pointer_mut("/gears/github-mirror/database")
+        .ok_or_else(|| anyhow!("gears.github-mirror.database is missing"))?;
+    if let Some(url) = url {
+        *database = json!({ "dsn": url });
+        return Ok(());
+    }
+    let (Some(file), Some(repo)) = (
+        database
+            .get("file")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        repo,
+    ) else {
+        return Ok(());
     };
-    cli.get("tenant_id")
-        .map(|value| {
-            let text = value
-                .as_str()
-                .ok_or_else(|| anyhow!("cli.tenant_id must be a string"))?;
-            Uuid::parse_str(text).context("cli.tenant_id is not a UUID")
-        })
-        .transpose()
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| anyhow!("`{repo}` is not ORG/REPO"))?;
+    validate_repo_path(owner, name).map_err(|e| anyhow!("`{repo}`: {e}"))?;
+    let folder = match placement {
+        DatabasePlacement::Shared => return Ok(()),
+        DatabasePlacement::PerOrg => owner.to_owned(),
+        DatabasePlacement::PerRepo => format!("{owner}_{name}"),
+    };
+    database["file"] = Value::String(format!("cache/{folder}/{file}"));
+    Ok(())
 }
 
 fn add_github_token(config: &mut Value, token: &str) -> Result<()> {

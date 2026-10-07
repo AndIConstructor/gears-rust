@@ -70,6 +70,57 @@ impl Default for SyncScope {
 }
 
 impl SyncScope {
+    /// The scope enabling exactly the comma-separated object types named,
+    /// with the PRD's aliases (`prs`, `pulls`, `actions`, `gha`).
+    ///
+    /// # Errors
+    /// `Validation` naming the first type that is not one of them.
+    pub fn parse_list(list: &str) -> Result<Self, DomainError> {
+        let mut scope = Self::none();
+        for raw in list.split(',') {
+            let name = raw.trim().to_ascii_lowercase();
+            if name.is_empty() {
+                continue;
+            }
+            match name.as_str() {
+                "issues" => scope.issues = true,
+                "pull_requests" | "pulls" | "prs" => scope.pull_requests = true,
+                "commits" => scope.commits = true,
+                "releases" => scope.releases = true,
+                "branches" => scope.branches = true,
+                "labels" => scope.labels = true,
+                "milestones" => scope.milestones = true,
+                "github_actions" | "actions" | "gha" => scope.github_actions = true,
+                "contributors" => scope.contributors = true,
+                "security" => scope.security = true,
+                other => {
+                    return Err(DomainError::Validation {
+                        field: "include".to_owned(),
+                        message: format!("unknown object type `{other}`"),
+                    });
+                }
+            }
+        }
+        Ok(scope)
+    }
+
+    /// This scope with every type enabled in `excluded` turned off.
+    #[must_use]
+    pub fn without(self, excluded: Self) -> Self {
+        Self {
+            issues: self.issues && !excluded.issues,
+            pull_requests: self.pull_requests && !excluded.pull_requests,
+            commits: self.commits && !excluded.commits,
+            releases: self.releases && !excluded.releases,
+            branches: self.branches && !excluded.branches,
+            labels: self.labels && !excluded.labels,
+            milestones: self.milestones && !excluded.milestones,
+            github_actions: self.github_actions && !excluded.github_actions,
+            contributors: self.contributors && !excluded.contributors,
+            security: self.security && !excluded.security,
+        }
+    }
+
     /// A scope with every object type disabled.
     #[must_use]
     pub fn none() -> Self {

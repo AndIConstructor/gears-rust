@@ -242,6 +242,25 @@ impl GithubPort for GatedGithub {
             .expire_cache(scope, tenant_id, fetched_before)
             .await
     }
+
+    async fn cache_size(
+        &self,
+        scope: &AccessScope,
+        tenant_id: uuid::Uuid,
+        owner: &str,
+        name: &str,
+        repo_ids: &[i64],
+    ) -> Result<u64, DomainError> {
+        self.inner
+            .cache_size(scope, tenant_id, owner, name, repo_ids)
+            .await
+    }
+
+    async fn rate_limit(
+        &self,
+    ) -> Result<Vec<github_mirror::domain::ports::github::RateLimitQuota>, DomainError> {
+        self.inner.rate_limit().await
+    }
 }
 
 async fn queue_sync(service: &Arc<ConcreteService>) -> (Router, String) {

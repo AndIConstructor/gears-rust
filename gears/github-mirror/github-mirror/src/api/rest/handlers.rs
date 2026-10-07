@@ -90,7 +90,7 @@ impl SyncQuery {
 
         let mut scope = default;
         if let Some(include) = self.include.as_deref() {
-            scope.objects = objects_from_include(include)?;
+            scope.objects = SyncScope::parse_list(include)?;
         }
         if let Some(mode) = self.actions_scope.as_deref() {
             scope.collection.actions = CollectionMode::parse(mode)?;
@@ -117,36 +117,6 @@ impl SyncQuery {
                 message: format!("`{raw}` is not an RFC3339 instant: {e}"),
             })
     }
-}
-
-/// Build an object scope enabling exactly the comma-separated types named.
-fn objects_from_include(include: &str) -> Result<SyncScope, DomainError> {
-    let mut scope = SyncScope::none();
-    for raw in include.split(',') {
-        let name = raw.trim().to_ascii_lowercase();
-        if name.is_empty() {
-            continue;
-        }
-        match name.as_str() {
-            "issues" => scope.issues = true,
-            "pull_requests" | "pulls" => scope.pull_requests = true,
-            "commits" => scope.commits = true,
-            "releases" => scope.releases = true,
-            "branches" => scope.branches = true,
-            "labels" => scope.labels = true,
-            "milestones" => scope.milestones = true,
-            "github_actions" | "actions" => scope.github_actions = true,
-            "contributors" => scope.contributors = true,
-            "security" => scope.security = true,
-            other => {
-                return Err(DomainError::Validation {
-                    field: "include".to_owned(),
-                    message: format!("unknown object type `{other}`"),
-                });
-            }
-        }
-    }
-    Ok(scope)
 }
 
 /// `?owner=X` clears everything mirrored for that owner; `?repo=owner/name`

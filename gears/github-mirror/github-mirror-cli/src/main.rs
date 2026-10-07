@@ -1,7 +1,7 @@
 mod app;
 mod registered_gears;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use figment::Figment;
 use figment::providers::Serialized;
 use github_mirror::domain::ports::github::ForceMode;
-use github_mirror::domain::service::Service;
+use github_mirror::domain::service::{Service, SyncRequest};
 use serde_json::Value;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -24,7 +24,7 @@ use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
 use crate::app::commands::{self, Entity};
-use crate::app::config;
+use crate::app::config::{self, DatabasePlacement, StorageFlags};
 use crate::app::output::{self, OutputFormat};
 
 #[derive(Parser)]
@@ -59,6 +59,33 @@ struct Cli {
         help = "Platform login token; falls back to CF_PLATFORM_TOKEN, then ~/.github-mirror/platform_token.txt"
     )]
     platform_token: Option<String>,
+
+    #[arg(
+        long,
+        global = true,
+        env = "GITHUB_MIRROR_STORAGE_DIR",
+        value_name = "DIR",
+        help = "Root folder for the databases and caches; replaces server.home_dir (default ~/.github-mirror)"
+    )]
+    storage_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        global = true,
+        env = "GITHUB_MIRROR_DATABASE_URL",
+        value_name = "URL",
+        help = "Database URL (sqlite://, postgres:// or mysql://); replaces gears.github-mirror.database and makes --database-placement moot"
+    )]
+    database_url: Option<String>,
+
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "MODE",
+        help = "Where the SQLite file goes: per_repo (default) one per repository, per_org one per owner, shared one for all"
+    )]
+    database_placement: Option<DatabasePlacement>,
 
     #[arg(short, long, global = true, action = clap::ArgAction::Count, help = "More log output (-v, -vv, -vvv)")]
     verbose: u8,
@@ -101,6 +128,36 @@ enum Command {
         force_full: bool,
         #[arg(long, help = "Like --force-full, and also bypass the HTTP cache")]
         force: bool,
+        #[arg(long, value_name = "N", help = "Tasks in flight inside this sync")]
+        max_concurrent: Option<std::num::NonZeroUsize>,
+        #[arg(
+            long,
+            value_name = "CUTOFF",
+            help = "Skip closed issues and pull requests older than this: YYYY-MM-DD, Nd, Nw or Nm"
+        )]
+        since: Option<String>,
+        #[arg(
+            long,
+            value_name = "TYPES",
+            help = "Collect only these object types, comma-separated: issues, pull_requests (prs, pulls), commits, releases, branches, labels, milestones, github_actions (actions, gha), contributors"
+        )]
+        include: Option<String>,
+        #[arg(
+            long,
+            value_name = "TYPES",
+            help = "Object types to leave out, comma-separated"
+        )]
+        exclude: Option<String>,
+        #[arg(
+            long,
+            value_name = "MODE",
+            help = "Workflow runs and CI checks: open, all or none"
+        )]
+        actions_scope: Option<String>,
+        #[arg(long, value_name = "MODE", help = "Reactions: open, all or none")]
+        reactions_scope: Option<String>,
+        #[arg(long, value_name = "MODE", help = "Timeline events: open, all or none")]
+        timeline_scope: Option<String>,
     },
     #[command(about = "Continue an interrupted synchronization")]
     Resume {
@@ -134,6 +191,11 @@ enum Command {
         repo: String,
     },
     #[command(
+        name = "check-rate-limit",
+        about = "Show the GitHub token's remaining REST and GraphQL quotas"
+    )]
+    CheckRateLimit,
+    #[command(
         name = "clear-cache",
         about = "Remove everything mirrored for a repository: its data, change-detection state and cached responses"
     )]
@@ -141,6 +203,19 @@ enum Command {
         #[arg(help = "ORG/REPO")]
         repo: String,
     },
+}
+
+impl Command {
+    fn repo(&self) -> Option<&str> {
+        match self {
+            Self::Sync { repo, .. }
+            | Self::Resume { repo, .. }
+            | Self::Query { repo, .. }
+            | Self::Status { repo }
+            | Self::ClearCache { repo } => Some(repo),
+            Self::CheckRateLimit => None,
+        }
+    }
 }
 
 #[tokio::main]
@@ -171,17 +246,35 @@ async fn run(cli: Cli) -> Result<()> {
         )
     })?;
     let github_token = config::resolve_token(cli.token, "gh_token.txt");
-    let loaded = config::load(&cli.config, github_token.as_deref())?;
+    let loaded = config::load(
+        &cli.config,
+        github_token.as_deref(),
+        StorageFlags {
+            storage_dir: cli.storage_dir,
+            database_url: cli.database_url,
+            database_placement: cli.database_placement,
+            repo: command.repo(),
+        },
+    )?;
     let format = cli.output_format.unwrap_or(match command {
         Command::Query { .. } => OutputFormat::Json,
         Command::Sync { .. }
         | Command::Resume { .. }
         | Command::Status { .. }
+        | Command::CheckRateLimit
         | Command::ClearCache { .. } => OutputFormat::Table,
     });
 
+    let database_file = config::sqlite_file(&loaded.app);
     let runtime = Runtime::start(loaded.app)?;
-    let outcome = execute(&runtime, command, &platform_token, loaded.tenant_id).await;
+    let outcome = execute(
+        &runtime,
+        command,
+        &platform_token,
+        loaded.tenant_id,
+        database_file.as_deref(),
+    )
+    .await;
     let stopped = runtime.stop().await;
     let value = match (outcome, stopped) {
         (Ok(value), Ok(())) => value,
@@ -195,7 +288,9 @@ async fn execute(
     command: Command,
     platform_token: &str,
     tenant_id: Option<Uuid>,
+    database_file: Option<&Path>,
 ) -> Result<Value> {
+    let service = runtime.service().await?;
     let ctx = runtime.authenticate(platform_token).await?;
     if let Some(expected) = tenant_id
         && expected != ctx.subject_tenant_id()
@@ -205,25 +300,44 @@ async fn execute(
             ctx.subject_tenant_id()
         );
     }
-    let service = runtime.service().await?;
     match command {
         Command::Sync {
             repo,
             force_full,
             force,
+            max_concurrent,
+            since,
+            include,
+            exclude,
+            actions_scope,
+            reactions_scope,
+            timeline_scope,
+        } => {
+            let request = commands::sync_request(
+                &service,
+                &commands::SyncFlags {
+                    force: ForceMode::from_flags(force, force_full),
+                    max_concurrent,
+                    since: since.as_deref(),
+                    include: include.as_deref(),
+                    exclude: exclude.as_deref(),
+                    actions_scope: actions_scope.as_deref(),
+                    reactions_scope: reactions_scope.as_deref(),
+                    timeline_scope: timeline_scope.as_deref(),
+                },
+            )?;
+            commands::sync(&service, &ctx, &repo, request).await
         }
-        | Command::Resume {
+        Command::Resume {
             repo,
             force_full,
             force,
         } => {
-            commands::sync(
-                &service,
-                &ctx,
-                &repo,
-                ForceMode::from_flags(force, force_full),
-            )
-            .await
+            let request = SyncRequest {
+                force: ForceMode::from_flags(force, force_full),
+                ..SyncRequest::default()
+            };
+            commands::sync(&service, &ctx, &repo, request).await
         }
         Command::Query {
             entity,
@@ -231,8 +345,9 @@ async fn execute(
             number,
             limit,
         } => commands::query(&service, &ctx, entity, &repo, number, limit).await,
-        Command::Status { repo } => commands::status(&service, &ctx, &repo).await,
+        Command::Status { repo } => commands::status(&service, &ctx, &repo, database_file).await,
         Command::ClearCache { repo } => commands::clear_cache(&service, &ctx, &repo).await,
+        Command::CheckRateLimit => commands::check_rate_limit(&service, &ctx).await,
     }
 }
 

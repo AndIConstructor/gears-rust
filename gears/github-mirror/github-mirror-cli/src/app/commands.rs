@@ -1,4 +1,8 @@
-use anyhow::{Result, anyhow};
+use std::num::NonZeroUsize;
+use std::path::Path;
+
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Days, NaiveDate, TimeZone, Utc};
 use github_mirror::api::rest::dto::{
     BranchDto, CommentDto, CommitDto, ContributorDto, IssueDto, IssueReactionDto,
     IssueTimelineEventDto, LabelDto, MilestoneDto, PullRequestDto, ReleaseDto, RepoDto,
@@ -9,7 +13,8 @@ use github_mirror::domain::ports::github::ForceMode;
 use github_mirror::domain::repo::{
     ListingFilter, PageWindow, RepoSyncStatusRecord, SyncSessionRecord,
 };
-use github_mirror::domain::service::Service;
+use github_mirror::domain::scope::{CollectionMode, SyncScope};
+use github_mirror::domain::service::{Service, SyncRequest};
 use serde::Serialize;
 use serde_json::{Value, json};
 use toolkit_odata::{CursorV1, ODataQuery};
@@ -38,14 +43,85 @@ pub enum Entity {
     WorkflowRuns,
 }
 
+pub struct SyncFlags<'a> {
+    pub force: ForceMode,
+    pub max_concurrent: Option<NonZeroUsize>,
+    pub since: Option<&'a str>,
+    pub include: Option<&'a str>,
+    pub exclude: Option<&'a str>,
+    pub actions_scope: Option<&'a str>,
+    pub reactions_scope: Option<&'a str>,
+    pub timeline_scope: Option<&'a str>,
+}
+
+pub fn sync_request(service: &Service, flags: &SyncFlags<'_>) -> Result<SyncRequest> {
+    let narrows = flags.include.is_some()
+        || flags.exclude.is_some()
+        || flags.actions_scope.is_some()
+        || flags.reactions_scope.is_some()
+        || flags.timeline_scope.is_some();
+    let scope = if narrows {
+        let mut scope = service.default_scope();
+        if let Some(include) = flags.include {
+            scope.objects = SyncScope::parse_list(include)?;
+        }
+        if let Some(exclude) = flags.exclude {
+            scope.objects = scope.objects.without(SyncScope::parse_list(exclude)?);
+        }
+        if let Some(mode) = flags.actions_scope {
+            scope.collection.actions = CollectionMode::parse(mode)?;
+        }
+        if let Some(mode) = flags.reactions_scope {
+            scope.collection.reactions = CollectionMode::parse(mode)?;
+        }
+        if let Some(mode) = flags.timeline_scope {
+            scope.collection.timeline = CollectionMode::parse(mode)?;
+        }
+        Some(scope)
+    } else {
+        None
+    };
+    Ok(SyncRequest {
+        scope,
+        force: flags.force,
+        since: flags.since.map(parse_since).transpose()?,
+        max_concurrent_tasks: flags.max_concurrent,
+    })
+}
+
+fn parse_since(raw: &str) -> Result<DateTime<Utc>> {
+    let value = raw.trim();
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return date
+            .and_hms_opt(0, 0, 0)
+            .map(|at| Utc.from_utc_datetime(&at))
+            .ok_or_else(|| anyhow!("`{value}` is not a date"));
+    }
+    let (number, unit) = value.split_at(value.len().saturating_sub(1));
+    let amount: u64 = number
+        .parse()
+        .ok()
+        .filter(|amount| *amount > 0)
+        .ok_or_else(|| anyhow!("`{value}` is not YYYY-MM-DD, Nd, Nw or Nm"))?;
+    let days = match unit {
+        "d" => amount,
+        "w" => amount.saturating_mul(7),
+        "m" => amount.saturating_mul(30),
+        _ => bail!("`{value}` is not YYYY-MM-DD, Nd, Nw or Nm"),
+    };
+    Utc::now()
+        .checked_sub_days(Days::new(days))
+        .ok_or_else(|| anyhow!("`{value}` reaches back too far"))
+}
+
 pub async fn sync(
     service: &Service,
     ctx: &SecurityContext,
     repo: &str,
-    force: ForceMode,
+    request: SyncRequest,
 ) -> Result<Value> {
     let (owner, name) = split_repo(repo)?;
-    let summary = service.sync_now(ctx, owner, name, None, force).await?;
+    let summary = service.sync_now(ctx, owner, name, None, request).await?;
     Ok(serde_json::to_value(SyncSummaryDto::from(summary))?)
 }
 
@@ -207,13 +283,37 @@ async fn query_one(
     }
 }
 
+pub async fn check_rate_limit(service: &Service, ctx: &SecurityContext) -> Result<Value> {
+    let quotas = service.rate_limit(ctx).await?;
+    let now = chrono::Utc::now();
+    let rows: Vec<Value> = quotas
+        .iter()
+        .map(|quota| {
+            json!({
+                "resource": quota.resource,
+                "limit": quota.limit,
+                "used": quota.used,
+                "remaining": quota.remaining,
+                "reset_at": quota.reset_at.map(|at| at.to_rfc3339()),
+                "reset_in_seconds": quota.reset_at.map(|at| (at - now).num_seconds().max(0)),
+            })
+        })
+        .collect();
+    Ok(Value::Array(rows))
+}
+
 pub async fn clear_cache(service: &Service, ctx: &SecurityContext, repo: &str) -> Result<Value> {
     let (owner, name) = split_repo(repo)?;
     let removed = service.delete_repository(ctx, owner, name).await?;
     Ok(json!({ "repository": format!("{owner}/{name}"), "rows_removed": removed }))
 }
 
-pub async fn status(service: &Service, ctx: &SecurityContext, repo: &str) -> Result<Value> {
+pub async fn status(
+    service: &Service,
+    ctx: &SecurityContext,
+    repo: &str,
+    database_file: Option<&Path>,
+) -> Result<Value> {
     let (owner, name) = split_repo(repo)?;
     let full_name = format!("{owner}/{name}");
     let run = run_status(service, ctx, &full_name)
@@ -222,11 +322,31 @@ pub async fn status(service: &Service, ctx: &SecurityContext, repo: &str) -> Res
     let session = latest_session(service, ctx, &full_name)
         .await?
         .map(SyncSessionDto::from);
+    let cache_bytes = service.cache_size(ctx, owner, name).await?;
+    let database_bytes = database_file.map(database_bytes).transpose()?;
     Ok(json!({
         "repository": full_name,
         "run": run,
         "last_session": session,
+        "storage": {
+            "cache_bytes": cache_bytes,
+            "database_bytes": database_bytes,
+        },
     }))
+}
+
+fn database_bytes(path: &Path) -> Result<u64> {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    Ok(file_size(path)? + file_size(Path::new(&wal))?)
+}
+
+fn file_size(path: &Path) -> Result<u64> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    }
 }
 
 async fn run_status(

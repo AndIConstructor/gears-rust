@@ -134,6 +134,23 @@ impl GithubPort for NeverAnswers {
     ) -> Result<u64, DomainError> {
         Ok(0)
     }
+
+    async fn cache_size(
+        &self,
+        _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
+        _owner: &str,
+        _name: &str,
+        _repo_ids: &[i64],
+    ) -> Result<u64, DomainError> {
+        Ok(0)
+    }
+
+    async fn rate_limit(
+        &self,
+    ) -> Result<Vec<github_mirror::domain::ports::github::RateLimitQuota>, DomainError> {
+        Ok(Vec::new())
+    }
 }
 
 /// The deadline is the only thing that ends a run which will not end itself.

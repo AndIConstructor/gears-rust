@@ -60,6 +60,18 @@ impl ForceMode {
     }
 }
 
+/// One GitHub rate-limit pool, as `GET /rate_limit` reports it.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RateLimitQuota {
+    /// `core`, `graphql`, `search`, and whatever else GitHub lists.
+    pub resource: String,
+    pub limit: u64,
+    pub remaining: u64,
+    pub used: u64,
+    pub reset_at: Option<DateTime<Utc>>,
+}
+
 /// Everything one fetch needs beyond the repository's name.
 #[domain_model]
 #[derive(Debug, Clone)]
@@ -79,6 +91,9 @@ pub struct FetchOptions {
     pub cancel: CancellationToken,
     pub telemetry: Arc<SessionTelemetry>,
     pub public_repo: Arc<OnceLock<bool>>,
+    /// Tasks in flight inside this run, when the caller narrows the gear's
+    /// `max_concurrent_tasks` for it.
+    pub max_concurrent_tasks: Option<std::num::NonZeroUsize>,
 }
 
 /// A top-level listing the sync can reconcile deletions for.
@@ -478,4 +493,25 @@ pub trait GithubPort: Send + Sync {
         tenant_id: uuid::Uuid,
         fetched_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
+
+    /// Bytes the cache holds for one `owner/name` repository, matched exactly
+    /// as `clear_cache` matches, so `status` can show what a clear would free.
+    ///
+    /// # Errors
+    /// Storage failures.
+    async fn cache_size(
+        &self,
+        scope: &AccessScope,
+        tenant_id: uuid::Uuid,
+        owner: &str,
+        name: &str,
+        repo_ids: &[i64],
+    ) -> Result<u64, DomainError>;
+
+    /// The token's quotas on every GitHub pool, `core` and `graphql` first,
+    /// read live from `GET /rate_limit`, which GitHub does not charge for.
+    ///
+    /// # Errors
+    /// `Internal` when GitHub cannot be reached or answers something else.
+    async fn rate_limit(&self) -> Result<Vec<RateLimitQuota>, DomainError>;
 }

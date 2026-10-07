@@ -233,6 +233,7 @@ mod tests {
             force: crate::domain::ports::github::ForceMode::None,
             since: None,
             telemetry_file: None,
+            max_concurrent_tasks: None,
             access_scope: AccessScope::default(),
             claim: None,
         }

@@ -687,7 +687,7 @@ OPENAPI_BUILD_FEATURE_ARGS := $(if $(GEAR),$(GEAR_OPENAPI_FEATURE_ARGS),$(OPENAP
 
 # -------- Tests --------
 
-.PHONY: test test-no-macros test-macros test-sqlite test-pg test-pgq test-mysql test-db test-users-info-pg test-usage-collector-pg test-usage-collector-ch test-types-registry-db test-cluster-pg test-cluster-redis test-cluster-k8s coverage-cluster-k8s test-rg-pg test-settings-service-pg test-github-mirror-db test-pricing-pg test-coord-pg test-products-pg test-fixtures-narrow test-fips
+.PHONY: test test-no-macros test-macros test-sqlite test-pg test-pgq test-mysql test-db test-users-info-pg test-usage-collector-pg test-usage-collector-ch test-types-registry-db test-cluster-pg test-cluster-redis test-cluster-k8s coverage-cluster-k8s test-rg-pg test-settings-service-pg test-github-mirror-db test-github-mirror-scale test-pricing-pg test-coord-pg test-products-pg test-fixtures-narrow test-fips
 
 # Run all tests, or a single gear when GEAR=<gear> is set.
 # When GEAR= is set, cargo gears ls packages finds matching crates + their
@@ -909,6 +909,11 @@ test-github-mirror-db: install-tools
 	GM_TEST_DATABASE_URL=$(GM_MARIADB_URL) cargo nextest run -p cf-gears-github-mirror --features integration --no-fail-fast; maria=$$?; \
 	docker rm -f gm-test-postgres gm-test-mariadb >/dev/null; \
 	test $$pg -eq 0 && test $$maria -eq 0
+
+## Run the github-mirror gear's 110,000-entity interrupt-and-resume test (SQLite, minutes)
+test-github-mirror-scale: install-tools
+	$(call print_target_banner)
+	cargo nextest run -p cf-gears-github-mirror --test scale_resume_test --run-ignored ignored-only
 
 ## Run bss-pricing's Postgres tier (Docker required; each suite spins up its own
 ## postgres container via testcontainers).

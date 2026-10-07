@@ -136,6 +136,18 @@ pub trait HttpCache: Send + Sync {
         tenant_id: uuid::Uuid,
         fetched_before: DateTime<Utc>,
     ) -> Result<u64, DomainError>;
+
+    /// Bytes held for the entries `clear` would drop for `url_prefixes`: the
+    /// bodies as stored, plus the metadata files of a file cache.
+    ///
+    /// # Errors
+    /// Storage failures.
+    async fn size(
+        &self,
+        scope: &AccessScope,
+        tenant_id: uuid::Uuid,
+        url_prefixes: &[&str],
+    ) -> Result<u64, DomainError>;
 }
 
 /// A cache that stores nothing, for callers that do not want one.
@@ -180,6 +192,15 @@ impl HttpCache for NoCache {
         _scope: &AccessScope,
         _tenant_id: uuid::Uuid,
         _fetched_before: DateTime<Utc>,
+    ) -> Result<u64, DomainError> {
+        Ok(0)
+    }
+
+    async fn size(
+        &self,
+        _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
+        _url_prefixes: &[&str],
     ) -> Result<u64, DomainError> {
         Ok(0)
     }

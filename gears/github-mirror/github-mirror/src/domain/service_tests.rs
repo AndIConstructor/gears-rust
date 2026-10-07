@@ -130,6 +130,7 @@ fn job(telemetry_file: Option<&str>) -> SyncJob {
         force: ForceMode::None,
         since: None,
         telemetry_file: telemetry_file.map(ToOwned::to_owned),
+        max_concurrent_tasks: None,
         access_scope: toolkit_security::AccessScope::default(),
         claim: None,
     }

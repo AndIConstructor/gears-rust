@@ -463,6 +463,7 @@ fn opts(scope: ScopeConfig) -> FetchOptions {
         cancel: tokio_util::sync::CancellationToken::new(),
         telemetry: std::sync::Arc::default(),
         public_repo: std::sync::Arc::default(),
+        max_concurrent_tasks: None,
     }
 }
 
@@ -1617,6 +1618,21 @@ impl HttpCache for MemCache {
     ) -> Result<u64, DomainError> {
         Ok(0)
     }
+
+    async fn size(
+        &self,
+        _scope: &AccessScope,
+        _tenant_id: uuid::Uuid,
+        _url_prefixes: &[&str],
+    ) -> Result<u64, DomainError> {
+        Ok(self
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .map(|entry| entry.body.len() as u64)
+            .sum())
+    }
 }
 
 /// Only the repository endpoint is in scope, so one sync is exactly one call.
@@ -1668,6 +1684,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
         cancel: tokio_util::sync::CancellationToken::new(),
         telemetry: std::sync::Arc::default(),
         public_repo: std::sync::Arc::default(),
+        max_concurrent_tasks: None,
     };
 
     let fresh = fetch_repository(&client, "rust-lang", "rust", &options)
@@ -2948,4 +2965,37 @@ fn a_token_may_not_travel_over_plain_http_to_another_host() {
             "{url} must be allowed: {why}"
         );
     }
+}
+
+#[tokio::test]
+async fn check_rate_limit_reads_every_pool_with_core_and_graphql_first() {
+    let server = MockServer::start_async().await;
+    let quotas = server
+        .mock_async(|when, then| {
+            when.method("GET")
+                .path("/rate_limit")
+                .header("authorization", "Bearer tok");
+            then.status(200).json_body(json!({
+                "resources": {
+                    "search": {"limit": 30, "used": 1, "remaining": 29, "reset": 1_700_000_060},
+                    "graphql": {"limit": 5000, "used": 400, "remaining": 4600, "reset": 1_700_003_600},
+                    "core": {"limit": 5000, "used": 123, "remaining": 4877, "reset": 1_700_003_600}
+                }
+            }));
+        })
+        .await;
+    let client =
+        GithubClient::new(server.base_url(), Some("tok".to_owned())).expect("client must build");
+
+    let read = client.rate_limit().await.expect("the quotas must read");
+
+    quotas.assert_calls_async(1).await;
+    let order: Vec<&str> = read.iter().map(|quota| quota.resource.as_str()).collect();
+    assert_eq!(order, ["core", "graphql", "search"]);
+    assert_eq!(read[0].remaining, 4877);
+    assert_eq!(read[0].used, 123);
+    assert_eq!(
+        read[0].reset_at.map(|at| at.timestamp()),
+        Some(1_700_003_600)
+    );
 }
