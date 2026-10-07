@@ -3,30 +3,54 @@ use std::sync::Arc;
 use axum::extract::Extension;
 use axum::http::header;
 use toolkit::api::canonical_prelude::*;
-use toolkit::api::rest::extract::{Json, Path};
+use toolkit::api::rest::extract::{Json, Path, Query};
 use toolkit_security::SecurityContext;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
-use crate::api::rest::error::for_settings;
-use crate::api::rest::types::{ConcreteService, ConcreteSettings};
+use crate::api::rest::error::{for_rest, for_settings};
+use crate::api::rest::types::{ConcreteIntake, ConcreteSettings};
+use crate::domain::record_intake::IntakeOutcome;
 
 use super::dto::{
-    CreateFoundationNoteRequest, FoundationNoteDto, PutSubjectSettingsRequest, SubjectSettingsDto,
+    PutSubjectSettingsRequest, RecordOutcomeDto, RecordQuery, RecordRequest, SubjectSettingsDto,
 };
 
-/// @cpt-dod:cpt-cf-construct-dod-gear-foundation-create-route:p1
-pub async fn create_note(
-    // @cpt-begin:cpt-cf-construct-flow-gear-foundation-create-note:p1:inst-create-parse
+/// The answer's status: 202 for a received record, which is processed later,
+/// and 200 for a repeat, which changes nothing.
+fn status_of(outcome: IntakeOutcome) -> StatusCode {
+    match outcome {
+        IntakeOutcome::Received => StatusCode::ACCEPTED,
+        IntakeOutcome::Repeat => StatusCode::OK,
+    }
+}
+
+/// @cpt-dod:cpt-cf-construct-dod-record-intake-route:p1
+pub async fn submit_record(
+    // @cpt-begin:cpt-cf-construct-flow-record-intake-submit:p1:inst-submit-parse
     Extension(ctx): Extension<SecurityContext>,
-    Extension(svc): Extension<Arc<ConcreteService>>,
-    Json(req): Json<CreateFoundationNoteRequest>,
-    // @cpt-end:cpt-cf-construct-flow-gear-foundation-create-note:p1:inst-create-parse
+    Extension(svc): Extension<Arc<ConcreteIntake>>,
+    Query(query): Query<RecordQuery>,
+    Json(RecordRequest(record)): Json<RecordRequest>,
+    // @cpt-end:cpt-cf-construct-flow-record-intake-submit:p1:inst-submit-parse
 ) -> ApiResult<impl IntoResponse> {
-    let note = svc.create_note(&ctx, req.into()).await?;
-    // @cpt-begin:cpt-cf-construct-flow-gear-foundation-create-note:p1:inst-create-return
-    let dto: FoundationNoteDto = note.into();
-    Ok((StatusCode::CREATED, Json(dto)))
-    // @cpt-end:cpt-cf-construct-flow-gear-foundation-create-note:p1:inst-create-return
+    // The error is mapped, and so logged, inside this span, so the log names
+    // the connector and the tenant it sent the record for.
+    let span = tracing::info_span!(
+        "record_intake",
+        tenant_id = %query.tenant,
+        connector = %ctx.subject_id()
+    );
+    let outcome = async {
+        svc.submit(&ctx, query.tenant, record)
+            .await
+            .map_err(for_rest)
+    }
+    .instrument(span)
+    .await?;
+    // @cpt-begin:cpt-cf-construct-flow-record-intake-submit:p1:inst-submit-answer
+    Ok((status_of(outcome), Json(RecordOutcomeDto::from(outcome))))
+    // @cpt-end:cpt-cf-construct-flow-record-intake-submit:p1:inst-submit-answer
 }
 
 /// @cpt-dod:cpt-cf-construct-dod-subject-settings-routes:p1

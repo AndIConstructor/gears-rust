@@ -6,7 +6,7 @@ use toolkit_security::AccessScope;
 use crate::domain::error::DomainError;
 use crate::domain::subject_settings::{SubjectKey, SubjectSettings, SubjectSettingsRepository};
 
-use super::sea_orm_repo::map_scope_error;
+use super::scope_error::map_scope_error;
 use super::subject_settings_entity::{self as entity, Entity as SubjectSettingsEntity};
 
 /// `SeaORM`-backed [`SubjectSettingsRepository`]; every query goes through the

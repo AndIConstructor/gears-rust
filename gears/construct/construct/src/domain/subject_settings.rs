@@ -154,13 +154,28 @@ impl<R: SubjectSettingsRepository + 'static> SubjectSettingsService<R> {
             .await?;
         // @cpt-end:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-scope
 
-        // @cpt-begin:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-select
-        let conn = self.db.conn().map_err(DomainError::from)?;
         let key = SubjectKey {
             tenant_id,
             subject_id,
         };
-        let stored = self.repo.find(&conn, &scope, key).await?;
+        self.settings_within(ctx, &scope, key).await
+    }
+
+    /// The settings of one subject in its tenant, read under a scope the
+    /// caller already holds from its own permission check. Record intake uses
+    /// it: its "send records" decision covers the read, so a connector needs no
+    /// second permission. The row is read only in the key's tenant; a scope
+    /// that does not cover it finds nothing and gets the tenant's default.
+    pub(crate) async fn settings_within(
+        &self,
+        ctx: &SecurityContext,
+        scope: &AccessScope,
+        key: SubjectKey,
+    ) -> Result<SubjectSettings, DomainError> {
+        let tenant_id = key.tenant_id;
+        // @cpt-begin:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-select
+        let conn = self.db.conn().map_err(DomainError::from)?;
+        let stored = self.repo.find(&conn, scope, key).await?;
         // @cpt-end:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-select
 
         // @cpt-begin:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-stored

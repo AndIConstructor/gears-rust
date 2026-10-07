@@ -375,3 +375,29 @@ async fn setting_personalization_outside_the_scope_is_forbidden() {
         .expect("find");
     assert_eq!(untouched, Some(ERASING));
 }
+
+#[tokio::test]
+async fn a_scope_over_several_tenants_reads_only_the_named_tenants_row() {
+    let db = inmem_db().await;
+    let conn = db.conn().expect("connection");
+    let repo = SeaOrmSubjectSettingsRepository::new();
+    let (named, other, subject) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let in_tenant = |tenant_id| SubjectKey {
+        tenant_id,
+        subject_id: subject,
+    };
+    seed_subject_settings(&db, in_tenant(other), ERASING).await;
+    let both = AccessScope::for_tenants(vec![named, other]);
+
+    let in_named = repo
+        .find(&conn, &both, in_tenant(named))
+        .await
+        .expect("find");
+    let in_other = repo
+        .find(&conn, &both, in_tenant(other))
+        .await
+        .expect("find");
+
+    assert_eq!(in_named, None, "the other tenant's row is not read");
+    assert_eq!(in_other, Some(ERASING));
+}

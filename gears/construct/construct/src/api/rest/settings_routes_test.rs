@@ -3,24 +3,22 @@
 
 use std::sync::Arc;
 
-use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
+use authz_resolver_sdk::AuthZResolverApi;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use axum::{Extension, Router};
 use toolkit::api::OpenApiRegistryImpl;
 use toolkit_canonical_errors::Problem;
-use toolkit_db::{DBProvider, Db};
+use toolkit_db::Db;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::api::rest::error::SubjectSettingsError;
 use crate::api::rest::routes::register_routes;
-use crate::config::ConstructConfig;
-use crate::domain::service::{Service, ServiceConfig};
 use crate::domain::subject_settings::{SubjectKey, SubjectSettings};
-use crate::infra::storage::sea_orm_repo::SeaOrmNoteRepository;
 use crate::test_support::{
-    AllowResolver, DenyResolver, context_of, inmem_db, seed_subject_settings, settings_service,
+    AllowResolver, DenyResolver, IntakeFixture, context_of, inmem_db, seed_subject_settings,
+    settings_service,
 };
 
 const DEFAULT_ON: bool = true;
@@ -37,15 +35,9 @@ fn router_for(
     subject_id: Uuid,
     tenant_id: Uuid,
 ) -> Router {
-    let config = ServiceConfig::try_from(&ConstructConfig::default()).expect("valid config");
-    let notes = Arc::new(Service::new(
-        Arc::new(DBProvider::new(db.clone())),
-        Arc::new(SeaOrmNoteRepository::new()),
-        PolicyEnforcer::new(Arc::clone(&resolver)),
-        config,
-    ));
+    let intake = Arc::new(IntakeFixture::default().build(db));
     let settings = Arc::new(settings_service(db, resolver, DEFAULT_ON));
-    register_routes(Router::new(), &OpenApiRegistryImpl::new(), notes, settings)
+    register_routes(Router::new(), &OpenApiRegistryImpl::new(), intake, settings)
         .layer(Extension(context_of(subject_id, tenant_id)))
 }
 
