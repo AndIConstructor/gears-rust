@@ -18,6 +18,9 @@ name = "github_mirror"
 [lints]
 workspace = true
 
+[features]
+integration = ["toolkit-db/pg", "toolkit-db/mysql"]
+
 [dependencies]
 github-mirror-sdk = { package = "cf-gears-github-mirror-sdk", version = "0.1.0", path = "../github-mirror-sdk" }
 

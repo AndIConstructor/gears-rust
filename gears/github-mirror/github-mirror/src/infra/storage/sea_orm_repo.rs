@@ -5643,7 +5643,9 @@ impl ActiveSyncRepository for SeaOrmActiveSyncRepository {
                 active_syncs::Column::TenantId,
                 active_syncs::Column::RepoFullName,
             ]);
-            on_conflict.inner_mut().do_nothing();
+            on_conflict
+                .inner_mut()
+                .do_nothing_on([active_syncs::Column::TenantId]);
             match ActiveSyncEntity::insert(model.clone())
                 .secure()
                 .scope_with_model(scope, &model)

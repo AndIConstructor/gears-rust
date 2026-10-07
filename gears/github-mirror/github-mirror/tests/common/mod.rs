@@ -431,15 +431,47 @@ pub async fn inmem_db() -> Db {
         min_conns: Some(1),
         ..Default::default()
     };
-    let db = connect_db("sqlite::memory:", opts)
+    #[cfg(feature = "integration")]
+    let url = match std::env::var("GM_TEST_DATABASE_URL") {
+        Ok(server) => fresh_database_on(&server).await,
+        Err(_) => SQLITE_MEMORY.to_owned(),
+    };
+    #[cfg(not(feature = "integration"))]
+    let url = SQLITE_MEMORY.to_owned();
+    let db = connect_db(&url, opts)
         .await
-        .unwrap_or_else(|e| panic!("in-memory database must connect: {e}"));
+        .unwrap_or_else(|e| panic!("the test database must connect: {e}"));
 
     run_migrations_for_testing(&db, Migrator::migrations())
         .await
         .unwrap_or_else(|e| panic!("migrations must apply: {e}"));
 
     db
+}
+
+const SQLITE_MEMORY: &str = "sqlite::memory:";
+
+#[cfg(feature = "integration")]
+async fn fresh_database_on(server: &str) -> String {
+    use sea_orm::ConnectionTrait;
+
+    let name = format!("gm_test_{}", uuid::Uuid::new_v4().simple());
+    let admin = sea_orm::Database::connect(server)
+        .await
+        .unwrap_or_else(|e| panic!("GM_TEST_DATABASE_URL must connect: {e}"));
+    admin
+        .execute_unprepared(&format!("CREATE DATABASE {name}"))
+        .await
+        .unwrap_or_else(|e| panic!("the test database {name} must be created: {e}"));
+    admin
+        .close()
+        .await
+        .unwrap_or_else(|e| panic!("the server connection must close: {e}"));
+
+    let mut url = url::Url::parse(server)
+        .unwrap_or_else(|e| panic!("GM_TEST_DATABASE_URL is not a URL: {e}"));
+    url.set_path(&format!("/{name}"));
+    url.to_string()
 }
 
 pub fn enforcer() -> PolicyEnforcer {
