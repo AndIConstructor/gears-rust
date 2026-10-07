@@ -18,6 +18,7 @@ use url::form_urlencoded;
 
 use crate::api::rest::routes::ConcreteService;
 use crate::domain::error::DomainError;
+use crate::domain::ports::github::ForceMode;
 use crate::domain::repo::{
     IssueState, ListingDirection, ListingFilter, ListingSort, PageWindow, RepoRunStatus,
 };
@@ -45,8 +46,12 @@ const MAX_PER_PAGE: u64 = 100;
 /// response-header size.
 const MAX_FILTER_VALUE: usize = 64;
 
-/// `?force=true` bypasses the HTTP cache (PRD §5.2 force mode): every request
-/// goes out without its stored validator, so nothing is served from cache.
+/// `?force_full=true` walks every listing and refines every entity, ignoring
+/// the watermarks and fingerprints earlier runs stored, but still asks GitHub
+/// "has this page changed?" so unchanged pages cost nothing. `?force=true`
+/// does that and also bypasses the HTTP cache (PRD §5.2 force mode): every
+/// request goes out without its stored validator, so nothing is served from
+/// cache.
 ///
 /// The remaining fields narrow what the run collects (PRD §5.4, §5.19). Any
 /// field left out keeps the gear's configured default, and `include`
@@ -54,6 +59,7 @@ const MAX_FILTER_VALUE: usize = 64;
 #[derive(Debug, Default, Deserialize)]
 pub struct SyncQuery {
     pub force: Option<bool>,
+    pub force_full: Option<bool>,
     /// Comma-separated object types to collect, e.g.
     /// `issues,pull_requests,commits`. Omit to collect the configured set.
     pub include: Option<String>,
@@ -157,6 +163,7 @@ pub struct CacheClearQuery {
 pub struct ResumeQuery {
     pub repo: Option<String>,
     pub force: Option<bool>,
+    pub force_full: Option<bool>,
 }
 
 /// `?status=in_progress` narrows a run-status listing.
@@ -424,7 +431,10 @@ pub async fn sync_repository(
             &owner,
             &name,
             scope,
-            query.force.unwrap_or(false),
+            ForceMode::from_flags(
+                query.force.unwrap_or(false),
+                query.force_full.unwrap_or(false),
+            ),
             since,
         )
         .await?;
@@ -981,7 +991,14 @@ pub async fn resume_syncs(
     Query(query): Query<ResumeQuery>,
 ) -> ApiResult<(StatusCode, JsonBody<ResumeAcceptedDto>)> {
     let outcome = svc
-        .resume_incomplete_syncs(&ctx, query.repo.as_deref(), query.force.unwrap_or(false))
+        .resume_incomplete_syncs(
+            &ctx,
+            query.repo.as_deref(),
+            ForceMode::from_flags(
+                query.force.unwrap_or(false),
+                query.force_full.unwrap_or(false),
+            ),
+        )
         .await?;
     Ok((
         StatusCode::ACCEPTED,

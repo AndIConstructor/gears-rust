@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
-    ActionsListing, CommitDetail, CommitListing, FetchOptions, GithubPort, IssueDetail,
+    ActionsListing, CommitDetail, CommitListing, FetchOptions, ForceMode, GithubPort, IssueDetail,
     IssueDetailWants, IssueListing, ListCursor, MetadataListing, PullDetail, PullListing, RepoRef,
 };
 use github_mirror::domain::repo::{PullRequestCommitRecord, RepoRecord, WorkflowJobRecord};
@@ -201,7 +201,7 @@ async fn sync_with(github: Arc<ShortPullWalk>) -> SyncSummary {
     );
     let mut pump = common::SyncPump::take(&service).await;
     service
-        .enqueue_sync(&ctx, OWNER, NAME, None, false, None)
+        .enqueue_sync(&ctx, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the sync must queue");
     assert_eq!(pump.drain(&service).await, 1);

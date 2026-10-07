@@ -230,7 +230,7 @@ mod tests {
             owner: "acme".to_owned(),
             name: name.to_owned(),
             scope: ScopeConfig::default(),
-            force: false,
+            force: crate::domain::ports::github::ForceMode::None,
             since: None,
             telemetry_file: None,
             access_scope: AccessScope::default(),

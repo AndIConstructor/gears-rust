@@ -4474,6 +4474,19 @@ const CONTRIBUTOR_MERGE_CHUNK: usize = 500;
 
 /// One mirrored table's upsert pass: writes every fetched record and reports
 /// how many rows it wrote.
+macro_rules! delete_by_repo {
+    ($conn:expr, $scope:expr, $repo_id:expr, $entity:ident, $module:ident) => {
+        $entity::delete_many()
+            .secure()
+            .scope_with($scope)
+            .filter(sea_orm::Condition::all().add($module::Column::RepoId.eq($repo_id)))
+            .exec($conn)
+            .await
+            .map_err(map_scope_error)?
+            .rows_affected
+    };
+}
+
 macro_rules! sync_table {
     ($conn:expr, $scope:expr, $tenant:expr, $upsert:ident, $records:expr) => {{
         let mut synced: u64 = 0;
@@ -4913,6 +4926,110 @@ impl SyncWriter for SeaOrmSyncWriter {
                 Box::pin(async move {
                     sync_table!(tx, &scope, tenant_id, workflow_job_upsert_in, jobs);
                     Ok(())
+                })
+            })
+            .await
+    }
+
+    async fn delete_repository(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        repo_full_name: &str,
+    ) -> Result<u64, DomainError> {
+        let scope = scope.clone();
+        let repo_full_name = repo_full_name.to_owned();
+        self.db
+            .db()
+            .transaction_ref_mapped(move |tx| {
+                Box::pin(async move {
+                    let mut removed = 0;
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, IssueReactionEntity, issue_reactions);
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, IssueTimelineEntity, issue_timeline);
+                    removed += delete_by_repo!(tx, &scope, repo_id, IssueEventEntity, issue_events);
+                    removed += delete_by_repo!(tx, &scope, repo_id, CommentEntity, comments);
+                    removed += delete_by_repo!(tx, &scope, repo_id, IssueEntity, issues);
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, ReviewCommentEntity, review_comments);
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, ReviewThreadEntity, review_threads);
+                    removed += delete_by_repo!(tx, &scope, repo_id, ReviewEntity, reviews);
+                    removed += delete_by_repo!(
+                        tx,
+                        &scope,
+                        repo_id,
+                        PullRequestFileEntity,
+                        pull_request_files
+                    );
+                    removed += delete_by_repo!(
+                        tx,
+                        &scope,
+                        repo_id,
+                        PullRequestCommitEntity,
+                        pull_request_commits
+                    );
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, PullRequestEntity, pull_requests);
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, CommitCommentEntity, commit_comments);
+                    removed += delete_by_repo!(tx, &scope, repo_id, CommitFileEntity, commit_files);
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, CommitStatusEntity, commit_statuses);
+                    removed += delete_by_repo!(tx, &scope, repo_id, CheckRunEntity, check_runs);
+                    removed += delete_by_repo!(tx, &scope, repo_id, CommitEntity, commits);
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, WorkflowJobEntity, workflow_jobs);
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, WorkflowRunEntity, workflow_runs);
+                    removed += delete_by_repo!(tx, &scope, repo_id, DeploymentEntity, deployments);
+                    removed += delete_by_repo!(tx, &scope, repo_id, LabelEntity, labels);
+                    removed += delete_by_repo!(tx, &scope, repo_id, MilestoneEntity, milestones);
+                    removed += delete_by_repo!(tx, &scope, repo_id, ReleaseEntity, releases);
+                    removed += delete_by_repo!(tx, &scope, repo_id, BranchEntity, branches);
+                    removed += delete_by_repo!(tx, &scope, repo_id, TagEntity, tags);
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, ContributorEntity, contributors);
+                    removed +=
+                        delete_by_repo!(tx, &scope, repo_id, SyncWatermarkEntity, sync_watermarks);
+                    removed += delete_by_repo!(
+                        tx,
+                        &scope,
+                        repo_id,
+                        EntityFingerprintEntity,
+                        entity_fingerprints
+                    );
+                    removed +=
+                        SyncSessionEntity::delete_many()
+                            .secure()
+                            .scope_with(&scope)
+                            .filter(sea_orm::Condition::all().add(
+                                sync_sessions::Column::RepoFullName.eq(repo_full_name.as_str()),
+                            ))
+                            .exec(tx)
+                            .await
+                            .map_err(map_scope_error)?
+                            .rows_affected;
+                    removed += RepoSyncStatusEntity::delete_many()
+                        .secure()
+                        .scope_with(&scope)
+                        .filter(sea_orm::Condition::all().add(
+                            repo_sync_status::Column::RepoFullName.eq(repo_full_name.as_str()),
+                        ))
+                        .exec(tx)
+                        .await
+                        .map_err(map_scope_error)?
+                        .rows_affected;
+                    removed += RepoEntity::delete_many()
+                        .secure()
+                        .scope_with(&scope)
+                        .filter(sea_orm::Condition::all().add(repositories::Column::Id.eq(repo_id)))
+                        .exec(tx)
+                        .await
+                        .map_err(map_scope_error)?
+                        .rows_affected;
+                    Ok(removed)
                 })
             })
             .await
@@ -5942,26 +6059,27 @@ impl EntityFingerprintRepository for SeaOrmEntityFingerprintRepository {
         family: &str,
         entity_ids: &[String],
     ) -> Result<Vec<EntityFingerprintRecord>, DomainError> {
-        if entity_ids.is_empty() {
-            return Ok(Vec::new());
-        }
         let conn = self.db.conn()?;
-        let rows = EntityFingerprintEntity::find()
-            .secure()
-            .scope_with(scope)
-            .filter(
-                sea_orm::Condition::all()
-                    .add(entity_fingerprints::Column::RepoId.eq(repo_id))
-                    .add(entity_fingerprints::Column::Family.eq(family))
-                    .add(
-                        entity_fingerprints::Column::EntityId
-                            .is_in(entity_ids.iter().map(String::as_str)),
-                    ),
-            )
-            .all(&conn)
-            .await
-            .map_err(map_scope_error)?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        let mut found = Vec::with_capacity(entity_ids.len());
+        for chunk in entity_ids.chunks(FINGERPRINT_UPSERT_CHUNK) {
+            let rows = EntityFingerprintEntity::find()
+                .secure()
+                .scope_with(scope)
+                .filter(
+                    sea_orm::Condition::all()
+                        .add(entity_fingerprints::Column::RepoId.eq(repo_id))
+                        .add(entity_fingerprints::Column::Family.eq(family))
+                        .add(
+                            entity_fingerprints::Column::EntityId
+                                .is_in(chunk.iter().map(String::as_str)),
+                        ),
+                )
+                .all(&conn)
+                .await
+                .map_err(map_scope_error)?;
+            found.extend(rows.into_iter().map(Into::into));
+        }
+        Ok(found)
     }
 
     async fn upsert_many(

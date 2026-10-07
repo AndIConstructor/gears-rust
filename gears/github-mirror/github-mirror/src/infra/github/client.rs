@@ -631,7 +631,7 @@ impl GithubClient {
         url: &str,
         key: &CacheKey,
     ) -> Option<CachedResponse> {
-        if options.force {
+        if options.force.skips_cache() {
             return None;
         }
         let (scope, tenant_id) = cache_partition(options);
@@ -839,7 +839,17 @@ impl GithubClient {
             let last_modified = header_string(response.headers(), "last-modified");
             let next_page = next_link(response.headers());
             match read_body(response).await {
-                Ok(body) => break (body, etag, last_modified, next_page, admission, permit, line),
+                Ok(body) => {
+                    break (
+                        body,
+                        etag,
+                        last_modified,
+                        next_page,
+                        admission,
+                        permit,
+                        line,
+                    );
+                }
                 Err(ReadFailure::Transport(e)) if upstream_attempt < UPSTREAM_RETRIES => {
                     drop(permit);
                     drop(admission);
@@ -1162,7 +1172,8 @@ impl GithubClient {
                     self.pause(delay, telemetry, cancel).await?;
                     attempt += 1;
                 }
-                GraphqlRead::RateLimited { body, bytes, .. } | GraphqlRead::Answer { body, bytes } => {
+                GraphqlRead::RateLimited { body, bytes, .. }
+                | GraphqlRead::Answer { body, bytes } => {
                     line.entry.response_bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
                     self.metrics.response_bytes("POST", bytes);
                     telemetry.add_downloaded(bytes);
@@ -1206,9 +1217,8 @@ fn unusable_answer(
             "GitHub answered {status} for {url}"
         )));
     }
-    (!status.is_success()).then(|| {
-        DomainError::internal(format!("GitHub responded with {status} for {url}"))
-    })
+    (!status.is_success())
+        .then(|| DomainError::internal(format!("GitHub responded with {status} for {url}")))
 }
 
 struct Sent<'a> {

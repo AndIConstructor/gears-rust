@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
-    ActionsListing, CommitDetail, CommitListing, FetchOptions, FetchedRepository, GithubPort,
-    IssueDetail, IssueDetailWants, IssueListing, ListCursor, ListingCompleteness, MetadataListing,
-    PullDetail, PullListing, RepoRef,
+    ActionsListing, CommitDetail, CommitListing, FetchOptions, FetchedRepository, ForceMode,
+    GithubPort, IssueDetail, IssueDetailWants, IssueListing, ListCursor, ListingCompleteness,
+    MetadataListing, PullDetail, PullListing, RepoRef,
 };
 use github_mirror::domain::repo::{
     IssueRecord, ListingFilter, PageWindow, RepoRecord, SyncWatermarkRepository, WorkflowJobRecord,
@@ -222,7 +222,7 @@ async fn a_listing_walked_in_two_pages_keeps_one_state_across_them() {
     let mut pump = common::SyncPump::take(&service).await;
 
     service
-        .enqueue_sync(&ctx, OWNER, NAME, None, false, None)
+        .enqueue_sync(&ctx, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the sync must queue");
     assert_eq!(pump.drain(&service).await, 1);

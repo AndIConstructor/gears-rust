@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
-    ActionsListing, CommitDetail, CommitListing, FetchOptions, GithubPort, IssueDetail,
+    ActionsListing, CommitDetail, CommitListing, FetchOptions, ForceMode, GithubPort, IssueDetail,
     IssueDetailWants, IssueListing, ListCursor, MetadataListing, PullDetail, PullListing, RepoRef,
 };
 use github_mirror::domain::repo::{
@@ -226,7 +226,7 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
 
     let (clean, mut clean_pump) = service_for().await;
     clean
-        .enqueue_sync(&ctx, OWNER, NAME, None, false, None)
+        .enqueue_sync(&ctx, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the first sync must queue");
     assert_eq!(clean_pump.drain(&clean).await, 1);
@@ -245,7 +245,7 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
     );
     let mut pump = common::SyncPump::take(&service).await;
     service
-        .enqueue_sync(&ctx, OWNER, NAME, None, false, None)
+        .enqueue_sync(&ctx, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the interrupted sync must queue");
     assert_eq!(pump.drain_under(&service, &stopped).await, 1);
@@ -271,7 +271,7 @@ async fn an_interrupted_sync_resumes_to_the_state_an_uninterrupted_one_reaches()
     );
 
     let resumed = service
-        .resume_incomplete_syncs(&ctx, None, false)
+        .resume_incomplete_syncs(&ctx, None, ForceMode::None)
         .await
         .expect("resume must queue the repository again");
     assert_eq!(resumed.session_ids.len(), 1);
@@ -297,13 +297,13 @@ async fn a_repository_that_finished_has_nothing_to_resume() {
     let (service, mut pump) = service_for().await;
 
     service
-        .enqueue_sync(&ctx, OWNER, NAME, None, false, None)
+        .enqueue_sync(&ctx, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the sync must queue");
     assert_eq!(pump.drain(&service).await, 1);
 
     let resumed = service
-        .resume_incomplete_syncs(&ctx, None, false)
+        .resume_incomplete_syncs(&ctx, None, ForceMode::None)
         .await
         .expect("resume must succeed");
 
@@ -319,7 +319,7 @@ async fn one_tenant_cannot_resume_another_tenants_repository() {
     let (service, mut pump) = service_for().await;
 
     service
-        .enqueue_sync(&owner, OWNER, NAME, None, false, None)
+        .enqueue_sync(&owner, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the sync must queue");
     let stopped = CancellationToken::new();
@@ -328,7 +328,7 @@ async fn one_tenant_cannot_resume_another_tenants_repository() {
 
     let stranger = common::caller_in(Uuid::new_v4());
     let resumed = service
-        .resume_incomplete_syncs(&stranger, None, false)
+        .resume_incomplete_syncs(&stranger, None, ForceMode::None)
         .await
         .expect("resume must succeed");
 
@@ -495,7 +495,7 @@ async fn a_refinement_left_pending_is_finished_by_the_next_sync_even_when_the_li
     let mut pump = common::SyncPump::take(&service).await;
 
     let first = service
-        .enqueue_sync(&ctx, OWNER, NAME, None, false, None)
+        .enqueue_sync(&ctx, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the first sync must queue");
     assert_eq!(pump.drain(&service).await, 1);
@@ -510,7 +510,7 @@ async fn a_refinement_left_pending_is_finished_by_the_next_sync_even_when_the_li
     );
 
     let second = service
-        .enqueue_sync(&ctx, OWNER, NAME, None, false, None)
+        .enqueue_sync(&ctx, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the second sync must queue");
     assert_eq!(pump.drain(&service).await, 1);

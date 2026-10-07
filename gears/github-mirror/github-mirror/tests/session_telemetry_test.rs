@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use github_mirror::api::rest::dto::SessionTelemetryDto;
 use github_mirror::domain::error::DomainError;
+use github_mirror::domain::ports::github::ForceMode;
 use github_mirror::domain::sync::TelemetrySnapshot;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
@@ -19,7 +20,7 @@ async fn synced_telemetry(
     ctx: &SecurityContext,
 ) -> TelemetrySnapshot {
     let queued = service
-        .enqueue_sync(ctx, OWNER, NAME, None, false, None)
+        .enqueue_sync(ctx, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the sync must queue");
     assert_eq!(pump.drain(service).await, 1);
@@ -88,6 +89,7 @@ async fn sync_now_refuses_a_telemetry_file_name_that_leaves_its_folder() {
             OWNER,
             NAME,
             Some("../escape.jsonl".to_owned()),
+            ForceMode::None,
         )
         .await
         .unwrap_err();

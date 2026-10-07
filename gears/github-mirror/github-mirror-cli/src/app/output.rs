@@ -23,7 +23,10 @@ fn table(value: &Value) -> String {
         Value::Object(fields) => {
             let mut pairs = Vec::new();
             flatten("", fields, &mut pairs);
-            let rows: Vec<Vec<String>> = pairs.into_iter().map(|(key, value)| vec![key, value]).collect();
+            let rows: Vec<Vec<String>> = pairs
+                .into_iter()
+                .map(|(key, value)| vec![key, value])
+                .collect();
             render(&["field".to_owned(), "value".to_owned()], &rows)
         }
         other => format!("{}\n", cell(other)),

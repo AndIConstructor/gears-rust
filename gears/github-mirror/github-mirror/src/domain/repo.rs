@@ -1886,6 +1886,20 @@ pub trait SyncWriter: Send + Sync {
         jobs: Vec<WorkflowJobRecord>,
     ) -> Result<(), DomainError>;
 
+    /// Remove everything the mirror holds about one repository: every mirrored
+    /// entity, the change-detection state, the run status and sessions, and
+    /// the repository row itself, in one transaction. Returns how many rows
+    /// went.
+    ///
+    /// # Errors
+    /// Storage failures.
+    async fn delete_repository(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        repo_full_name: &str,
+    ) -> Result<u64, DomainError>;
+
     /// Merge the people one run met into `gm_contributors`, unioning roles
     /// with what earlier runs stored; returns how many rows were written.
     ///

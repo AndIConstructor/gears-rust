@@ -75,3 +75,4 @@ uuid = { workspace = true }
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }
 toolkit-security = { workspace = true }
 async-trait = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -5,6 +5,7 @@ use github_mirror::api::rest::dto::{
     RepoSyncStatusDto, ReviewCommentDto, ReviewDto, ReviewThreadDto, SyncSessionDto,
     SyncSummaryDto, WorkflowRunDto,
 };
+use github_mirror::domain::ports::github::ForceMode;
 use github_mirror::domain::repo::{
     ListingFilter, PageWindow, RepoSyncStatusRecord, SyncSessionRecord,
 };
@@ -37,9 +38,14 @@ pub enum Entity {
     WorkflowRuns,
 }
 
-pub async fn sync(service: &Service, ctx: &SecurityContext, repo: &str) -> Result<Value> {
+pub async fn sync(
+    service: &Service,
+    ctx: &SecurityContext,
+    repo: &str,
+    force: ForceMode,
+) -> Result<Value> {
     let (owner, name) = split_repo(repo)?;
-    let summary = service.sync_now(ctx, owner, name, None).await?;
+    let summary = service.sync_now(ctx, owner, name, None, force).await?;
     Ok(serde_json::to_value(SyncSummaryDto::from(summary))?)
 }
 
@@ -56,7 +62,11 @@ pub async fn query(
     let filter = ListingFilter::default();
     let rows = match entity {
         Entity::Issues => rows(
-            service.list_issues(ctx, owner, name, window, filter).await?.0.items,
+            service
+                .list_issues(ctx, owner, name, window, filter)
+                .await?
+                .0
+                .items,
             IssueDto::from,
         )?,
         Entity::Prs => rows(
@@ -68,11 +78,18 @@ pub async fn query(
             PullRequestDto::from,
         )?,
         Entity::Commits => rows(
-            service.list_commits(ctx, owner, name, window, None).await?.0.items,
+            service
+                .list_commits(ctx, owner, name, window, None)
+                .await?
+                .0
+                .items,
             CommitDto::from,
         )?,
         Entity::Contributors => rows(
-            service.list_contributors(ctx, owner, name, window).await?.items,
+            service
+                .list_contributors(ctx, owner, name, window)
+                .await?
+                .items,
             ContributorDto::from,
         )?,
         Entity::Repos => vec![serde_json::to_value(RepoDto::from(
@@ -87,7 +104,10 @@ pub async fn query(
             LabelDto::from,
         )?,
         Entity::Milestones => rows(
-            service.list_milestones(ctx, owner, name, window).await?.items,
+            service
+                .list_milestones(ctx, owner, name, window)
+                .await?
+                .items,
             MilestoneDto::from,
         )?,
         Entity::Releases => rows(
@@ -108,8 +128,9 @@ pub async fn query(
         | Entity::ReviewComments
         | Entity::Reactions
         | Entity::Timeline => {
-            let number =
-                number.ok_or_else(|| anyhow!("this entity belongs to one issue or pull request: pass --number <N>"))?;
+            let number = number.ok_or_else(|| {
+                anyhow!("this entity belongs to one issue or pull request: pass --number <N>")
+            })?;
             query_one(service, ctx, entity, (owner, name), number, window).await?
         }
     };
@@ -126,7 +147,10 @@ async fn query_one(
 ) -> Result<Vec<Value>> {
     match entity {
         Entity::Comments => rows(
-            service.list_comments(ctx, owner, name, number, window).await?.items,
+            service
+                .list_comments(ctx, owner, name, number, window)
+                .await?
+                .items,
             CommentDto::from,
         ),
         Entity::ReviewThreads => rows(
@@ -143,7 +167,10 @@ async fn query_one(
             ReviewThreadDto::from,
         ),
         Entity::Reviews => rows(
-            service.list_reviews(ctx, owner, name, number, window).await?.items,
+            service
+                .list_reviews(ctx, owner, name, number, window)
+                .await?
+                .items,
             ReviewDto::from,
         ),
         Entity::ReviewComments => rows(
@@ -178,6 +205,12 @@ async fn query_one(
         | Entity::Releases
         | Entity::WorkflowRuns => Ok(Vec::new()),
     }
+}
+
+pub async fn clear_cache(service: &Service, ctx: &SecurityContext, repo: &str) -> Result<Value> {
+    let (owner, name) = split_repo(repo)?;
+    let removed = service.delete_repository(ctx, owner, name).await?;
+    Ok(json!({ "repository": format!("{owner}/{name}"), "rows_removed": removed }))
 }
 
 pub async fn status(service: &Service, ctx: &SecurityContext, repo: &str) -> Result<Value> {
@@ -241,8 +274,8 @@ async fn latest_session(
 }
 
 fn next_page(cursor: &str) -> Result<ODataQuery> {
-    let cursor =
-        CursorV1::decode(cursor).map_err(|e| anyhow!("the next-page cursor did not decode: {e}"))?;
+    let cursor = CursorV1::decode(cursor)
+        .map_err(|e| anyhow!("the next-page cursor did not decode: {e}"))?;
     Ok(ODataQuery::new().with_limit(PAGE_LIMIT).with_cursor(cursor))
 }
 

@@ -288,7 +288,7 @@ impl MirrorWorker {
                 entity,
                 &items,
                 Utc::now(),
-                run.options.force,
+                run.options.force.refetches_all(),
             )
             .await?;
         for (candidate, reason) in candidates.into_iter().zip(reasons) {
@@ -406,7 +406,12 @@ impl MirrorWorker {
         let repo_id = run.repo_id()?;
         let start = self
             .watermark
-            .start_sweep(&run.scope, repo_id, Family::Issues, run.options.force)
+            .start_sweep(
+                &run.scope,
+                repo_id,
+                Family::Issues,
+                run.options.force.refetches_all(),
+            )
             .await?;
         let updated_after = start.updated_after;
         let collection = run.options.scope.collection;
@@ -529,7 +534,12 @@ impl MirrorWorker {
         let repo_id = run.repo_id()?;
         let start = self
             .watermark
-            .start_sweep(&run.scope, repo_id, Family::PullRequests, run.options.force)
+            .start_sweep(
+                &run.scope,
+                repo_id,
+                Family::PullRequests,
+                run.options.force.refetches_all(),
+            )
             .await?;
         let updated_after = start.updated_after;
         let mut high = updated_after;
@@ -714,7 +724,12 @@ impl MirrorWorker {
         let repo_id = run.repo_id()?;
         let start = self
             .watermark
-            .start_sweep(&run.scope, repo_id, Family::Commits, run.options.force)
+            .start_sweep(
+                &run.scope,
+                repo_id,
+                Family::Commits,
+                run.options.force.refetches_all(),
+            )
             .await?;
         let with_ci = run.options.scope.collection.actions == CollectionMode::All;
         let mut page1_etag: Option<String> = None;

@@ -22,7 +22,7 @@ use toolkit_security::{AccessScope, SecurityContext, pep_properties};
 use uuid::Uuid;
 
 use super::error::DomainError;
-use super::ports::github::{FetchOptions, GithubPort, SHARED_CACHE_PARTITION};
+use super::ports::github::{FetchOptions, ForceMode, GithubPort, SHARED_CACHE_PARTITION};
 use super::ports::telemetry_sink::TelemetrySink;
 use super::repo::{
     ActiveSyncRecord, ActiveSyncRepository, BranchRecord, BranchRepository, CheckRunRecord,
@@ -546,10 +546,10 @@ pub struct SyncJob {
     /// What this run collects. Resolved at enqueue time from the request, or
     /// from the gear config when the request says nothing.
     pub scope: ScopeConfig,
-    /// PRD §5.2 force mode: the GitHub client skips its stored `ETag`s, the
-    /// sweep ignores its watermark and the change gate re-fetches every
-    /// entity, so the whole repository is read again from GitHub.
-    pub force: bool,
+    /// PRD §5.2 force mode: `Full` makes the sweep ignore its watermark and the
+    /// change gate refine every entity; `All` also makes the GitHub client skip
+    /// its stored `ETag`s, so every page is downloaded again.
+    pub force: ForceMode,
     /// Oldest closed entity worth collecting, from the request.
     pub since: Option<DateTime<Utc>>,
     pub telemetry_file: Option<String>,
@@ -3410,6 +3410,55 @@ impl Service {
         Ok(removed)
     }
 
+    /// Remove one repository from the caller's tenant mirror: its rows in
+    /// every entity table, its watermarks and fingerprints, its sessions and
+    /// run status, its cached responses, and the repository row itself. The
+    /// next sync starts from nothing. Returns how many database rows went.
+    ///
+    /// # Errors
+    /// `Validation` when `owner/name` is not a usable path, `NotFound` when
+    /// the repository is not mirrored for this tenant, `Conflict` while a
+    /// sync of it is in flight, `Forbidden`/`Database` as usual.
+    pub async fn delete_repository(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: &str,
+    ) -> Result<u64, DomainError> {
+        validate_repo_path(owner, name)?;
+        let full_name = repo_full_name(owner, name)?;
+        let tenant_id = ctx.subject_tenant_id();
+        let scope = self.sync_access_scope(ctx).await?;
+
+        let repository = self
+            .repo
+            .find_by_full_name(&scope, &full_name)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+        if self.active_syncs.find(&scope, &full_name).await?.is_some() {
+            return Err(DomainError::Conflict(format!(
+                "a sync of {full_name} is in flight; stop it or wait for it before deleting"
+            )));
+        }
+
+        let cached = self
+            .github
+            .clear_cache(&scope, tenant_id, owner, Some(name), &[repository.id])
+            .await?;
+        let rows = self
+            .sync_writer
+            .delete_repository(&scope, repository.id, &full_name)
+            .await?;
+        tracing::info!(
+            owner,
+            repository = name,
+            rows,
+            cached,
+            "deleted a mirrored repository"
+        );
+        Ok(rows + cached)
+    }
+
     /// Hand the service the token the gear cancels on shutdown. Called once,
     /// when the sync pool starts.
     ///
@@ -3733,7 +3782,7 @@ impl Service {
         &self,
         ctx: &SecurityContext,
         only: Option<&str>,
-        force: bool,
+        force: ForceMode,
     ) -> Result<ResumeOutcome, DomainError> {
         let pending = self.repos_awaiting_resume(ctx, only).await?;
         let scopes = self.enqueue_scopes(ctx).await?;
@@ -3799,7 +3848,7 @@ impl Service {
         owner: &str,
         name: &str,
         sync_scope: Option<ScopeConfig>,
-        force: bool,
+        force: ForceMode,
         since: Option<DateTime<Utc>>,
     ) -> Result<QueuedSync, DomainError> {
         let scopes = self.enqueue_scopes(ctx).await?;
@@ -3832,7 +3881,7 @@ impl Service {
         owner: &str,
         name: &str,
         sync_scope: Option<ScopeConfig>,
-        force: bool,
+        force: ForceMode,
         since: Option<DateTime<Utc>>,
     ) -> Result<QueuedSync, DomainError> {
         let (job, session) = match self
@@ -3886,7 +3935,9 @@ impl Service {
                 })?,
                 () = shutdown.cancelled() => return Err(DomainError::Cancelled),
             };
-            service.sync_now(&ctx, &owner, &name, None).await
+            service
+                .sync_now(&ctx, &owner, &name, None, ForceMode::None)
+                .await
         })
     }
 
@@ -3911,6 +3962,7 @@ impl Service {
         owner: &str,
         name: &str,
         telemetry_file: Option<String>,
+        force: ForceMode,
     ) -> Result<SyncSummary, DomainError> {
         validate_repo_path(owner, name)?;
         telemetry_file
@@ -3919,7 +3971,7 @@ impl Service {
             .transpose()?;
         let scopes = self.enqueue_scopes(ctx).await?;
         let mut job = match self
-            .prepare_sync(ctx, &scopes, owner, name, None, false, None)
+            .prepare_sync(ctx, &scopes, owner, name, None, force, None)
             .await?
         {
             PreparedSync::Joined(running) => {
@@ -3946,7 +3998,7 @@ impl Service {
         owner: &str,
         name: &str,
         sync_scope: Option<ScopeConfig>,
-        force: bool,
+        force: ForceMode,
         since: Option<DateTime<Utc>>,
     ) -> Result<PreparedSync, DomainError> {
         let sync_scope = sync_scope.unwrap_or(self.config.scope);

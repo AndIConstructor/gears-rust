@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
-    ActionsListing, CommitDetail, CommitListing, FetchOptions, GithubPort, IssueDetail,
+    ActionsListing, CommitDetail, CommitListing, FetchOptions, ForceMode, GithubPort, IssueDetail,
     IssueDetailWants, IssueListing, ListCursor, MetadataListing, PullDetail, PullListing, RepoRef,
 };
 use github_mirror::domain::repo::{RepoRecord, SessionStatus, WorkflowJobRecord};
@@ -156,7 +156,7 @@ async fn a_run_that_will_not_end_is_stopped_at_its_deadline() {
     let mut pump = common::SyncPump::take(&service).await;
 
     let queued = service
-        .enqueue_sync(&ctx, OWNER, NAME, None, false, None)
+        .enqueue_sync(&ctx, OWNER, NAME, None, ForceMode::None, None)
         .await
         .expect("the sync must queue");
 

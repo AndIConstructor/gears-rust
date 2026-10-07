@@ -41,7 +41,10 @@ pub fn load(path: &Path, github_token: Option<&str>) -> Result<CliConfig> {
 }
 
 pub fn resolve_token(given: Option<String>, file_name: &str) -> Option<String> {
-    if let Some(token) = given.map(|token| token.trim().to_owned()).filter(|token| !token.is_empty()) {
+    if let Some(token) = given
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty())
+    {
         return Some(token);
     }
     let path = user_home().ok()?.join(".github-mirror").join(file_name);
@@ -120,8 +123,7 @@ fn expand_home_dir(config: &mut Value) -> Result<()> {
         None if raw == "~" => user_home()?,
         None => PathBuf::from(raw),
     };
-    std::fs::create_dir_all(&path)
-        .with_context(|| format!("cannot create {}", path.display()))?;
+    std::fs::create_dir_all(&path).with_context(|| format!("cannot create {}", path.display()))?;
     *home_dir = Value::String(path.to_string_lossy().into_owned());
     Ok(())
 }
@@ -130,5 +132,7 @@ fn user_home() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("cannot find the home directory: neither HOME nor USERPROFILE is set"))
+        .ok_or_else(|| {
+            anyhow!("cannot find the home directory: neither HOME nor USERPROFILE is set")
+        })
 }

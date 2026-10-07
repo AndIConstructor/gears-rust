@@ -8,6 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 use super::{ABANDONED_AFTER_SECS, SyncJob, abandoned, telemetry_file_path};
+use crate::domain::ports::github::ForceMode;
 use crate::domain::repo::{SessionStatus, SyncSessionRecord};
 use crate::domain::scope::ScopeConfig;
 
@@ -126,7 +127,7 @@ fn job(telemetry_file: Option<&str>) -> SyncJob {
         owner: "rust-lang".to_owned(),
         name: "rust".to_owned(),
         scope: ScopeConfig::default(),
-        force: false,
+        force: ForceMode::None,
         since: None,
         telemetry_file: telemetry_file.map(ToOwned::to_owned),
         access_scope: toolkit_security::AccessScope::default(),

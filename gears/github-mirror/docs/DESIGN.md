@@ -79,7 +79,7 @@ A sync is designed to be stopped and started again. The task queue lives in memo
 | `cpt-cf-github-mirror-fr-progress` | `p2` | `progress_percent` is weighted by phase, never goes down, and is written by the heartbeat |
 | `cpt-cf-github-mirror-fr-env-independence` | `p1` | All settings come from the gear config; the GitHub token comes from the credential store |
 
-Not covered by this design yet: the rest of the CLI (`clear-cache`, `check-rate-limit`, the sync flags of `cpt-cf-github-mirror-fr-cli-sync`, `--database-placement` and storage metrics; see [CLI](#cli)), Python bindings (`cpt-cf-github-mirror-fr-python-bindings`), write-back (`cpt-cf-github-mirror-fr-write-back`), the token pool (`cpt-cf-github-mirror-fr-token-pool`) and security-alert collection (`cpt-cf-github-mirror-fr-security-sync`, refused by scope validation today).
+Not covered by this design yet: the rest of the CLI (`check-rate-limit`, the sync flags of `cpt-cf-github-mirror-fr-cli-sync`, `--database-placement` and storage metrics; see [CLI](#cli)), Python bindings (`cpt-cf-github-mirror-fr-python-bindings`), write-back (`cpt-cf-github-mirror-fr-write-back`), the token pool (`cpt-cf-github-mirror-fr-token-pool`) and security-alert collection (`cpt-cf-github-mirror-fr-security-sync`, refused by scope validation today).
 
 #### NFR Allocation
 
@@ -180,7 +180,7 @@ SeaORM through toolkit-db, with SQLite and PostgreSQL in the migrations. The mig
 | `SessionStatus` | `queued`, `in_progress`, `complete`, `failed`, `interrupted` |
 | `RepoRunStatus` | Per repository: `in_progress` until a run completes, then `complete` |
 | `ScopeConfig` | `objects` (which families) and `collection` (`actions`, `reactions`, `timeline`: `all` / `open` / `none`) |
-| `SyncJob` | A queued run: tenant context, repository, scope, `force`, `since`, and the claim guard |
+| `SyncJob` | A queued run: tenant context, repository, scope, force mode, `since`, and the claim guard |
 | `Claim` | The in-memory mark that a repository has a run in flight, with the terms it was asked for |
 | `ExtractionTask` | One unit of work: kind, entity id, priority, `attempt` (repair pass), `retries` (database retries) |
 | `TaskKind` | `Discover`, `Index(Family)`, `Refine(Entity)`, `Verify(Entity)` |
@@ -270,7 +270,7 @@ Response store with compression and a content hash, in `gm_http_cache` or, with 
 
 | Method and path | What it does |
 |---|---|
-| `POST /repos/{owner}/{name}/sync` | Queue a sync. Query: `force`, `include`, `actions_scope`, `reactions_scope`, `timeline_scope`, `since`. `202` with the session id; a repeat on the same terms joins the running sync; other terms get `409` |
+| `POST /repos/{owner}/{name}/sync` | Queue a sync. Query: `force`, `force_full`, `include`, `actions_scope`, `reactions_scope`, `timeline_scope`, `since`. `202` with the session id; a repeat on the same terms joins the running sync; other terms get `409` |
 | `POST /sync/resume` | Re-queue repositories still `in_progress` (optionally one, `?repo=owner/name`) |
 | `GET /sessions`, `GET /sessions/{id}` | Session list and one session: status, progress, error, summary |
 | `GET /sync-status` | Per-repository run status; filter `status=in_progress\|complete` |
@@ -456,15 +456,15 @@ Tasks have no table: the queue is in memory.
 
 #### 3.8.1 Incremental Listing Sweep
 
-Issues and pull requests are listed newest first. A sweep starts from the family's `last_seen_updated_at` minus a five-minute overlap and stops at the first page whose rows are all older. The newest `updated_at` seen is staged as the candidate; it is promoted only when the whole family, including its refinements, has finished. A run that stops early promotes nothing, so the next run walks the listing again and the gate re-seeds whatever was left `pending`. `force` ignores the watermark. A run narrowed by `since`, or run on a scope narrower than the gear's configured one in any object type or collection mode, moves no watermark: it may have skipped rows a default run would store, so the next default sync walks from where the last default one stopped.
+Issues and pull requests are listed newest first. A sweep starts from the family's `last_seen_updated_at` minus a five-minute overlap and stops at the first page whose rows are all older. The newest `updated_at` seen is staged as the candidate; it is promoted only when the whole family, including its refinements, has finished. A run that stops early promotes nothing, so the next run walks the listing again and the gate re-seeds whatever was left `pending`. `force_full` and `force` ignore the watermark. A run narrowed by `since`, or run on a scope narrower than the gear's configured one in any object type or collection mode, moves no watermark: it may have skipped rows a default run would store, so the next default sync walks from where the last default one stopped.
 
-Commits have no date watermark. Their only date is `committer.date`, which the committer's machine sets: a commit dated in the future would push the bound past every later commit, and one made before the last sync but pushed after it would fall below the bound. The commits sweep keeps the head commit instead. When page one's `ETag` has changed and a head from the last complete sweep is stored, it asks `GET /repos/{owner}/{name}/compare/{last_head}...{head}` for the commits added since, whatever their dates, and then walks the commit comments as usual. The first sync, `force`, and a head GitHub no longer has below the new one (a force push answers `diverged` or `404`) walk the whole listing instead. The new head is promoted with the page-one `ETag`, at the same family-complete point.
+Commits have no date watermark. Their only date is `committer.date`, which the committer's machine sets: a commit dated in the future would push the bound past every later commit, and one made before the last sync but pushed after it would fall below the bound. The commits sweep keeps the head commit instead. When page one's `ETag` has changed and a head from the last complete sweep is stored, it asks `GET /repos/{owner}/{name}/compare/{last_head}...{head}` for the commits added since, whatever their dates, and then walks the commit comments as usual. The first sync, `force_full` or `force`, and a head GitHub no longer has below the new one (a force push answers `diverged` or `404`) walk the whole listing instead. The new head is promoted with the page-one `ETag`, at the same family-complete point.
 
 Workflow runs have no watermark either: a sync reads the newest ten pages of `/actions/runs` (1,000 runs) and stops there, and older runs keep what was stored. Runs are never reconciled away, so the cap removes nothing.
 
 #### 3.8.2 Change Gate
 
-An entity is refined when it is new, its fingerprint or child-counts hash changed, its last refinement did not complete, its refresh TTL ran out, or the run is forced. TTLs:
+An entity is refined when it is new, its fingerprint or child-counts hash changed, its last refinement did not complete, its refresh TTL ran out, or the run is forced (`force_full` or `force`). TTLs:
 
 | Entity | Open | Closed |
 |---|---|---|
@@ -585,9 +585,10 @@ The database pool should allow at least `max_concurrent_syncs` × `max_concurren
 
 | Command | What it does |
 |---|---|
-| `sync <ORG/REPO>`, `resume <ORG/REPO>` | `Service::sync_now`; a repeat continues from the stored watermarks |
+| `sync <ORG/REPO>`, `resume <ORG/REPO>` | `Service::sync_now`; a repeat continues from the stored watermarks. `--force-full` walks every listing and refines every entity but keeps asking GitHub whether a page changed; `--force` does that and also fetches every page afresh |
 | `query <ENTITY> <ORG/REPO>` | Reads mirrored rows; `--number` for comments, reviews, review comments, review threads, reactions and timeline; `--limit` |
 | `status <ORG/REPO>` | The repository's run status and its latest session |
+| `clear-cache <ORG/REPO>` | `Service::delete_repository`: every mirrored row of the repository, its watermarks, fingerprints, sessions, run status and cached responses, then the repository row, in one transaction; refused with `409` while a sync of it is in flight. This is the per-repository deletion `cpt-cf-github-mirror-nfr-data-governance` asks for; the REST `DELETE /cache` keeps dropping cached responses only |
 
 Configuration is one TOML file (`--config`, default `./github-mirror.toml`) merged over the built-in template that `--print-config` prints; its tables are the runtime's own settings, plus `[cli] tenant_id`. The GitHub token comes from `--token`, `GITHUB_TOKEN` or `~/.github-mirror/gh_token.txt` and reaches the gear through an in-memory static credstore secret. The platform token comes from `--platform-token`, `CF_PLATFORM_TOKEN` or `~/.github-mirror/platform_token.txt`; the AuthN resolver turns it into the `SecurityContext`, and when `cli.tenant_id` is set it must match the token's tenant. The `static-authn` feature (default) accepts any non-empty platform token as the plugin's configured identity, for local use; `oidc-authn` checks it against the platform's login server.
 

@@ -11,6 +11,7 @@ use authn_resolver_sdk::AuthNResolverClient;
 use clap::{Parser, Subcommand};
 use figment::Figment;
 use figment::providers::Serialized;
+use github_mirror::domain::ports::github::ForceMode;
 use github_mirror::domain::service::Service;
 use serde_json::Value;
 use tokio::task::JoinHandle;
@@ -33,7 +34,12 @@ use crate::app::output::{self, OutputFormat};
     about = "Mirror GitHub repositories into a local database and query them"
 )]
 struct Cli {
-    #[arg(long, global = true, default_value = "./github-mirror.toml", help = "TOML configuration file")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "./github-mirror.toml",
+        help = "TOML configuration file"
+    )]
     config: PathBuf,
 
     #[arg(
@@ -57,13 +63,22 @@ struct Cli {
     #[arg(short, long, global = true, action = clap::ArgAction::Count, help = "More log output (-v, -vv, -vvv)")]
     verbose: u8,
 
-    #[arg(long, global = true, help = "Log filter, e.g. info or github_mirror=debug")]
+    #[arg(
+        long,
+        global = true,
+        help = "Log filter, e.g. info or github_mirror=debug"
+    )]
     log_level: Option<String>,
 
     #[arg(short, long, global = true, help = "Only errors in the log output")]
     quiet: bool,
 
-    #[arg(long, global = true, value_enum, help = "table (default for sync and status) or json (default for query)")]
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        help = "table (default for sync and status) or json (default for query)"
+    )]
     output_format: Option<OutputFormat>,
 
     #[arg(long, help = "Print the built-in configuration template and exit")]
@@ -79,11 +94,25 @@ enum Command {
     Sync {
         #[arg(help = "ORG/REPO")]
         repo: String,
+        #[arg(
+            long,
+            help = "Walk every listing and refine every entity, keeping the HTTP cache"
+        )]
+        force_full: bool,
+        #[arg(long, help = "Like --force-full, and also bypass the HTTP cache")]
+        force: bool,
     },
     #[command(about = "Continue an interrupted synchronization")]
     Resume {
         #[arg(help = "ORG/REPO")]
         repo: String,
+        #[arg(
+            long,
+            help = "Walk every listing and refine every entity, keeping the HTTP cache"
+        )]
+        force_full: bool,
+        #[arg(long, help = "Like --force-full, and also bypass the HTTP cache")]
+        force: bool,
     },
     #[command(about = "Read mirrored data from the local database")]
     Query {
@@ -91,13 +120,24 @@ enum Command {
         entity: Entity,
         #[arg(help = "ORG/REPO")]
         repo: String,
-        #[arg(long, help = "Issue or pull request number, for entities that belong to one")]
+        #[arg(
+            long,
+            help = "Issue or pull request number, for entities that belong to one"
+        )]
         number: Option<i64>,
         #[arg(long, default_value_t = 30, help = "Most rows to return")]
         limit: u64,
     },
     #[command(about = "Show the synchronization status of a repository")]
     Status {
+        #[arg(help = "ORG/REPO")]
+        repo: String,
+    },
+    #[command(
+        name = "clear-cache",
+        about = "Remove everything mirrored for a repository: its data, change-detection state and cached responses"
+    )]
+    ClearCache {
         #[arg(help = "ORG/REPO")]
         repo: String,
     },
@@ -134,9 +174,10 @@ async fn run(cli: Cli) -> Result<()> {
     let loaded = config::load(&cli.config, github_token.as_deref())?;
     let format = cli.output_format.unwrap_or(match command {
         Command::Query { .. } => OutputFormat::Json,
-        Command::Sync { .. } | Command::Resume { .. } | Command::Status { .. } => {
-            OutputFormat::Table
-        }
+        Command::Sync { .. }
+        | Command::Resume { .. }
+        | Command::Status { .. }
+        | Command::ClearCache { .. } => OutputFormat::Table,
     });
 
     let runtime = Runtime::start(loaded.app)?;
@@ -166,8 +207,23 @@ async fn execute(
     }
     let service = runtime.service().await?;
     match command {
-        Command::Sync { repo } | Command::Resume { repo } => {
-            commands::sync(&service, &ctx, &repo).await
+        Command::Sync {
+            repo,
+            force_full,
+            force,
+        }
+        | Command::Resume {
+            repo,
+            force_full,
+            force,
+        } => {
+            commands::sync(
+                &service,
+                &ctx,
+                &repo,
+                ForceMode::from_flags(force, force_full),
+            )
+            .await
         }
         Command::Query {
             entity,
@@ -176,6 +232,7 @@ async fn execute(
             limit,
         } => commands::query(&service, &ctx, entity, &repo, number, limit).await,
         Command::Status { repo } => commands::status(&service, &ctx, &repo).await,
+        Command::ClearCache { repo } => commands::clear_cache(&service, &ctx, &repo).await,
     }
 }
 

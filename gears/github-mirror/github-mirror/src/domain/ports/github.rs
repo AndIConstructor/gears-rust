@@ -23,6 +23,43 @@ use crate::domain::sync::telemetry::SessionTelemetry;
 
 pub const SHARED_CACHE_PARTITION: uuid::Uuid = uuid::Uuid::nil();
 
+/// How much of a sync ignores what earlier runs stored (PRD §5.2 force mode).
+#[domain_model]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ForceMode {
+    /// Watermarks, fingerprints and cached responses all apply.
+    #[default]
+    None,
+    /// Walk every listing and refine every entity, but still send cached
+    /// validators so unchanged pages cost no rate-limit units (`--force-full`).
+    Full,
+    /// `Full`, and fetch every page afresh with no cached validator (`--force`).
+    All,
+}
+
+impl ForceMode {
+    #[must_use]
+    pub fn from_flags(force: bool, force_full: bool) -> Self {
+        if force {
+            Self::All
+        } else if force_full {
+            Self::Full
+        } else {
+            Self::None
+        }
+    }
+
+    #[must_use]
+    pub fn refetches_all(self) -> bool {
+        self != Self::None
+    }
+
+    #[must_use]
+    pub fn skips_cache(self) -> bool {
+        self == Self::All
+    }
+}
+
 /// Everything one fetch needs beyond the repository's name.
 #[domain_model]
 #[derive(Debug, Clone)]
@@ -32,9 +69,7 @@ pub struct FetchOptions {
     pub access_scope: AccessScope,
     /// Which object types and sub-resources to collect.
     pub scope: ScopeConfig,
-    /// Ignore any cached validator and re-fetch everything (PRD §5.2 force
-    /// mode). Fresh responses are still written back to the cache.
-    pub force: bool,
+    pub force: ForceMode,
     /// Oldest closed issue or pull request worth collecting (PRD &sect;5.4
     /// `--since`); open ones are always collected.
     pub since: Option<DateTime<Utc>>,

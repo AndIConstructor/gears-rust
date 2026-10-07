@@ -2,8 +2,8 @@
 
 use github_mirror::domain::error::DomainError;
 use github_mirror::domain::ports::github::{
-    CommitListing, FetchOptions, FetchedRepository, GithubPort, IssueDetailWants, IssueListing,
-    ListCursor, Listing, ListingCompleteness, PullListing, RepoRef,
+    CommitListing, FetchOptions, FetchedRepository, ForceMode, GithubPort, IssueDetailWants,
+    IssueListing, ListCursor, Listing, ListingCompleteness, PullListing, RepoRef,
 };
 use github_mirror::domain::ports::telemetry_sink::TelemetrySink;
 use github_mirror::domain::repo::ContributorRecord;
@@ -458,7 +458,7 @@ fn opts(scope: ScopeConfig) -> FetchOptions {
         tenant_id,
         access_scope: AccessScope::for_tenant(tenant_id),
         scope,
-        force: false,
+        force: ForceMode::None,
         since: None,
         cancel: tokio_util::sync::CancellationToken::new(),
         telemetry: std::sync::Arc::default(),
@@ -1663,7 +1663,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
         tenant_id: tenant,
         access_scope: AccessScope::for_tenant(tenant),
         scope,
-        force: false,
+        force: ForceMode::None,
         since: None,
         cancel: tokio_util::sync::CancellationToken::new(),
         telemetry: std::sync::Arc::default(),
@@ -1688,7 +1688,7 @@ async fn a_stored_etag_turns_the_next_sync_into_a_free_304() {
     );
 
     let forced = FetchOptions {
-        force: true,
+        force: ForceMode::All,
         ..options.clone()
     };
     fetch_repository(&client, "rust-lang", "rust", &forced)

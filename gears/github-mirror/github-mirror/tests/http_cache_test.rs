@@ -337,12 +337,19 @@ async fn a_clear_takes_every_prefix_it_is_given_and_an_empty_list_takes_none() {
 
     let survivor = CacheKey::compute("GET", urls[1], "application/json");
     assert!(
-        cache.get(&scope, tenant, &survivor).await.unwrap().is_some(),
+        cache
+            .get(&scope, tenant, &survivor)
+            .await
+            .unwrap()
+            .is_some(),
         "the repository no prefix named must survive"
     );
     for url in [urls[0], urls[2]] {
         let key = CacheKey::compute("GET", url, "application/json");
-        assert!(cache.get(&scope, tenant, &key).await.unwrap().is_none(), "{url}");
+        assert!(
+            cache.get(&scope, tenant, &key).await.unwrap().is_none(),
+            "{url}"
+        );
     }
 }
 

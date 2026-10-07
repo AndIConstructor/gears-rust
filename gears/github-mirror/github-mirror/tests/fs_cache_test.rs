@@ -30,7 +30,13 @@ fn cache_in(dir: &Path, compression: Compression) -> FilesystemHttpCache {
 
 async fn put(cache: &FilesystemHttpCache, tenant: Uuid, url: &str) {
     cache
-        .put(&AccessScope::for_tenant(tenant), tenant, &key(url), url, entry())
+        .put(
+            &AccessScope::for_tenant(tenant),
+            tenant,
+            &key(url),
+            url,
+            entry(),
+        )
         .await
         .unwrap();
 }
@@ -104,8 +110,7 @@ async fn files_land_under_the_tenant_folder_with_a_meta_companion() {
     assert!(body.is_file(), "body at {}", body.display());
     assert!(meta.is_file(), "meta at {}", meta.display());
 
-    let meta: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
     assert_eq!(meta["url"], URL);
     assert_eq!(meta["etag"], "W/\"abc\"");
     assert_eq!(meta["compression"], "none");
@@ -154,12 +159,19 @@ async fn a_deny_all_scope_reads_nothing_and_writes_nothing() {
     );
     assert_eq!(
         cache
-            .clear(&AccessScope::deny_all(), tenant, &["https://api.github.com/repos/acme"])
+            .clear(
+                &AccessScope::deny_all(),
+                tenant,
+                &["https://api.github.com/repos/acme"]
+            )
             .await
             .unwrap(),
         0
     );
-    assert!(cached(&cache, tenant, URL).await, "the denied clear must leave the entry");
+    assert!(
+        cached(&cache, tenant, URL).await,
+        "the denied clear must leave the entry"
+    );
 }
 
 #[tokio::test]
@@ -199,7 +211,10 @@ async fn clearing_by_prefix_drops_only_the_matching_repository() {
         ("https://api.github.com/repos/acme/widget", true),
         ("https://api.github.com/repos/acme/widget/issues", true),
         ("https://api.github.com/repos/acme/widget?page=2", true),
-        ("https://api.github.com/repos/acme/widget-fork/issues", false),
+        (
+            "https://api.github.com/repos/acme/widget-fork/issues",
+            false,
+        ),
         ("https://api.github.com/repos/acme/widgets/issues", false),
         ("https://api.github.com/repos/acme/gadget/issues", false),
     ];
@@ -208,7 +223,11 @@ async fn clearing_by_prefix_drops_only_the_matching_repository() {
     }
 
     let removed = cache
-        .clear(&scope, tenant, &["https://api.github.com/repos/acme/widget"])
+        .clear(
+            &scope,
+            tenant,
+            &["https://api.github.com/repos/acme/widget"],
+        )
         .await
         .unwrap();
     assert_eq!(removed, 3, "the prefix itself, its child and its query");
