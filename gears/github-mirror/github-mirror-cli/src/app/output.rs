@@ -139,3 +139,48 @@ fn line(out: &mut String, cells: &[String], widths: &[usize]) {
     out.push_str(padded.join("  ").trim_end());
     out.push('\n');
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod tests {
+    use serde_json::json;
+
+    use super::table;
+
+    #[test]
+    fn an_object_of_objects_prints_titled_sections_in_report_order() {
+        let text = table(&json!({
+            "storage": {"cache_bytes": 1},
+            "api": {},
+            "repository": {"repository": "o/r"},
+        }));
+        let repository = text.find("REPOSITORY\n").unwrap();
+        let api = text.find("API\n(none)\n").unwrap();
+        let storage = text.find("STORAGE\n").unwrap();
+        assert!(repository < api && api < storage, "{text}");
+        assert!(text.contains("repository  o/r"), "{text}");
+    }
+
+    #[test]
+    fn a_flat_object_prints_dotted_fields_and_blank_nulls() {
+        let text = table(&json!({"b": null, "a": {"c": "d"}, "n": 7}));
+        assert!(text.contains("a.c    d"), "{text}");
+        assert!(text.contains("n      7"), "{text}");
+        assert!(text.lines().any(|line| line.trim_end() == "b"), "{text}");
+    }
+
+    #[test]
+    fn rows_print_one_column_per_scalar_key() {
+        let text = table(&json!([
+            {"id": 1, "name": "x", "nested": {"k": 1}},
+            {"id": 2, "name": "yy"},
+        ]));
+        assert!(text.starts_with("id  name\n"), "{text}");
+        assert!(!text.contains("nested"), "{text}");
+        assert!(text.contains("2   yy"), "{text}");
+    }
+}

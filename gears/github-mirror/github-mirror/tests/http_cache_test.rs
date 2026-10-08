@@ -428,3 +428,42 @@ async fn a_compression_value_this_build_does_not_know_is_refused() {
         "an unknown compression must not be served as a body"
     );
 }
+
+#[tokio::test]
+async fn size_sums_the_stored_bodies_below_the_prefixes() {
+    let cache = store(Compression::None).await;
+    let tenant = Uuid::new_v4();
+    let scope = AccessScope::for_tenant(tenant);
+    let widget = "https://api.github.com/repos/acme/widget";
+    let other = "https://api.github.com/repos/acme/other";
+    for (url, body) in [
+        (format!("{widget}/issues"), "0123456789"),
+        (format!("{widget}/pulls?page=2"), "01234"),
+        (format!("{other}/issues"), "0123456789012345678901234567890"),
+    ] {
+        let key = CacheKey::compute("GET", &url, "application/json");
+        let stored = CachedResponse {
+            body: body.to_owned(),
+            etag: None,
+            last_modified: None,
+            next_page: None,
+        };
+        cache.put(&scope, tenant, &key, &url, stored).await.unwrap();
+    }
+
+    assert_eq!(cache.size(&scope, tenant, &[widget]).await.unwrap(), 15);
+    assert_eq!(cache.size(&scope, tenant, &[other]).await.unwrap(), 31);
+    assert_eq!(
+        cache.size(&scope, tenant, &[widget, other]).await.unwrap(),
+        46
+    );
+    assert_eq!(cache.size(&scope, tenant, &[]).await.unwrap(), 0);
+    let stranger = Uuid::new_v4();
+    assert_eq!(
+        cache
+            .size(&AccessScope::for_tenant(stranger), stranger, &[widget])
+            .await
+            .unwrap(),
+        0
+    );
+}

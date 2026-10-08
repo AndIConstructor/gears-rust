@@ -555,3 +555,56 @@ fn split_repo(repo: &str) -> Result<(&str, &str)> {
         .filter(|(owner, name)| !owner.is_empty() && !name.is_empty() && !name.contains('/'))
         .ok_or_else(|| anyhow!("`{repo}` is not ORG/REPO"))
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_date_or_a_relative_span_becomes_a_cutoff() {
+        assert_eq!(
+            parse_since("2026-01-02").unwrap(),
+            Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap()
+        );
+        for (span, days) in [("3d", 3), ("2w", 14), ("1m", 30)] {
+            let cutoff = parse_since(span).unwrap();
+            assert_eq!((Utc::now() - cutoff).num_days(), days, "{span}");
+        }
+        for bad in ["", "0d", "x", "3y", "2026-13-01"] {
+            assert!(parse_since(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_instant_must_be_iso_8601() {
+        assert_eq!(
+            parse_instant("2026-10-08T12:00:00Z").unwrap(),
+            Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap()
+        );
+        assert!(parse_instant("2026-10-08").is_err());
+    }
+
+    #[test]
+    fn a_repository_argument_must_be_owner_slash_name() {
+        assert_eq!(split_repo("dtolnay/itoa").unwrap(), ("dtolnay", "itoa"));
+        for bad in ["itoa", "/itoa", "dtolnay/", "a/b/c"] {
+            assert!(split_repo(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_report_always_has_its_five_sections() {
+        let report = sections("dtolnay/itoa", None, None, None, json!({"cache_bytes": 0})).unwrap();
+        let keys: Vec<&String> = report.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["api", "objects", "repository", "run", "storage"]);
+        assert_eq!(report["repository"]["repository"], "dtolnay/itoa");
+        assert_eq!(report["run"], json!({}));
+        assert_eq!(report["objects"], json!({}));
+        assert_eq!(report["storage"]["cache_bytes"], 0);
+    }
+}

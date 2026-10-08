@@ -403,3 +403,46 @@ async fn a_tenant_with_no_folder_yet_clears_and_expires_nothing() {
     assert_eq!(cache.expire(&scope, tenant, Utc::now()).await.unwrap(), 0);
     assert!(!cached(&cache, tenant, URL).await);
 }
+
+#[tokio::test]
+async fn size_counts_the_body_and_meta_files_below_the_prefixes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = cache_in(dir.path(), Compression::None);
+    let tenant = Uuid::new_v4();
+    let scope = AccessScope::for_tenant(tenant);
+    let widget = "https://api.github.com/repos/acme/widget";
+    let issues = format!("{widget}/issues");
+    let pulls = format!("{widget}/pulls?page=2");
+    put(&cache, tenant, &issues).await;
+    put(&cache, tenant, &pulls).await;
+    put(
+        &cache,
+        tenant,
+        "https://api.github.com/repos/acme/other/issues",
+    )
+    .await;
+
+    let widget_keys = [key(&issues), key(&pulls)];
+    let expected: u64 = files_under(dir.path())
+        .iter()
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            widget_keys.iter().any(|k| name.starts_with(k.as_str()))
+        })
+        .map(|path| std::fs::metadata(path).unwrap().len())
+        .sum();
+    assert!(expected > 0);
+    assert_eq!(
+        cache.size(&scope, tenant, &[widget]).await.unwrap(),
+        expected
+    );
+    assert_eq!(cache.size(&scope, tenant, &[]).await.unwrap(), 0);
+    let stranger = Uuid::new_v4();
+    assert_eq!(
+        cache
+            .size(&AccessScope::for_tenant(stranger), stranger, &[widget])
+            .await
+            .unwrap(),
+        0
+    );
+}

@@ -232,3 +232,154 @@ fn user_home() -> Result<PathBuf> {
             anyhow!("cannot find the home directory: neither HOME nor USERPROFILE is set")
         })
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("github-mirror-cli-{}", Uuid::new_v4().simple()))
+    }
+
+    fn flags(
+        dir: &Path,
+        placement: Option<DatabasePlacement>,
+        repo: Option<&'static str>,
+    ) -> StorageFlags<'static> {
+        StorageFlags {
+            storage_dir: Some(dir.to_path_buf()),
+            database_url: None,
+            database_placement: placement,
+            repo,
+        }
+    }
+
+    fn database_file(
+        dir: &Path,
+        placement: Option<DatabasePlacement>,
+        repo: Option<&'static str>,
+    ) -> Option<PathBuf> {
+        let loaded = load(
+            Path::new("does-not-exist.toml"),
+            None,
+            flags(dir, placement, repo),
+        )
+        .unwrap();
+        sqlite_file(&loaded.app)
+    }
+
+    fn remove(dir: &Path) {
+        if dir.exists() {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    fn under_cache(dir: &Path, folder: &str) -> PathBuf {
+        dir.join("github-mirror")
+            .join("cache")
+            .join(folder)
+            .join("github_mirror.db")
+    }
+
+    #[test]
+    fn per_repo_is_the_default_and_names_the_file_after_owner_and_repository() {
+        let dir = scratch_dir();
+        assert_eq!(
+            database_file(&dir, None, Some("dtolnay/itoa")),
+            Some(under_cache(&dir, "dtolnay_itoa"))
+        );
+        remove(&dir);
+    }
+
+    #[test]
+    fn per_org_and_shared_place_the_file_by_owner_or_once_for_all() {
+        let dir = scratch_dir();
+        assert_eq!(
+            database_file(&dir, Some(DatabasePlacement::PerOrg), Some("dtolnay/itoa")),
+            Some(under_cache(&dir, "dtolnay"))
+        );
+        let shared = dir.join("github-mirror").join("github_mirror.db");
+        assert_eq!(
+            database_file(&dir, Some(DatabasePlacement::Shared), Some("dtolnay/itoa")),
+            Some(shared.clone())
+        );
+        assert_eq!(database_file(&dir, None, None), Some(shared));
+        remove(&dir);
+    }
+
+    #[test]
+    fn a_database_url_replaces_the_file_and_makes_placement_moot() {
+        let dir = scratch_dir();
+        let postgres = load(
+            Path::new("does-not-exist.toml"),
+            None,
+            StorageFlags {
+                storage_dir: Some(dir.clone()),
+                database_url: Some("postgres://u:p@db.local/mirror".to_owned()),
+                database_placement: Some(DatabasePlacement::PerRepo),
+                repo: Some("dtolnay/itoa"),
+            },
+        )
+        .unwrap();
+        assert_eq!(sqlite_file(&postgres.app), None);
+
+        let by_url = dir.join("by-url.db");
+        let sqlite = load(
+            Path::new("does-not-exist.toml"),
+            None,
+            StorageFlags {
+                storage_dir: Some(dir.clone()),
+                database_url: Some(format!("sqlite://{}?mode=rwc", by_url.display())),
+                database_placement: None,
+                repo: Some("dtolnay/itoa"),
+            },
+        )
+        .unwrap();
+        assert_eq!(sqlite_file(&sqlite.app), Some(by_url));
+        remove(&dir);
+    }
+
+    #[test]
+    fn the_flag_beats_the_toml_placement() {
+        let dir = scratch_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("github-mirror.toml");
+        std::fs::write(&toml, "[cli]\ndatabase_placement = \"shared\"\n").unwrap();
+
+        let from_toml = load(&toml, None, flags(&dir, None, Some("dtolnay/itoa"))).unwrap();
+        assert_eq!(
+            sqlite_file(&from_toml.app),
+            Some(dir.join("github-mirror").join("github_mirror.db"))
+        );
+        let from_flag = load(
+            &toml,
+            None,
+            flags(&dir, Some(DatabasePlacement::PerRepo), Some("dtolnay/itoa")),
+        )
+        .unwrap();
+        assert_eq!(
+            sqlite_file(&from_flag.app),
+            Some(under_cache(&dir, "dtolnay_itoa"))
+        );
+        remove(&dir);
+    }
+
+    #[test]
+    fn a_repository_name_that_is_not_a_safe_path_is_refused_before_any_file_is_chosen() {
+        let dir = scratch_dir();
+        assert!(
+            load(
+                Path::new("does-not-exist.toml"),
+                None,
+                flags(&dir, None, Some("../x"))
+            )
+            .is_err()
+        );
+        assert!(!dir.exists());
+    }
+}
