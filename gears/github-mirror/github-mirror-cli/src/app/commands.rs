@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
@@ -30,6 +31,7 @@ pub enum Entity {
     Contributors,
     Repos,
     Comments,
+    Conversations,
     ReviewThreads,
     Reviews,
     ReviewComments,
@@ -198,6 +200,7 @@ pub async fn query(
                 .items,
             WorkflowRunDto::from,
         )?,
+        Entity::Conversations => conversations(service, ctx, (owner, name), number, limit).await?,
         Entity::Comments
         | Entity::ReviewThreads
         | Entity::Reviews
@@ -279,8 +282,52 @@ async fn query_one(
         | Entity::Labels
         | Entity::Milestones
         | Entity::Releases
-        | Entity::WorkflowRuns => Ok(Vec::new()),
+        | Entity::WorkflowRuns
+        | Entity::Conversations => Ok(Vec::new()),
     }
+}
+
+async fn conversations(
+    service: &Service,
+    ctx: &SecurityContext,
+    (owner, name): (&str, &str),
+    number: Option<i64>,
+    limit: u64,
+) -> Result<Vec<Value>> {
+    let mut parents: BTreeMap<(String, i64), Vec<Value>> = BTreeMap::new();
+    let found = service.list_conversations(ctx, owner, name, number).await?;
+    for conversation in found
+        .into_iter()
+        .take(usize::try_from(limit).unwrap_or(usize::MAX))
+    {
+        let members = service.conversation_comments(ctx, &conversation).await?;
+        let comments = if members.review_comments.is_empty() {
+            rows(members.comments, CommentDto::from)?
+        } else {
+            rows(members.review_comments, ReviewCommentDto::from)?
+        };
+        parents
+            .entry((conversation.parent_kind, conversation.parent_number))
+            .or_default()
+            .push(json!({
+                "conv_type": conversation.conv_type,
+                "root_comment_id": conversation.root_comment_id,
+                "comment_count": conversation.comment_count,
+                "is_resolved": conversation.is_resolved,
+                "created_at": conversation.created_at,
+                "comments": comments,
+            }));
+    }
+    Ok(parents
+        .into_iter()
+        .map(|((parent_kind, parent_number), conversations)| {
+            json!({
+                "parent_kind": parent_kind,
+                "parent_number": parent_number,
+                "conversations": conversations,
+            })
+        })
+        .collect())
 }
 
 pub async fn check_rate_limit(service: &Service, ctx: &SecurityContext) -> Result<Value> {

@@ -55,6 +55,10 @@ use crate::domain::repo::{
     ReviewThreadRecord, ReviewThreadRepository, TagRecord, TagRepository, WorkflowJobRecord,
     WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
+use crate::domain::repo::{
+    CommentForGrouping, ConversationRepository, LogicalConversation, ReviewCommentForGrouping,
+    ReviewThreadForGrouping,
+};
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache};
 use crate::infra::github::compression::{Compression, content_hash};
 
@@ -80,6 +84,7 @@ use super::entity::issue_reactions::{self, Entity as IssueReactionEntity};
 use super::entity::issue_timeline::{self, Entity as IssueTimelineEntity};
 use super::entity::issues::{self, Entity as IssueEntity};
 use super::entity::labels::{self, Entity as LabelEntity};
+use super::entity::logical_conversations::{self, Entity as LogicalConversationEntity};
 use super::entity::milestones::{self, Entity as MilestoneEntity};
 use super::entity::pull_request_commits::{self, Entity as PullRequestCommitEntity};
 use super::entity::pull_request_files::{self, Entity as PullRequestFileEntity};
@@ -601,6 +606,7 @@ fn comment_active_model(tenant_id: Uuid, r: &CommentRecord) -> comments::ActiveM
         updated_at: ActiveValue::Set(r.updated_at.clone()),
         html_url: ActiveValue::Set(r.html_url.clone()),
         extracted_at: ActiveValue::Set(Some(Utc::now())),
+        conversation_id: ActiveValue::NotSet,
     }
 }
 
@@ -678,6 +684,7 @@ fn review_comment_active_model(
         subject_type: ActiveValue::Set(r.subject_type.clone()),
         pull_request_review_id: ActiveValue::Set(r.pull_request_review_id),
         extracted_at: ActiveValue::Set(Some(Utc::now())),
+        conversation_id: ActiveValue::NotSet,
     }
 }
 
@@ -4950,6 +4957,13 @@ impl SyncWriter for SeaOrmSyncWriter {
                         delete_by_repo!(tx, &scope, repo_id, IssueTimelineEntity, issue_timeline);
                     removed += delete_by_repo!(tx, &scope, repo_id, IssueEventEntity, issue_events);
                     removed += delete_by_repo!(tx, &scope, repo_id, CommentEntity, comments);
+                    removed += delete_by_repo!(
+                        tx,
+                        &scope,
+                        repo_id,
+                        LogicalConversationEntity,
+                        logical_conversations
+                    );
                     removed += delete_by_repo!(tx, &scope, repo_id, IssueEntity, issues);
                     removed +=
                         delete_by_repo!(tx, &scope, repo_id, ReviewCommentEntity, review_comments);
@@ -6195,5 +6209,397 @@ impl EntityFingerprintRepository for SeaOrmEntityFingerprintRepository {
             .map_err(map_scope_error)?;
 
         Ok(row.map(Into::into))
+    }
+}
+
+pub struct SeaOrmConversationRepository {
+    db: Arc<DbProvider>,
+}
+
+impl SeaOrmConversationRepository {
+    #[must_use]
+    pub fn new(db: Arc<DbProvider>) -> Self {
+        Self { db }
+    }
+}
+
+const GROUPING_CHUNK: usize = 500;
+
+fn parent_chunks(numbers: Option<&[i64]>) -> Vec<Option<&[i64]>> {
+    match numbers {
+        None => vec![None],
+        Some(all) => all.chunks(GROUPING_CHUNK).map(Some).collect(),
+    }
+}
+
+fn rows_of_parents<C: ColumnTrait>(
+    repo_column: C,
+    repo_id: i64,
+    parent_column: C,
+    parents: Option<&[i64]>,
+) -> sea_orm::Condition {
+    let mut condition = sea_orm::Condition::all().add(repo_column.eq(repo_id));
+    if let Some(parents) = parents {
+        condition = condition.add(parent_column.is_in(parents.iter().copied()));
+    }
+    condition
+}
+
+fn conversation_from_model(m: logical_conversations::Model) -> LogicalConversation {
+    LogicalConversation {
+        repo_id: m.repo_id,
+        conv_type: m.conv_type,
+        root_comment_id: m.root_comment_id,
+        parent_kind: m.parent_kind,
+        parent_number: m.parent_number,
+        comment_count: m.comment_count,
+        is_resolved: m.is_resolved,
+        created_at: m.created_at,
+    }
+}
+
+#[derive(sea_orm::FromQueryResult)]
+struct ParentNumber {
+    number: i64,
+}
+
+#[async_trait]
+impl ConversationRepository for SeaOrmConversationRepository {
+    async fn pull_numbers(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<Vec<i64>, DomainError> {
+        let conn = self.db.conn()?;
+        let rows: Vec<ParentNumber> = PullRequestEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(sea_orm::Condition::all().add(pull_requests::Column::RepoId.eq(repo_id)))
+            .project_all(&conn, |select| {
+                select
+                    .select_only()
+                    .column_as(pull_requests::Column::Number, "number")
+                    .into_model::<ParentNumber>()
+            })
+            .await
+            .map_err(map_scope_error)?;
+        Ok(rows.into_iter().map(|row| row.number).collect())
+    }
+
+    async fn comments_for_grouping(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        issue_numbers: Option<&[i64]>,
+    ) -> Result<Vec<CommentForGrouping>, DomainError> {
+        let conn = self.db.conn()?;
+        let mut out = Vec::new();
+        for chunk in parent_chunks(issue_numbers) {
+            let rows = CommentEntity::find()
+                .secure()
+                .scope_with(scope)
+                .filter(rows_of_parents(
+                    comments::Column::RepoId,
+                    repo_id,
+                    comments::Column::IssueNumber,
+                    chunk,
+                ))
+                .all(&conn)
+                .await
+                .map_err(map_scope_error)?;
+            out.extend(rows.into_iter().map(|m| CommentForGrouping {
+                id: m.id,
+                issue_number: m.issue_number,
+                body: m.body,
+                created_at: m.created_at,
+                conversation_id: m.conversation_id,
+            }));
+        }
+        Ok(out)
+    }
+
+    async fn review_comments_for_grouping(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        pull_numbers: Option<&[i64]>,
+    ) -> Result<Vec<ReviewCommentForGrouping>, DomainError> {
+        let conn = self.db.conn()?;
+        let mut out = Vec::new();
+        for chunk in parent_chunks(pull_numbers) {
+            let rows = ReviewCommentEntity::find()
+                .secure()
+                .scope_with(scope)
+                .filter(rows_of_parents(
+                    review_comments::Column::RepoId,
+                    repo_id,
+                    review_comments::Column::PullNumber,
+                    chunk,
+                ))
+                .all(&conn)
+                .await
+                .map_err(map_scope_error)?;
+            out.extend(rows.into_iter().map(|m| ReviewCommentForGrouping {
+                id: m.id,
+                pull_number: m.pull_number,
+                in_reply_to_id: m.in_reply_to_id,
+                created_at: m.created_at,
+                conversation_id: m.conversation_id,
+            }));
+        }
+        Ok(out)
+    }
+
+    async fn review_threads_for_grouping(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        pull_numbers: Option<&[i64]>,
+    ) -> Result<Vec<ReviewThreadForGrouping>, DomainError> {
+        let conn = self.db.conn()?;
+        let mut out = Vec::new();
+        for chunk in parent_chunks(pull_numbers) {
+            let rows = ReviewThreadEntity::find()
+                .secure()
+                .scope_with(scope)
+                .filter(rows_of_parents(
+                    review_threads::Column::RepoId,
+                    repo_id,
+                    review_threads::Column::PullNumber,
+                    chunk,
+                ))
+                .all(&conn)
+                .await
+                .map_err(map_scope_error)?;
+            out.extend(rows.into_iter().map(|m| ReviewThreadForGrouping {
+                id: m.id,
+                pull_number: m.pull_number,
+                is_resolved: m.is_resolved,
+                comments_count: m.comments_count,
+            }));
+        }
+        Ok(out)
+    }
+
+    async fn issues_with_comments_since(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        since: DateTimeUtc,
+    ) -> Result<Vec<i64>, DomainError> {
+        let conn = self.db.conn()?;
+        let rows: Vec<ParentNumber> = CommentEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(comments::Column::RepoId.eq(repo_id))
+                    .add(comments::Column::ExtractedAt.gte(since)),
+            )
+            .project_all(&conn, |select| {
+                select
+                    .select_only()
+                    .column_as(comments::Column::IssueNumber, "number")
+                    .distinct()
+                    .into_model::<ParentNumber>()
+            })
+            .await
+            .map_err(map_scope_error)?;
+        Ok(rows.into_iter().map(|row| row.number).collect())
+    }
+
+    async fn pulls_with_review_comments_since(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        since: DateTimeUtc,
+    ) -> Result<Vec<i64>, DomainError> {
+        let conn = self.db.conn()?;
+        let rows: Vec<ParentNumber> = ReviewCommentEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(review_comments::Column::RepoId.eq(repo_id))
+                    .add(review_comments::Column::ExtractedAt.gte(since)),
+            )
+            .project_all(&conn, |select| {
+                select
+                    .select_only()
+                    .column_as(review_comments::Column::PullNumber, "number")
+                    .distinct()
+                    .into_model::<ParentNumber>()
+            })
+            .await
+            .map_err(map_scope_error)?;
+        Ok(rows.into_iter().map(|row| row.number).collect())
+    }
+
+    async fn list(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        parent_number: Option<i64>,
+    ) -> Result<Vec<LogicalConversation>, DomainError> {
+        let conn = self.db.conn()?;
+        let mut condition =
+            sea_orm::Condition::all().add(logical_conversations::Column::RepoId.eq(repo_id));
+        if let Some(number) = parent_number {
+            condition = condition.add(logical_conversations::Column::ParentNumber.eq(number));
+        }
+        let rows = LogicalConversationEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(condition)
+            .order_by(logical_conversations::Column::ParentNumber, Order::Asc)
+            .order_by(logical_conversations::Column::ConvType, Order::Asc)
+            .order_by(logical_conversations::Column::RootCommentId, Order::Asc)
+            .all(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(rows.into_iter().map(conversation_from_model).collect())
+    }
+
+    async fn upsert(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: LogicalConversation,
+    ) -> Result<(), DomainError> {
+        let conn = self.db.conn()?;
+        let model = logical_conversations::ActiveModel {
+            tenant_id: ActiveValue::Set(tenant_id),
+            repo_id: ActiveValue::Set(record.repo_id),
+            conv_type: ActiveValue::Set(record.conv_type),
+            root_comment_id: ActiveValue::Set(record.root_comment_id),
+            parent_kind: ActiveValue::Set(record.parent_kind),
+            parent_number: ActiveValue::Set(record.parent_number),
+            comment_count: ActiveValue::Set(record.comment_count),
+            is_resolved: ActiveValue::Set(record.is_resolved),
+            created_at: ActiveValue::Set(record.created_at),
+            extracted_at: ActiveValue::Set(Some(Utc::now())),
+        };
+        let on_conflict = SecureOnConflict::<LogicalConversationEntity>::columns([
+            logical_conversations::Column::TenantId,
+            logical_conversations::Column::RepoId,
+            logical_conversations::Column::ConvType,
+            logical_conversations::Column::RootCommentId,
+        ])
+        .update_columns([
+            logical_conversations::Column::ParentKind,
+            logical_conversations::Column::ParentNumber,
+            logical_conversations::Column::CommentCount,
+            logical_conversations::Column::IsResolved,
+            logical_conversations::Column::CreatedAt,
+            logical_conversations::Column::ExtractedAt,
+        ])
+        .map_err(map_scope_error)?;
+        LogicalConversationEntity::insert(model.clone())
+            .secure()
+            .scope_with_model(scope, &model)
+            .map_err(map_scope_error)?
+            .on_conflict(on_conflict)
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(())
+    }
+
+    async fn set_comment_conversation(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        comment_id: i64,
+        conversation_id: Option<i64>,
+    ) -> Result<(), DomainError> {
+        let conn = self.db.conn()?;
+        CommentEntity::update_many()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(comments::Column::RepoId.eq(repo_id))
+                    .add(comments::Column::Id.eq(comment_id)),
+            )
+            .col_expr(
+                comments::Column::ConversationId,
+                Expr::value(conversation_id),
+            )
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(())
+    }
+
+    async fn set_review_comment_conversation(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        comment_id: i64,
+        conversation_id: Option<i64>,
+    ) -> Result<(), DomainError> {
+        let conn = self.db.conn()?;
+        ReviewCommentEntity::update_many()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(review_comments::Column::RepoId.eq(repo_id))
+                    .add(review_comments::Column::Id.eq(comment_id)),
+            )
+            .col_expr(
+                review_comments::Column::ConversationId,
+                Expr::value(conversation_id),
+            )
+            .exec(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(())
+    }
+
+    async fn comments_in(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        root_comment_id: i64,
+    ) -> Result<Vec<Comment>, DomainError> {
+        let conn = self.db.conn()?;
+        let rows = CommentEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(comments::Column::RepoId.eq(repo_id))
+                    .add(comments::Column::ConversationId.eq(root_comment_id)),
+            )
+            .order_by(comments::Column::CreatedAt, Order::Asc)
+            .order_by(comments::Column::Id, Order::Asc)
+            .all(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn review_comments_in(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        root_comment_id: i64,
+    ) -> Result<Vec<ReviewComment>, DomainError> {
+        let conn = self.db.conn()?;
+        let rows = ReviewCommentEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(review_comments::Column::RepoId.eq(repo_id))
+                    .add(review_comments::Column::ConversationId.eq(root_comment_id)),
+            )
+            .order_by(review_comments::Column::CreatedAt, Order::Asc)
+            .order_by(review_comments::Column::Id, Order::Asc)
+            .all(&conn)
+            .await
+            .map_err(map_scope_error)?;
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 }

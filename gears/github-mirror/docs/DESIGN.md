@@ -442,6 +442,18 @@ Transitions: `queued` → `in_progress` when a worker (or `sync_now`) starts the
 | `fingerprint`, `child_counts_hash`, `updated_at`, `node_id` | What the gate compares |
 | `last_refined_at`, `refinement_status` | `pending` until the detail fetch completes, then `complete` |
 
+#### Table: gm_logical_conversations
+
+| Column | Description |
+|---|---|
+| `tenant_id`, `repo_id`, `conv_type`, `root_comment_id` | Primary key; `conv_type` is `inline` (review comments chained by `in_reply_to_id`) or `toplevel` (issue or pull-request comments tied together by quoting) |
+| `parent_kind`, `parent_number` | `pull_request` or `issue`, and its number |
+| `comment_count`, `created_at` | How many comments the conversation holds, and GitHub's stamp of its root |
+| `is_resolved` | For `inline`, the resolution of the review thread paired with it by comment count; `NULL` for `toplevel` |
+| `extracted_at` | When the grouping pass last wrote the row |
+
+Derived after every completed sync whose scope has issues or pull requests (`domain/sync/conversations.rs`, ported from the reference implementation's `logical.rs`): a normal run re-groups only the issues and pull requests whose comments the run wrote; `--force` and `--force-full` re-group the whole repository. Each member comment carries its root's id in `conversation_id` on `gm_comments` and `gm_review_comments`. A top-level comment counts as a reply when its blockquoted lines share at least 16 consecutive characters, case and spacing ignored, with an earlier comment of the same issue. A failure of the pass is logged and does not fail the sync.
+
 #### Mirrored Entity Tables
 
 `gm_repositories`, `gm_issues`, `gm_pull_requests`, `gm_commits`, `gm_comments`, `gm_review_comments`, `gm_reviews`, `gm_review_threads`, `gm_labels`, `gm_milestones`, `gm_releases`, `gm_branches`, `gm_tags`, `gm_contributors`, `gm_workflow_runs`, `gm_workflow_jobs`, `gm_pull_request_files`, `gm_pull_request_commits`, `gm_commit_files`, `gm_commit_comments`, `gm_commit_statuses`, `gm_check_runs`, `gm_issue_events`, `gm_issue_reactions`, `gm_issue_timeline`, `gm_deployments`. Each has `tenant_id` in its key and an `extracted_at` stamp written by every upsert.
@@ -586,7 +598,7 @@ The database pool should allow at least `max_concurrent_syncs` × `max_concurren
 | Command | What it does |
 |---|---|
 | `sync <ORG/REPO>`, `resume <ORG/REPO>` | `Service::sync_now`; a repeat continues from the stored watermarks. `sync` takes `--include`/`--exclude` (object types, with the PRD's aliases), `--actions-scope`/`--reactions-scope`/`--timeline-scope`, `--since` (`YYYY-MM-DD`, `Nd`, `Nw` or `Nm`) and `--max-concurrent`, each mapped onto the request the REST `sync` route accepts. `--force-full` walks every listing and refines every entity but keeps asking GitHub whether a page changed; `--force` does that and also fetches every page afresh |
-| `query <ENTITY> <ORG/REPO>` | Reads mirrored rows; `--number` for comments, reviews, review comments, review threads, reactions and timeline; `--limit` |
+| `query <ENTITY> <ORG/REPO>` | Reads mirrored rows; `--number` for comments, reviews, review comments, review threads, reactions and timeline, optional for `conversations`, which prints each issue or pull request's derived conversations with their comments (`Service::list_conversations`, [gm_logical_conversations](#table-gm_logical_conversations)); `--limit` |
 | `status <ORG/REPO>` | The repository's run status, its latest session, and `storage`: `cache_bytes`, what the HTTP cache holds for the repository (`Service::cache_size`, the same entries `clear-cache` drops; entries in the shared public partition are not counted), and `database_bytes`, the size of the gear's SQLite file and its `-wal` file when there is one, `null` on PostgreSQL and MariaDB. With `per_repo` placement that is the repository's own size; with `per_org` or `shared` the file holds other repositories too and the repository's own share is not available |
 | `check-rate-limit` | `Service::rate_limit`: the token's quotas on every GitHub pool from `GET /rate_limit`, which costs nothing; `core` and `graphql` first |
 | `clear-cache <ORG/REPO>` | `Service::delete_repository`: every mirrored row of the repository, its watermarks, fingerprints, sessions, run status and cached responses, then the repository row, in one transaction; refused with `409` while a sync of it is in flight. This is the per-repository deletion `cpt-cf-github-mirror-nfr-data-governance` asks for; the REST `DELETE /cache` keeps dropping cached responses only |

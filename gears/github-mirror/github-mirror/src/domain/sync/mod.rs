@@ -16,6 +16,7 @@
 //!   inside one of those syncs.
 
 pub mod change_gate;
+pub mod conversations;
 pub mod mirror_worker;
 pub mod pool;
 pub mod queue;
@@ -27,6 +28,7 @@ pub mod verification;
 pub mod worker;
 
 pub use change_gate::{ChangeGate, GateInputs, GateReason};
+pub use conversations::{ConversationStats, group_conversations};
 pub use mirror_worker::{MirrorWorker, RunState};
 pub use pool::SyncPoolRunner;
 pub use queue::{TaskCounts, TaskQueue};

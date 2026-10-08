@@ -31,19 +31,21 @@ use super::repo::{
     CheckRunRepository, CommentRecord, CommentRepository, CommitCommentRecord,
     CommitCommentRepository, CommitFileRecord, CommitFileRepository, CommitRecord,
     CommitRepository, CommitStatusRecord, CommitStatusRepository, ContributorRecord,
-    ContributorRepository, DeploymentRecord, DeploymentRepository, EntityFingerprintRepository,
-    IssueEventRecord, IssueEventRepository, IssueReactionRecord, IssueReactionRepository,
-    IssueRecord, IssueRepository, IssueTimelineEventRecord, IssueTimelineRepository, LabelRecord,
-    LabelRepository, ListingFilter, MilestoneRecord, MilestoneRepository, PageWindow,
-    PullRequestCommitRecord, PullRequestCommitRepository, PullRequestFileRecord,
-    PullRequestFileRepository, PullRequestRecord, PullRequestRepository, ReleaseRecord,
-    ReleaseRepository, RepoRecord, RepoRepository, RepoRunStatus, RepoSyncStatusRecord,
-    RepoSyncStatusRepository, ReviewCommentRecord, ReviewCommentRepository, ReviewRecord,
-    ReviewRepository, ReviewThreadRecord, ReviewThreadRepository, SessionStatus, SyncSessionRecord,
+    ContributorRepository, ConversationComments, ConversationRepository, DeploymentRecord,
+    DeploymentRepository, EntityFingerprintRepository, IssueEventRecord, IssueEventRepository,
+    IssueReactionRecord, IssueReactionRepository, IssueRecord, IssueRepository,
+    IssueTimelineEventRecord, IssueTimelineRepository, LabelRecord, LabelRepository, ListingFilter,
+    LogicalConversation, MilestoneRecord, MilestoneRepository, PageWindow, PullRequestCommitRecord,
+    PullRequestCommitRepository, PullRequestFileRecord, PullRequestFileRepository,
+    PullRequestRecord, PullRequestRepository, ReleaseRecord, ReleaseRepository, RepoRecord,
+    RepoRepository, RepoRunStatus, RepoSyncStatusRecord, RepoSyncStatusRepository,
+    ReviewCommentRecord, ReviewCommentRepository, ReviewRecord, ReviewRepository,
+    ReviewThreadRecord, ReviewThreadRepository, SessionStatus, SyncSessionRecord,
     SyncSessionRepository, SyncWatermarkRepository, SyncWriter, TagRecord, TagRepository,
     WorkflowJobRecord, WorkflowJobRepository, WorkflowRunRecord, WorkflowRunRepository,
 };
 use super::scope::ScopeConfig;
+use super::sync::conversations::{self, group_conversations};
 use super::sync::{
     ChangeGate, Family, MirrorWorker, RepoPhaseRunner, RunState, SessionTelemetry, SweepWatermark,
     TaskFailure, TaskKind, Worker,
@@ -623,6 +625,7 @@ pub struct Service {
     tags: Arc<dyn TagRepository>,
     commit_files: Arc<dyn CommitFileRepository>,
     review_threads: Arc<dyn ReviewThreadRepository>,
+    conversations: Arc<dyn ConversationRepository>,
     commit_comments: Arc<dyn CommitCommentRepository>,
     issue_events: Arc<dyn IssueEventRepository>,
     deployments: Arc<dyn DeploymentRepository>,
@@ -826,6 +829,7 @@ impl Clone for Service {
             tags: Arc::clone(&self.tags),
             commit_files: Arc::clone(&self.commit_files),
             review_threads: Arc::clone(&self.review_threads),
+            conversations: Arc::clone(&self.conversations),
             commit_comments: Arc::clone(&self.commit_comments),
             issue_events: Arc::clone(&self.issue_events),
             deployments: Arc::clone(&self.deployments),
@@ -882,6 +886,7 @@ impl Service {
         tags: Arc<dyn TagRepository>,
         commit_files: Arc<dyn CommitFileRepository>,
         review_threads: Arc<dyn ReviewThreadRepository>,
+        conversations: Arc<dyn ConversationRepository>,
         commit_comments: Arc<dyn CommitCommentRepository>,
         issue_events: Arc<dyn IssueEventRepository>,
         deployments: Arc<dyn DeploymentRepository>,
@@ -925,6 +930,7 @@ impl Service {
             tags,
             commit_files,
             review_threads,
+            conversations,
             commit_comments,
             issue_events,
             deployments,
@@ -3475,6 +3481,70 @@ impl Service {
         Ok(rows + cached)
     }
 
+    /// The conversations the grouping pass derived for one repository: every
+    /// one, or those under one issue or pull-request number.
+    ///
+    /// # Errors
+    /// `Validation`, `Forbidden`, `Database` as usual; `NotFound` when the
+    /// repository is not mirrored.
+    pub async fn list_conversations(
+        &self,
+        ctx: &SecurityContext,
+        owner: &str,
+        name: &str,
+        parent_number: Option<i64>,
+    ) -> Result<Vec<LogicalConversation>, DomainError> {
+        let repository = self.get_repo(ctx, owner, name).await?;
+        let scope = self.comment_access_scope(ctx).await?;
+        self.conversations
+            .list(&scope, repository.id, parent_number)
+            .await
+    }
+
+    /// The comments of one conversation, oldest first: review comments for an
+    /// `inline` conversation, issue or pull-request comments for a `toplevel`
+    /// one.
+    ///
+    /// # Errors
+    /// `Forbidden`/`Database` as usual.
+    pub async fn conversation_comments(
+        &self,
+        ctx: &SecurityContext,
+        conversation: &LogicalConversation,
+    ) -> Result<ConversationComments, DomainError> {
+        let scope = self.comment_access_scope(ctx).await?;
+        let mut members = ConversationComments::default();
+        if conversation.conv_type == conversations::INLINE {
+            members.review_comments = self
+                .conversations
+                .review_comments_in(&scope, conversation.repo_id, conversation.root_comment_id)
+                .await?;
+        } else {
+            members.comments = self
+                .conversations
+                .comments_in(&scope, conversation.repo_id, conversation.root_comment_id)
+                .await?;
+        }
+        Ok(members)
+    }
+
+    async fn comment_access_scope(
+        &self,
+        ctx: &SecurityContext,
+    ) -> Result<AccessScope, DomainError> {
+        Ok(self
+            .policy_enforcer
+            .access_scope_with(
+                ctx,
+                &COMMENT_RESOURCE,
+                actions::LIST,
+                None,
+                &AccessRequest::new()
+                    .resource_property(pep_properties::OWNER_TENANT_ID, ctx.subject_tenant_id()),
+            )
+            .await?)
+    }
+
     /// Bytes the HTTP cache holds for one repository, for `status`. Guarded
     /// like `clear_cache`, since it reads exactly what a clear would drop.
     ///
@@ -4977,6 +5047,43 @@ impl Service {
         }
     }
 
+    /// Derive the conversations of this run's repository once its rows are
+    /// written: a normal run only for the issues and pull requests whose
+    /// comments it wrote, a forced run for all of them. A failure is logged
+    /// and does not fail the sync.
+    async fn group_conversations(
+        &self,
+        run: &RunState,
+        watermark: DateTime<Utc>,
+    ) -> Result<(), DomainError> {
+        if !(run.options.scope.objects.issues || run.options.scope.objects.pull_requests) {
+            return Ok(());
+        }
+        let changed_since = (!run.options.force.refetches_all()).then_some(watermark);
+        match group_conversations(
+            self.conversations.as_ref(),
+            &run.scope,
+            run.tenant_id,
+            run.repo_id()?,
+            changed_since,
+        )
+        .await
+        {
+            Ok(stats) => tracing::info!(
+                repository = %format!("{}/{}", run.owner, run.name),
+                inline = stats.inline,
+                toplevel = stats.toplevel,
+                "grouped conversations"
+            ),
+            Err(e) => tracing::warn!(
+                repository = %format!("{}/{}", run.owner, run.name),
+                error = %e,
+                "conversation grouping skipped"
+            ),
+        }
+        Ok(())
+    }
+
     /// The part of a sync that runs under the lock: phases, then reconciliation.
     async fn run_phases(
         &self,
@@ -5089,6 +5196,7 @@ impl Service {
                 "reconciled upstream deletions"
             );
         }
+        self.group_conversations(run, watermark).await?;
         progress.stored();
 
         let mut summary = run.summary();

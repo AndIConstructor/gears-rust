@@ -426,6 +426,8 @@ pub mod comments {
         /// deletion-reconciliation watermark; `None` on rows from before
         /// the column existed.
         pub extracted_at: Option<DateTimeUtc>,
+        /// Root comment of the derived conversation this one belongs to.
+        pub conversation_id: Option<i64>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -485,6 +487,8 @@ pub mod review_comments {
         /// deletion-reconciliation watermark; `None` on rows from before
         /// the column existed.
         pub extracted_at: Option<DateTimeUtc>,
+        /// Root comment of the derived conversation this one belongs to.
+        pub conversation_id: Option<i64>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1375,6 +1379,48 @@ pub mod workflow_jobs {
         /// When a sync last wrote this row. Doubles as the
         /// deletion-reconciliation watermark; `None` on rows from before
         /// the column existed.
+        pub extracted_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod logical_conversations {
+    use super::{DeriveEntityModel, DerivePrimaryKey, DeriveRelation, EnumIter, Scopable, Uuid};
+    use sea_orm::entity::prelude::*;
+
+    /// One derived conversation (`domain::sync::conversations`), tenant-scoped.
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Scopable)]
+    #[sea_orm(table_name = "gm_logical_conversations")]
+    #[secure(
+        tenant_col = "tenant_id",
+        resource_col = "root_comment_id",
+        no_owner,
+        no_type
+    )]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub tenant_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub repo_id: i64,
+        /// `inline` or `toplevel`.
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub conv_type: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub root_comment_id: i64,
+        /// `pull_request` or `issue`.
+        pub parent_kind: String,
+        pub parent_number: i64,
+        pub comment_count: i64,
+        /// Resolution of the review thread paired with an `inline`
+        /// conversation; `None` for `toplevel`.
+        pub is_resolved: Option<bool>,
+        /// GitHub's stamp of the root comment, kept verbatim.
+        pub created_at: Option<String>,
+        /// When the grouping pass last wrote this row.
         pub extracted_at: Option<DateTimeUtc>,
     }
 

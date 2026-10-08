@@ -28,10 +28,10 @@ use crate::infra::storage::sea_orm_repo::{
     SeaOrmActiveSyncRepository, SeaOrmBranchRepository, SeaOrmCheckRunRepository,
     SeaOrmCommentRepository, SeaOrmCommitCommentRepository, SeaOrmCommitFileRepository,
     SeaOrmCommitRepository, SeaOrmCommitStatusRepository, SeaOrmContributorRepository,
-    SeaOrmDeploymentRepository, SeaOrmEntityFingerprintRepository, SeaOrmHttpCache,
-    SeaOrmIssueEventRepository, SeaOrmIssueReactionRepository, SeaOrmIssueRepository,
-    SeaOrmIssueTimelineRepository, SeaOrmLabelRepository, SeaOrmMilestoneRepository,
-    SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
+    SeaOrmConversationRepository, SeaOrmDeploymentRepository, SeaOrmEntityFingerprintRepository,
+    SeaOrmHttpCache, SeaOrmIssueEventRepository, SeaOrmIssueReactionRepository,
+    SeaOrmIssueRepository, SeaOrmIssueTimelineRepository, SeaOrmLabelRepository,
+    SeaOrmMilestoneRepository, SeaOrmPullRequestCommitRepository, SeaOrmPullRequestFileRepository,
     SeaOrmPullRequestRepository, SeaOrmReleaseRepository, SeaOrmRepoRepository,
     SeaOrmRepoSyncStatusRepository, SeaOrmReviewCommentRepository, SeaOrmReviewRepository,
     SeaOrmReviewThreadRepository, SeaOrmSyncSessionRepository, SeaOrmSyncWatermarkRepository,
@@ -135,6 +135,7 @@ impl Gear for GithubMirrorGear {
         let tags = Arc::new(SeaOrmTagRepository::new(Arc::clone(&db)));
         let commit_files = Arc::new(SeaOrmCommitFileRepository::new(Arc::clone(&db)));
         let review_threads = Arc::new(SeaOrmReviewThreadRepository::new(Arc::clone(&db)));
+        let conversations = Arc::new(SeaOrmConversationRepository::new(Arc::clone(&db)));
         let commit_comments = Arc::new(SeaOrmCommitCommentRepository::new(Arc::clone(&db)));
         let issue_events = Arc::new(SeaOrmIssueEventRepository::new(Arc::clone(&db)));
         let deployments = Arc::new(SeaOrmDeploymentRepository::new(Arc::clone(&db)));
@@ -185,6 +186,7 @@ impl Gear for GithubMirrorGear {
             tags,
             commit_files,
             review_threads,
+            conversations,
             commit_comments,
             issue_events,
             deployments,
