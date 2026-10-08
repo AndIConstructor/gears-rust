@@ -101,6 +101,26 @@ use super::entity::tags::{self, Entity as TagEntity};
 use super::entity::workflow_jobs::{self, Entity as WorkflowJobEntity};
 use super::entity::workflow_runs::{self, Entity as WorkflowRunEntity};
 
+fn extracted_since<C: ColumnTrait>(column: C, since: Option<DateTimeUtc>) -> sea_orm::Condition {
+    let mut condition = sea_orm::Condition::all();
+    if let Some(since) = since {
+        condition = condition.add(column.gte(since));
+    }
+    condition
+}
+
+fn window_cutoffs<C: ColumnTrait>(
+    extracted_at: C,
+    updated_at: Option<C>,
+    window: PageWindow,
+) -> sea_orm::Condition {
+    let mut condition = extracted_since(extracted_at, window.extracted_since());
+    if let (Some(column), Some(since)) = (updated_at, window.updated_since()) {
+        condition = condition.add(column.gte(github_instant(since)));
+    }
+    condition
+}
+
 pub struct SeaOrmRepoRepository {
     db: Arc<DbProvider>,
 }
@@ -1350,9 +1370,11 @@ impl ReviewThreadRepository for SeaOrmReviewThreadRepository {
         repo_id: i64,
         pull_number: i64,
         query: &ODataQuery,
+        extracted_since: Option<DateTimeUtc>,
     ) -> Result<Page<ReviewThread>, DomainError> {
         let conn = self.db.conn()?;
-        review_thread_list_by_pull_in(&conn, scope, repo_id, pull_number, query).await
+        review_thread_list_by_pull_in(&conn, scope, repo_id, pull_number, query, extracted_since)
+            .await
     }
 }
 
@@ -1973,6 +1995,11 @@ async fn repo_list_window_in<C: DBRunner>(
         // Unique tie-break: two rows may share a full name, and equal sort
         // keys must not shuffle between adjacent page windows.
         .order_by(repositories::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            repositories::Column::ExtractedAt,
+            None,
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2146,6 +2173,11 @@ async fn issue_list_by_repo_in<C: DBRunner>(
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(issues::Column::Number, Order::Asc)
         .order_by(issues::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            issues::Column::ExtractedAt,
+            Some(issues::Column::UpdatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2348,6 +2380,11 @@ async fn pull_request_list_by_repo_in<C: DBRunner>(
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(pull_requests::Column::Number, Order::Asc)
         .order_by(pull_requests::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            pull_requests::Column::ExtractedAt,
+            Some(pull_requests::Column::UpdatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2489,6 +2526,11 @@ async fn commit_list_by_repo_in<C: DBRunner>(
         .order_by(commits::Column::CommittedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commits::Column::Sha, Order::Asc)
+        .filter(window_cutoffs(
+            commits::Column::ExtractedAt,
+            Some(commits::Column::CommittedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2607,6 +2649,11 @@ async fn comment_list_by_issue_in<C: DBRunner>(
         .order_by(comments::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(comments::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            comments::Column::ExtractedAt,
+            Some(comments::Column::UpdatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2736,6 +2783,11 @@ async fn review_comment_list_by_pull_in<C: DBRunner>(
         .order_by(review_comments::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(review_comments::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            review_comments::Column::ExtractedAt,
+            Some(review_comments::Column::UpdatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2885,6 +2937,11 @@ async fn review_list_by_pull_in<C: DBRunner>(
                 .add(reviews::Column::PullNumber.eq(pull_number)),
         )
         .order_by(reviews::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            reviews::Column::ExtractedAt,
+            Some(reviews::Column::SubmittedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -2970,6 +3027,7 @@ async fn label_list_by_repo_in<C: DBRunner>(
         .filter(sea_orm::Condition::all().add(labels::Column::RepoId.eq(repo_id)))
         .order_by(labels::Column::Name, Order::Asc)
         .order_by(labels::Column::Id, Order::Asc)
+        .filter(window_cutoffs(labels::Column::ExtractedAt, None, window))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3071,6 +3129,11 @@ async fn milestone_list_by_repo_in<C: DBRunner>(
         .filter(sea_orm::Condition::all().add(milestones::Column::RepoId.eq(repo_id)))
         .order_by(milestones::Column::Number, Order::Asc)
         .order_by(milestones::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            milestones::Column::ExtractedAt,
+            Some(milestones::Column::UpdatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3175,6 +3238,11 @@ async fn release_list_by_repo_in<C: DBRunner>(
         .order_by(releases::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(releases::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            releases::Column::ExtractedAt,
+            Some(releases::Column::CreatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3257,6 +3325,7 @@ async fn branch_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(branches::Column::RepoId.eq(repo_id)))
         .order_by(branches::Column::Name, Order::Asc)
+        .filter(window_cutoffs(branches::Column::ExtractedAt, None, window))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3325,6 +3394,11 @@ async fn contributor_list_by_repo_in<C: DBRunner>(
         // Derived contributors carry no activity count to rank by, so
         // the unique key is the whole ordering.
         .order_by(contributors::Column::UserId, Order::Asc)
+        .filter(window_cutoffs(
+            contributors::Column::ExtractedAt,
+            None,
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3445,6 +3519,11 @@ async fn workflow_run_list_by_repo_in<C: DBRunner>(
         .order_by(workflow_runs::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(workflow_runs::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            workflow_runs::Column::ExtractedAt,
+            Some(workflow_runs::Column::UpdatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3518,6 +3597,11 @@ async fn pull_request_file_list_by_pull_in<C: DBRunner>(
                 .add(pull_request_files::Column::PullNumber.eq(pull_number)),
         )
         .order_by(pull_request_files::Column::Filename, Order::Asc)
+        .filter(window_cutoffs(
+            pull_request_files::Column::ExtractedAt,
+            None,
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3595,6 +3679,7 @@ async fn tag_list_by_repo_in<C: DBRunner>(
         .scope_with(scope)
         .filter(sea_orm::Condition::all().add(tags::Column::RepoId.eq(repo_id)))
         .order_by(tags::Column::Name, Order::Asc)
+        .filter(window_cutoffs(tags::Column::ExtractedAt, None, window))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3725,6 +3810,7 @@ async fn review_thread_list_by_pull_in<C: DBRunner>(
     repo_id: i64,
     pull_number: i64,
     query: &ODataQuery,
+    since: Option<DateTimeUtc>,
 ) -> Result<Page<ReviewThread>, DomainError> {
     paginate_odata::<ReviewThreadField, ReviewThreadODataMapper, _, _, _, _>(
         ReviewThreadEntity::find()
@@ -3734,7 +3820,8 @@ async fn review_thread_list_by_pull_in<C: DBRunner>(
                 sea_orm::Condition::all()
                     .add(review_threads::Column::RepoId.eq(repo_id))
                     .add(review_threads::Column::PullNumber.eq(pull_number)),
-            ),
+            )
+            .filter(extracted_since(review_threads::Column::ExtractedAt, since)),
         conn,
         query,
         ("id", SortDir::Asc),
@@ -3811,6 +3898,11 @@ async fn commit_comment_list_by_commit_in<C: DBRunner>(
         .order_by(commit_comments::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commit_comments::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            commit_comments::Column::ExtractedAt,
+            Some(commit_comments::Column::UpdatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3886,6 +3978,11 @@ async fn issue_event_list_by_issue_in<C: DBRunner>(
         .order_by(issue_events::Column::CreatedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(issue_events::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            issue_events::Column::ExtractedAt,
+            Some(issue_events::Column::CreatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -3956,6 +4053,11 @@ async fn deployment_list_by_repo_in<C: DBRunner>(
         .order_by(deployments::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(deployments::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            deployments::Column::ExtractedAt,
+            Some(deployments::Column::UpdatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -4027,6 +4129,11 @@ async fn pull_request_commit_list_by_pull_in<C: DBRunner>(
         .order_by(pull_request_commits::Column::CommittedAt, Order::Asc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(pull_request_commits::Column::Sha, Order::Asc)
+        .filter(window_cutoffs(
+            pull_request_commits::Column::ExtractedAt,
+            Some(pull_request_commits::Column::CommittedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -4102,6 +4209,11 @@ async fn commit_status_list_by_commit_in<C: DBRunner>(
         .order_by(commit_statuses::Column::CreatedAt, Order::Desc)
         // Unique tie-break: equal sort keys must not shuffle page windows.
         .order_by(commit_statuses::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            commit_statuses::Column::ExtractedAt,
+            Some(commit_statuses::Column::UpdatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -4204,6 +4316,11 @@ async fn workflow_job_list_by_run_in<C: DBRunner>(
                 .add(workflow_jobs::Column::RunId.eq(run_id)),
         )
         .order_by(workflow_jobs::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            workflow_jobs::Column::ExtractedAt,
+            None,
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -4269,6 +4386,11 @@ async fn issue_reaction_list_by_issue_in<C: DBRunner>(
                 .add(issue_reactions::Column::IssueNumber.eq(issue_number)),
         )
         .order_by(issue_reactions::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            issue_reactions::Column::ExtractedAt,
+            Some(issue_reactions::Column::CreatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -4373,6 +4495,11 @@ async fn check_run_list_by_commit_in<C: DBRunner>(
                 .add(check_runs::Column::HeadSha.eq(head_sha)),
         )
         .order_by(check_runs::Column::Id, Order::Asc)
+        .filter(window_cutoffs(
+            check_runs::Column::ExtractedAt,
+            None,
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)
@@ -4471,6 +4598,11 @@ async fn issue_timeline_list_by_issue_in<C: DBRunner>(
                 .add(issue_timeline::Column::IssueNumber.eq(issue_number)),
         )
         .order_by(issue_timeline::Column::Position, Order::Asc)
+        .filter(window_cutoffs(
+            issue_timeline::Column::ExtractedAt,
+            Some(issue_timeline::Column::CreatedAt),
+            window,
+        ))
         .limit(window.limit())
         .offset(window.offset())
         .all(conn)

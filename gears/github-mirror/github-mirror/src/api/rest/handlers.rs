@@ -695,7 +695,7 @@ pub async fn list_review_threads(
 ) -> ApiResult<JsonPage<ReviewThreadDto>> {
     validate_repo_path(&owner, &name)?;
     let page: Page<_> = svc
-        .list_review_threads(&ctx, &owner, &name, number, &query)
+        .list_review_threads(&ctx, &owner, &name, number, &query, None)
         .await?;
     Ok(Json(page.map_items(ReviewThreadDto::from)))
 }

@@ -2526,6 +2526,7 @@ impl Service {
         name: &str,
         pull_number: i64,
         query: &ODataQuery,
+        extracted_since: Option<DateTime<Utc>>,
     ) -> Result<Page<ReviewThread>, DomainError> {
         let scope = self
             .policy_enforcer
@@ -2547,7 +2548,7 @@ impl Service {
             .ok_or(DomainError::NotFound)?;
 
         self.review_threads
-            .list_by_pull(&scope, repository.id, pull_number, query)
+            .list_by_pull(&scope, repository.id, pull_number, query, extracted_since)
             .await
     }
 

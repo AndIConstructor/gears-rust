@@ -394,7 +394,7 @@ async fn every_child_listing_of_a_shared_repository_stays_with_its_tenant() {
                 "review threads",
                 fixture.review_threads.len(),
                 service
-                    .list_review_threads(tenant, OWNER, NAME, PULL_NUMBER, &query)
+                    .list_review_threads(tenant, OWNER, NAME, PULL_NUMBER, &query, None)
                     .await
                     .expect("review threads must list")
                     .items

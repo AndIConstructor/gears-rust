@@ -113,6 +113,11 @@ pub struct IssueRecord {
 pub struct PageWindow {
     limit: u64,
     offset: u64,
+    /// Keep only rows a sync wrote at or after this instant.
+    extracted_since: Option<DateTime<Utc>>,
+    /// Keep only rows GitHub last changed at or after this instant, by the
+    /// entity's own stamp; entities without one ignore it.
+    updated_since: Option<DateTime<Utc>>,
 }
 
 impl PageWindow {
@@ -165,7 +170,12 @@ impl PageWindow {
                 ),
             });
         }
-        Ok(Self { limit, offset })
+        Ok(Self {
+            limit,
+            offset,
+            extracted_since: None,
+            updated_since: None,
+        })
     }
 
     /// The first `limit` rows, clamped to [`Self::MAX_LIMIT`].
@@ -182,6 +192,8 @@ impl PageWindow {
                 limit
             },
             offset: 0,
+            extracted_since: None,
+            updated_since: None,
         }
     }
 
@@ -195,6 +207,28 @@ impl PageWindow {
     #[must_use]
     pub const fn offset(self) -> u64 {
         self.offset
+    }
+
+    #[must_use]
+    pub const fn with_extracted_since(mut self, since: Option<DateTime<Utc>>) -> Self {
+        self.extracted_since = since;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_updated_since(mut self, since: Option<DateTime<Utc>>) -> Self {
+        self.updated_since = since;
+        self
+    }
+
+    #[must_use]
+    pub const fn extracted_since(self) -> Option<DateTime<Utc>> {
+        self.extracted_since
+    }
+
+    #[must_use]
+    pub const fn updated_since(self) -> Option<DateTime<Utc>> {
+        self.updated_since
     }
 }
 
@@ -1167,6 +1201,7 @@ pub trait ReviewThreadRepository: Send + Sync {
         repo_id: i64,
         pull_number: i64,
         query: &ODataQuery,
+        extracted_since: Option<DateTime<Utc>>,
     ) -> Result<Page<ReviewThread>, DomainError>;
 }
 

@@ -128,6 +128,14 @@ fn parse_since(raw: &str) -> Result<DateTime<Utc>> {
         .ok_or_else(|| anyhow!("`{value}` reaches back too far"))
 }
 
+fn parse_instant(raw: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw.trim())
+        .map(|at| at.with_timezone(&Utc))
+        .map_err(|e| {
+            anyhow!("`{raw}` is not an ISO 8601 instant such as 2026-10-08T12:00:00Z: {e}")
+        })
+}
+
 pub async fn sync(
     service: &Service,
     ctx: &SecurityContext,
@@ -140,6 +148,12 @@ pub async fn sync(
     report(service, ctx, owner, name, Some(&summary), database_file).await
 }
 
+pub struct QueryFilters<'a> {
+    pub since: Option<&'a str>,
+    pub extracted_since: Option<&'a str>,
+    pub subject_type: Option<&'a str>,
+}
+
 pub async fn query(
     service: &Service,
     ctx: &SecurityContext,
@@ -147,11 +161,24 @@ pub async fn query(
     repo: &str,
     number: Option<i64>,
     limit: u64,
+    filters: &QueryFilters<'_>,
 ) -> Result<Value> {
     let (owner, name) = split_repo(repo)?;
-    let window = PageWindow::bounded(limit, 0)?;
+    let updated_since = filters.since.map(parse_since).transpose()?;
+    let extracted_since = filters.extracted_since.map(parse_instant).transpose()?;
+    if filters.subject_type.is_some() && !matches!(entity, Entity::ReviewComments) {
+        bail!("--subject-type applies to review-comments only");
+    }
+    if (updated_since.is_some() || extracted_since.is_some())
+        && matches!(entity, Entity::Repos | Entity::Conversations)
+    {
+        bail!("--since and --extracted-since do not apply to repos or conversations");
+    }
+    let window = PageWindow::bounded(limit, 0)?
+        .with_updated_since(updated_since)
+        .with_extracted_since(extracted_since);
     let filter = ListingFilter::default();
-    let rows = match entity {
+    let mut rows = match entity {
         Entity::Issues => rows(
             service
                 .list_issues(ctx, owner, name, window, filter)
@@ -226,6 +253,9 @@ pub async fn query(
             query_one(service, ctx, entity, (owner, name), number, window).await?
         }
     };
+    if let Some(subject_type) = filters.subject_type {
+        rows.retain(|row| row.get("subject_type").and_then(Value::as_str) == Some(subject_type));
+    }
     Ok(Value::Array(rows))
 }
 
@@ -253,6 +283,7 @@ async fn query_one(
                     name,
                     number,
                     &ODataQuery::new().with_limit(window.limit()),
+                    window.extracted_since(),
                 )
                 .await?
                 .items,

@@ -196,6 +196,24 @@ enum Command {
         number: Option<i64>,
         #[arg(long, default_value_t = 30, help = "Most rows to return")]
         limit: u64,
+        #[arg(
+            long,
+            value_name = "CUTOFF",
+            help = "Only rows GitHub changed at or after this: YYYY-MM-DD, Nd, Nw or Nm"
+        )]
+        since: Option<String>,
+        #[arg(
+            long,
+            value_name = "ISO8601",
+            help = "Only rows a sync wrote at or after this instant, e.g. 2026-10-08T12:00:00Z"
+        )]
+        extracted_since: Option<String>,
+        #[arg(
+            long,
+            value_name = "TYPE",
+            help = "Review comments on a line or a file: line or file"
+        )]
+        subject_type: Option<String>,
     },
     #[command(about = "Show the synchronization status of a repository")]
     Status {
@@ -360,7 +378,25 @@ async fn execute(
             repo,
             number,
             limit,
-        } => commands::query(&service, &ctx, entity, &repo, number, limit).await,
+            since,
+            extracted_since,
+            subject_type,
+        } => {
+            commands::query(
+                &service,
+                &ctx,
+                entity,
+                &repo,
+                number,
+                limit,
+                &commands::QueryFilters {
+                    since: since.as_deref(),
+                    extracted_since: extracted_since.as_deref(),
+                    subject_type: subject_type.as_deref(),
+                },
+            )
+            .await
+        }
         Command::Status { repo } => commands::status(&service, &ctx, &repo, database_file).await,
         Command::ClearCache { repo } => commands::clear_cache(&service, &ctx, &repo).await,
         Command::CheckRateLimit => commands::check_rate_limit(&service, &ctx).await,
