@@ -18193,6 +18193,19 @@
               "null"
             ]
           },
+          "snippet_after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "snippet_before": {
+            "description": "Code lines above and below the commented line, when the sync kept them.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "start_line": {
             "format": "int64",
             "type": [
@@ -52701,6 +52714,15 @@
             }
           },
           {
+            "description": "Walk every listing and refine every entity, keeping the HTTP cache",
+            "in": "query",
+            "name": "force_full",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "description": "Comma-separated object types to collect, e.g. `issues,pull_requests`",
             "in": "query",
             "name": "include",
@@ -53129,6 +53151,15 @@
             "description": "Bypass the HTTP cache and re-fetch everything",
             "in": "query",
             "name": "force",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Walk every listing and refine every entity, keeping the HTTP cache",
+            "in": "query",
+            "name": "force_full",
             "required": false,
             "schema": {
               "type": "boolean"
