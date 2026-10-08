@@ -20,6 +20,13 @@ fn reason(reason: DropReason) -> &'static str {
     match reason {
         DropReason::NoPlanner => "no_planner",
         DropReason::ProcessingFailed => "processing_failed",
+        DropReason::CheckFailed => "check_failed",
+        DropReason::PersonalizationOff => "personalization_off",
+        DropReason::ErasureInProgress => "erasure_in_progress",
+        DropReason::UntrustedSource => "untrusted_source",
+        DropReason::BelowConfidenceFloor => "below_confidence_floor",
+        DropReason::EntityKindNotAllowed => "entity_kind_not_allowed",
+        DropReason::WriteCapExceeded => "write_cap_exceeded",
     }
 }
 

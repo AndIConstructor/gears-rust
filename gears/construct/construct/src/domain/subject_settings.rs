@@ -108,6 +108,19 @@ pub trait TenantDefaults: Send + Sync {
     ) -> Result<bool, DomainError>;
 }
 
+/// The read of a subject's settings for a caller that already holds a scope:
+/// record intake under its "send records" decision, Admission under the scope
+/// processing builds for the tenant.
+#[async_trait]
+pub trait SubjectSettingsReader: Send + Sync {
+    async fn read(
+        &self,
+        ctx: &SecurityContext,
+        scope: &AccessScope,
+        key: SubjectKey,
+    ) -> Result<SubjectSettings, DomainError>;
+}
+
 #[domain_model]
 pub struct SubjectSettingsService<R: SubjectSettingsRepository> {
     db: Arc<DbProvider>,
@@ -270,5 +283,17 @@ impl<R: SubjectSettingsRepository + 'static> SubjectSettingsService<R> {
                 })
             })
             .await
+    }
+}
+
+#[async_trait]
+impl<R: SubjectSettingsRepository + 'static> SubjectSettingsReader for SubjectSettingsService<R> {
+    async fn read(
+        &self,
+        ctx: &SecurityContext,
+        scope: &AccessScope,
+        key: SubjectKey,
+    ) -> Result<SubjectSettings, DomainError> {
+        self.settings_within(ctx, scope, key).await
     }
 }

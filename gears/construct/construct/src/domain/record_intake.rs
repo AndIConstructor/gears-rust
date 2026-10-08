@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use super::DbProvider;
 use super::error::DomainError;
+use super::plan::{Origin, Plan};
 pub use super::refusal::{Place, Refusal, RefusalReason};
 use super::subject_settings::{SubjectKey, SubjectSettingsRepository, SubjectSettingsService};
 
@@ -164,6 +165,20 @@ pub enum DropReason {
     NoPlanner,
     /// Processing could not finish.
     ProcessingFailed,
+    /// A sensitive-data check failed, or answered outside the plan.
+    CheckFailed,
+    /// Admission: personalization is off for the subject.
+    PersonalizationOff,
+    /// Admission: an erasure of the subject is under way.
+    ErasureInProgress,
+    /// Admission: the tenant does not trust the connector.
+    UntrustedSource,
+    /// Admission: a step is below the tenant's confidence floor.
+    BelowConfidenceFloor,
+    /// Admission: a step stores an entity kind the tenant does not allow.
+    EntityKindNotAllowed,
+    /// Admission: the plan is over the tenant's write caps.
+    WriteCapExceeded,
 }
 
 /// A content-free event for a dropped record: the tenant, the subject, the
@@ -197,6 +212,33 @@ impl DropEvent {
             stage,
             reason,
         }
+    }
+
+    /// The drop event for a plan built from a connector's record. A plan with
+    /// no record behind it (an agent's, a reviewer's or an administrator's)
+    /// has none: its caller gets the reason in the result and audits it.
+    #[must_use]
+    pub fn for_plan(plan: &Plan, stage: DropStage, reason: DropReason) -> Option<Self> {
+        let Origin::Connector {
+            connector,
+            provenance,
+            version,
+            type_id,
+            ..
+        } = &plan.origin
+        else {
+            return None;
+        };
+        Some(Self {
+            tenant_id: plan.tenant_id,
+            subject_id: Some(plan.subject_id),
+            connector: connector.clone(),
+            provenance: provenance.clone(),
+            version: version.clone(),
+            type_id: type_id.clone(),
+            stage,
+            reason,
+        })
     }
 }
 

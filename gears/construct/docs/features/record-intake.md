@@ -153,7 +153,7 @@ The PRD requires Construct to take records one at a time, check each against its
 
 **Input**: A received record that processing drops, the stage that drops it, and the reason.
 
-**Output**: One content-free event: tenant, subject, connector, record identity (provenance and version), record type, stage (`planner`, `checks`, `admission`, `writer`) and reason (`no_planner`, `processing_failed`).
+**Output**: One content-free event: tenant, subject, connector, record identity (provenance and version), record type, stage (`planner`, `checks`, `admission`, `writer`) and reason: `no_planner` and `processing_failed`, and, from the Sensitive-Data Checks and Admission (Story 5.7.3), `check_failed`, `personalization_off`, `erasure_in_progress`, `untrusted_source`, `below_confidence_floor`, `entity_kind_not_allowed` and `write_cap_exceeded`. A plan with no record behind it (an agent's, a reviewer's or an administrator's) has no drop event; its caller gets the reason in the result.
 
 **Steps**:
 1. [x] - `p1` - Write the event to the structured log at warn level under the target `construct::audit`, until the Audit gear ships. The subject is a plain id, only when the record names one; no record content is written. The Planner, the Sensitive-Data Checks, Admission and the Profile Writer emit it - `inst-drop-event-log`
@@ -238,7 +238,7 @@ The system **MUST** define one content-free drop event (tenant, subject, connect
 **Implements**:
 - `cpt-cf-construct-algo-record-intake-drop-event`
 
-**Verified by**: `a_drop_event_names_the_record_its_stage_and_its_reason`, `the_drop_event_is_logged_without_record_content` (captures the log). The stub emits it today; the Planner, the checks, Admission and the writer will.
+**Verified by**: `a_drop_event_names_the_record_its_stage_and_its_reason`, `the_drop_event_is_logged_without_record_content` (captures the log). The stub, the Sensitive-Data Checks and Admission emit it today (`a_failed_check_drops_the_record_with_a_drop_event`, `an_admission_drop_is_logged_in_the_record_drop_shape_without_content`); the Planner and the writer will.
 
 ### Intake Route
 

@@ -18,13 +18,19 @@ use toolkit_security::{AccessScope, PlatformSecurityContext, SecurityContext, pe
 use uuid::Uuid;
 
 use crate::api::rest::types::ConcreteIntake;
+use crate::domain::admission::{
+    Admission, AdmissionEvents, AdmissionPorts, AdmissionRules, AdmissionRulesSource, Allowed,
+    SensitiveDataEvent,
+};
 use crate::domain::error::DomainError;
+use crate::domain::plan::{Change, NodeKey, Origin, Plan, PlanValue, Property, Step};
 use crate::domain::record_intake::{
     DropEvent, IntakeEvents, IntakePorts, ReceivedRecord, RecordHandOff, RecordIntakeService,
     RecordTypes,
 };
+use crate::domain::sensitive_data::{Found, SensitiveDataCheck, SensitiveDataKind, Verdict};
 use crate::domain::subject_settings::{
-    SubjectKey, SubjectSettings, SubjectSettingsService, TenantDefaults,
+    SubjectKey, SubjectSettings, SubjectSettingsReader, SubjectSettingsService, TenantDefaults,
 };
 use crate::infra::connector_switch::ConfigConnectorSwitch;
 use crate::infra::record_types::RegistryRecordTypes;
@@ -399,6 +405,12 @@ pub struct RecordingEvents {
     pub dropped: std::sync::Mutex<Vec<DropEvent>>,
 }
 
+impl RecordingEvents {
+    pub fn taken(&self) -> Vec<DropEvent> {
+        self.dropped.lock().unwrap().clone()
+    }
+}
+
 impl IntakeEvents for RecordingEvents {
     fn dropped(&self, event: DropEvent) {
         self.dropped.lock().unwrap().push(event);
@@ -522,4 +534,238 @@ pub async fn stored_record_ids(db: &Db) -> usize {
         .await
         .expect("list record ids")
         .len()
+}
+
+// --- Plans, checks and Admission ---
+
+/// A plan from a connector's record for a new subject, with the given steps.
+pub fn connector_plan(steps: Vec<Step>) -> Plan {
+    Plan {
+        tenant_id: Uuid::new_v4(),
+        subject_id: Uuid::new_v4(),
+        origin: Origin::Connector {
+            connector: "connector-a".to_owned(),
+            provenance: "chat_engine/thread-42/msg-7".to_owned(),
+            version: "v1".to_owned(),
+            type_id: construct_sdk::gts::CHAT_MESSAGE_TYPE.to_owned(),
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
+        },
+        profile_version: Some(3),
+        steps,
+    }
+}
+
+/// The same plan, written by a person with `origin`: no step has a confidence.
+pub fn by_a_person(mut plan: Plan, origin: Origin) -> Plan {
+    plan.origin = origin;
+    for step in &mut plan.steps {
+        step.confidence = None;
+    }
+    plan
+}
+
+/// A model's step that adds an entity of `kind` with `properties`.
+pub fn add_entity(kind: &str, properties: &[(&str, &str)]) -> Step {
+    Step {
+        entity_kind: kind.to_owned(),
+        change: Change::AddEntity {
+            key: NodeKey(Uuid::new_v4().to_string()),
+            properties: properties
+                .iter()
+                .map(|(name, value)| Property::new(*name, *value))
+                .collect(),
+        },
+        confidence: Some(0.9),
+    }
+}
+
+/// A model's step that gives an existing property of `kind` a new value.
+pub fn replace_property(kind: &str, name: &str, value: &str) -> Step {
+    Step {
+        entity_kind: kind.to_owned(),
+        change: Change::ReplaceProperty {
+            entity: NodeKey("entity-1".to_owned()),
+            property: Property::new(name, value),
+        },
+        confidence: Some(0.9),
+    }
+}
+
+/// A model's step that removes an entity of `kind`.
+pub fn remove_entity(kind: &str) -> Step {
+    Step {
+        entity_kind: kind.to_owned(),
+        change: Change::RemoveEntity {
+            entity: NodeKey("entity-2".to_owned()),
+        },
+        confidence: Some(0.9),
+    }
+}
+
+/// Byte ranges of found content, from `(start, end)` pairs.
+pub fn spans(pairs: &[(usize, usize)]) -> Vec<std::ops::Range<usize>> {
+    pairs.iter().map(|&(start, end)| start..end).collect()
+}
+
+/// A test check: finds every occurrence of `needle` in a value, as content of
+/// its kind. It never runs in a deployment.
+pub struct SubstringCheck {
+    pub kind: SensitiveDataKind,
+    pub needle: &'static str,
+}
+
+#[async_trait]
+impl SensitiveDataCheck for SubstringCheck {
+    fn kind(&self) -> SensitiveDataKind {
+        self.kind
+    }
+
+    async fn check(&self, values: &[PlanValue]) -> Result<Verdict, DomainError> {
+        let found = values
+            .iter()
+            .filter_map(|value| {
+                let spans: Vec<_> = value
+                    .text
+                    .match_indices(self.needle)
+                    .map(|(start, hit)| start..start + hit.len())
+                    .collect();
+                (!spans.is_empty()).then_some(Found {
+                    at: value.at,
+                    spans,
+                })
+            })
+            .collect();
+        Ok(Verdict {
+            kind: self.kind,
+            found,
+        })
+    }
+}
+
+/// A check that cannot answer, as a model check whose call failed.
+pub struct FailingCheck(pub SensitiveDataKind);
+
+#[async_trait]
+impl SensitiveDataCheck for FailingCheck {
+    fn kind(&self) -> SensitiveDataKind {
+        self.0
+    }
+
+    async fn check(&self, _values: &[PlanValue]) -> Result<Verdict, DomainError> {
+        Err(DomainError::Unavailable("model check timed out".to_owned()))
+    }
+}
+
+/// A check that answers with a fixed verdict, whatever the values.
+pub struct FixedCheck(pub SensitiveDataKind, pub Verdict);
+
+#[async_trait]
+impl SensitiveDataCheck for FixedCheck {
+    fn kind(&self) -> SensitiveDataKind {
+        self.0
+    }
+
+    async fn check(&self, _values: &[PlanValue]) -> Result<Verdict, DomainError> {
+        Ok(self.1.clone())
+    }
+}
+
+/// Keeps every block and redaction event, with its action.
+#[derive(Default)]
+pub struct RecordingAdmissionEvents {
+    pub events: std::sync::Mutex<Vec<(&'static str, SensitiveDataEvent)>>,
+}
+
+impl RecordingAdmissionEvents {
+    pub fn taken(&self) -> Vec<(&'static str, SensitiveDataEvent)> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl AdmissionEvents for RecordingAdmissionEvents {
+    fn blocked(&self, event: SensitiveDataEvent) {
+        self.events.lock().unwrap().push(("blocked", event));
+    }
+
+    fn redacted(&self, event: SensitiveDataEvent) {
+        self.events.lock().unwrap().push(("redacted", event));
+    }
+}
+
+/// The subject's settings, the same for every subject; or a failed read.
+pub struct FixedSubjectSettings(pub Result<SubjectSettings, fn() -> DomainError>);
+
+#[async_trait]
+impl SubjectSettingsReader for FixedSubjectSettings {
+    async fn read(
+        &self,
+        _ctx: &SecurityContext,
+        _scope: &AccessScope,
+        _key: SubjectKey,
+    ) -> Result<SubjectSettings, DomainError> {
+        self.0.map_err(|make| make())
+    }
+}
+
+/// The tenant's admission rules, the same for every tenant; or a failed read.
+pub struct FixedRules(pub Result<AdmissionRules, fn() -> DomainError>);
+
+#[async_trait]
+impl AdmissionRulesSource for FixedRules {
+    async fn rules(
+        &self,
+        _ctx: &SecurityContext,
+        _tenant_id: Uuid,
+    ) -> Result<AdmissionRules, DomainError> {
+        self.0.clone().map_err(|make| make())
+    }
+}
+
+/// Rules that let every plan in the tests through, with avatar's floor.
+pub fn open_rules() -> AdmissionRules {
+    AdmissionRules {
+        trusted_connectors: Allowed::Any,
+        confidence_floor: 0.6,
+        entity_kinds: Allowed::Any,
+        max_steps: 100,
+        max_value_chars: 1000,
+    }
+}
+
+/// Admission over fixed settings and rules, with recording events.
+pub struct AdmissionFixture {
+    pub settings: SubjectSettings,
+    pub rules: AdmissionRules,
+    pub events: Arc<RecordingAdmissionEvents>,
+    pub drops: Arc<RecordingEvents>,
+}
+
+impl Default for AdmissionFixture {
+    fn default() -> Self {
+        Self {
+            settings: SubjectSettings {
+                personalization_enabled: true,
+                erasure_in_progress: false,
+            },
+            rules: open_rules(),
+            events: Arc::default(),
+            drops: Arc::default(),
+        }
+    }
+}
+
+impl AdmissionFixture {
+    pub fn build(&self) -> Admission {
+        Admission::new(AdmissionPorts {
+            settings: Arc::new(FixedSubjectSettings(Ok(self.settings))),
+            rules: Arc::new(FixedRules(Ok(self.rules.clone()))),
+            events: Arc::clone(&self.events) as Arc<dyn AdmissionEvents>,
+            drops: Arc::clone(&self.drops) as Arc<dyn IntakeEvents>,
+        })
+    }
+}
+
+/// The security context and scope processing builds for a tenant.
+pub fn processing_context(tenant_id: Uuid) -> (SecurityContext, AccessScope) {
+    (context_in(tenant_id), AccessScope::for_tenant(tenant_id))
 }

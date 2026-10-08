@@ -1,3 +1,6 @@
+pub mod admission_events;
+#[cfg(test)]
+mod admission_events_test;
 pub mod connector_switch;
 #[cfg(test)]
 mod hand_off_test;
