@@ -817,6 +817,8 @@ pub fn fetched_repository() -> FetchedRepository {
             side: Some("RIGHT".to_owned()),
             start_side: None,
             subject_type: Some("line".to_owned()),
+            snippet_before: None,
+            snippet_after: None,
         }],
         reviews: vec![ReviewRecord {
             id: 31,

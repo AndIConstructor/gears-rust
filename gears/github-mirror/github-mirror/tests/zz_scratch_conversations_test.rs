@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 const REPO: i64 = 1;
 
+type Row = (String, i64, i64, i64, Option<bool>);
+
 fn review_comment(id: i64, reply_to: Option<i64>, at: &str) -> ReviewCommentRecord {
     ReviewCommentRecord {
         id,
@@ -44,6 +46,8 @@ fn review_comment(id: i64, reply_to: Option<i64>, at: &str) -> ReviewCommentReco
         start_side: None,
         subject_type: None,
         pull_request_review_id: None,
+        snippet_before: None,
+        snippet_after: None,
     }
 }
 
@@ -124,7 +128,7 @@ async fn groups_inline_chains_and_quoted_toplevel_comments() {
     assert_eq!((stats.inline, stats.toplevel), (2, 2));
 
     let all = conversations.list(&scope, REPO, None).await.unwrap();
-    let summary: Vec<(String, i64, i64, i64, Option<bool>)> = all
+    let summary: Vec<Row> = all
         .iter()
         .map(|c| {
             (

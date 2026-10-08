@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde_json::{Map, Value};
 
 const MAX_CELL: usize = 60;
+const SECTION_ORDER: [&str; 5] = ["repository", "run", "objects", "api", "storage"];
 
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum OutputFormat {
@@ -20,6 +21,29 @@ pub fn print(value: &Value, format: OutputFormat) -> Result<()> {
 fn table(value: &Value) -> String {
     match value {
         Value::Array(rows) => rows_table(rows),
+        Value::Object(sections)
+            if !sections.is_empty() && sections.values().all(Value::is_object) =>
+        {
+            let mut ordered: Vec<(&String, &Value)> = sections.iter().collect();
+            ordered.sort_by_key(|(title, _)| {
+                SECTION_ORDER
+                    .iter()
+                    .position(|known| known == title)
+                    .unwrap_or(SECTION_ORDER.len())
+            });
+            let mut out = String::new();
+            for (title, section) in ordered {
+                out.push_str(&title.to_uppercase());
+                out.push('\n');
+                if section.as_object().is_some_and(Map::is_empty) {
+                    out.push_str("(none)\n");
+                } else {
+                    out.push_str(&table(section));
+                }
+                out.push('\n');
+            }
+            out
+        }
         Value::Object(fields) => {
             let mut pairs = Vec::new();
             flatten("", fields, &mut pairs);

@@ -158,6 +158,18 @@ enum Command {
         reactions_scope: Option<String>,
         #[arg(long, value_name = "MODE", help = "Timeline events: open, all or none")]
         timeline_scope: Option<String>,
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Code lines kept above each inline review comment, from its diff hunk: a count, or -1 for all"
+        )]
+        inline_comment_snippet_before: Option<i32>,
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Code lines kept below each inline review comment: a count, or -1 for all"
+        )]
+        inline_comment_snippet_after: Option<i32>,
     },
     #[command(about = "Continue an interrupted synchronization")]
     Resume {
@@ -312,6 +324,8 @@ async fn execute(
             actions_scope,
             reactions_scope,
             timeline_scope,
+            inline_comment_snippet_before,
+            inline_comment_snippet_after,
         } => {
             let request = commands::sync_request(
                 &service,
@@ -324,9 +338,11 @@ async fn execute(
                     actions_scope: actions_scope.as_deref(),
                     reactions_scope: reactions_scope.as_deref(),
                     timeline_scope: timeline_scope.as_deref(),
+                    snippet_before: inline_comment_snippet_before,
+                    snippet_after: inline_comment_snippet_after,
                 },
             )?;
-            commands::sync(&service, &ctx, &repo, request).await
+            commands::sync(&service, &ctx, &repo, request, database_file).await
         }
         Command::Resume {
             repo,
@@ -337,7 +353,7 @@ async fn execute(
                 force: ForceMode::from_flags(force, force_full),
                 ..SyncRequest::default()
             };
-            commands::sync(&service, &ctx, &repo, request).await
+            commands::sync(&service, &ctx, &repo, request, database_file).await
         }
         Command::Query {
             entity,

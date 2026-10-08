@@ -444,6 +444,6 @@ mod tests {
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 44);
+        assert_eq!(gear.migrations().len(), 46);
     }
 }

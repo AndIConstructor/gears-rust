@@ -79,7 +79,7 @@ A sync is designed to be stopped and started again. The task queue lives in memo
 | `cpt-cf-github-mirror-fr-progress` | `p2` | `progress_percent` is weighted by phase, never goes down, and is written by the heartbeat |
 | `cpt-cf-github-mirror-fr-env-independence` | `p1` | All settings come from the gear config; the GitHub token comes from the credential store |
 
-Not covered by this design yet: the rest of the CLI (the inline-comment snippet flags; see [CLI](#cli)), Python bindings (`cpt-cf-github-mirror-fr-python-bindings`), write-back (`cpt-cf-github-mirror-fr-write-back`), the token pool (`cpt-cf-github-mirror-fr-token-pool`) and security-alert collection (`cpt-cf-github-mirror-fr-security-sync`, refused by scope validation today).
+Not covered by this design yet: Python bindings (`cpt-cf-github-mirror-fr-python-bindings`), write-back (`cpt-cf-github-mirror-fr-write-back`), the token pool (`cpt-cf-github-mirror-fr-token-pool`) and security-alert collection (`cpt-cf-github-mirror-fr-security-sync`, refused by scope validation today).
 
 #### NFR Allocation
 
@@ -508,6 +508,8 @@ For every pull request the declared commit and file counts are compared with wha
 
 An issue is refined when either its reactions or its timeline scope wants it.
 
+`inline_comment_snippets` (`before`, `after`; CLI `--inline-comment-snippet-before/after <N>`, TOML `scope.collection.inline_comment_snippets`) keeps code context with every review comment: the N lines of its `diff_hunk` above the commented line in `snippet_before` and below it in `snippet_after`, `@@` header and diff markers removed; `-1` keeps the whole side, `0` (the default) nothing. GitHub's `diff_hunk` ends at the commented line, so `snippet_after` stays empty unless a hunk carries lines below it. A sync asking for more context than a running one does not join it.
+
 #### 3.8.7 Claims, Locks and Liveness
 
 | Mechanism | Scope | Purpose |
@@ -597,9 +599,9 @@ The database pool should allow at least `max_concurrent_syncs` × `max_concurren
 
 | Command | What it does |
 |---|---|
-| `sync <ORG/REPO>`, `resume <ORG/REPO>` | `Service::sync_now`; a repeat continues from the stored watermarks. `sync` takes `--include`/`--exclude` (object types, with the PRD's aliases), `--actions-scope`/`--reactions-scope`/`--timeline-scope`, `--since` (`YYYY-MM-DD`, `Nd`, `Nw` or `Nm`) and `--max-concurrent`, each mapped onto the request the REST `sync` route accepts. `--force-full` walks every listing and refines every entity but keeps asking GitHub whether a page changed; `--force` does that and also fetches every page afresh |
+| `sync <ORG/REPO>`, `resume <ORG/REPO>` | `Service::sync_now`; a repeat continues from the stored watermarks. The answer is the same report `status` prints (below), with the run's own counts. `sync` takes `--include`/`--exclude` (object types, with the PRD's aliases), `--actions-scope`/`--reactions-scope`/`--timeline-scope`, `--inline-comment-snippet-before/after`, `--since` (`YYYY-MM-DD`, `Nd`, `Nw` or `Nm`) and `--max-concurrent`, each mapped onto the request the REST `sync` route accepts. `--force-full` walks every listing and refines every entity but keeps asking GitHub whether a page changed; `--force` does that and also fetches every page afresh |
 | `query <ENTITY> <ORG/REPO>` | Reads mirrored rows; `--number` for comments, reviews, review comments, review threads, reactions and timeline, optional for `conversations`, which prints each issue or pull request's derived conversations with their comments (`Service::list_conversations`, [gm_logical_conversations](#table-gm_logical_conversations)); `--limit` |
-| `status <ORG/REPO>` | The repository's run status, its latest session, and `storage`: `cache_bytes`, what the HTTP cache holds for the repository (`Service::cache_size`, the same entries `clear-cache` drops; entries in the shared public partition are not counted), and `database_bytes`, the size of the gear's SQLite file and its `-wal` file when there is one, `null` on PostgreSQL and MariaDB. With `per_repo` placement that is the repository's own size; with `per_org` or `shared` the file holds other repositories too and the repository's own share is not available |
+| `status <ORG/REPO>` | Five tables (one JSON object each with `--output-format json`): `repository` (the latest session: status, progress, `started_at`, `ended_at`, `duration_ms`, error), `run` (the `gm_repo_sync_status` row), `objects` (rows synced per type from the session's summary, plus `stale_rows_deleted` and `accepted_drift_total`), `api` (the session's telemetry: REST and GraphQL calls, fresh and `304` answers, rate-limit waits, bytes, `cache_hit_ratio`, task and entity counts) and `storage`: `cache_bytes`, what the HTTP cache holds for the repository (`Service::cache_size`, the same entries `clear-cache` drops; entries in the shared public partition are not counted), and `database_bytes`, the size of the gear's SQLite file and its `-wal` file when there is one, `null` on PostgreSQL and MariaDB. With `per_repo` placement that is the repository's own size; with `per_org` or `shared` the file holds other repositories too and the repository's own share is not available |
 | `check-rate-limit` | `Service::rate_limit`: the token's quotas on every GitHub pool from `GET /rate_limit`, which costs nothing; `core` and `graphql` first |
 | `clear-cache <ORG/REPO>` | `Service::delete_repository`: every mirrored row of the repository, its watermarks, fingerprints, sessions, run status and cached responses, then the repository row, in one transaction; refused with `409` while a sync of it is in flight. This is the per-repository deletion `cpt-cf-github-mirror-nfr-data-governance` asks for; the REST `DELETE /cache` keeps dropping cached responses only |
 

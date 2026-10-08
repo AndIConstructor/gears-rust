@@ -17,7 +17,7 @@ use github_mirror::domain::repo::{
 use github_mirror::domain::scope::{CollectionMode, SyncScope};
 use github_mirror::domain::service::{Service, SyncRequest};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use toolkit_odata::{CursorV1, ODataQuery};
 use toolkit_security::SecurityContext;
 
@@ -54,6 +54,8 @@ pub struct SyncFlags<'a> {
     pub actions_scope: Option<&'a str>,
     pub reactions_scope: Option<&'a str>,
     pub timeline_scope: Option<&'a str>,
+    pub snippet_before: Option<i32>,
+    pub snippet_after: Option<i32>,
 }
 
 pub fn sync_request(service: &Service, flags: &SyncFlags<'_>) -> Result<SyncRequest> {
@@ -61,7 +63,9 @@ pub fn sync_request(service: &Service, flags: &SyncFlags<'_>) -> Result<SyncRequ
         || flags.exclude.is_some()
         || flags.actions_scope.is_some()
         || flags.reactions_scope.is_some()
-        || flags.timeline_scope.is_some();
+        || flags.timeline_scope.is_some()
+        || flags.snippet_before.is_some()
+        || flags.snippet_after.is_some();
     let scope = if narrows {
         let mut scope = service.default_scope();
         if let Some(include) = flags.include {
@@ -79,6 +83,14 @@ pub fn sync_request(service: &Service, flags: &SyncFlags<'_>) -> Result<SyncRequ
         if let Some(mode) = flags.timeline_scope {
             scope.collection.timeline = CollectionMode::parse(mode)?;
         }
+        let snippets = &mut scope.collection.inline_comment_snippets;
+        if let Some(before) = flags.snippet_before {
+            snippets.before = before;
+        }
+        if let Some(after) = flags.snippet_after {
+            snippets.after = after;
+        }
+        snippets.validate()?;
         Some(scope)
     } else {
         None
@@ -121,10 +133,11 @@ pub async fn sync(
     ctx: &SecurityContext,
     repo: &str,
     request: SyncRequest,
+    database_file: Option<&Path>,
 ) -> Result<Value> {
     let (owner, name) = split_repo(repo)?;
-    let summary = service.sync_now(ctx, owner, name, None, request).await?;
-    Ok(serde_json::to_value(SyncSummaryDto::from(summary))?)
+    let summary = SyncSummaryDto::from(service.sync_now(ctx, owner, name, None, request).await?);
+    report(service, ctx, owner, name, Some(&summary), database_file).await
 }
 
 pub async fn query(
@@ -362,6 +375,17 @@ pub async fn status(
     database_file: Option<&Path>,
 ) -> Result<Value> {
     let (owner, name) = split_repo(repo)?;
+    report(service, ctx, owner, name, None, database_file).await
+}
+
+async fn report(
+    service: &Service,
+    ctx: &SecurityContext,
+    owner: &str,
+    name: &str,
+    summary: Option<&SyncSummaryDto>,
+    database_file: Option<&Path>,
+) -> Result<Value> {
     let full_name = format!("{owner}/{name}");
     let run = run_status(service, ctx, &full_name)
         .await?
@@ -369,17 +393,59 @@ pub async fn status(
     let session = latest_session(service, ctx, &full_name)
         .await?
         .map(SyncSessionDto::from);
-    let cache_bytes = service.cache_size(ctx, owner, name).await?;
-    let database_bytes = database_file.map(database_bytes).transpose()?;
-    Ok(json!({
-        "repository": full_name,
-        "run": run,
-        "last_session": session,
-        "storage": {
-            "cache_bytes": cache_bytes,
-            "database_bytes": database_bytes,
-        },
-    }))
+    let summary = summary.or(session.as_ref().and_then(|s| s.summary.as_ref()));
+    let storage = json!({
+        "cache_bytes": service.cache_size(ctx, owner, name).await?,
+        "database_bytes": database_file.map(database_bytes).transpose()?,
+    });
+    sections(&full_name, run.as_ref(), session.as_ref(), summary, storage)
+}
+
+fn sections(
+    repository: &str,
+    run: Option<&RepoSyncStatusDto>,
+    session: Option<&SyncSessionDto>,
+    summary: Option<&SyncSummaryDto>,
+    storage: Value,
+) -> Result<Value> {
+    let repository = json!({
+        "repository": repository,
+        "session_id": session.map(|s| s.id.clone()),
+        "status": session.map(|s| serde_json::to_value(s.status)).transpose()?,
+        "progress_percent": session.map(|s| s.progress_percent),
+        "started_at": session.and_then(|s| s.started_at.clone()),
+        "ended_at": session.and_then(|s| s.ended_at.clone()),
+        "duration_ms": session.and_then(|s| s.duration_ms),
+        "error": session.and_then(|s| s.error.clone()),
+    });
+    let mut objects = Map::new();
+    if let Some(summary) = summary
+        && let Value::Object(fields) = serde_json::to_value(summary)?
+    {
+        for (key, value) in fields {
+            if let Some(object) = key.strip_suffix("_synced") {
+                objects.insert(object.to_owned(), value);
+            } else if key == "stale_rows_deleted" || key == "accepted_drift_total" {
+                objects.insert(key, value);
+            }
+        }
+    }
+    let api = session
+        .and_then(|s| s.telemetry.as_ref())
+        .map(serde_json::to_value)
+        .transpose()?
+        .unwrap_or_else(|| json!({}));
+    let run = run
+        .map(serde_json::to_value)
+        .transpose()?
+        .unwrap_or_else(|| json!({}));
+    let mut report = Map::new();
+    report.insert("repository".to_owned(), repository);
+    report.insert("run".to_owned(), run);
+    report.insert("objects".to_owned(), Value::Object(objects));
+    report.insert("api".to_owned(), api);
+    report.insert("storage".to_owned(), storage);
+    Ok(Value::Object(report))
 }
 
 fn database_bytes(path: &Path) -> Result<u64> {

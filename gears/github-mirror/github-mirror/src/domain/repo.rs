@@ -630,6 +630,10 @@ pub struct ReviewCommentRecord {
     pub subject_type: Option<String>,
     /// The review this inline comment belongs to, when it belongs to one.
     pub pull_request_review_id: Option<i64>,
+    /// Code lines above and below the commented line, cut from `diff_hunk`
+    /// when the sync's `inline_comment_snippets` asks for them.
+    pub snippet_before: Option<String>,
+    pub snippet_after: Option<String>,
 }
 
 #[async_trait]

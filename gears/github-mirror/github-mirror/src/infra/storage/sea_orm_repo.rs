@@ -685,6 +685,8 @@ fn review_comment_active_model(
         pull_request_review_id: ActiveValue::Set(r.pull_request_review_id),
         extracted_at: ActiveValue::Set(Some(Utc::now())),
         conversation_id: ActiveValue::NotSet,
+        snippet_before: ActiveValue::Set(r.snippet_before.clone()),
+        snippet_after: ActiveValue::Set(r.snippet_after.clone()),
     }
 }
 
@@ -2672,6 +2674,8 @@ async fn review_comment_upsert_in<C: DBRunner>(
         review_comments::Column::SubjectType,
         review_comments::Column::OriginalPosition,
         review_comments::Column::PullRequestReviewId,
+        review_comments::Column::SnippetBefore,
+        review_comments::Column::SnippetAfter,
         review_comments::Column::ExtractedAt,
     ])
     .map_err(map_scope_error)?;
@@ -2709,6 +2713,8 @@ async fn review_comment_upsert_in<C: DBRunner>(
         start_side: record.start_side,
         subject_type: record.subject_type,
         pull_request_review_id: record.pull_request_review_id,
+        snippet_before: record.snippet_before,
+        snippet_after: record.snippet_after,
     })
 }
 

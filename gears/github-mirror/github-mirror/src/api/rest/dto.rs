@@ -525,6 +525,9 @@ pub struct ReviewCommentDto {
     /// The review this inline comment belongs to, as GitHub reports it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_request_review_id: Option<i64>,
+    /// Code lines above and below the commented line, when the sync kept them.
+    pub snippet_before: Option<String>,
+    pub snippet_after: Option<String>,
 }
 
 impl From<ReviewComment> for ReviewCommentDto {
@@ -550,6 +553,8 @@ impl From<ReviewComment> for ReviewCommentDto {
             start_side: c.start_side,
             subject_type: c.subject_type,
             pull_request_review_id: c.pull_request_review_id,
+            snippet_before: c.snippet_before,
+            snippet_after: c.snippet_after,
         }
     }
 }

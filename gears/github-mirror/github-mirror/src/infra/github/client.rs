@@ -24,6 +24,7 @@ use crate::domain::repo::{
     ReviewCommentRecord, ReviewRecord, ReviewThreadRecord, TagRecord, WorkflowJobRecord,
     WorkflowRunRecord,
 };
+use crate::domain::scope::InlineCommentSnippets;
 use crate::domain::sync::telemetry::{GithubApi, RequestOutcome, SessionTelemetry, TelemetryEntry};
 use crate::infra::github::cache::{CacheKey, CachedResponse, HttpCache, NoCache};
 use crate::infra::github::compression::MAX_BODY_BYTES;
@@ -1976,7 +1977,11 @@ fn comment_record(repo_id: i64, c: GhComment) -> Option<CommentRecord> {
     })
 }
 
-fn review_comment_record(repo_id: i64, c: GhReviewComment) -> Option<ReviewCommentRecord> {
+fn review_comment_record(
+    repo_id: i64,
+    c: GhReviewComment,
+    snippets: InlineCommentSnippets,
+) -> Option<ReviewCommentRecord> {
     let Some(pull_number) = issue_number_from_url(c.pull_request_url.as_deref()) else {
         tracing::warn!(
             comment_id = c.id,
@@ -1985,6 +1990,7 @@ fn review_comment_record(repo_id: i64, c: GhReviewComment) -> Option<ReviewComme
         );
         return None;
     };
+    let (snippet_before, snippet_after) = snippets.cut(c.diff_hunk.as_deref());
     Some(ReviewCommentRecord {
         id: c.id,
         repo_id,
@@ -2008,6 +2014,8 @@ fn review_comment_record(repo_id: i64, c: GhReviewComment) -> Option<ReviewComme
         start_side: c.start_side,
         subject_type: c.subject_type,
         pull_request_review_id: c.pull_request_review_id,
+        snippet_before,
+        snippet_after,
     })
 }
 
@@ -2870,7 +2878,13 @@ impl GithubPort for GithubClient {
             listing.review_comments = page
                 .parsed
                 .into_iter()
-                .filter_map(|c| review_comment_record(repo_id, c))
+                .filter_map(|c| {
+                    review_comment_record(
+                        repo_id,
+                        c,
+                        options.scope.collection.inline_comment_snippets,
+                    )
+                })
                 .collect();
             listing
                 .complete

@@ -489,6 +489,9 @@ pub mod review_comments {
         pub extracted_at: Option<DateTimeUtc>,
         /// Root comment of the derived conversation this one belongs to.
         pub conversation_id: Option<i64>,
+        /// Code lines above and below the commented line, from `diff_hunk`.
+        pub snippet_before: Option<String>,
+        pub snippet_after: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
