@@ -12,6 +12,8 @@ use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use toolkit_canonical_errors::{CanonicalError, InvalidArgument};
 use toolkit_security::PlatformSecurityContext;
+use tracing::Instrument as _;
+use uuid::Uuid;
 
 use crate::contract::PlatformTypesRegistryApi;
 use crate::gts::TypeResource;
@@ -21,7 +23,12 @@ use crate::models::{
     IdempotencyKey, JsonDocument, LifecycleStatus, MAX_BATCH_GET_KEYS, Origin, Projection,
     PublisherContext, RegisterEntitiesRequest, RegisterItem, RegistrationOutcome,
 };
-use crate::submit::{Stop, await_registration, bounded, deadline_from_now, jittered};
+
+pub mod submit;
+use submit::{Stop, await_registration, bounded, deadline_after, jittered};
+
+mod telemetry;
+use telemetry::{Run, StopReason, error_fields, operation_id_of};
 
 /// How a submitted batch is retried at the transport level, key and request unchanged.
 const TRANSPORT_ATTEMPTS: u32 = 3;
@@ -114,6 +121,9 @@ impl ReconcileOutcome {
 
 /// Reconcile desired documents under `publisher`; callers reach it through
 /// `PlatformTypesRegistryApiExt::reconcile_entities_and_await`, which documents it.
+///
+/// The call runs in an INFO `reconcile` span; each submitted payload in an INFO
+/// `reconcile_batch` span within it (see the README's Observability section).
 pub async fn reconcile<'d, A, I>(
     api: &A,
     ctx: &PlatformSecurityContext,
@@ -126,79 +136,133 @@ where
     A: PlatformTypesRegistryApi + ?Sized,
     I: IntoIterator<Item = &'d (GtsId, JsonDocument)>,
 {
-    let call = Call {
+    // The whole-call budget starts now, before any preparation.
+    let started = Instant::now();
+    let deadline = deadline_after(started, options.deadline);
+    let span = tracing::info_span!(
+        "reconcile",
+        reconcile_id = %Uuid::new_v4(),
+        publisher = %publisher.name,
+        publisher_version = %publisher.version,
+        inputs = tracing::field::Empty,
+        desired = tracing::field::Empty,
+        passes = options.passes.get(),
+        batch_size = options.batch_size.get(),
+        deadline_ms = u64::try_from(options.deadline.as_millis()).unwrap_or(u64::MAX),
+    );
+    let (wanted, outcomes) = span.in_scope(|| validate(desired));
+    let prepared = Prepared {
+        started,
+        deadline,
+        wanted,
+        outcomes,
+    };
+    run(api, ctx, publisher, cancel, options, prepared)
+        .instrument(span)
+        .await
+}
+
+/// A call's input, validated, and its budget.
+struct Prepared<'d> {
+    started: Instant,
+    deadline: Result<Instant, CanonicalError>,
+    wanted: Wanted<'d>,
+    outcomes: Outcomes,
+}
+
+async fn run<A: PlatformTypesRegistryApi + ?Sized>(
+    api: &A,
+    ctx: &PlatformSecurityContext,
+    publisher: &PublisherContext,
+    cancel: &CancellationToken,
+    options: &ReconcileOptions,
+    prepared: Prepared<'_>,
+) -> Result<Reconciliation, CanonicalError> {
+    // The guard reports the call's end, whichever way it ends, dropped included.
+    let desired = prepared.wanted.len() + prepared.outcomes.len();
+    let mut run = Run::new(prepared.started, desired, prepared.outcomes);
+    let mut wanted = prepared.wanted;
+    tracing::info!(event = "reconcile_started", "reconciliation started");
+    let deadline = match prepared.deadline {
+        Ok(deadline) => deadline,
+        Err(error) => {
+            run.stop(StopReason::InvalidDeadline);
+            return Err(error);
+        }
+    };
+    let mut call = Call {
         api,
         ctx,
         publisher,
-        deadline: deadline_from_now(options.deadline)?,
+        deadline,
         cancel,
+        batches: 0,
     };
-    let (mut wanted, mut outcomes) = validate(desired);
-    let mut submitted = false;
     let mut backoff = options.retry_backoff.min(options.retry_backoff_max);
-
-    for pass in 0..options.passes.get() {
-        if cancel.is_cancelled() {
-            return Err(TypeResource::cancelled().create());
-        }
-        if pass > 0 {
-            let wait = jittered(backoff);
-            tracing::debug!(
-                gear = %publisher.name,
-                pass,
-                unsettled = wanted.len(),
-                backoff = ?wait,
-                "reconciliation retries the unsettled identifiers"
-            );
-            match pause(wait, call.deadline, cancel).await {
-                Ok(()) => {}
-                Err(Stop::Cancelled) => return Err(Stop::Cancelled.into_error()),
-                Err(stop @ Stop::Deadline(_)) => {
-                    mark_unsettled(
-                        &wanted,
-                        &mut outcomes,
-                        &ReconcilePendingCause::Unavailable(stop.into_error()),
-                    );
-                    break;
-                }
-            }
+    let mut stop = StopReason::PassesExhausted;
+    for pass in 1..=options.passes.get() {
+        run.passes = pass;
+        let end = if pass > 1
+            && let Err(stopped) = pause(jittered(backoff), deadline, cancel).await
+        {
+            stopped_between_passes(stopped, &wanted, &mut run)
+        } else {
+            call.pass(pass, options.batch_size.get(), &mut wanted, &mut run)
+                .await
+        };
+        // Each later pause doubles, up to the maximum.
+        if pass > 1 {
             backoff = backoff.saturating_mul(2).min(options.retry_backoff_max);
         }
-
-        // Only the caller's token ends the call; a `Cancelled` from the registry is an answer.
-        let current = match call.read(wanted.values().map(|(id, _)| id)).await {
-            Ok(Ok(current)) => current,
-            Err(Stop::Cancelled) => return Err(Stop::Cancelled.into_error()),
-            Err(stop @ Stop::Deadline(_)) => {
-                let cause = ReconcilePendingCause::of(stop.into_error());
-                mark_unsettled(&wanted, &mut outcomes, &cause);
+        match end {
+            PassEnd::Next => {}
+            PassEnd::Stop(reason) => {
+                stop = reason;
                 break;
             }
-            Ok(Err(e)) => {
-                mark_unsettled(&wanted, &mut outcomes, &ReconcilePendingCause::of(e));
-                break;
+            PassEnd::Cancelled => {
+                run.stop(StopReason::Cancelled);
+                return Err(Stop::Cancelled.into_error());
             }
-        };
-
-        let candidates = compare(&mut wanted, &mut outcomes, &current);
-        if candidates.is_empty() {
-            wanted.clear();
-            break;
-        }
-        submitted = true;
-
-        let decided = call
-            .submit_all(candidates, options.batch_size.get())
-            .await?;
-        record(decided, &mut wanted, &mut outcomes);
-        if wanted.is_empty() {
-            break;
         }
     }
+    // The last pass ran out of time rather than of passes: the local budget, not a remote
+    // `DeadlineExceeded` answered while it still had some.
+    if stop == StopReason::PassesExhausted && Instant::now() >= deadline {
+        stop = StopReason::Deadline;
+    }
+    Ok(conclude(run, &wanted, call.batches > 0, stop))
+}
 
+/// The pause before a later pass, ended by the caller or the deadline.
+fn stopped_between_passes(stopped: Stop, wanted: &Wanted<'_>, run: &mut Run) -> PassEnd {
+    match stopped {
+        Stop::Cancelled => PassEnd::Cancelled,
+        Stop::Deadline(_) => {
+            let cause = ReconcilePendingCause::Unavailable(stopped.into_error());
+            mark_unsettled(wanted, &mut run.outcomes, &cause);
+            PassEnd::Stop(StopReason::Deadline)
+        }
+    }
+}
+
+/// How one pass ended.
+enum PassEnd {
+    Next,
+    Stop(StopReason),
+    Cancelled,
+}
+
+/// Give every identifier still wanted an outcome, report the end, and answer.
+fn conclude(
+    mut run: Run,
+    wanted: &Wanted<'_>,
+    submitted: bool,
+    stop: StopReason,
+) -> Reconciliation {
     // Whatever stopped the passes, nothing desired leaves without an outcome.
-    for (key, (id, _)) in &wanted {
-        outcomes.entry(key.clone()).or_insert_with(|| {
+    for (key, (id, _)) in wanted {
+        run.outcomes.entry(key.clone()).or_insert_with(|| {
             (
                 id.clone(),
                 ReconcileOutcome::Pending(ReconcilePendingCause::Unavailable(
@@ -211,13 +275,19 @@ where
         });
     }
     if !submitted
-        && outcomes
+        && run
+            .outcomes
             .values()
             .all(|(_, o)| matches!(o, ReconcileOutcome::Admitted))
     {
-        return Ok(Reconciliation::UpToDate);
+        run.finish(StopReason::UpToDate);
+        return Reconciliation::UpToDate;
     }
-    Ok(Reconciliation::Reconciled(outcomes.into_values().collect()))
+    Reconciliation::Reconciled(run.finish(stop).into_values().collect())
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 struct Call<'c, A: ?Sized> {
@@ -226,6 +296,8 @@ struct Call<'c, A: ?Sized> {
     publisher: &'c PublisherContext,
     deadline: Instant,
     cancel: &'c CancellationToken,
+    /// Payloads submitted so far; numbers each `reconcile_batch` span.
+    batches: u32,
 }
 
 /// A pause of `backoff`, cut short by the deadline or the caller's cancellation.
@@ -268,7 +340,7 @@ fn compare(
 
 /// Record decisions and remove the identifiers this call will not submit again.
 fn record(
-    decided: Vec<(GtsId, ReconcileOutcome)>,
+    decided: impl IntoIterator<Item = (GtsId, ReconcileOutcome)>,
     wanted: &mut Wanted<'_>,
     outcomes: &mut Outcomes,
 ) {
@@ -292,7 +364,7 @@ fn record(
 type Wanted<'d> = BTreeMap<String, (GtsId, &'d JsonDocument)>;
 
 /// Outcomes so far, by canonical identifier.
-type Outcomes = BTreeMap<String, (GtsId, ReconcileOutcome)>;
+pub type Outcomes = BTreeMap<String, (GtsId, ReconcileOutcome)>;
 
 struct Current {
     content: JsonDocument,
@@ -306,9 +378,11 @@ fn validate<'d>(
     desired: impl IntoIterator<Item = &'d (GtsId, JsonDocument)>,
 ) -> (Wanted<'d>, Outcomes) {
     let mut wanted: Wanted<'d> = BTreeMap::new();
-    let mut outcomes = BTreeMap::new();
+    let mut outcomes = Outcomes::new();
     let mut conflicting = Vec::new();
+    let mut inputs = 0_usize;
     for (id, content) in desired {
+        inputs += 1;
         match wanted.get(id.id()) {
             Some((_, existing)) if *existing != content => conflicting.push(id.clone()),
             Some(_) => {}
@@ -328,6 +402,9 @@ fn validate<'d>(
             .create();
         outcomes.insert(id.id().to_owned(), (id, ReconcileOutcome::Rejected(error)));
     }
+    let span = tracing::Span::current();
+    span.record("inputs", inputs);
+    span.record("desired", wanted.len() + outcomes.len());
     (wanted, outcomes)
 }
 
@@ -342,6 +419,50 @@ fn mark_unsettled(wanted: &Wanted<'_>, outcomes: &mut Outcomes, cause: &Reconcil
 }
 
 impl<A: PlatformTypesRegistryApi + ?Sized> Call<'_, A> {
+    /// One read–compare–submit pass; outcomes are recorded in `run` as they are decided.
+    async fn pass(
+        &mut self,
+        pass: u32,
+        batch_size: usize,
+        wanted: &mut Wanted<'_>,
+        run: &mut Run,
+    ) -> PassEnd {
+        if self.cancel.is_cancelled() {
+            return PassEnd::Cancelled;
+        }
+        // Only the caller's token ends the call; a `Cancelled` from the registry is an answer.
+        let current = match self.read(wanted.values().map(|(id, _)| id)).await {
+            Ok(Ok(current)) => current,
+            Err(Stop::Cancelled) => return PassEnd::Cancelled,
+            Err(stop @ Stop::Deadline(_)) => {
+                let cause = ReconcilePendingCause::of(stop.into_error());
+                mark_unsettled(wanted, &mut run.outcomes, &cause);
+                return PassEnd::Stop(StopReason::Deadline);
+            }
+            Ok(Err(e)) => {
+                mark_unsettled(wanted, &mut run.outcomes, &ReconcilePendingCause::of(e));
+                return PassEnd::Stop(StopReason::ReadFailed);
+            }
+        };
+        let candidates = compare(wanted, &mut run.outcomes, &current);
+        if candidates.is_empty() {
+            wanted.clear();
+            return PassEnd::Stop(StopReason::Completed);
+        }
+        if self
+            .submit_all(candidates, batch_size, pass, wanted, run)
+            .await
+            .is_err()
+        {
+            return PassEnd::Cancelled;
+        }
+        if wanted.is_empty() {
+            PassEnd::Stop(StopReason::Completed)
+        } else {
+            PassEnd::Next
+        }
+    }
+
     /// Reads `ids` in bounded batches, selecting `content` and `origin`. The outer `Err` is
     /// this call's own stop, the inner one the registry's failure or a protocol fault.
     async fn read<'a>(
@@ -419,81 +540,60 @@ impl<A: PlatformTypesRegistryApi + ?Sized> Call<'_, A> {
         Ok(Ok(current))
     }
 
-    /// Submit bounded batches, bisect synchronous refusals, and return every candidate’s outcome.
+    /// Submit bounded batches and record every candidate's outcome as its batch is decided,
+    /// so a later stop loses nothing already observed. `Err` is the caller's cancellation.
     async fn submit_all(
-        &self,
+        &mut self,
         candidates: Vec<RegisterItem>,
         batch_size: usize,
-    ) -> Result<Vec<(GtsId, ReconcileOutcome)>, CanonicalError> {
-        let mut decided = Vec::with_capacity(candidates.len());
-        let mut queue: Vec<Vec<RegisterItem>> = Vec::new();
+        pass: u32,
+        wanted: &mut Wanted<'_>,
+        run: &mut Run,
+    ) -> Result<(), Stop> {
+        // Each payload with the batch it came from: a refused remainder or a split half.
+        let mut queue: Vec<(Option<u32>, Vec<RegisterItem>)> = Vec::new();
         let mut rest = candidates.into_iter().peekable();
         while rest.peek().is_some() {
-            queue.push(rest.by_ref().take(batch_size).collect());
+            queue.push((None, rest.by_ref().take(batch_size).collect()));
         }
         queue.reverse();
-        while let Some(batch) = queue.pop() {
-            match self.submit_batch(batch).await {
-                Submitted::Decided(outcomes) => decided.extend(outcomes),
-                Submitted::Refused(error, mut batch) => {
-                    match (refusal(&error, &batch), batch.len()) {
-                        // Only the named candidate is at fault: reject it, resubmit the rest
-                        // in order, as a new payload under a new key.
-                        (Refusal::Candidate(index), _) => {
-                            let refused = batch.remove(index);
-                            tracing::debug!(
-                                gts_id = %refused.gts_id,
-                                remaining = batch.len(),
-                                "registry refused a candidate; resubmitting the rest"
-                            );
-                            decided.push((refused.gts_id, ReconcileOutcome::Rejected(error)));
-                            if !batch.is_empty() {
-                                queue.push(batch);
-                            }
-                        }
-                        (Refusal::Size, 2..) => {
-                            tracing::debug!(size = batch.len(), %error, "registry refused a batch's size; bisecting it");
-                            let right = batch.split_off(batch.len() >> 1);
-                            queue.push(right);
-                            queue.push(batch);
-                        }
-                        // Splitting cannot cure it, and the documents are not at fault.
-                        (Refusal::Size | Refusal::Request, _) => {
-                            let cause = ReconcilePendingCause::Refused(error);
-                            decided.extend(
-                                batch
-                                    .into_iter()
-                                    .map(|c| (c.gts_id, ReconcileOutcome::Pending(cause.clone()))),
-                            );
-                        }
-                    }
-                }
-                Submitted::Cancelled => return Err(Stop::Cancelled.into_error()),
-                Submitted::Unavailable(error, batch) => {
-                    let cause = ReconcilePendingCause::of(error);
-                    decided.extend(
-                        batch
-                            .into_iter()
-                            .map(|c| (c.gts_id, ReconcileOutcome::Pending(cause.clone()))),
-                    );
-                }
-            }
+        while let Some((parent_batch, batch)) = queue.pop() {
+            let key = IdempotencyKey::generate();
+            self.batches += 1;
+            let batch_id = self.batches;
+            let span = tracing::info_span!(
+                "reconcile_batch",
+                batch = batch_id,
+                parent_batch,
+                pass,
+                size = batch.len(),
+                idempotency_key = key.as_str(),
+                attempt = tracing::field::Empty,
+                operation_id = tracing::field::Empty,
+            );
+            let submitted = self.submit_batch(key, batch).instrument(span.clone()).await;
+            // Synchronously in the batch's span: its refusal events carry its fields.
+            let decided = span.in_scope(|| decide(submitted, batch_id, &mut queue))?;
+            record(decided, wanted, &mut run.outcomes);
         }
-        Ok(decided)
+        Ok(())
     }
 
-    /// New key per batch; transport retries preserve it and use jittered pauses under the deadline.
-    async fn submit_batch(&self, items: Vec<RegisterItem>) -> Submitted {
-        let key = IdempotencyKey::generate();
+    /// Submit one payload under `key`; transport retries preserve it and use jittered pauses
+    /// under the deadline. Runs inside the batch's span.
+    async fn submit_batch(&self, key: IdempotencyKey, items: Vec<RegisterItem>) -> Submitted {
         let request = RegisterEntitiesRequest {
             items,
             dry_run: false,
             publisher: self.publisher.clone(),
         };
+        // Before anything is sent: the key reaches an INFO log even if no answer ever does.
+        tracing::info!(event = "batch_submitted", "submitting a batch");
         let mut backoff = TRANSPORT_RETRY_BACKOFF;
         let mut attempt = 0;
         loop {
             attempt += 1;
+            tracing::Span::current().record("attempt", attempt);
             let error = match await_registration(
                 self.api,
                 self.ctx,
@@ -515,21 +615,20 @@ impl<A: PlatformTypesRegistryApi + ?Sized> Call<'_, A> {
                 Err(Stop::Cancelled) => return Submitted::Cancelled,
                 Err(stop @ Stop::Deadline(_)) => stop.into_error(),
             };
+            if let Some(operation_id) = operation_id_of(&error) {
+                tracing::Span::current()
+                    .record("operation_id", tracing::field::display(operation_id));
+            }
             if !retryable(&error) {
                 return Submitted::Unavailable(error, request.items);
             }
+            let fields = error_fields(&error);
             if attempt >= TRANSPORT_ATTEMPTS {
-                tracing::warn!(
-                    gear = %self.publisher.name,
-                    attempts = attempt,
-                    size = request.items.len(),
-                    %error,
-                    "a submission failed every transport attempt; it stays pending"
-                );
+                telemetry::transport_exhausted(attempt, &fields);
                 return Submitted::Unavailable(error, request.items);
             }
             let wait = jittered(backoff);
-            tracing::debug!(attempt, %error, backoff = ?wait, "retrying a submission under its key");
+            telemetry::transport_retry(&fields, millis(wait));
             match pause(wait, self.deadline, self.cancel).await {
                 Ok(()) => {}
                 Err(Stop::Deadline(_)) => return Submitted::Unavailable(error, request.items),
@@ -540,8 +639,73 @@ impl<A: PlatformTypesRegistryApi + ?Sized> Call<'_, A> {
     }
 }
 
+/// One submission's candidates, decided; a refused remainder or split halves go back on
+/// `queue` as children of `batch_id`. `Err` is the caller's cancellation.
+fn decide(
+    submitted: Submitted,
+    batch_id: u32,
+    queue: &mut Vec<(Option<u32>, Vec<RegisterItem>)>,
+) -> Result<Vec<(GtsId, ReconcileOutcome)>, Stop> {
+    let pending = |batch: Vec<RegisterItem>, cause: ReconcilePendingCause| {
+        batch
+            .into_iter()
+            .map(|c| (c.gts_id, ReconcileOutcome::Pending(cause.clone())))
+            .collect()
+    };
+    Ok(match submitted {
+        Submitted::Decided(outcomes) => outcomes,
+        Submitted::Cancelled => return Err(Stop::Cancelled),
+        Submitted::Unavailable(error, batch) => pending(batch, ReconcilePendingCause::of(error)),
+        Submitted::Refused(error, batch) => refused(error, batch, batch_id, queue),
+    })
+}
+
+/// A synchronous `InvalidArgument`'s candidates: the named one rejected and the rest
+/// resubmitted, a size refusal split, or the whole batch left pending.
+fn refused(
+    error: CanonicalError,
+    mut batch: Vec<RegisterItem>,
+    batch_id: u32,
+    queue: &mut Vec<(Option<u32>, Vec<RegisterItem>)>,
+) -> Vec<(GtsId, ReconcileOutcome)> {
+    let fields = error_fields(&error);
+    match (refusal(&error, &batch), batch.len()) {
+        // Only the named candidate is at fault: reject it, resubmit the rest in order, as a
+        // new payload under a new key.
+        (Refusal::Candidate(index), _) => {
+            let refused = batch.remove(index);
+            telemetry::candidate_refused(&refused.gts_id, batch.len(), &fields);
+            if !batch.is_empty() {
+                queue.push((Some(batch_id), batch));
+            }
+            vec![(refused.gts_id, ReconcileOutcome::Rejected(error))]
+        }
+        (Refusal::Size, 2..) => {
+            telemetry::batch_split(&fields);
+            let right = batch.split_off(batch.len() >> 1);
+            queue.push((Some(batch_id), right));
+            queue.push((Some(batch_id), batch));
+            Vec::new()
+        }
+        // Splitting cannot cure it, and the documents are not at fault.
+        (Refusal::Size | Refusal::Request, _) => {
+            telemetry::batch_refused(&fields);
+            let cause = ReconcilePendingCause::Refused(error);
+            batch
+                .into_iter()
+                .map(|c| (c.gts_id, ReconcileOutcome::Pending(cause.clone())))
+                .collect()
+        }
+    }
+}
+
 fn incomplete_read(id: &GtsId, why: &str) -> CanonicalError {
-    tracing::warn!(gts_id = %id, why, "registry read answered incompletely; nothing is submitted");
+    tracing::warn!(
+        event = "incomplete_read",
+        gts_id = %id,
+        why,
+        "registry read answered incompletely; nothing is submitted"
+    );
     CanonicalError::internal(format!(
         "the registry answered a reconciliation read of '{id}' incompletely: {why}"
     ))
@@ -626,6 +790,7 @@ fn cover(
                 Some(mut outcomes) if outcomes.len() == 1 => outcomes.remove(0),
                 found => {
                     tracing::warn!(
+                        event = "item_unreported",
                         gts_id = %candidate.gts_id,
                         reported = found.map_or(0, |o| o.len()),
                         "a completed operation did not report this candidate exactly once"
@@ -736,5 +901,11 @@ fn classify(outcome: RegistrationOutcome) -> ReconcileOutcome {
 }
 
 #[cfg(test)]
-#[path = "reconcile_tests.rs"]
-mod reconcile_tests;
+#[path = "mod_tests.rs"]
+mod mod_tests;
+
+#[cfg(test)]
+mod telemetry_tests;
+
+#[cfg(test)]
+mod telemetry_capture;

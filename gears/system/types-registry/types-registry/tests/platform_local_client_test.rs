@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use gts::{GtsId, GtsIdPattern, GtsInstanceId};
-use serde_json::json;
+use serde_json::{Value, json};
 use toolkit_db::{DBProvider, DbError};
 use toolkit_gts::gts_id;
 use toolkit_security::PlatformSecurityContext;
@@ -883,4 +883,297 @@ async fn discovery_honours_a_chain_depth() {
 async fn the_local_client_conforms_to_the_contract() {
     let h = harness().await;
     types_registry_sdk::testing_platform::conformance::run(&h.client).await;
+}
+
+/// Events as a JSON-logging production subscriber at INFO writes them, spans included.
+mod captured {
+    use std::io;
+    use std::sync::Arc;
+
+    use parking_lot::Mutex;
+    use serde_json::Value;
+    use tracing::subscriber::DefaultGuard;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    pub struct Log(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Log {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Log {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
+
+    /// Keeps a second dispatcher registered for the whole binary. With only one, tracing-core
+    /// computes a callsite's interest from the registering thread's default, so a test
+    /// without a capture can cache `never` for a callsite another test's capture needs.
+    fn keep_interest_shared() {
+        static SHARED: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        SHARED.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+    }
+
+    impl Log {
+        pub fn install() -> (Self, DefaultGuard) {
+            keep_interest_shared();
+            let log = Self::default();
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(log.clone())
+                .finish();
+            (log, tracing::subscriber::set_default(subscriber))
+        }
+
+        pub fn lines(&self) -> Vec<Value> {
+            String::from_utf8_lossy(&self.0.lock())
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("a JSON log line"))
+                .collect()
+        }
+
+        /// The lines whose `event` field is `name`.
+        pub fn named(&self, name: &str) -> Vec<Value> {
+            self.lines()
+                .into_iter()
+                .filter(|line| line["fields"]["event"] == name)
+                .collect()
+        }
+    }
+
+    /// The fields of the innermost span named `name` around `line`.
+    pub fn span<'a>(line: &'a Value, name: &str) -> &'a Value {
+        line["spans"]
+            .as_array()
+            .and_then(|spans| spans.iter().rev().find(|s| s["name"] == name))
+            .unwrap_or_else(|| panic!("no {name} span around {line}"))
+    }
+}
+
+#[tokio::test]
+async fn an_accepted_and_a_replayed_submission_name_one_operation_and_its_key() {
+    let h = harness().await;
+    let (log, _guard) = captured::Log::install();
+    let key = uuid::Uuid::new_v4().to_string();
+    let request = || register(vec![create(CF_TYPE, schema(CF_TYPE))]);
+
+    let first = h
+        .client
+        .register_entities(&ctx(), IdempotencyKey::new(key.clone()).unwrap(), request())
+        .await
+        .expect("accepted");
+    // The acknowledgement was lost: the client retries under the same key.
+    let replay = h
+        .client
+        .register_entities(&ctx(), IdempotencyKey::new(key.clone()).unwrap(), request())
+        .await
+        .expect("replayed");
+
+    assert_eq!(replay.operation_id, first.operation_id);
+    let accepted = log.named("operation_accepted");
+    assert_eq!(accepted.len(), 2, "{accepted:#?}");
+    for (line, replayed) in accepted.iter().zip([false, true]) {
+        let fields = &line["fields"];
+        assert_eq!(fields["idempotency_key"], key.as_str());
+        assert_eq!(fields["operation_id"], first.operation_id.to_string());
+        assert_eq!(fields["replayed"], replayed);
+        assert_eq!(fields["kind"], "registration");
+    }
+}
+
+#[tokio::test]
+async fn reconciliation_through_the_local_client_is_traced_from_call_to_operation() {
+    use types_registry_sdk::{PlatformTypesRegistryApiExt, ReconcileOptions};
+
+    let h = harness().await;
+    let (log, _guard) = captured::Log::install();
+    h.client
+        .reconcile_entities_and_await(
+            &ctx(),
+            &publisher(),
+            &[(id(CF_TYPE), schema(CF_TYPE))],
+            &ReconcileOptions::default(),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("reconciles");
+
+    let [accepted] = <[_; 1]>::try_from(log.named("operation_accepted")).expect("one");
+    let [batch] = <[_; 1]>::try_from(log.named("batch_accepted")).expect("one");
+    let [finished] = <[_; 1]>::try_from(log.named("reconcile_finished")).expect("one");
+
+    // The registry's acceptance runs in the caller's task, inside the call's spans.
+    let reconcile_id = &captured::span(&finished, "reconcile")["reconcile_id"];
+    assert_eq!(
+        &captured::span(&accepted, "reconcile")["reconcile_id"],
+        reconcile_id
+    );
+    let key = &captured::span(&batch, "reconcile_batch")["idempotency_key"];
+    assert_eq!(&accepted["fields"]["idempotency_key"], key);
+    assert_eq!(
+        &captured::span(&accepted, "reconcile_batch")["idempotency_key"],
+        key
+    );
+    assert_eq!(
+        accepted["fields"]["operation_id"],
+        batch["fields"]["operation_id"]
+    );
+    assert_eq!(finished["fields"]["stop"], "completed");
+    assert_eq!(finished["fields"]["admitted"], 1);
+    assert_eq!(finished["level"], "INFO");
+    let text = log
+        .lines()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<String>();
+    assert!(
+        !text.contains("\"properties\""),
+        "no document content is logged"
+    );
+}
+
+/// The local client, except that a registration's answer never comes back: the registry
+/// accepts it, says so on `accepted`, and the client never learns it.
+struct LostAcknowledgement {
+    client: LocalClient,
+    accepted: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl PlatformTypesRegistryApi for LostAcknowledgement {
+    async fn batch_get_entities(
+        &self,
+        ctx: &PlatformSecurityContext,
+        request: BatchGetEntitiesRequest,
+    ) -> Result<
+        types_registry_sdk::BatchGetEntitiesResponse,
+        toolkit_canonical_errors::CanonicalError,
+    > {
+        self.client.batch_get_entities(ctx, request).await
+    }
+
+    async fn list_entities(
+        &self,
+        ctx: &PlatformSecurityContext,
+        request: ListEntitiesRequest,
+    ) -> Result<types_registry_sdk::ListEntitiesResponse, toolkit_canonical_errors::CanonicalError>
+    {
+        self.client.list_entities(ctx, request).await
+    }
+
+    async fn register_entities(
+        &self,
+        ctx: &PlatformSecurityContext,
+        key: IdempotencyKey,
+        request: RegisterEntitiesRequest,
+    ) -> Result<types_registry_sdk::RegistrationOperation, toolkit_canonical_errors::CanonicalError>
+    {
+        self.client
+            .register_entities(ctx, key, request)
+            .await
+            .expect("the registry accepts it");
+        self.accepted.notify_one();
+        std::future::pending().await
+    }
+
+    async fn delete_entities(
+        &self,
+        ctx: &PlatformSecurityContext,
+        key: IdempotencyKey,
+        request: DeleteEntitiesRequest,
+    ) -> Result<types_registry_sdk::DeletionOperation, toolkit_canonical_errors::CanonicalError>
+    {
+        self.client.delete_entities(ctx, key, request).await
+    }
+
+    async fn get_operation(
+        &self,
+        ctx: &PlatformSecurityContext,
+        operation_id: uuid::Uuid,
+    ) -> Result<Operation, toolkit_canonical_errors::CanonicalError> {
+        self.client.get_operation(ctx, operation_id).await
+    }
+}
+
+/// A remote client's lost acknowledgement, investigated from the logs alone: the client's
+/// INFO events of one call name the key, and the registry's acceptance event with that key
+/// names the operation — joined by the key, not by span nesting.
+#[tokio::test]
+async fn a_lost_acknowledgement_is_bridged_from_the_calls_logs_to_its_operation() {
+    use types_registry_sdk::{PlatformTypesRegistryApiExt, ReconcileOptions};
+
+    let h = harness().await;
+    let api = LostAcknowledgement {
+        client: LocalClient::new(Arc::clone(&h.service)),
+        accepted: tokio::sync::Notify::new(),
+    };
+    let (log, _guard) = captured::Log::install();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (ctx, publisher, options) = (ctx(), publisher(), ReconcileOptions::default());
+    let desired = [(id(CF_TYPE), schema(CF_TYPE))];
+    // The caller gives up only once the registry has accepted: no budget races the call,
+    // and a call that ends first fails the test at once.
+    let call = api.reconcile_entities_and_await(&ctx, &publisher, &desired, &options, &cancel);
+    tokio::pin!(call);
+    let result = tokio::select! {
+        result = &mut call => panic!("the call ended before the registry accepted: {result:?}"),
+        () = api.accepted.notified() => {
+            cancel.cancel();
+            call.await
+        }
+    };
+    assert!(
+        matches!(
+            result,
+            Err(toolkit_canonical_errors::CanonicalError::Cancelled { .. })
+        ),
+        "the caller cancelled: {result:?}"
+    );
+
+    let [finished] = <[_; 1]>::try_from(log.named("reconcile_finished")).expect("one");
+    assert_eq!(finished["fields"]["stop"], "cancelled");
+    assert!(
+        log.named("batch_accepted").is_empty(),
+        "no acknowledgement arrived"
+    );
+    let reconcile_id = &captured::span(&finished, "reconcile")["reconcile_id"];
+
+    // The client's side: its INFO events of this call, and the key they name.
+    let keys: Vec<Value> = log
+        .named("batch_submitted")
+        .iter()
+        .filter(|line| &captured::span(line, "reconcile")["reconcile_id"] == reconcile_id)
+        .map(|line| captured::span(line, "reconcile_batch")["idempotency_key"].clone())
+        .collect();
+    let [key] = <[_; 1]>::try_from(keys).expect("one submitted payload");
+
+    // The registry's side, by key alone.
+    let accepted: Vec<Value> = log
+        .named("operation_accepted")
+        .into_iter()
+        .filter(|line| line["fields"]["idempotency_key"] == key)
+        .collect();
+    let [accepted] = <[_; 1]>::try_from(accepted).expect("the registry accepted it once");
+    let operation_id: uuid::Uuid = accepted["fields"]["operation_id"]
+        .as_str()
+        .and_then(|id| id.parse().ok())
+        .expect("an operation id");
+    h.client
+        .get_operation(&ctx, operation_id)
+        .await
+        .expect("the operation the logs lead to exists");
 }

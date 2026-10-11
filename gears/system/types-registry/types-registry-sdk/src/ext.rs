@@ -45,7 +45,7 @@ use crate::models::{
 use crate::reconcile::{ReconcileOptions, Reconciliation, reconcile};
 
 pub use crate::models::MAX_BATCH_GET_KEYS;
-pub use crate::submit::{POLL_INTERVAL_INITIAL, POLL_INTERVAL_MAX};
+pub use crate::reconcile::submit::{POLL_INTERVAL_INITIAL, POLL_INTERVAL_MAX};
 
 /// Page limit preventing endless traversal and unbounded accumulation.
 pub const MAX_LIST_PAGES: usize = 1_000;

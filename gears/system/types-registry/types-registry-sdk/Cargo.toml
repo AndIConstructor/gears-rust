@@ -72,6 +72,8 @@ parking_lot = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 # Round-trip and consistency properties of the SDK's codecs and orderings.
 proptest = { workspace = true }
+# Captures reconciliation's events and spans in tests.
+tracing-subscriber = { workspace = true }
 # The test doubles also compile under `cfg(test)` without `test-util`.
 toolkit = { workspace = true }
 parking_lot = { workspace = true }

@@ -835,6 +835,17 @@ async fn time_pending_passes(passes: u32, backoff: Duration, max: Duration) -> (
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_pause_keeps_doubling_past_any_integer_factor_up_to_its_maximum() {
+    // 1 ns doubling 33 times reaches 8.59 s, then 10 s for the last seven pauses: at least
+    // half of it, 43.59 s, under jitter. A factor capped at u32::MAX would stop at 4.29 s.
+    let (elapsed, reads) =
+        time_pending_passes(42, Duration::from_nanos(1), Duration::from_secs(10)).await;
+
+    assert_eq!(reads, 42);
+    assert!(elapsed >= Duration::from_secs(43), "{elapsed:?}");
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_pause_between_passes_doubles_within_its_jitter_envelope() {
     // 200 + 400 + 800 + 1600 ms, each jittered into [half, full].
     let (elapsed, reads) =

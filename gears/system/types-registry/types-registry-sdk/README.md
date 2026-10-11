@@ -154,6 +154,58 @@ match registry.get_type_schema(&ctx, &type_id, Projection::Default).await {
 }
 ```
 
+## Observability
+
+`reconcile_entities_and_await` traces with `tracing` at INFO; nothing needs DEBUG to be
+correlated. Every event has a stable `event` field. Codes only: no document content, and no
+free text of an error (`detail`, a violation's description, an admission message). The full
+error reaches the caller in the returned `ReconcileOutcome` or `Err`; an accepted operation's
+item failures are also persisted and read with `get_operation`. A synchronous refusal, a
+conflicting duplicate or a read fault need not have created an operation: when an error names
+one (an idempotency conflict, a lost read-back, a deadline while it ran), the batch span
+records its `operation_id`; otherwise the caller's error is the only full text.
+
+| Span (INFO) | Fields |
+|---|---|
+| `reconcile` | `reconcile_id`, `publisher`, `publisher_version`, `inputs` (entries given), `desired` (distinct identifiers), `passes`, `batch_size`, `deadline_ms` |
+| `reconcile_batch` | `batch`, `parent_batch` (the batch a refused remainder or split half came from), `pass`, `size`, `idempotency_key`, `attempt`, `operation_id` (once known) |
+
+| Level | `event` | Meaning |
+|---|---|---|
+| INFO | `reconcile_started` | the call began |
+| INFO | `batch_submitted` | a new payload is about to be sent, under its `idempotency_key`; written before any answer |
+| INFO | `batch_accepted` | the registry accepted the batch as `operation_id` |
+| INFO | `candidate_refused` | one candidate refused synchronously (`gts_id`, `category`, `reason`, `violation_fields`); the rest is resubmitted |
+| INFO | `batch_split` | a size refusal, bisected |
+| WARN | `batch_refused` | the request as a whole was refused; its candidates stay pending |
+| WARN | `transport_exhausted`, `incomplete_read`, `item_unreported` | transport or protocol trouble |
+| INFO / WARN | `reconcile_finished` | `stop`, `elapsed_ms`, `desired`, `admitted`, `rejected`, `pending`, `undecided`, `passes` |
+| WARN | `entity_unsettled` | one per identifier not admitted, on a normal return: `outcome`, `cause`, `category`, `reason`, `dependency_id`, `dependency_kind`, `diagnostic_code`; `rejected` is final for that document, `pending` may settle in a later call |
+| DEBUG | `transport_retry` | a transport failure retried under the same key (`category`, `reason`, `backoff_ms`) |
+
+`reconcile_finished` is written exactly once — also when the call is cancelled, its future
+dropped (`stop = "dropped"`, with what it had observed and the rest `undecided`) or its
+deadline unrepresentable. It is INFO only for `up_to_date`, a `completed` call that admitted
+everything, and cancellation by the caller's token; anything else is WARN. `stop` is
+`up_to_date`, `completed`, `passes_exhausted`, `deadline`, `read_failed`, `cancelled`,
+`invalid_deadline`, `dropped` or `panicked`.
+
+The registry writes INFO `operation_accepted` once an operation is durable — `operation_id`,
+`kind`, `dry_run`, `items`, `replayed` — with `idempotency_key` when the key is a canonical
+UUID, as the SDK generates (any other key is logged as `idempotency_key_kind` and
+`idempotency_key_len` only).
+
+**Investigating a call.** Filter by `reconcile_id`. `reconcile_finished` and the
+`entity_unsettled` rows say what ended how. Each `batch_submitted` names its batch's
+`idempotency_key`, before any answer; the registry's `operation_accepted` with that key gives the
+`operation_id`, even when the acknowledgement never reached the client (a replay is
+`replayed = true`). The registry's `types_registry.admission.operation` and `unit` spans carry
+that `operation_id` and each candidate's outcome, and `get_operation` reads an admission
+refusal's full text. Rows from a synchronous refusal (`candidate_refused`,
+`batch_refused`), a conflicting duplicate or `read_failed` may name no operation; their full
+error is the one the caller received. With the local client the registry's acceptance runs inside the caller's spans, so its
+event carries `reconcile_id` directly.
+
 ## Testing (`test-util`)
 
 - `testing_platform::MockTypesRegistry` implements both contracts in memory. Seed it

@@ -47,6 +47,14 @@ pub async fn await_registration<A: PlatformTypesRegistryApi + ?Sized>(
         Err(error) => return Ok(Err(error)),
     };
     let operation_id = operation.operation_id;
+    // Known at once, so every later event of the submission — and of a lost read — names it.
+    tracing::Span::current().record("operation_id", tracing::field::display(operation_id));
+    tracing::info!(
+        event = "batch_accepted",
+        %operation_id,
+        status = ?operation.status,
+        "the registry accepted the submission"
+    );
     let mut interval = POLL_INTERVAL_INITIAL;
     while operation.status != OperationStatus::Completed {
         bounded(
@@ -89,9 +97,9 @@ pub fn jittered(backoff: Duration) -> Duration {
     half + Duration::from_nanos(rand::rng().random_range(0..=spread))
 }
 
-/// `now + budget`, or `InvalidArgument` for a budget no clock can represent.
-pub fn deadline_from_now(budget: Duration) -> Result<Instant, CanonicalError> {
-    Instant::now().checked_add(budget).ok_or_else(|| {
+/// `start + budget`, or `InvalidArgument` for a budget no clock can represent.
+pub fn deadline_after(start: Instant, budget: Duration) -> Result<Instant, CanonicalError> {
+    start.checked_add(budget).ok_or_else(|| {
         TypeResource::invalid_argument()
             .with_field_violation(
                 field::DEADLINE_FIELD,

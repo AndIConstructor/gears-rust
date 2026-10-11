@@ -24,7 +24,6 @@ pub mod models;
 pub mod precondition;
 pub mod reason;
 mod reconcile;
-mod submit;
 
 #[cfg(any(test, feature = "test-util"))]
 #[expect(
@@ -48,6 +47,7 @@ pub use models::{
     RegisterItem, RegistrationItemResult, RegistrationOperation, RegistrationOutcome, TypeSchema,
     Validator,
 };
+
 pub use reconcile::{ReconcileOptions, ReconcileOutcome, ReconcilePendingCause, Reconciliation};
 
 // Legacy API and model re-exports.

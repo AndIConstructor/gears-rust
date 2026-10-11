@@ -1,0 +1,325 @@
+//! Reconciliation's tracing: the machine-readable fields of an error, and the run guard that
+//! reports a call's end exactly once, however it ends.
+//!
+//! Events carry codes, never free text: an error's `detail`, a violation's description and an
+//! admission message may quote the submitted document. The full error reaches the caller in
+//! the returned outcome or `Err`; an accepted operation's item failures are also persisted,
+//! read with `get_operation`. A synchronous refusal, a conflicting duplicate or a read fault
+//! need not have created an operation; when an error names one, [`operation_id_of`] reads it.
+
+use toolkit_canonical_errors::{CanonicalError, InvalidArgument};
+use uuid::Uuid;
+
+use super::{Outcomes, ReconcileOutcome, ReconcilePendingCause};
+use crate::gts::OPERATION_RESOURCE_TYPE;
+use crate::item_failure::{AdmissionFailure, context};
+
+/// An error's machine-readable fields.
+pub struct ErrorFields {
+    pub category: &'static str,
+    /// The admission reason, the violations' reason codes, or the canonical `reason`.
+    pub reason: Option<String>,
+    /// The request fields an `InvalidArgument` names.
+    pub violation_fields: Option<String>,
+    pub dependency_id: Option<String>,
+    pub dependency_kind: Option<String>,
+    pub diagnostic_code: Option<String>,
+}
+
+pub fn error_fields(error: &CanonicalError) -> ErrorFields {
+    let mut fields = ErrorFields {
+        category: category(error),
+        reason: None,
+        violation_fields: None,
+        dependency_id: None,
+        dependency_kind: None,
+        diagnostic_code: None,
+    };
+    if let Some(failure) = AdmissionFailure::from_canonical(error) {
+        fields.reason = Some(failure.reason.as_wire().to_owned());
+        fields.dependency_id = failure.context(context::DEPENDENCY_ID).map(str::to_owned);
+        fields.dependency_kind = failure.context(context::DEPENDENCY_KIND).map(str::to_owned);
+        fields.diagnostic_code = failure.context(context::DIAGNOSTIC_CODE).map(str::to_owned);
+        return fields;
+    }
+    match error {
+        CanonicalError::InvalidArgument {
+            ctx: InvalidArgument::FieldViolations { field_violations },
+            ..
+        } => {
+            let join = |pick: fn(&toolkit_canonical_errors::FieldViolation) -> &str| {
+                field_violations
+                    .iter()
+                    .map(pick)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            fields.violation_fields = Some(join(|v| v.field.as_str()));
+            fields.reason = Some(join(|v| v.reason.as_str()));
+        }
+        // Policy and parent refusals: the violations' type codes, never their descriptions.
+        CanonicalError::FailedPrecondition { ctx, .. } if !ctx.violations.is_empty() => {
+            fields.reason = Some(
+                ctx.violations
+                    .iter()
+                    .map(|v| v.type_.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        CanonicalError::Aborted { ctx, .. } => fields.reason = Some(ctx.reason.clone()),
+        CanonicalError::PermissionDenied { ctx, .. } => fields.reason = Some(ctx.reason.clone()),
+        CanonicalError::Unauthenticated { ctx, .. } => fields.reason.clone_from(&ctx.reason),
+        _ => {}
+    }
+    fields
+}
+
+/// The category's stable short name.
+pub fn category(error: &CanonicalError) -> &'static str {
+    match error {
+        CanonicalError::Cancelled { .. } => "cancelled",
+        CanonicalError::Unknown { .. } => "unknown",
+        CanonicalError::InvalidArgument { .. } => "invalid_argument",
+        CanonicalError::DeadlineExceeded { .. } => "deadline_exceeded",
+        CanonicalError::NotFound { .. } => "not_found",
+        CanonicalError::AlreadyExists { .. } => "already_exists",
+        CanonicalError::PermissionDenied { .. } => "permission_denied",
+        CanonicalError::ResourceExhausted { .. } => "resource_exhausted",
+        CanonicalError::FailedPrecondition { .. } => "failed_precondition",
+        CanonicalError::Aborted { .. } => "aborted",
+        CanonicalError::OutOfRange { .. } => "out_of_range",
+        CanonicalError::Unimplemented { .. } => "unimplemented",
+        CanonicalError::Internal { .. } => "internal",
+        CanonicalError::ServiceUnavailable { .. } => "service_unavailable",
+        CanonicalError::DataLoss { .. } => "data_loss",
+        CanonicalError::Unauthenticated { .. } => "unauthenticated",
+        _ => "other",
+    }
+}
+
+/// The operation an operation-scoped error names: a failed read-back or a deadline passed
+/// while it ran.
+pub fn operation_id_of(error: &CanonicalError) -> Option<Uuid> {
+    if error.resource_type() != Some(OPERATION_RESOURCE_TYPE) {
+        return None;
+    }
+    Uuid::parse_str(error.resource_name()?).ok()
+}
+
+/// Every transport attempt of a payload failed; its candidates stay pending.
+pub fn transport_exhausted(attempts: u32, fields: &ErrorFields) {
+    tracing::warn!(
+        event = "transport_exhausted",
+        attempts,
+        category = fields.category,
+        reason = fields.reason.as_deref(),
+        "a submission failed every transport attempt; it stays pending"
+    );
+}
+
+/// A transport failure retried under the same key.
+pub fn transport_retry(fields: &ErrorFields, backoff_ms: u64) {
+    tracing::debug!(
+        event = "transport_retry",
+        category = fields.category,
+        reason = fields.reason.as_deref(),
+        backoff_ms,
+        "retrying a submission under its key"
+    );
+}
+
+/// A synchronous refusal naming one candidate, which is rejected; the rest is resubmitted.
+pub fn candidate_refused(gts_id: &gts::GtsId, remaining: usize, fields: &ErrorFields) {
+    tracing::info!(
+        event = "candidate_refused",
+        gts_id = %gts_id,
+        remaining,
+        category = fields.category,
+        reason = fields.reason.as_deref(),
+        violation_fields = fields.violation_fields.as_deref(),
+        "registry refused a candidate; resubmitting the rest"
+    );
+}
+
+/// A synchronous refusal of the batch's size, which is bisected.
+pub fn batch_split(fields: &ErrorFields) {
+    tracing::info!(
+        event = "batch_split",
+        reason = fields.reason.as_deref(),
+        "registry refused a batch's size; bisecting it"
+    );
+}
+
+/// A synchronous refusal of the request as a whole; its candidates stay pending.
+pub fn batch_refused(fields: &ErrorFields) {
+    tracing::warn!(
+        event = "batch_refused",
+        category = fields.category,
+        reason = fields.reason.as_deref(),
+        violation_fields = fields.violation_fields.as_deref(),
+        "registry refused the request; its candidates stay pending"
+    );
+}
+
+/// Why a call stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    UpToDate,
+    Completed,
+    PassesExhausted,
+    Deadline,
+    ReadFailed,
+    Cancelled,
+    InvalidDeadline,
+}
+
+impl StopReason {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::UpToDate => "up_to_date",
+            Self::Completed => "completed",
+            Self::PassesExhausted => "passes_exhausted",
+            Self::Deadline => "deadline",
+            Self::ReadFailed => "read_failed",
+            Self::Cancelled => "cancelled",
+            Self::InvalidDeadline => "invalid_deadline",
+        }
+    }
+}
+
+/// One call's progress. Its outcomes are written as each batch is decided, so a call that is
+/// cancelled or dropped still reports what it observed; `Drop` reports the end unless
+/// [`Self::finish`] already has.
+pub struct Run {
+    started: tokio::time::Instant,
+    /// Distinct identifiers desired: duplicates in the input count once.
+    desired: usize,
+    pub outcomes: Outcomes,
+    pub passes: u32,
+    stop: Option<StopReason>,
+    reported: bool,
+}
+
+impl Run {
+    pub fn new(started: tokio::time::Instant, desired: usize, outcomes: Outcomes) -> Self {
+        Self {
+            started,
+            desired,
+            outcomes,
+            passes: 0,
+            stop: None,
+            reported: false,
+        }
+    }
+
+    /// The call is returning early; `Drop` reports it.
+    pub fn stop(&mut self, reason: StopReason) {
+        self.stop = Some(reason);
+    }
+
+    /// Report a normal return — every identifier not admitted, then the summary — and hand
+    /// the outcomes over.
+    pub fn finish(&mut self, reason: StopReason) -> Outcomes {
+        self.stop = Some(reason);
+        for (id, outcome) in self.outcomes.values() {
+            unsettled(id, outcome);
+        }
+        self.summarize();
+        std::mem::take(&mut self.outcomes)
+    }
+
+    fn summarize(&mut self) {
+        self.reported = true;
+        let (admitted, rejected, pending) = self.tally();
+        let undecided = self.desired.saturating_sub(self.outcomes.len());
+        let stop = self.stop_label();
+        let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let quiet = match self.stop {
+            Some(StopReason::UpToDate | StopReason::Cancelled) => true,
+            Some(StopReason::Completed) => rejected == 0 && pending == 0 && undecided == 0,
+            _ => false,
+        };
+        macro_rules! summary {
+            ($level:ident) => {
+                tracing::$level!(
+                    event = "reconcile_finished",
+                    stop,
+                    elapsed_ms,
+                    desired = self.desired,
+                    admitted,
+                    rejected,
+                    pending,
+                    undecided,
+                    passes = self.passes,
+                    "reconciliation finished"
+                )
+            };
+        }
+        if quiet {
+            summary!(info);
+        } else {
+            summary!(warn);
+        }
+    }
+}
+
+impl Run {
+    /// Admitted, rejected and pending outcomes so far.
+    fn tally(&self) -> (usize, usize, usize) {
+        self.outcomes
+            .values()
+            .fold((0, 0, 0), |(a, r, p), (_, outcome)| match outcome {
+                ReconcileOutcome::Admitted => (a + 1, r, p),
+                ReconcileOutcome::Rejected(_) => (a, r + 1, p),
+                ReconcileOutcome::Pending(_) => (a, r, p + 1),
+            })
+    }
+
+    fn stop_label(&self) -> &'static str {
+        match self.stop {
+            Some(reason) => reason.label(),
+            None if std::thread::panicking() => "panicked",
+            None => "dropped",
+        }
+    }
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        if !self.reported {
+            self.summarize();
+        }
+    }
+}
+
+/// One identifier's outcome other than admission, as its codes.
+fn unsettled(id: &gts::GtsId, outcome: &ReconcileOutcome) {
+    let (outcome, cause, error) = match outcome {
+        ReconcileOutcome::Admitted => return,
+        ReconcileOutcome::Rejected(error) => ("rejected", None, error),
+        ReconcileOutcome::Pending(cause) => {
+            let (cause, error) = match cause {
+                ReconcilePendingCause::Dependency(e) => ("dependency", e),
+                ReconcilePendingCause::Conflict(e) => ("conflict", e),
+                ReconcilePendingCause::Unavailable(e) => ("unavailable", e),
+                ReconcilePendingCause::Refused(e) => ("refused", e),
+            };
+            ("pending", Some(cause), error)
+        }
+    };
+    let fields = error_fields(error);
+    tracing::warn!(
+        event = "entity_unsettled",
+        gts_id = %id,
+        outcome,
+        cause,
+        category = fields.category,
+        reason = fields.reason.as_deref(),
+        violation_fields = fields.violation_fields.as_deref(),
+        dependency_id = fields.dependency_id.as_deref(),
+        dependency_kind = fields.dependency_kind.as_deref(),
+        diagnostic_code = fields.diagnostic_code.as_deref(),
+        "an identifier was not admitted"
+    );
+}
