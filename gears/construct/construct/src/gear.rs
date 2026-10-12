@@ -134,7 +134,7 @@ impl toolkit::contracts::RestApiCapability for ConstructGear {
             .settings
             .get()
             .map(Arc::clone)
-            .ok_or_else(|| anyhow::anyhow!("Service not initialized"))?;
+            .ok_or_else(|| anyhow::anyhow!("Subject settings service not initialized"))?;
 
         let router = routes::register_routes(router, openapi, service, settings);
         info!("Construct gear: REST routes registered");

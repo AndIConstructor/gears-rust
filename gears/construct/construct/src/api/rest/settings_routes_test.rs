@@ -17,13 +17,14 @@ use crate::api::rest::error::SubjectSettingsError;
 use crate::api::rest::routes::register_routes;
 use crate::config::ConstructConfig;
 use crate::domain::service::{Service, ServiceConfig};
-use crate::domain::subject_settings::SubjectSettings;
+use crate::domain::subject_settings::{SubjectKey, SubjectSettings};
 use crate::infra::storage::sea_orm_repo::SeaOrmNoteRepository;
 use crate::test_support::{
     AllowResolver, DenyResolver, context_of, inmem_db, seed_subject_settings, settings_service,
 };
 
 const DEFAULT_ON: bool = true;
+const SETTINGS_RESOURCE_TYPE: &str = "gts.cf.construct.subject.settings.v1~";
 
 fn path(subject_id: Uuid) -> String {
     format!("/construct/v1/subjects/{subject_id}/settings")
@@ -133,8 +134,10 @@ async fn the_erasure_flag_is_shown_and_survives_a_change() {
     let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
     seed_subject_settings(
         &db,
-        tenant,
-        subject,
+        SubjectKey {
+            tenant_id: tenant,
+            subject_id: subject,
+        },
         SubjectSettings {
             personalization_enabled: false,
             erasure_in_progress: true,
@@ -175,36 +178,79 @@ async fn another_subject_gets_403_for_both_routes() {
     for (status, body) in [(get_status, get_body), (put_status, put_body)] {
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         let problem = json(&body);
-        assert_eq!(problem["type"], refusal()["type"], "{body}");
+        assert_eq!(problem["context"], refusal()["context"], "{body}");
+        assert_eq!(
+            problem["context"]["resource_type"], SETTINGS_RESOURCE_TYPE,
+            "a settings refusal, not a note refusal: {body}"
+        );
+        assert_eq!(problem["context"]["reason"], "ACCESS_DENIED", "{body}");
         assert!(
-            !body.contains("its own settings"),
+            !body.contains("may not read"),
             "the internal message stays out of the answer: {body}"
         );
     }
 }
 
 #[tokio::test]
-async fn a_subject_of_another_tenant_gets_403() {
+async fn the_owner_never_sees_its_row_of_another_tenant() {
     let db = inmem_db().await;
-    let (own_tenant, other_tenant) = (Uuid::new_v4(), Uuid::new_v4());
-    let other_subject = Uuid::new_v4();
+    let (own_tenant, other_tenant, subject) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
     seed_subject_settings(
         &db,
-        other_tenant,
-        other_subject,
-        SubjectSettings::new_subject(false),
+        SubjectKey {
+            tenant_id: other_tenant,
+            subject_id: subject,
+        },
+        SubjectSettings {
+            personalization_enabled: !DEFAULT_ON,
+            erasure_in_progress: true,
+        },
     )
     .await;
 
     let (status, body) = send(
-        router_for(&db, Arc::new(AllowResolver), Uuid::new_v4(), own_tenant),
+        router_for(&db, Arc::new(AllowResolver), subject, own_tenant),
         Method::GET,
-        &path(other_subject),
+        &path(subject),
         None,
     )
     .await;
 
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json(&body)["personalization_enabled"], DEFAULT_ON, "{body}");
+    assert_eq!(json(&body)["erasure_in_progress"], false, "{body}");
+}
+
+#[tokio::test]
+async fn both_routes_answer_no_store() {
+    let db = inmem_db().await;
+    let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
+
+    for (method, body) in [
+        (Method::GET, None),
+        (Method::PUT, Some(r#"{"personalization_enabled":false}"#)),
+    ] {
+        let mut builder = Request::builder().method(method).uri(path(subject));
+        if body.is_some() {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let request = builder
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_owned())))
+            .unwrap();
+        let response = router_for(&db, Arc::new(AllowResolver), subject, tenant)
+            .oneshot(request)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+    }
 }
 
 #[tokio::test]

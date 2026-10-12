@@ -18,7 +18,9 @@ use toolkit_security::{AccessScope, PlatformSecurityContext, SecurityContext, pe
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::subject_settings::{SubjectSettings, SubjectSettingsService, TenantDefaults};
+use crate::domain::subject_settings::{
+    SubjectKey, SubjectSettings, SubjectSettingsService, TenantDefaults,
+};
 use crate::infra::storage::migrations::Migrator;
 use crate::infra::storage::subject_settings_entity;
 use crate::infra::storage::subject_settings_repo::SeaOrmSubjectSettingsRepository;
@@ -148,14 +150,13 @@ pub fn settings_service(
     )
 }
 
-/// Stores one subject's settings row in `tenant_id`, through the secure ORM
-/// with a scope for that tenant. `None` for the erasure flag leaves the column
+/// Stores one subject's settings row, through the secure ORM with a scope for
+/// the key's tenant. `None` for the erasure flag leaves the column
 /// out of the insert, so the table default applies. The insert's error is
 /// returned, not unwrapped, so a test can expect a refusal.
 pub async fn insert_subject_settings(
     db: &Db,
-    tenant_id: Uuid,
-    subject_id: Uuid,
+    key: SubjectKey,
     personalization_enabled: bool,
     erasure_in_progress: Option<bool>,
 ) -> Result<(), ScopeError> {
@@ -163,31 +164,25 @@ pub async fn insert_subject_settings(
     use toolkit_db::secure::SecureInsertExt;
 
     let row = subject_settings_entity::ActiveModel {
-        tenant_id: ActiveValue::Set(tenant_id),
-        subject_id: ActiveValue::Set(subject_id),
+        tenant_id: ActiveValue::Set(key.tenant_id),
+        subject_id: ActiveValue::Set(key.subject_id),
         personalization_enabled: ActiveValue::Set(personalization_enabled),
         erasure_in_progress: erasure_in_progress.map_or(ActiveValue::NotSet, ActiveValue::Set),
     };
     let conn = db.conn().expect("connection");
     subject_settings_entity::Entity::insert(row.clone())
         .secure()
-        .scope_with_model(&AccessScope::for_tenant(tenant_id), &row)?
+        .scope_with_model(&AccessScope::for_tenant(key.tenant_id), &row)?
         .exec(&conn)
         .await?;
     Ok(())
 }
 
 /// Stores one subject's settings, both columns set.
-pub async fn seed_subject_settings(
-    db: &Db,
-    tenant_id: Uuid,
-    subject_id: Uuid,
-    settings: SubjectSettings,
-) {
+pub async fn seed_subject_settings(db: &Db, key: SubjectKey, settings: SubjectSettings) {
     insert_subject_settings(
         db,
-        tenant_id,
-        subject_id,
+        key,
         settings.personalization_enabled,
         Some(settings.erasure_in_progress),
     )

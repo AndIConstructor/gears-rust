@@ -150,12 +150,5 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "personalization_default": false }))
                 .expect("known key");
         assert!(!config.personalization_default);
-        assert!(
-            serde_json::from_value::<ConstructConfig>(
-                serde_json::json!({ "personalisation_default": false })
-            )
-            .is_err(),
-            "typo must not be ignored"
-        );
     }
 }

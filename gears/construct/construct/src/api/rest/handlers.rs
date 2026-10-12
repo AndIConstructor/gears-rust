@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::Extension;
+use axum::http::header;
 use toolkit::api::canonical_prelude::*;
 use toolkit::api::rest::extract::{Json, Path};
 use toolkit_security::SecurityContext;
@@ -41,7 +42,7 @@ pub async fn get_subject_settings(
         .await
         .map_err(for_settings)?;
     // @cpt-begin:cpt-cf-construct-flow-subject-settings-view:p1:inst-view-return
-    Ok(Json(SubjectSettingsDto::new(subject_id, settings)))
+    Ok(not_stored(SubjectSettingsDto::new(subject_id, settings)))
     // @cpt-end:cpt-cf-construct-flow-subject-settings-view:p1:inst-view-return
 }
 
@@ -58,6 +59,12 @@ pub async fn put_subject_settings(
         .await
         .map_err(for_settings)?;
     // @cpt-begin:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-return
-    Ok(Json(SubjectSettingsDto::new(subject_id, settings)))
+    Ok(not_stored(SubjectSettingsDto::new(subject_id, settings)))
     // @cpt-end:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-return
+}
+
+/// One subject's settings, marked `Cache-Control: no-store`, so no proxy or
+/// browser cache keeps one subject's privacy state.
+fn not_stored(dto: SubjectSettingsDto) -> impl IntoResponse {
+    ([(header::CACHE_CONTROL, "no-store")], Json(dto))
 }

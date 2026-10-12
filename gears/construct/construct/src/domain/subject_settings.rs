@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
+use toolkit_db::DBProvider;
 use toolkit_db::secure::DBRunner;
 use toolkit_macros::domain_model;
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
@@ -43,25 +44,35 @@ impl SubjectSettings {
     }
 }
 
+/// One subject in one tenant: the key of a settings row. The same subject id
+/// can have a row in more than one tenant, so a row is never looked up by the
+/// subject alone. Named fields keep the two ids from being swapped.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubjectKey {
+    pub tenant_id: Uuid,
+    pub subject_id: Uuid,
+}
+
 #[async_trait]
 pub trait SubjectSettingsRepository: Send + Sync {
-    /// The stored settings of one subject, if they are inside the scope.
+    /// The stored settings of the subject in its tenant, if they are inside
+    /// the scope.
     async fn find<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,
-        subject_id: Uuid,
+        key: SubjectKey,
     ) -> Result<Option<SubjectSettings>, DomainError>;
 
-    /// Store the subject's personalization setting in `tenant_id`, creating the
-    /// row when there is none. A new row starts with no erasure under way; an
-    /// existing row keeps its erasure flag. The scope must cover the row.
+    /// Store the subject's personalization setting, creating the row when
+    /// there is none. A new row starts with no erasure under way; an existing
+    /// row keeps its erasure flag. The scope must cover the row.
     async fn set_personalization<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,
-        tenant_id: Uuid,
-        subject_id: Uuid,
+        key: SubjectKey,
         personalization_enabled: bool,
     ) -> Result<(), DomainError>;
 }
@@ -75,9 +86,13 @@ fn ensure_owner(ctx: &SecurityContext, subject_id: Uuid) -> Result<(), DomainErr
     }
     // @cpt-end:cpt-cf-construct-algo-subject-settings-owner-only:p1:inst-owner-compare
     // @cpt-begin:cpt-cf-construct-algo-subject-settings-owner-only:p1:inst-owner-refuse
-    Err(DomainError::forbidden(
-        "a subject may only read and change its own settings",
-    ))
+    // The ids go into the message, which the REST mapping logs and keeps out
+    // of the answer, so the log says who was refused which settings.
+    Err(DomainError::forbidden(format!(
+        "subject {} may not read or change the settings of subject {subject_id} (tenant {})",
+        ctx.subject_id(),
+        ctx.subject_tenant_id()
+    )))
     // @cpt-end:cpt-cf-construct-algo-subject-settings-owner-only:p1:inst-owner-refuse
 }
 
@@ -102,7 +117,7 @@ pub struct SubjectSettingsService<R: SubjectSettingsRepository> {
 }
 
 /// @cpt-dod:cpt-cf-construct-dod-subject-settings-read:p1
-impl<R: SubjectSettingsRepository> SubjectSettingsService<R> {
+impl<R: SubjectSettingsRepository + 'static> SubjectSettingsService<R> {
     pub fn new(
         db: Arc<DbProvider>,
         repo: Arc<R>,
@@ -141,7 +156,11 @@ impl<R: SubjectSettingsRepository> SubjectSettingsService<R> {
 
         // @cpt-begin:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-select
         let conn = self.db.conn().map_err(DomainError::from)?;
-        let stored = self.repo.find(&conn, &scope, subject_id).await?;
+        let key = SubjectKey {
+            tenant_id,
+            subject_id,
+        };
+        let stored = self.repo.find(&conn, &scope, key).await?;
         // @cpt-end:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-select
 
         // @cpt-begin:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-stored
@@ -181,6 +200,11 @@ impl<R: SubjectSettingsRepository> SubjectSettingsService<R> {
     /// The erasure flag is left as it is, so turning personalization on during
     /// an erasure stores the choice but does not end the erasure. Returns the
     /// settings as stored.
+    ///
+    /// cancel-safe: the write and its read-back run in one transaction. A drop
+    /// before the commit stores nothing; a drop after it leaves the one
+    /// committed write, which a repeat of the same request repeats without
+    /// harm, and no answer.
     #[tracing::instrument(skip_all, fields(tenant_id = %ctx.subject_tenant_id(), subject_id = %subject_id))]
     pub async fn set_personalization(
         &self,
@@ -206,24 +230,30 @@ impl<R: SubjectSettingsRepository> SubjectSettingsService<R> {
             .await?;
         // @cpt-end:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-scope
 
-        // @cpt-begin:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-store
-        let conn = self.db.conn().map_err(DomainError::from)?;
-        self.repo
-            .set_personalization(
-                &conn,
-                &scope,
-                tenant_id,
-                subject_id,
-                personalization_enabled,
-            )
-            .await?;
-        // @cpt-end:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-store
-
-        // @cpt-begin:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-return
-        self.repo
-            .find(&conn, &scope, subject_id)
-            .await?
-            .ok_or_else(|| DomainError::internal("subject settings row missing after the write"))
-        // @cpt-end:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-return
+        let key = SubjectKey {
+            tenant_id,
+            subject_id,
+        };
+        let repo = Arc::clone(&self.repo);
+        // One transaction for the write and its read-back, so the answer is
+        // this request's write even when the subject sends two at once.
+        DBProvider::<DomainError>::new(self.db.db())
+            .transaction(move |tx| {
+                Box::pin(async move {
+                    // @cpt-begin:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-store
+                    repo.set_personalization(tx, &scope, key, personalization_enabled)
+                        .await?;
+                    // @cpt-end:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-store
+                    // @cpt-begin:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-return
+                    repo.find(tx, &scope, key).await?.ok_or_else(|| {
+                        DomainError::internal(format!(
+                            "subject settings row missing after the write: tenant {}, subject {}",
+                            key.tenant_id, key.subject_id
+                        ))
+                    })
+                    // @cpt-end:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-return
+                })
+            })
+            .await
     }
 }

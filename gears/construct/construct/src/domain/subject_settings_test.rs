@@ -14,7 +14,9 @@ use toolkit_security::{PlatformSecurityContext, SecurityContext, pep_properties}
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::subject_settings::{SubjectSettings, SubjectSettingsService, TenantDefaults};
+use crate::domain::subject_settings::{
+    SubjectKey, SubjectSettings, SubjectSettingsService, TenantDefaults,
+};
 use crate::infra::storage::subject_settings_repo::SeaOrmSubjectSettingsRepository;
 use crate::test_support::{
     AllowResolver, DenyResolver, context_in, context_of, inmem_db, seed_subject_settings,
@@ -153,7 +155,15 @@ async fn stored_row_wins_over_the_tenant_default() {
     let defaults = StubDefaults::new(true);
     let svc = service_with(&db, Arc::new(AllowResolver), defaults.clone());
     let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
-    seed_subject_settings(&db, tenant, subject, ERASING).await;
+    seed_subject_settings(
+        &db,
+        SubjectKey {
+            tenant_id: tenant,
+            subject_id: subject,
+        },
+        ERASING,
+    )
+    .await;
 
     let settings = svc
         .settings(&context_in(tenant), subject)
@@ -191,7 +201,15 @@ async fn settings_of_another_tenant_are_not_visible() {
     let defaults = StubDefaults::new(true);
     let svc = service_with(&db, Arc::new(AllowResolver), defaults.clone());
     let (own, other, subject) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-    seed_subject_settings(&db, other, subject, ERASING).await;
+    seed_subject_settings(
+        &db,
+        SubjectKey {
+            tenant_id: other,
+            subject_id: subject,
+        },
+        ERASING,
+    )
+    .await;
 
     let settings = svc
         .settings(&context_in(own), subject)
@@ -265,7 +283,15 @@ async fn owner_reads_its_own_settings() {
     let db = inmem_db().await;
     let svc = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(false));
     let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
-    seed_subject_settings(&db, tenant, subject, ERASING).await;
+    seed_subject_settings(
+        &db,
+        SubjectKey {
+            tenant_id: tenant,
+            subject_id: subject,
+        },
+        ERASING,
+    )
+    .await;
 
     let own = svc
         .owner_settings(&context_of(subject, tenant), subject)
@@ -308,7 +334,15 @@ async fn turning_personalization_on_does_not_end_an_erasure() {
     let db = inmem_db().await;
     let svc = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(true));
     let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
-    seed_subject_settings(&db, tenant, subject, ERASING).await;
+    seed_subject_settings(
+        &db,
+        SubjectKey {
+            tenant_id: tenant,
+            subject_id: subject,
+        },
+        ERASING,
+    )
+    .await;
 
     let stored = svc
         .set_personalization(&context_of(subject, tenant), subject, true)
@@ -330,7 +364,15 @@ async fn another_subject_is_refused_before_the_policy_service_is_asked() {
     let resolver = Arc::new(RecordingResolver::default());
     let svc = service_with(&db, resolver.clone(), StubDefaults::new(true));
     let (tenant, owner) = (Uuid::new_v4(), Uuid::new_v4());
-    seed_subject_settings(&db, tenant, owner, ERASING).await;
+    seed_subject_settings(
+        &db,
+        SubjectKey {
+            tenant_id: tenant,
+            subject_id: owner,
+        },
+        ERASING,
+    )
+    .await;
     let someone_else = context_of(Uuid::new_v4(), tenant);
 
     let read = svc.owner_settings(&someone_else, owner).await;
@@ -353,24 +395,29 @@ async fn another_subject_is_refused_before_the_policy_service_is_asked() {
 }
 
 #[tokio::test]
-async fn a_subject_of_another_tenant_is_refused() {
+async fn the_owner_reads_only_its_row_of_its_own_tenant() {
     let db = inmem_db().await;
     let svc = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(true));
-    let (own_tenant, other_tenant) = (Uuid::new_v4(), Uuid::new_v4());
-    let other_subject = Uuid::new_v4();
-    seed_subject_settings(&db, other_tenant, other_subject, ERASING).await;
-    let caller = context_of(Uuid::new_v4(), own_tenant);
+    let (own_tenant, other_tenant, subject) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_subject_settings(
+        &db,
+        SubjectKey {
+            tenant_id: other_tenant,
+            subject_id: subject,
+        },
+        ERASING,
+    )
+    .await;
 
-    let read = svc.owner_settings(&caller, other_subject).await;
-    let change = svc.set_personalization(&caller, other_subject, true).await;
+    let own = svc
+        .owner_settings(&context_of(subject, own_tenant), subject)
+        .await
+        .expect("own settings");
 
-    assert!(
-        matches!(read, Err(DomainError::Forbidden(_))),
-        "got {read:?}"
-    );
-    assert!(
-        matches!(change, Err(DomainError::Forbidden(_))),
-        "got {change:?}"
+    assert_eq!(
+        own,
+        SubjectSettings::new_subject(true),
+        "the row of the other tenant is not read; the subject is new in its own tenant"
     );
 }
 
@@ -379,7 +426,15 @@ async fn a_change_in_one_tenant_leaves_the_same_subject_in_another_tenant_alone(
     let db = inmem_db().await;
     let svc = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(true));
     let (first, second, subject) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-    seed_subject_settings(&db, second, subject, ERASING).await;
+    seed_subject_settings(
+        &db,
+        SubjectKey {
+            tenant_id: second,
+            subject_id: subject,
+        },
+        ERASING,
+    )
+    .await;
 
     svc.set_personalization(&context_of(subject, first), subject, false)
         .await

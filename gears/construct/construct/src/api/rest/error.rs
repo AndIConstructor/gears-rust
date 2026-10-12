@@ -9,9 +9,10 @@ pub struct FoundationNoteError;
 #[resource_error(gts_id!("cf.construct.subject.settings.v1~"))]
 pub struct SubjectSettingsError;
 
-/// The REST answer for a domain error on the subject's settings routes. A
-/// refusal names the settings resource; every other error is mapped as
-/// everywhere else.
+/// The REST answer for a domain error on the subject's settings routes. The
+/// errors about the request itself name the settings resource; the gear's own
+/// failures are mapped as everywhere else. Every variant is listed, so a new
+/// one has to be placed here.
 ///
 /// @cpt-dod:cpt-cf-construct-dod-subject-settings-routes:p1
 #[must_use]
@@ -25,7 +26,15 @@ pub fn for_settings(e: DomainError) -> CanonicalError {
                 .create()
         }
         // @cpt-end:cpt-cf-construct-algo-subject-settings-owner-only:p1:inst-owner-refuse-return
-        other => other.into(),
+        DomainError::NotFound => SubjectSettingsError::not_found("Subject settings not found")
+            .with_resource("subject_settings")
+            .create(),
+        DomainError::Validation { field, message } => SubjectSettingsError::invalid_argument()
+            .with_field_violation(field, message, "VALIDATION_ERROR")
+            .create(),
+        e @ (DomainError::Unavailable(_) | DomainError::Internal(_) | DomainError::Database(_)) => {
+            e.into()
+        }
     }
 }
 

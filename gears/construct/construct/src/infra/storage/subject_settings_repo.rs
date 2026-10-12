@@ -2,10 +2,9 @@ use async_trait::async_trait;
 use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait};
 use toolkit_db::secure::{DBRunner, SecureEntityExt, SecureInsertExt, SecureOnConflict};
 use toolkit_security::AccessScope;
-use uuid::Uuid;
 
 use crate::domain::error::DomainError;
-use crate::domain::subject_settings::{SubjectSettings, SubjectSettingsRepository};
+use crate::domain::subject_settings::{SubjectKey, SubjectSettings, SubjectSettingsRepository};
 
 use super::sea_orm_repo::map_scope_error;
 use super::subject_settings_entity::{self as entity, Entity as SubjectSettingsEntity};
@@ -28,13 +27,17 @@ impl SubjectSettingsRepository for SeaOrmSubjectSettingsRepository {
         &self,
         conn: &C,
         scope: &AccessScope,
-        subject_id: Uuid,
+        key: SubjectKey,
     ) -> Result<Option<SubjectSettings>, DomainError> {
         // @cpt-begin:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-select
         let row = SubjectSettingsEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(Condition::all().add(entity::Column::SubjectId.eq(subject_id)))
+            .filter(
+                Condition::all()
+                    .add(entity::Column::TenantId.eq(key.tenant_id))
+                    .add(entity::Column::SubjectId.eq(key.subject_id)),
+            )
             .one(conn)
             .await
             .map_err(map_scope_error)?;
@@ -47,16 +50,15 @@ impl SubjectSettingsRepository for SeaOrmSubjectSettingsRepository {
         &self,
         conn: &C,
         scope: &AccessScope,
-        tenant_id: Uuid,
-        subject_id: Uuid,
+        key: SubjectKey,
         personalization_enabled: bool,
     ) -> Result<(), DomainError> {
         // The erasure flag is left out of the insert, so a new row takes the
         // column default (no erasure under way), and out of the update, so an
         // existing row keeps it.
         let row = entity::ActiveModel {
-            tenant_id: ActiveValue::Set(tenant_id),
-            subject_id: ActiveValue::Set(subject_id),
+            tenant_id: ActiveValue::Set(key.tenant_id),
+            subject_id: ActiveValue::Set(key.subject_id),
             personalization_enabled: ActiveValue::Set(personalization_enabled),
             erasure_in_progress: ActiveValue::NotSet,
         };
