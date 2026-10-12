@@ -1,8 +1,7 @@
 //! Platform and tenant Types Registry contracts.
 //!
 //! The platform contract supports all operations; the tenant contract supports entity reads.
-//! REST authenticates the process token; local contexts carry no validated principal.
-//! Mutation calls read back accepted operations; failures name the operation for same-key replay.
+//! Mutations return operations; retry an accepted request with the same key after a read failure.
 
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::{PlatformSecurityContext, SecurityContext};

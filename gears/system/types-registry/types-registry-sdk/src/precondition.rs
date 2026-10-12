@@ -1,25 +1,15 @@
-//! Canonical `FailedPrecondition` violation types.
-//!
-//! Legacy parent refusals use [`PARENT_NOT_REGISTERED`] as the violation type,
-//! the parent Type Schema id as its subject, and the dependent id as `resource_name`.
-//! The violation description carries the message.
-//!
-//! Policy refusals use [`REGISTRATION_POLICY_PREFIX`] and [`PolicyParameter`];
-//! item failures use [`crate::item_failure::AdmissionFailure`]. Each decoder
-//! accepts only its own shape.
+//! Precondition refusal codes and registration-policy parameters.
+//! Decode parent and policy refusals with [`crate::TypesRegistryError`], and
+//! operation-item failures with [`crate::item_failure::AdmissionFailure`].
 
 /// Violation type for [`crate::TypesRegistryError::ParentNotRegistered`].
 pub const PARENT_NOT_REGISTERED: &str = "PARENT_NOT_REGISTERED";
 
-/// Prefix of the `violations[].type` of a registration-policy refusal; the rest is the
-/// refused policy parameter in upper case (`REGISTRATION_POLICY_ALLOWED_VENDORS`).
-///
-/// The refusal names the candidate in `resource_name` and the policy region (or
-/// [`DEFAULT_REGION`]) in `violations[].subject`.
+/// Prefix of policy-refusal codes, such as `REGISTRATION_POLICY_ALLOWED_VENDORS`.
+/// `resource_name` identifies the candidate; `violations[].subject` identifies the region.
 pub const REGISTRATION_POLICY_PREFIX: &str = "REGISTRATION_POLICY_";
 
-/// The `violations[].subject` of a policy refusal made by the default policy, which
-/// belongs to no named region.
+/// Default policy region in `violations[].subject`.
 pub const DEFAULT_REGION: &str = "<default>";
 
 /// The candidate's vendor is not in the region's `allowed_vendors`.

@@ -961,7 +961,7 @@ mod cover {
             gts_id: GtsId::try_new(id).expect("valid identifier"),
             content: json!({}),
             expected_resource_version: None,
-            force: false,
+            skip_compatibility_check: false,
         }
     }
 
@@ -1230,10 +1230,15 @@ const E: &str = "gts.cf.test.pkg.e.v1~";
 
 /// Refuse every registration that carries `id`, naming it as a candidate refusal does.
 fn refuse_candidate(fake: &MockTypesRegistry, id: &str) {
+    refuse_candidate_field(fake, id, crate::field::ENTITY_FIELD);
+}
+
+/// Refuse every registration that carries `id` with a violation of its `field`.
+fn refuse_candidate_field(fake: &MockTypesRegistry, id: &str, field: &str) {
     fake.inject(
         Fault::on(Call::Register)
             .key(gid(id))
-            .fail(invalid(crate::field::ENTITY_FIELD, Some(id))),
+            .fail(invalid(field, Some(id))),
     );
 }
 
@@ -1301,6 +1306,39 @@ async fn a_refused_candidate_is_rejected_and_the_rest_resubmitted_in_order_under
         "a new payload takes a new key"
     );
     assert_eq!(fake.calls(Call::Register), 2);
+}
+
+/// Every candidate field the registry can name classifies its refusal as that
+/// candidate's, so the rest of the batch is resubmitted rather than held pending.
+#[tokio::test(start_paused = true)]
+async fn a_refusal_naming_any_candidate_field_rejects_only_that_candidate() {
+    for field in [
+        crate::field::GTS_ID_FIELD,
+        crate::field::ENTITY_FIELD,
+        crate::field::EXPECTED_RESOURCE_VERSION_FIELD,
+        crate::field::SKIP_COMPATIBILITY_CHECK_FIELD,
+    ] {
+        let fake = MockTypesRegistry::new();
+        refuse_candidate_field(&fake, B, field);
+
+        let outcomes = outcomes(run(&fake, vec![doc(A), doc(B), doc(C)]).await);
+
+        assert!(
+            matches!(
+                outcomes[B],
+                ReconcileOutcome::Rejected(CanonicalError::InvalidArgument { .. })
+            ),
+            "{field}: {:?}",
+            outcomes[B]
+        );
+        for id in [A, C] {
+            assert!(
+                matches!(outcomes[id], ReconcileOutcome::Admitted),
+                "{field} {id}: {:?}",
+                outcomes[id]
+            );
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]

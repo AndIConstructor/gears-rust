@@ -383,7 +383,7 @@ pub fn validate(
             item_no,
             key: EntityKey::GtsId(id.id().to_owned()),
             precondition: expected,
-            // The wire and ADR-0004 say `force`; the column says `compat_forced`.
+            // The wire says `skip_compatibility_check`; the column says `compat_forced`.
             // This is the one place the two names meet.
             compat_forced: candidate.force,
             request_payload: canonical,

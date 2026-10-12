@@ -14,9 +14,7 @@ pub const QUERY_FIELD: &str = "query";
 /// The entity-content field (carries [`VALIDATION_FAILED`]).
 pub const ENTITY_FIELD: &str = "entity";
 
-// Request fields of the database-backed API. Header and query-parameter names are
-// spelled exactly as the caller sent them, `$select` included, so a caller greps the
-// violation for the thing it wrote.
+// Request fields and exact header/query names used in validation errors.
 
 /// The `Idempotency-Key` request header, as the registry names it.
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -30,8 +28,8 @@ pub const ITEMS_FIELD: &str = "items";
 pub const ENTITY_KEY_FIELD: &str = "entity_key";
 /// A batch read item's `if_none_match` validator.
 pub const IF_NONE_MATCH_FIELD: &str = "if_none_match";
-/// A candidate's `force` flag.
-pub const FORCE_FIELD: &str = "force";
+/// A candidate's `skip_compatibility_check` request.
+pub const SKIP_COMPATIBILITY_CHECK_FIELD: &str = "skip_compatibility_check";
 /// A candidate's `expected_resource_version` precondition.
 pub const EXPECTED_RESOURCE_VERSION_FIELD: &str = "expected_resource_version";
 /// The discovery `pattern` parameter.

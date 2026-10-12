@@ -159,7 +159,7 @@ pub async fn submit_entities(
                 gts_id: c.gts_id,
                 content: Some(c.content),
                 expected_resource_version: c.expected_resource_version,
-                force: c.force.unwrap_or(false),
+                force: c.skip_compatibility_check.unwrap_or(false),
             })
             .collect(),
     };

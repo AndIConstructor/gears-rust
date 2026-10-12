@@ -2,8 +2,6 @@
 
 Plan: [`plan.md`](./plan.md) · Spec: [`SPEC.md`](./SPEC.md)
 
-The executable list contains **45 sequential tasks**: T1–T30 are complete and **T31–T45 are the 15 open tasks**. Criteria, recorded evidence and checkbox states are preserved. There are no merged-task, removed-pilot or deferred-task entries. Task IDs in this file use the current numbering. Checkpoint IDs remain unchanged.
-
 **Execution is sequential, in numeric order:**
 
 - **Phase 7 — both clients, real local AM, every gear on the persistent registry:** T31 → T38. Contracts/adapters are complete (T29 + T30); T31 makes them usable through ClientHub after database seeding, with a new gear publishing in `init()`. T32 then migrates the complete local AM/IdP/TR group and proves it through existing AM REST requests, with only the new registry client inside AM. Then both APIs over REST, the platform cache and generic lifecycle are ready (Checkpoint 7A, local application/SDK-contract handoff); then one atomic remaining-fleet/REST cutover (Checkpoint 7). T33 is implemented on its own toolkit branch and must reach `main` before T34's route move.
@@ -15,7 +13,7 @@ Standing bar for every task, on top of its own acceptance criteria: `make fmt`, 
 `TR/` abbreviates `gears/system/types-registry/types-registry/`, `TR-SDK/` abbreviates
 `gears/system/types-registry/types-registry-sdk/`. Other paths are from the repository root.
 
-**No new ADRs.** The no-PDP deviation is recorded in SPEC §9 (ceiling C6) and §12; the two wire breaks in SPEC §10.2 — `POST /entities` (D10) and the paged content-free `GET /entities` (D12). P23's decisions are SPEC D18–D22 and ceilings C11–C13; P26 changes scheduling, granularity and numbering, and amends D11's dependent configured entities (T40). P28 moves seeding/local publication to T31; P29 adds the full local AM/IdP/TR group in T32. Both permit bounded coexistence until the remaining T38 cutover. P30 merges five later task IDs; P31 removes the separate pilot task/application and transfers its process proof to real AM in T41. Open question O5 and the P1-deferred O6 are in SPEC §17.
+**No new ADRs.** The no-PDP deviation is recorded in SPEC §9 (ceiling C6) and §12; the two wire breaks in SPEC §10.2 — `POST /entities` (D10) and the paged content-free `GET /entities` (D12). P23's decisions are SPEC D18–D22 and ceilings C11–C13; P26 changes scheduling, granularity and numbering, and amends D11's dependent configured entities (T40). P28 moves seeding/local publication to T31; P29 adds the full local AM/IdP/TR group in T32. Both permit bounded coexistence until the remaining T38 cutover. P30 merges five later task IDs; P31 limits Checkpoint 7A to local AM and SDK contracts and assigns the full process proof to real AM in T41. Open question O5 and the P1-deferred O6 are in SPEC §17.
 
 ---
 
@@ -326,16 +324,16 @@ T21's shapes:
 ### - [x] T7: Acceptance path and operation records
 
 **Description:** The synchronous half of admission: envelope and batch bounds, canonical
-identifier check, registration policy, identifier profile, Draft-07 dialect gate, `force`
+identifier check, registration policy, identifier profile, Draft-07 dialect gate, `skip_compatibility_check`
 gate, request fingerprint, `Idempotency-Key` resolution, then one transaction inserting the
 operation, its items and the outbox message. Reads no entity state.
 
 Outcome and evidence: the criteria below. The per-task report was folded into these and deleted.
 
 **Acceptance criteria:**
-- [x] SPEC §8.1 ordering: `validate` has no database access, so policy precedes existence checks. Acceptance handles steps 1–6 and 8; T18 implements step 7 in the worker using its extracted dependency edges (see SPEC §8.1). T17 replaces the temporary `force` refusal with compatibility checks and provenance.
+- [x] SPEC §8.1 ordering: `validate` has no database access, so policy precedes existence checks. Acceptance handles steps 1–6 and 8; T18 implements step 7 in the worker using its extracted dependency edges (see SPEC §8.1). T17 replaces the temporary `skip_compatibility_check` refusal with compatibility checks and provenance.
 - [x] Policy gates **every accepted candidate**, because P0 accepts only declared creations: a positive `expected_resource_version` is refused (`AcceptanceError::RevisionNotAccepted`) and deletion is refused with the envelope. SPEC §8.1's revision/deletion bypass is deliberately *not* implemented yet — gating on the caller's declared kind while nothing verified the claim let a request name a version and skip the gate outright (found at the Checkpoint 1 review). The bypass returns at T11, together with the commit-side precondition that makes the claim checkable. A refusal names the region and the parameter
-- [x] Fingerprint covers canonical body, operation kind, owner, preconditions and each `force` flag — plus dry-run mode, plane, tenant and principal, as one table-driven test over all nine inputs. Every field is **length-prefixed**, so a digest cannot confuse `("ab", "c")` with `("a", "bc")`, and the digest carries a version tag so a future change to its coverage cannot read as a matching replay
+- [x] Fingerprint covers canonical body, operation kind, owner, preconditions and each `skip_compatibility_check` flag — plus dry-run mode, plane, tenant and principal, as one table-driven test over all nine inputs. Every field is **length-prefixed**, so a digest cannot confuse `("ab", "c")` with `("a", "bc")`, and the digest carries a version tag so a future change to its coverage cannot read as a matching replay
 - [x] Replay with a matching fingerprint returns the stored operation (`202` non-terminal, `200` terminal); a different fingerprint under the same key returns `409`. The replay test submits a deliberately **reordered** body, because canonicalization is the thing that makes a replay a replay
 - [x] Concurrent acceptance on one key resolves via the unique constraint, loser returns the winner after fingerprint verification. The loser re-reads **outside** the rolled-back transaction: on PostgreSQL a constraint violation poisons the transaction, so a re-read inside it would fail for a second, unrelated reason
 - [x] `plane = 1`, `tenant_id = NULL`, `principal_id` the named P0 constant with a `TODO`; ceiling C2 (global idempotency namespace) commented on the constant and at the scope-hash call site
@@ -748,7 +746,7 @@ admission had not committed yet.
   of resolving *that* revision, so a row carrying revision N+1 beside revision N's
   `resolved_schema` is a state no reader should see — and two statements would create it.
 
-**Interim implementation window (SPEC C9).** T11 makes database-backed revisions executable before T14's reverse-impact refresh and T17's compatibility comparison exist. No consumer or v1 cutover may use this path before those checkpoints (the DB path remains internal until T38). During the window, minor-bearing Type Schema revisions are rejected structurally, and `force` is rejected whenever it would have a real check to waive; T17 removes that temporary refusal only when it can record `compat_forced` truthfully. Major-only Type Schema revisions remain staging-only until T14 and T17 close the dependent-refresh and compatibility gaps.
+**Interim implementation window (SPEC C9).** T11 makes database-backed revisions executable before T14's reverse-impact refresh and T17's compatibility comparison exist. No consumer or v1 cutover may use this path before those checkpoints (the DB path remains internal until T38). During the window, minor-bearing Type Schema revisions are rejected structurally, and `skip_compatibility_check` is rejected whenever it would have a real check to skip; T17 removes that temporary refusal only when it can record `compat_forced` truthfully. Major-only Type Schema revisions remain staging-only until T14 and T17 close the dependent-refresh and compatibility gaps.
 
 **Dependencies:** Checkpoint 1
 **Files touched:** `TR/src/domain/admission/{acceptance,acceptance_tests,errors,unit,worker}.rs`, `TR/src/domain/ports.rs`, `TR/src/infra/storage/repo/{entity_repo,type_schema_repo,instance_repo,operation_repo}.rs`, `TR/src/infra/storage/store.rs`, `TR/src/api/rest/{error,dto}.rs`, `TR/tests/{revision_test,api_rest_test,repo_backends_test,repo_test,common/mod}.rs`
@@ -1394,7 +1392,7 @@ rejected with its own reason, never collapsed into `Incompatible`.
 - [x] `compare_documents` is the only comparison entry point; `is_minor_compatible` is not used
 - [x] `CompatibilityVerdict::Unknown` fails the candidate with a reason distinct from `Incompatible` (`principle-fail-closed`)
 - [x] Every admitted revision records `gts_spec_version`, `gts_impl_version` and `compat_forced`
-- [x] `force` waives one eligible cross-minor check when the deployment permits it. `ForceCompatibilityUnavailable` is removed; revision `compat_forced` records the effective waiver
+- [x] `skip_compatibility_check` waives one eligible cross-minor check when the deployment permits it. `ForceCompatibilityUnavailable` is removed; revision `compat_forced` records the effective waiver
 - [x] Major-0 candidates get no baseline and no verdict
 
 **Observability (P16 — this task instruments what it adds):**
@@ -1415,7 +1413,7 @@ rejected with its own reason, never collapsed into `Incompatible`.
       by `make test-types-registry-db`; its Docker execution remains to be recorded
 - [x] Compatibility matrix: optional property added at a `Closed` level (compatible), at `Open` (incompatible), at `Partial` (`Unknown`)
 - [x] Test: provenance columns match `GTS_SPECIFICATION_VERSION` and the crate version
-- [x] Disabled `force` is refused (`force_is_refused_while_the_deployment_disallows_it`).
+- [x] Disabled `skip_compatibility_check` is refused (`force_is_refused_while_the_deployment_disallows_it`).
       Before T20, Dry Run is synchronously rejected before the force gate; the ordering is asserted
       by `a_forced_dry_run_is_refused_for_being_a_dry_run_before_force_is_considered`
 - [x] Test: the verdict instrument's rendered name, label keys and both label vocabularies
@@ -1956,7 +1954,7 @@ and quickstart, for the seven-route completeness check)
 
 ### - [x] T22b: Field projection on all three read routes
 
-**Description:** Implement DESIGN §3.3's `$select` on exact read, `:batchGet` and discovery before T29 publishes the SDK models and T22d computes validators (historical decision P19). An absent `$select` returns P0's document-free metadata set; callers explicitly request `content`, `resolved_schema`, `effective_traits`, `effective_traits_schema` or `provenance`. The default includes managed `origin`, as fixed in SPEC §10.2. P0 has no availability or tenant fields, so those unavailable DESIGN fields are not advertised or synthesized. Keep T22a's 100-key batch ceiling and bounded discovery page.
+**Description:** Implement DESIGN §3.3's `$select` on exact read, `:batchGet` and discovery before T29 publishes the SDK models and T22d computes validators (historical decision P19). An absent `$select` returns P0's document-free metadata set; callers explicitly request `content`, `resolved_schema`, `effective_traits`, `effective_traits_schema` or the Type Schema `provenance` group. The default includes managed `origin`, as fixed in SPEC §10.2. P0 has no availability or tenant fields, so those unavailable DESIGN fields are not advertised or synthesized. Keep T22a's 100-key batch ceiling and bounded discovery page.
 
 **Acceptance criteria:**
 - [x] Update SPEC §§2, 8.3, 8.5, 9, 10.1, 10.2 and 16 before coding: fix the exact P0
@@ -1967,6 +1965,7 @@ and quickstart, for the seven-route completeness check)
   rationale without silently raising the 100-key ceiling. Done in the P19 contract revision;
   implementation and verification criteria below remain open
 - [x] Define one transport-neutral normalized field set for all three routes and T29/T22d: field names follow ToolKit OData's case-insensitive, whitespace-trimming rules; order does not change identity, and absent `$select` equals an explicit default selection. Reject duplicates, empty, unknown, unavailable, malformed or excessive selections with an RFC-9457 field violation naming `$select`, honoring ToolKit's parser limits. Check raw empty comma segments too: ToolKit's parser currently drops them. A document field selects the whole JSON document, not a nested path within it; inapplicable Type Schema fields are absent on Instances
+- [x] `provenance` is a group outside the default, selected only whole (its member is not a selectable name; a path into it is a nested selection), on generic `Entity` and `TypeSchema` (`Option<Provenance>`), never on `Instance`. Its one member, `compatibility_check_skipped`, is a required boolean: `true` means an applicable cross-minor check was deliberately waived with `skip_compatibility_check`; `false` means no waiver, not that a check ran. A selected `false` is present inside the group; an Instance omits the group on every read, selected or not, and SDK `Instance::try_from` refuses a snapshot carrying it. Reads carry the stored `type_schema_revision.compat_forced`; a selected Type Schema value that does not come back is corruption, not `false`. The revision's `gts_spec_version`, `gts_impl_version` and `compat_forced` stay internal audit and are not selectable
 - [x] Exact and batch reads accept the same selection and produce the same projected
   entity for one key. Batch `"$select"` is a top-level body field applied to every key;
   per-item `if_none_match` remains declared for T22d. `key`, lookup status and future `etag`
@@ -1997,9 +1996,14 @@ and quickstart, for the seven-route completeness check)
   baseline failure (`clippy::unused_async_trait_impl` in `libs/toolkit-security`); clippy
   over this gear with only that lint allowed is clean
 - [x] Router tests: default metadata-only response; each document alone; mixed batch;
-  managed `origin` shape, selected `provenance` and its
-  Instance null, Instance inapplicable fields; tombstone with `$select=content`; absent
-  key; invalid, unknown and unsupported selections; exact/batch parity
+  managed `origin` shape, selected `provenance` (`false` kept inside a Type Schema's
+  group, the group absent on an Instance, on all three reads, `ETag` scoped to it), Instance
+  inapplicable fields; tombstone with `$select=content`; absent key; invalid, unknown and
+  unsupported selections, including a `provenance` member alone or by path; exact/batch
+  parity; generated OpenAPI lists exactly the current `EntityDto` and `ProvenanceDto`
+  properties
+- [x] A forced revision reads back `provenance.compatibility_check_skipped=true`
+  (`compat_test`, typed SDK); e2e TR-READ-005/102, TR-REG-606/902/903 assert it over HTTP
 - [x] Router tests: discovery with metadata and document selection, multiple pages,
   cursor refusal after changing selection or pattern, and equivalent default spelling;
   malformed/unsupported OData options are refused
@@ -2029,7 +2033,8 @@ and quickstart, for the seven-route completeness check)
 - **Wire shape.** `EntityDto` omits unselected fields; only `kind` and `lifecycle_status`
   were required in OpenAPI (T22c's amendment adds `gts_id`/`gts_uuid`), metadata is non-nullable, documents are any-JSON (so a selected `null`
   stays). `origin` is `{"type":"managed",resource_version,created_at,updated_at}`;
-  `provenance` is exactly `gts_spec_version`, `gts_impl_version` and `compat_forced`;
+  `provenance` is `{"compatibility_check_skipped":false}` with a required non-null
+  boolean, omitted when unselected or inapplicable;
   `owning_gear` stays internal attribution that no read returns, and exposing it is P1
   work (SPEC §10.2). Instance artifacts are absent even when selected.
 - **Strict query parameters.** A guard extractor refuses undeclared keys
@@ -2259,7 +2264,7 @@ Plans P26–P31. T28, T29 and T30 are complete; the next task is **T31**. T33 is
 - **Traits and local clients (T29, T30).** Both contracts, the platform and tenant extension helpers and both local clients land together, in one pull request.
 - **Embedded local handoff (T31).** All linked inventory and `cfg.entities` are admitted into the database before the new APIs are published in ClientHub. A new gear can reconcile in `init()` without waiting for REST, T37 or the fleet migration.
 - **Real local application (T32).** AM, both IdP writers and the tenant-resolver family use the new catalogue together. Existing tenant/metadata/IdP REST e2e prove real behavior; the rest of the fleet stays legacy until T38.
-- **SDK contract handoff (T34–T37, Checkpoint 7A).** REST/TCP contracts, resolving clients, cache and generic lifecycle are verified, alongside T32's real local AM. Full process/directory/cold-start proof moves to real remote AM in T41. There is no synthetic pilot or early process-level guarantee.
+- **SDK contract handoff (T34–T37, Checkpoint 7A).** REST/TCP contracts, resolving clients, cache and generic lifecycle are verified, alongside T32's real local AM. Full process/directory/cold-start proof belongs to real remote AM in T41.
 - **Persistent registry for every gear (T38, Checkpoint 7).** One atomic, shim-free cutover moves every remaining consumer onto the already-seeded database and new SDK; P0 then ends on one REST version.
 
 **e2e windows.** T34 and T35 change routes and their e2e callers in the same commit, so `make e2e-local` stays green through Checkpoint 7A and the T38 cutover: legacy deletion, tenant path promotion and callers merge together (P30). No intermediate red window is accepted.
@@ -2321,7 +2326,7 @@ The checked criteria below retain the initial implementation record.
 
   Kind narrowing costs no round trip: the kind is the trailing `~` of the identifier, so a kind-mismatched argument fails locally
 - [x] `Entity` exposes the materialized documents as **plain fields** (`content`, `resolved_schema`, `effective_traits`, `effective_traits_schema`) plus a `segments` accessor, so the ~40 call sites using the old models' computed methods become field reads rather than rewrites
-- [x] `origin` is the DESIGN managed variant in P0. It carries the read `resource_version` and the timestamps used by reconciliation. There is no content digest (SPEC §10.2), and `provenance` is the sole selectable group
+- [x] `origin` is the DESIGN managed variant in P0. It carries the read `resource_version` and the timestamps used by reconciliation. There is no content digest (SPEC §10.2), and selectable documents are flat; `provenance` is the one group, carrying the Type Schema waiver as `compatibility_check_skipped`
 - [x] Documents are individually selectable, with explicit omission and T22b normalized selection; selecting traits need not transfer the 1 MB-bounded resolved schema
 - [x] **No `effective_*` recomputation exists in the SDK.** The old `GtsTypeSchema::effective_schema` / `effective_properties` / `effective_required` / `effective_traits` / `effective_traits_schema` are not reproduced (SPEC §10.1)
 - [x] `ListEntitiesRequest` carries `limit` and `cursor`, and `ListEntitiesResponse` carries the next cursor (D12)
@@ -2577,7 +2582,7 @@ A normative reference, not a task: its items carry no checkboxes. Each names its
 - **[T34, once T33 is in `main`]** The seven platform routes move to `/types-registry/platform/v1/` with `.platform_authenticated()`; no `/v2/` platform route remains. On `oop_serve` and through api-gateway they serve a valid internal token and refuse a bearer alone; through the gateway the token is validated by its inbound authenticator, and with none configured the routes are refused
 - **[T35]** The tenant routes — `GET /entities/{entity_key}`, `POST /entities:batchGet`, `GET /entities` on `/types-registry/v2/` — use `.authenticated()` and share their handlers' domain calls with the platform twins; they serve a valid bearer and refuse an internal token alone on both hosts. `get_operation` has no tenant route
 - **[platform T34; tenant T35]** Every refusal is a canonical `401` Problem, never `500`: with no credential, and with an invalid credential beside a valid one wherever that stack validates it — the registry's listener validates both, api-gateway an internal token only when its authenticator is configured
-- **[T35]** The standalone registry binary installs `AuthNResolverBearerAuthenticator` over its linked local `AuthNResolverClient`, following P30, and T35 records that production topology in SPEC §8.4; no separate development-authenticator pilot is introduced (P31). **Without one, a tenant route answers a canonical `401`** — not `500` from the handler's extractor and not a served request: `oop_serve` installs no tenant plane then, so the registry (or toolkit) adds a gate for it
+- **[T35]** The standalone registry binary installs `AuthNResolverBearerAuthenticator` over its linked local `AuthNResolverClient`, following P30, and T35 records that production topology in SPEC §8.4. **Without this authenticator, a tenant route answers a canonical `401`** — not `500` from the handler's extractor and not a served request: `oop_serve` installs no tenant plane then, so the registry (or toolkit) adds a gate for it
 - **[T34]** Mutation routes keep `exposed = false`; tenant routes may be exposed. C8's source comment states what `exposed = false` does not bound in Profile 1
 - **[T34, T35]** Platform handlers read `Extension<PlatformSecurityContext>`, tenant handlers `Extension<SecurityContext>` — one plane per handler
 - **[T34]** No principal is recorded: `P0_PRINCIPAL_ID` stays nil, and C2's source comment names T34 as where the identity became available but unrecorded
@@ -2633,7 +2638,7 @@ Commits inside the task: (1) tenant routes on shared domain calls and the tenant
 - [ ] Real TCP tenant reads match the T30 local client: `ETag`/`304`, `unchanged` and cursor semantics, the validator as the unquoted token (SPEC §8.5); each call forwards its own `SecurityContext` bearer and never the internal token; tenant handlers read `Extension<SecurityContext>` only
 - [ ] The tenant routes share their handlers' domain calls with the platform twins; `get_operation` has no tenant route
 - [ ] The standalone registry installs `AuthNResolverBearerAuthenticator` over a linked production authn-resolver/plugin and records that topology in SPEC §8.4 (P30). `AuthNResolverClient` has no current remote contract/adapter; do not add an unrelated RPC migration. Without an authenticator a tenant route answers a canonical `401` before dispatch while platform routes are served
-- [ ] Provide the production registry host entry in a separate composition crate (`apps/cf-types-registry-host`) using existing OoP bootstrap/CLI, its own database and linked production AuthN. Do not add authn-resolver as a dependency of the registry gear crate: authn already depends on it, which would create a Cargo cycle. Use the standalone listener without pulling AM/RG/TR declarations through the full example/gateway composition. This deployable registry entry is reused by T41/T43; it is not a pilot or development-authenticator application
+- [ ] Provide the production registry host entry in a separate composition crate (`apps/cf-types-registry-host`) using existing OoP bootstrap/CLI, its own database and linked production AuthN. Do not add authn-resolver as a dependency of the registry gear crate: authn already depends on it, which would create a Cargo cycle. Use the standalone listener without pulling AM/RG/TR declarations through the full example/gateway composition. This deployable registry entry is reused by T41/T43
 - [ ] Every REST-contract item owned by T35 is met; the interim tenant path is adapter-internal, so callers see the semantic API only
 
 **Verification:**
@@ -2670,7 +2675,7 @@ Commits inside the task: (1) resolving wrappers, `rest-server` and `provides` wi
 
 **Acceptance criteria:**
 - [ ] Cache is typed on `Entity`; the `GtsTypeSchema` / `GtsInstance` implementation keeps serving the old trait until T38 deletes both
-- [ ] The cache lives in the SDK as a `PlatformTypesRegistryApi` decorator. Wrap the embedded host's new platform local API delivered in T31 here; the legacy cache remains until T38. T41's real AM local/resolving clients use this decorator; no pilot-specific wrapper is built. Where a remote consumer's cache settings come from is decided and documented without adding a per-consumer key to the registry's config (SPEC §10.3)
+- [ ] The cache lives in the SDK as a `PlatformTypesRegistryApi` decorator. Wrap the embedded host's new platform local API delivered in T31 here; the legacy cache remains until T38. T41's real AM local/resolving clients use this decorator. Where a remote consumer's cache settings come from is decided and documented without adding a per-consumer key to the registry's config (SPEC §10.3)
 - [ ] Bound is **bytes** (`store_bound`, default 64MB), LRU-evicted — not an entry count. §3.2 caps one resolved document at 1MB, so the old `capacity: 1024` permitted ~1GB
 - [ ] Freshness window (`freshness_window`, default 30s per DESIGN); `0s` is meaningful and disables the window rather than being rejected
 - [ ] `fresh` on a read bypasses the window for that call and revalidates unconditionally against the entry's validator
@@ -2707,7 +2712,7 @@ Commits inside the task: (1) resolving wrappers, `rest-server` and `provides` wi
 
 ### - [ ] T37: Toolkit post-wiring lifecycle — hook, supervision and `Required` readiness
 
-**Description:** Give all gears a post-wiring hook and `/readyz` contribution, including gears without REST. Existing `post_init` requires `SystemCapability`, `start` requires `RunnableCapability`, and readiness is exposed only through `RestApiCapability::healthcheck` (`libs/toolkit/src/contracts.rs:30, :172, :64`). Add generic supervision to toolkit and connect SDK publication status to readiness (D16/D21). Write `publish_gts` and its status/supervised task over reconciliation; T28/T29's unused versions are archived in `c5f491cc8`. Production gears consume this in T41 with T39's collectors; no separate pilot publisher is built.
+**Description:** Give all gears a post-wiring hook and `/readyz` contribution, including gears without REST. Existing `post_init` requires `SystemCapability`, `start` requires `RunnableCapability`, and readiness is exposed only through `RestApiCapability::healthcheck` (`libs/toolkit/src/contracts.rs:30, :172, :64`). Add generic supervision to toolkit and connect SDK publication status to readiness (D16/D21). Write `publish_gts` and its status/supervised task over reconciliation; T28/T29's unused versions are archived in `c5f491cc8`. Production gears consume this in T41 with T39's collectors.
 
 Commits inside the task: (1) the hook; (2) generic supervision moved from the SDK; (3) readiness contributions and the publisher entry.
 
@@ -2737,7 +2742,7 @@ Commits inside the task: (1) the hook; (2) generic supervision moved from the SD
 ### Checkpoint 7A — local application and SDK contract handoff
 - [ ] T31's database seed/local ClientHub path and T32's complete AM/IdP/TR group work through existing real AM REST scenarios
 - [ ] Both SDK APIs pass T34/T35's real TCP contract, resolving-client and auth checks; T36's local/REST cache contract and T37's generic hook/supervision/readiness tests pass
-- [ ] The handoff documents local AM and verified SDK/TCP usage; it makes no complete cross-process startup/recovery guarantee yet. That application-level proof belongs to T41/Checkpoint 8A, not a synthetic pilot
+- [ ] The handoff documents local AM and verified SDK/TCP usage; it makes no complete cross-process startup/recovery guarantee yet. That application-level proof belongs to T41/Checkpoint 8A
 - [ ] `make ci`, gear tests on three backends, SDK feature builds and `make e2e-local` green; human review. The local handoff and bounded legacy/new coexistence remain as P28/P29 specify; final deployment still waits for Checkpoint 9
 
 ---
@@ -2746,7 +2751,7 @@ Commits inside the task: (1) the hook; (2) generic supervision moved from the SD
 
 **Description:** Audit the current `init` → wiring → `post_init` barrier (`host_runtime.rs:612`) before migrating the remaining consumers and deleting the legacy store. AM bootstrap assumes a complete catalogue (`account-management/src/gear.rs:678`); oagw resolves the root tenant in `post_init` (`oagw/src/gear.rs:216`) through a configured plugin instance (`static-tr-plugin/src/gear.rs:59`).
 
-**The audit — the first commit.** Lifecycle requirements drive the cutover and Phase 8 rather than follow them (historical decision P23). It reads the existing fleet's startup, not a synthetic pilot's.
+**The audit — the first commit.** Lifecycle requirements drive the cutover and Phase 8 rather than follow them (historical decision P23). It reads the existing fleet's startup.
 
 **The cutover.** Preserve and reverify T31's outbox → database seeding → local client-publication barrier; do not implement a second seeding path. T39 preserves global collection during migration; T42 narrows the seed set. Delete `switch_to_ready`, the `temporary`/`persistent` split, `SystemCapability::post_init` and the in-memory repository; reads use the database (D2, §8.2). Keep T36's new SDK cache and delete only the old model-typed cache (P7, §8.3).
 
@@ -2872,7 +2877,7 @@ Commits inside the task: (1) the collector macro; (2) declaring crates in mechan
 - [ ] `cargo test --workspace`
 - [ ] A fixture binary built in release with LTO asserts per-crate declaration counts, including a crate reached only through its `gts_declarations()`
 - [ ] Macro tests: renamed dependency, `cfg`-gated declaration, duplicate identifiers with equal and with different content; `gts(…)` gathers every listed crate once into one publisher call, forwards the gear crate's name and version (not an SDK or helper crate's), emits ownership metadata; a shared helper in a third crate forwards the caller's context and never builds one
-- [ ] Independent macro/collector compiler fixtures prove crate boundaries and declaration isolation, including release+LTO and distinct provider/consumer declaration sets. Wire them into the existing macro-test CI venue; they run no synthetic remote application
+- [ ] Independent macro/collector compiler fixtures prove crate boundaries and declaration isolation, including release+LTO and distinct provider/consumer declaration sets. Wire them into the existing macro-test CI venue
 - [ ] `make gts-docs`, `tools/gts-analyze` unaffected
 
 **Dependencies:** T38 (Checkpoint 7), T37; independent compiler fixtures require no remote-application harness **Files likely touched:** `libs/toolkit-gts/src/lib.rs`, `libs/toolkit-gts-macros/src/lib.rs`, `libs/toolkit-macros/` (the attribute), `lib.rs` of every declaring crate, `gears/settings-service/settings-service-sdk/src/{gts,catalogue}.rs`, the collector compiler fixtures **Scope:** L — four commits as listed; the declaring-crate line lands in mechanical slices
@@ -2949,7 +2954,7 @@ Commits inside the task: (1) the collector macro; (2) declaring crates in mechan
 - [ ] Embedded AM e2e stays green; the handoff instructions name every directory, authentication and prerequisite process
 
 **Verification:**
-- [ ] `make e2e-am-remote` builds/launches the production AM composition (`apps/cf-account-management-host`) and registry host from T35 with directory/config/auth dependencies, reuses existing AM REST scenarios and runs the process cases above. Add this target to CI when T41 implements it; no pilot package/application or test role switch is introduced
+- [ ] `make e2e-am-remote` builds/launches the production AM composition (`apps/cf-account-management-host`) and registry host from T35 with directory/config/auth dependencies, reuses existing AM REST scenarios and runs the process cases above. Add this target to CI when T41 implements it; no test role switch is introduced
 - [ ] Tests of each migrated prerequisite gear, including a delayed-prerequisite test per audit entry closed here
 - [ ] Gear tests on SQLite/PostgreSQL/MySQL; `make e2e-local`; reproducible commands and the production files used are recorded
 

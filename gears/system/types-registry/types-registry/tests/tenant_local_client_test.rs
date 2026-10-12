@@ -97,7 +97,7 @@ fn create(gts_id: &str, content: serde_json::Value) -> RegisterItem {
         gts_id: id(gts_id),
         content,
         expected_resource_version: None,
-        force: false,
+        skip_compatibility_check: false,
     }
 }
 

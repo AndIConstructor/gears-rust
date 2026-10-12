@@ -561,6 +561,17 @@ fn invalid_candidate(gts_id: &str, field_name: &str, detail: String, code: &str)
         .create()
 }
 
+/// A refused `skip_compatibility_check`, naming the candidate as the resource; `detail`
+/// follows the field name.
+fn invalid_skip(gts_id: &str, detail: &str) -> CanonicalError {
+    invalid_candidate(
+        gts_id,
+        field::SKIP_COMPATIBILITY_CHECK_FIELD,
+        format!("{} {detail}", field::SKIP_COMPATIBILITY_CHECK_FIELD),
+        field::VALIDATION_FAILED,
+    )
+}
+
 /// A refused `expected_resource_version`, naming the candidate as the resource.
 fn invalid_version(gts_id: &str, detail: String) -> CanonicalError {
     invalid_candidate(
@@ -716,20 +727,16 @@ impl From<AcceptanceError> for CanonicalError {
             // --- the candidate's flags ----------------------------------------
             // `allow_compatibility_force` is the operator's switch, so the caller
             // is told the outcome rather than the setting to go and change.
-            AcceptanceError::ForceNotPermitted { gts_id } => invalid_candidate(
+            AcceptanceError::ForceNotPermitted { gts_id } => invalid_skip(
                 gts_id,
-                field::FORCE_FIELD,
-                format!("force is not permitted on '{gts_id}' in this deployment"),
-                field::VALIDATION_FAILED,
+                &format!("is not permitted on '{gts_id}' in this deployment"),
             ),
-            AcceptanceError::ForceHasNothingToWaive { gts_id } => invalid_candidate(
+            AcceptanceError::ForceHasNothingToWaive { gts_id } => invalid_skip(
                 gts_id,
-                field::FORCE_FIELD,
-                format!("force on '{gts_id}' has no cross-minor compatibility check to waive"),
-                field::VALIDATION_FAILED,
+                &format!("on '{gts_id}' has no cross-minor compatibility check to skip"),
             ),
             // The identifier is at fault, not the flag, so the violation points at
-            // the identifier field rather than at `force`.
+            // the identifier field rather than at `skip_compatibility_check`.
             AcceptanceError::UnreadableVersion { gts_id } => invalid_candidate(
                 gts_id,
                 field::GTS_ID_FIELD,
@@ -972,12 +979,12 @@ mod tests {
             ),
             (
                 AcceptanceError::ForceNotPermitted { gts_id: id.clone() },
-                field::FORCE_FIELD,
+                field::SKIP_COMPATIBILITY_CHECK_FIELD,
                 field::VALIDATION_FAILED,
             ),
             (
                 AcceptanceError::ForceHasNothingToWaive { gts_id: id.clone() },
-                field::FORCE_FIELD,
+                field::SKIP_COMPATIBILITY_CHECK_FIELD,
                 field::VALIDATION_FAILED,
             ),
             (

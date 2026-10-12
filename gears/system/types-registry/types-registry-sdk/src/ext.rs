@@ -60,14 +60,12 @@ pub trait PlatformTypesRegistryApiExt: PlatformTypesRegistryApi {
     /// update differing content. Safe on every start; omitted identifiers are never deleted.
     ///
     /// [`Reconciliation::UpToDate`] means all documents matched without submission.
-    /// `Ok(Reconciled(..))` answers every desired identifier and may include `Rejected` (e.g.
-    /// incompatible changes) or `Pending` outcomes, including those left by deadline or pass
-    /// exhaustion: `Ok` alone does not mean admitted. An identifier listed twice with the same
-    /// document counts once; with different documents it is `Rejected` unsubmitted.
+    /// `Reconciled` reports every identifier, including rejected or pending ones;
+    /// `Ok` does not mean all were admitted. Identical duplicates collapse;
+    /// conflicting duplicates are rejected locally.
     ///
-    /// Cancellation or dropping loses in-flight keys; accepted writes continue. A later
-    /// call recovers through reads and preconditions. Prefer the token and `options.deadline`
-    /// over an outer timeout.
+    /// Cancellation and drop do not cancel accepted writes. Prefer `cancel` and
+    /// `options.deadline` to an outer timeout; a later call reconciles the current state.
     ///
     /// # Errors
     /// `InvalidArgument` for an unrepresentable deadline, `Cancelled` when `cancel` fires.
@@ -87,8 +85,8 @@ pub trait PlatformTypesRegistryApiExt: PlatformTypesRegistryApi {
     /// Projected Type Schema by identifier.
     ///
     /// # Errors
-    /// `NotFound` if absent. `InvalidArgument`, without transport, for an identifier that is
-    /// not a Type Schema's, which only an unchecked `GtsTypeId::new` can build.
+    /// `NotFound` if absent. `InvalidArgument` for an invalid or wrong-kind identifier,
+    /// before any request.
     async fn get_type_schema(
         &self,
         ctx: &PlatformSecurityContext,
@@ -214,13 +212,9 @@ pub trait PlatformTypesRegistryApiExt: PlatformTypesRegistryApi {
         get_many_by_uuid(&PlatformReads { api: self, ctx }, uuids, projection).await
     }
 
-    /// Traverse Type Schemas from `query.page.cursor`, preserving filters and page size.
-    /// [`Projection::Default`] selects content and all materializations here; an explicit
-    /// selection, even of the default fields, is kept as given.
-    /// Traversal is complete but provides no point-in-time snapshot.
-    ///
-    /// Each page is read with `kind` set to Type Schema and the effective selection, and a
-    /// cursor binds both: only a cursor issued for that same query resumes.
+    /// Traverse Type Schemas, preserving filters and page size. [`Projection::Default`]
+    /// includes content and derived documents; explicit selections are kept as given.
+    /// Cursors must match the query. Traversal provides no point-in-time snapshot.
     ///
     /// # Errors
     /// `InvalidArgument` for an Instance filter; a page's error; `ResourceExhausted` past

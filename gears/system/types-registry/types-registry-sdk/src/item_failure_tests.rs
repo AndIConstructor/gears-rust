@@ -311,7 +311,7 @@ fn variant_name(reason: &Reason) -> &'static str {
     }
 }
 
-/// Every stored code restores its own variant. A code that round-trips to the
+/// Every wire code restores its own variant. A code that round-trips to the
 /// *wrong* variant would relabel a refusal in the metrics without any read failing.
 #[test]
 fn every_code_round_trips_to_the_variant_that_wrote_it() {
@@ -325,7 +325,7 @@ fn every_code_round_trips_to_the_variant_that_wrote_it() {
     }
 }
 
-/// Known reasons use the same code in stored errors and metric labels.
+/// Known reasons use the same code in canonical errors and metric labels.
 #[test]
 fn a_known_reasons_stored_code_is_its_metric_label() {
     for reason in known() {
@@ -333,8 +333,7 @@ fn a_known_reasons_stored_code_is_its_metric_label() {
     }
 }
 
-/// No two reasons share a code. Two refusals under one code are one number an
-/// operator cannot act on, which is the failure P16 exists to prevent.
+/// Distinct reasons have distinct codes and metric labels.
 #[test]
 fn no_two_reasons_share_a_code() {
     let mut codes: Vec<&str> = known().iter().map(Reason::metric_label).collect();
@@ -362,7 +361,7 @@ fn every_code_is_stable_snake_case() {
     }
 }
 
-/// Preserve unfamiliar stored codes across versions; map their metric label
+/// Preserve unfamiliar wire codes across versions; map their metric label
 /// to `other` to bound cardinality.
 #[test]
 fn an_unfamiliar_code_is_preserved_in_storage_and_bounded_in_metrics() {

@@ -76,7 +76,18 @@ pub struct EntityRecord {
     pub resolved_schema: Option<Box<RawValue>>,
     pub effective_traits: Option<Box<RawValue>>,
     pub effective_traits_schema: Option<Box<RawValue>>,
+    /// Managed Type Schemas only: how the current revision was admitted.
     pub provenance: Option<Provenance>,
+}
+
+/// Admission metadata of the current revision, selected as one group.
+#[domain_model]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Provenance {
+    /// Whether an applicable cross-minor compatibility check was deliberately waived
+    /// with `skip_compatibility_check` (ADR-0004). `false` is not evidence that a
+    /// check ran.
+    pub compatibility_check_skipped: bool,
 }
 
 /// Where a managed entity's current state came from.
@@ -88,27 +99,10 @@ pub struct ManagedOrigin {
     pub updated_at: OffsetDateTime,
 }
 
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Provenance {
-    pub gts_spec_version: String,
-    pub gts_impl_version: String,
-    /// `None` for an Instance.
-    pub compat_forced: Option<bool>,
-}
-
 /// One key's read result; absence is an answer, not a failure. Every answer but
 /// `NotFound` carries the current validator (RFC 9110 §15.4.5).
 #[domain_model]
 #[derive(Clone, Debug)]
-// `Found` already owns heap JSON up to the 1 MB document bound, so the 240 bytes
-// `NotFound` pays for the shared discriminant are not what makes a batch large.
-// Boxing would buy that back and charge an allocation and an indirection per found
-// record — the wrong trade for the variant that carries every successful read.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "boxing Found penalises every successful read with an allocation and an indirection; NotFound's discriminant overhead is acceptable"
-)]
 pub enum EntityLookup {
     Found {
         record: EntityRecord,
@@ -904,14 +898,12 @@ fn into_records(
             EntityField::EffectiveTraitsSchema,
             state.effective_traits_schema,
         )?;
-        let provenance = if selection.contains(EntityField::Provenance) {
-            let revision = state
-                .provenance
-                .ok_or_else(|| missing_state(&row.gts_id, "selected provenance"))?;
+        let provenance = if is_schema && selection.contains(EntityField::Provenance) {
+            let skipped = state.compat_forced.ok_or_else(|| {
+                missing_state(&row.gts_id, "provenance.compatibility_check_skipped")
+            })?;
             Some(Provenance {
-                gts_spec_version: revision.gts_spec_version,
-                gts_impl_version: revision.gts_impl_version,
-                compat_forced: revision.compat_forced,
+                compatibility_check_skipped: skipped,
             })
         } else {
             None
@@ -1001,7 +993,7 @@ mod tests {
                 resolved_schema: None,
                 effective_traits: None,
                 effective_traits_schema: None,
-                provenance: None,
+                compat_forced: None,
             },
         )])
     }
@@ -1073,13 +1065,52 @@ mod tests {
         );
     }
 
+    fn provenance() -> FieldSelection {
+        FieldSelection::parse(&["provenance"]).expect("valid")
+    }
+
     #[test]
-    fn selected_provenance_that_did_not_come_back_is_corruption() {
-        let selection = FieldSelection::parse(&["provenance"]).expect("valid");
-        let result = into_records(vec![row(EntityKind::Instance)], state(None), selection);
+    fn a_selected_schema_provenance_that_did_not_come_back_is_corruption() {
+        let result = into_records(vec![row(EntityKind::TypeSchema)], state(None), provenance());
         assert!(
-            matches!(result, Err(ServiceError::CorruptDocument(_))),
+            matches!(result, Err(ServiceError::CorruptDocument(ref d)) if d.contains("compatibility_check_skipped")),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn selected_schema_provenance_keeps_its_stored_value_false_included() {
+        for stored in [true, false] {
+            let mut current = state(None);
+            current.get_mut(&7).expect("row").compat_forced = Some(stored);
+            let records = into_records(vec![row(EntityKind::TypeSchema)], current, provenance())
+                .expect("valid");
+            assert_eq!(
+                records[&7].provenance,
+                Some(Provenance {
+                    compatibility_check_skipped: stored
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn an_instance_has_no_provenance_even_when_it_is_selected() {
+        let records = into_records(vec![row(EntityKind::Instance)], state(None), provenance())
+            .expect("an Instance has no provenance to read");
+        assert_eq!(records[&7].provenance, None);
+    }
+
+    #[test]
+    fn unselected_schema_provenance_is_absent() {
+        let mut current = state(None);
+        current.get_mut(&7).expect("row").compat_forced = Some(true);
+        let records = into_records(
+            vec![row(EntityKind::TypeSchema)],
+            current,
+            FieldSelection::default(),
+        )
+        .expect("valid");
+        assert_eq!(records[&7].provenance, None);
     }
 }

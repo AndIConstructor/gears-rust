@@ -216,7 +216,7 @@ impl PlatformTypesRegistryApi for LocalClient {
                     gts_id,
                     content: Some(item.content),
                     expected_resource_version,
-                    force: item.force,
+                    force: item.skip_compatibility_check,
                 })
             })
             .collect::<Result<Vec<_>, CanonicalError>>()?;
@@ -535,9 +535,7 @@ fn snapshot_from(record: EntityRecord) -> Result<sdk::Entity, CanonicalError> {
             EntityField::EffectiveTraitsSchema,
         )?,
         provenance: record.provenance.map(|p| sdk::Provenance {
-            gts_spec_version: p.gts_spec_version,
-            gts_impl_version: p.gts_impl_version,
-            compat_forced: p.compat_forced,
+            compatibility_check_skipped: p.compatibility_check_skipped,
         }),
     })
 }

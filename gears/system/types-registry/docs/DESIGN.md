@@ -52,7 +52,7 @@ Registration and deletion use one asynchronous read/reconcile/conditional-write 
 | `cpt-cf-types-registry-fr-register-schemas`, `cpt-cf-types-registry-fr-register-instances` | Always-asynchronous read/reconcile/conditional-write with request idempotency, per-candidate outcomes, and dependency-aware partial admission. See *Admission Pipeline* in §3.2 and *Batch admission* in §3.6. |
 | `cpt-cf-types-registry-fr-dry-run` | A mode of the same admission operation that runs every check and suppresses the commit. See *Admission Pipeline* in §3.2. |
 | `cpt-cf-types-registry-fr-validate-schema-compat` | `BACKWARD` comparison of resolved effective schemas against one baseline, with checker provenance recorded; major 0 and explicit cross-minor waivers follow their separate profiles. See *Compatibility & Evolution Policy* in §3.2. |
-| `cpt-cf-types-registry-fr-minor-version-profile` | Per-major choice between mutable major-only identity and a gap-free immutable minor sequence opening at `M.0`; `force` waives one cross-minor check and is recorded. See *Compatibility & Evolution Policy* and *Dependency-aware partial admission* in §3.2. |
+| `cpt-cf-types-registry-fr-minor-version-profile` | Per-major choice between mutable major-only identity and a gap-free immutable minor sequence opening at `M.0`; `skip_compatibility_check` waives one cross-minor check and is recorded. See *Compatibility & Evolution Policy* and *Dependency-aware partial admission* in §3.2. |
 | `cpt-cf-types-registry-fr-validate-type-derivation` | Identifier-derived chain validation against every managed base under one resolution-closure dialect. See *Compatibility & Evolution Policy* in §3.2. |
 | `cpt-cf-types-registry-fr-gts-validation` | All GTS semantics come from `gts-rust`; the managed profile adds Draft-07 and identifier restrictions, while federation does not reinterpret source content. See §2.2, *Admission Pipeline*, and *Compatibility & Evolution Policy* in §3.2. |
 | `cpt-cf-types-registry-fr-ref-tracking` | Flat managed dependency edges for derivation, `$ref`, and Instance-to-schema relationships; used for deletion safety and impact analysis. `x-gts-ref` creates no edge. See *Dependency Graph & Deletion Safety* in §3.2. |
@@ -88,7 +88,7 @@ Registration and deletion use one asynchronous read/reconcile/conditional-write 
 | `cpt-cf-types-registry-adr-storage-identity-query-model` | Domain gears persist an opaque Registry Reference UUID derived deterministically from the exact client-supplied GTS Identifier. |
 | `cpt-cf-types-registry-adr-external-source-live-delegation` | Externally managed definitions and tenant state are delegated live to the owning Registry Source Plugin, never projected. |
 | `cpt-cf-types-registry-adr-type-schema-evolution-compatibility` | Managed Type Schemas evolve under `BACKWARD` compatibility, compared against one baseline rather than against history, and the guarantee that follows is a statement about a major. |
-| `cpt-cf-types-registry-adr-gts-minor-version-identity-evolution` | A major is either one mutable major-only entity or a gap-free sequence of immutable minors opening at `M.0`, chosen by its first member; a minor is the boundary at which references stop floating, and `force` waives the cross-minor check. |
+| `cpt-cf-types-registry-adr-gts-minor-version-identity-evolution` | A major is either one mutable major-only entity or a gap-free sequence of immutable minors opening at `M.0`, chosen by its first member; a minor is the boundary at which references stop floating, and `skip_compatibility_check` waives the cross-minor check. |
 | `cpt-cf-types-registry-adr-type-schema-revisions` | Every admitted Type Schema definition is an immutable retained revision with optimistic concurrency on the logical entity. |
 | `cpt-cf-types-registry-adr-registered-instance-revisions` | A registered Instance is a mutable logical entity whose every admitted value is an immutable revision bound to the Type Schema revision that validated it. |
 | `cpt-cf-types-registry-adr-federated-source-routing-query` | Ordered resolver chain over non-overlapping Source Claims, managed storage first, source-major federated traversal. |
@@ -442,7 +442,7 @@ synchronous:
 4. **Registration authority** — refuses a batch mixing planes, actions, or ownership scopes, a global candidate off the platform plane, and any tenant-plane candidate not covered by a grant. Authorization is evaluated for every distinct identifier; one successful check never authorizes its batch neighbours.
 5. **Managed identifier profile** — refuses an explicit UUID tail on any candidate (ADR-0001), and a minor or major 0 in the **last segment** of a registered Instance identifier (ADR-0004, ADR-0015). A minor on a Type Schema identifier is admissible under any prefix.
 6. **Declared identity and dialect, Type Schema candidates** — refuses a top-level `$id` that is not exactly the `gts://` URI of the candidate's GTS Identifier (absent, non-string, malformed, or naming another entity), then an absent top-level `$schema`, a value outside the closed Draft-07 spelling set, and a `$schema` below the document root that differs from it (ADR-0014). The set is canonical `http://json-schema.org/draft-07/schema#`, that URI without `#`, and either form under `https`; every accepted form normalizes to the canonical one.
-7. **`force`, per candidate** — refuses the flag where `allow_compatibility_force` is off, and where the candidate has no cross-minor check to waive: major-only, the first minor of its major, or major 0 (ADR-0004).
+7. **`skip_compatibility_check`, per candidate** — refuses the flag where `allow_compatibility_force` is off, and where the candidate has no cross-minor check to waive: major-only, the first minor of its major, or major 0 (ADR-0004).
 8. **Canonicalization and request identity** — canonicalizes each authored schema or Instance value through `gts-rust`, computes the request fingerprint, and resolves the mandatory `Idempotency-Key`.
 
 After acceptance creates the operation, the worker extracts the candidate's
@@ -464,7 +464,7 @@ Three ordering invariants are load-bearing:
   release boundary: the release that introduces the check is the first
   to persist an entity, so no stored edge predates it (ADR-0015).
 
-The request fingerprint covers the canonical body, operation kind, authorization scope, owner, optimistic preconditions, each `force` flag and the request-level `publisher`. The key identifies that request and is scoped to authorization scope, owning tenant, and principal. A matching replay returns the stored operation without reading entity state (`202` while active, `200` when terminal); another fingerprint under the same key returns `409 Conflict`. A new reconciliation uses a new key.
+The request fingerprint covers the canonical body, operation kind, authorization scope, owner, optimistic preconditions, each `skip_compatibility_check` flag and the request-level `publisher`. The key identifies that request and is scoped to authorization scope, owning tenant, and principal. A matching replay returns the stored operation without reading entity state (`202` while active, `200` when terminal); another fingerprint under the same key returns `409 Conflict`. A new reconciliation uses a new key.
 
 A dry run applies the same checks to the whole batch over one read snapshot and an overlay of prior successful candidates' changes. Entity writes and write-order claims stay virtual. After releasing the snapshot, the worker publishes outcomes in a short transaction. The mode participates in the request fingerprint and is stored on candidate rows for `ck_tr_operation_item_state`. Predictions reserve nothing; §3.3 defines their result fields.
 
@@ -794,7 +794,7 @@ It sequences checks; it does not implement them. Compatibility verdicts come fro
 
 Selects the baseline from the identifier: the entity's current revision for a major-only candidate, or the `ACTIVE` or `DELETED` definition of `vM.(n-1)~` for a minor-bearing one. ADR-0004 contiguity makes the latter a keyed name, not a search, so concurrent admission cannot move it. It compares resolved effective schemas through the document-level compatibility entry point and rejects an indeterminate verdict.
 
-Each admitted revision records the specification version, implementation version, and whether `force` waived cross-minor compatibility. Per-level content-model classification is an input to the verdict. ADR-0003 defers reinterpretation if compatibility semantics later change; this component stores those versions but does not read them back.
+Each admitted revision records the specification version, implementation version, and whether `skip_compatibility_check` waived cross-minor compatibility. Per-level content-model classification is an input to the verdict. ADR-0003 defers reinterpretation if compatibility semantics later change; this component stores those versions but does not read them back, and reads do not publish them. Only the waiver is published, as `provenance.compatibility_check_skipped` on a managed Type Schema.
 
 ADR-0015 exempts candidates whose final segment has major 0: they get no baseline or verdict, although per-level classification is still computed for use when stable dependants are evaluated.
 
@@ -1238,14 +1238,14 @@ The cursor binds query, subject visibility context, Context Tenant, authorizatio
 The `fr-type-query-assistance` filter forms map as follows:
 
 - **Derivation hierarchy:** normalize the supplied base to explicit `~*`, then apply `pattern` plus `max_chain_depth`. This is platform normalization, not generic GTS matching; a bare identifier remains literal elsewhere. Bases need no query because `chain_ids()` reconstructs them from the identifier.
-- **Version membership:** the same parameters collect every major/minor member, not only compatible or upward versions. Upgrade safety requires reading `provenance` for `compat_forced` across intervening minors; major-0 establishes no compatibility, and ADR-0004 forbids interpreting external version order.
+- **Version membership:** the same parameters collect every major/minor member, not only compatible or upward versions. Upgrade safety requires reading `provenance.compatibility_check_skipped` across intervening managed minors; major-0 establishes no compatibility, and ADR-0004 forbids interpreting external version order.
 - **Exact identifiers:** use non-paginated `:batchGet`, since repeatable query parameters cannot safely carry up to 1024-character identifiers. Combine pattern and exact results client-side when needed.
 
 ##### `POST /entities`
 
 | Parameter | Where | Meaning |
 |---|---|---|
-| `items[]` | body | Each the authored GTS JSON plus an optional `expected_resource_version` — present, the entity must still be at that version; absent, it must not exist, and `0` is rejected — and an optional `force` waiving the cross-minor compatibility check for that candidate alone (ADR-0004), rejected where the deployment has not enabled the waiver (§3.8) or where the candidate has no such check to waive. Non-empty, at most 100 |
+| `items[]` | body | Each the authored GTS JSON plus an optional `expected_resource_version` — present, the entity must still be at that version; absent, it must not exist, and `0` is rejected — and an optional `skip_compatibility_check` waiving the cross-minor compatibility check for that candidate alone (ADR-0004), rejected where the deployment has not enabled the waiver (§3.8) or where the candidate has no such check to waive. Non-empty, at most 100 |
 | `dry_run` | body | Runs the whole check sequence and commits nothing. Defaults to false |
 | `publisher` | body | Required on the platform plane: `{ "name", "version" }` — the actual registrant and its own SemVer version, applying to every item. It orders publications per entity (§3.2, *Publication ordering*). Refused on the tenant plane |
 
@@ -1507,8 +1507,9 @@ pub struct EntitySnapshot {
     pub effective_traits: Option<JsonDocument>,
     pub effective_traits_schema: Option<JsonDocument>,
 
-    /// The one surviving group: three small fields that always travel together
-    /// and have one consumer.
+    /// Admission metadata of the current revision, selected as one group. It
+    /// has fields only for a managed Type Schema; absent for an Instance and for
+    /// an external entity even when selected, never an empty group.
     pub provenance: Option<Provenance>,
 }
 
@@ -1529,16 +1530,15 @@ pub enum AvailabilityState { Available, Unavailable }
 /// Opaque. Equality is the only operation; it carries no order.
 pub struct Validator(Vec<u8>);
 
-// ---- selectable groups --------------------------------------------------
-
-/// Managed-only admission provenance: how the current revision was admitted.
-/// `compat_forced`: false when no waiver applied, true when it did, and None
-/// only for Instances. Safe multi-minor upgrades inspect every crossed minor.
-/// The internal `publisher_name` attribution is not a member (see `publisher_name`).
+/// How the current revision was admitted. Distinct from `origin`, which says
+/// whether the entity is managed or external.
 pub struct Provenance {
-    pub gts_spec_version: String,
-    pub gts_impl_version: String,
-    pub compat_forced: Option<bool>,
+    /// `true`: an applicable cross-minor compatibility check was deliberately
+    /// waived with ADR-0004 `skip_compatibility_check`. `false`: no such waiver —
+    /// not a claim that a check ran (a first minor or a major-0 version has none
+    /// to run). Derivation and every other admission check apply either way. Safe
+    /// multi-minor upgrades inspect every crossed minor.
+    pub compatibility_check_skipped: bool,
 }
 
 // ---- discovery ----------------------------------------------------------
@@ -1618,7 +1618,7 @@ pub struct RegisterItem {
     pub expected_resource_version: Option<u64>,
     /// Per-item ADR-0004 cross-minor waiver only. Requires deployment enablement
     /// and an applicable stable successor; participates in request fingerprint.
-    pub force: bool,
+    pub skip_compatibility_check: bool,
 }
 
 pub enum Operation {
@@ -1695,7 +1695,7 @@ Authorization runs first, then visibility, so a denial is uniform and out-of-sco
 
 `$select` returns the named fields plus the mandatory `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`. Its document-free default is `gts_id`, `gts_uuid`, `kind`, `origin`, `lifecycle_status`, `availability` and reason, ownership view, plus managed `resource_version` and timestamps. Callers may narrow further, for example to `availability` plus the mandatory fields.
 
-**Selectable documents are flat, with one group left**, cut by transfer cost rather than by consumer:
+**Selectable documents are flat, with one group**, cut by transfer cost rather than by consumer:
 
 | Selectable | Kind | Asked for by |
 |---|---|---|
@@ -1703,13 +1703,13 @@ Authorization runs first, then visibility, so a denial is uniform and out-of-sco
 | `resolved_schema` | Type Schemas | validating data against the type |
 | `effective_traits` | Type Schemas | reading trait values without the schema they came from |
 | `effective_traits_schema` | Type Schemas | validating those trait values |
-| `provenance` — a group, managed only | either; `compat_forced` Type Schemas only | diagnostics, a catalogue view, a caller deciding whether a minor step was checked |
+| `provenance` — a group, managed only | managed Type Schemas | a caller deciding whether a minor step skipped its compatibility check |
 
 `resolved_schema` is bounded at 1 MB (§3.6) while the two trait documents are small, so an `effective` group would make every caller that wants traits pay for the schema — across a 500-key `batchGet` that is the difference between kilobytes and hundreds of megabytes. The group also bought nothing that flatness does not: per-field selection inside it was already spelled `$select=effective/resolved_schema`, so all the group contributed was a path segment.
 
 `content` is not a group and never was: a schema and an Instance value are both exactly one document, and a two-variant wrapper would only restate `kind`, which the trailing `~` already gives for free.
 
-`provenance` stays grouped because its fields are small, always travel together, and serve one consumer — the case that justifies a group, and the only one here that does. Names are kind-independent for mixed batches; the three Type Schema documents are absent for an Instance.
+`provenance` is the admission metadata of the current revision, selected only whole: `$select=provenance`, never a member or a path inside it. It is a group because its members describe one thing — how the revision was admitted — apart from `origin`, which says where the entity comes from. Its one member, `compatibility_check_skipped`, is `true` only when an applicable cross-minor compatibility check was deliberately waived with ADR-0004 `skip_compatibility_check`. `false` says no such waiver happened; it does not say a check ran, since a first minor or a major-0 version has none, and derivation and every other admission check apply either way. A selected `false` is present inside the group, never omitted. The read carries the stored `type_schema_revision.compat_forced`, nothing recomputed. The GTS specification and implementation versions recorded on every revision stay internal audit, not read fields. A group with no applicable member is absent rather than empty or `null`: an Instance has none, and an external Type Schema was not admitted here, so no waiver of this registry's check can apply to it. Names are kind-independent for mixed batches; the three Type Schema documents and `provenance` are absent for an Instance, selected or not.
 
 The freshness validator is mandatory read metadata, outside `$select`: single-read `ETag` or batch result envelope.
 
@@ -1822,7 +1822,7 @@ vNext replaces `register(Vec<Value>) -> Vec<RegisterResult>` without compatibili
 
 `publisher_name` is the actual registrant, taken from `publisher.name` on first claim and fixed thereafter; another publisher gets `publisher_mismatch`. Together with `publisher_version` it forms the stamp (§3.2). Types Registry publishes its own types, seeds and configured entities under its own name/version. GTS namespaces never imply an owner.
 
-`publisher_name` is attribution, not authorization or visibility, until workload policy binds it to identity. It is required globally, unused for tenant-owned entities and absent externally. Publisher name/version remain absent from reads, SDK snapshots and `provenance` until the ownership view is designed.
+`publisher_name` is attribution, not authorization or visibility, until workload policy binds it to identity. It is required globally, unused for tenant-owned entities and absent externally. Publisher name/version remain absent from reads and SDK snapshots until the ownership view is designed.
 
 ##### Platform identifiers and the lint
 
@@ -2318,11 +2318,11 @@ gears:
           allowed_vendors: [acme]
 ```
 
-`ctx.config_or_default()` makes absent configuration and `config: {}` equivalent to these defaults; stock deployments start with `force` and purge disabled.
+`ctx.config_or_default()` makes absent configuration and `config: {}` equivalent to these defaults; stock deployments start with `skip_compatibility_check` requests and purge disabled.
 
 | Value | Type | Default | Governs |
 |---|---|---|---|
-| `allow_compatibility_force` | bool | `false` | Enables candidate `force`. When disabled, real and Dry Run requests receive a deployment-configuration refusal rather than silent ignore |
+| `allow_compatibility_force` | bool | `false` | Enables candidate `skip_compatibility_check`. When disabled, real and Dry Run requests receive a deployment-configuration refusal rather than silent ignore |
 | `allow_purge` | bool | `false` | Whether the operator purge-job entry point exists in this deployment. Where false the job refuses execution before scanning |
 | `operation_retention` | duration | `30d` | How long a terminal, unpinned operation is kept before the sweep may remove it |
 | `limits.*` | size or count | §3.2 | Besides the page size below, the five server-owned bounds of §3.2, *Bounded inputs*, which records what each default is derived from |
@@ -2336,12 +2336,12 @@ On `MySQL`, operators must configure `@@SESSION.cte_max_recursion_depth >= limit
 Configuration is read at process start and requires restart to change. Disabled controls are explicit:
 
 - purge has no gear-facing route or OpenAPI operation in any configuration; when disabled, its operator-job entry point refuses execution before scanning;
-- `force` is rejected with a deployment-configuration reason, including on Dry Run;
+- `skip_compatibility_check` is rejected with a deployment-configuration reason, including on Dry Run;
 - registration policy refusal names the region and parameter. The full policy is not exposed on the tenant plane because it discloses served vendors.
 
-Acceptance checks `allow_compatibility_force` and stores the waiver request. Each worker pass, including retries and revalidation, rechecks its process configuration and the cross-minor baseline eligibility. If either disallows the waiver, the worker clears it and applies the ordinary compatibility verdict. `operation_item.compat_forced` records the accepted request; `type_schema_revision.compat_forced` records the effective waiver. The purge job checks `allow_purge` at invocation. Configuration changes require restart; drain replicas for a hard cutover because they may disagree during a rolling restart. No shared per-request configuration or persisted generation is introduced.
+Acceptance checks `allow_compatibility_force` and stores the waiver request. Each worker pass, including retries and revalidation, rechecks its process configuration and the cross-minor baseline eligibility. If either disallows the waiver, the worker clears it and applies the ordinary compatibility verdict. `operation_item.compat_forced` records the accepted request; `type_schema_revision.compat_forced` records the effective waiver, which reads report as `provenance.compatibility_check_skipped`. The purge job checks `allow_purge` at invocation. Configuration changes require restart; drain replicas for a hard cutover because they may disagree during a rolling restart. No shared per-request configuration or persisted generation is introduced.
 
-Configuration values themselves are not stored: the waiver outcome, purge effect, policy refusal or admitted ownership, and operation retention state already record the relevant facts. Registration policy alone is region-scoped; ADR-0004 keeps `force` global and leaves any future regional authority to grants.
+Configuration values themselves are not stored: the waiver outcome, purge effect, policy refusal or admitted ownership, and operation retention state already record the relevant facts. Registration policy alone is region-scoped; ADR-0004 keeps `skip_compatibility_check` global and leaves any future regional authority to grants.
 
 SDK cache settings belong to each consuming process. P1 plugins are in the same binary; moving them out later changes topology, not the contract or ADR-0011 boundary.
 

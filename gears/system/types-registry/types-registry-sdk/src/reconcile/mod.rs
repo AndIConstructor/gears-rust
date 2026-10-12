@@ -1,7 +1,7 @@
 //! Reconcile explicit documents by reading current content and submitting differences.
 //! Transport retries reuse the key and request; new passes re-read and use new keys.
 //! Dependencies, conflicts and call refusals stay pending; item refusals are terminal.
-//! Matching content does not confirm the stored publisher version.
+//! Matching content does not confirm the publisher version.
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -40,9 +40,7 @@ const TRANSPORT_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ReconcileOptions {
-    /// Candidates per submission. A synchronous refusal naming one candidate rejects it and
-    /// resubmits the rest; a refusal of the batch's size is bisected; a refusal of the request
-    /// as a whole is submitted once and leaves the batch pending.
+    /// Maximum candidates per submission.
     pub batch_size: NonZeroUsize,
     /// Read–compare–submit passes in one call.
     pub passes: NonZeroU32,
@@ -119,11 +117,7 @@ impl ReconcileOutcome {
     }
 }
 
-/// Reconcile desired documents under `publisher`; callers reach it through
-/// `PlatformTypesRegistryApiExt::reconcile_entities_and_await`, which documents it.
-///
-/// The call runs in an INFO `reconcile` span; each submitted payload in an INFO
-/// `reconcile_batch` span within it (see the README's Observability section).
+/// Reconcile desired documents, tracing the call and each submitted batch.
 pub async fn reconcile<'d, A, I>(
     api: &A,
     ctx: &PlatformSecurityContext,
@@ -330,7 +324,7 @@ fn compare(
                 gts_id: id.clone(),
                 content: (*content).clone(),
                 expected_resource_version: found.map(|f| f.resource_version),
-                force: false,
+                skip_compatibility_check: false,
             });
             true
         }
@@ -346,8 +340,7 @@ fn record(
 ) {
     for (id, outcome) in decided {
         let key = id.id().to_owned();
-        // A refused call is not retried by another pass: re-reading does not fix its cause.
-        // It stays pending, so a later call can.
+        // Request refusals need a later call after their cause is fixed.
         if outcome.is_settled()
             || matches!(
                 outcome,
@@ -732,7 +725,7 @@ const CANDIDATE_FIELDS: [&str; 4] = [
     crate::field::GTS_ID_FIELD,
     crate::field::ENTITY_FIELD,
     crate::field::EXPECTED_RESOURCE_VERSION_FIELD,
-    crate::field::FORCE_FIELD,
+    crate::field::SKIP_COMPATIBILITY_CHECK_FIELD,
 ];
 
 fn refusal(error: &CanonicalError, batch: &[RegisterItem]) -> Refusal {

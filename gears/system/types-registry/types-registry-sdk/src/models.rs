@@ -1,5 +1,4 @@
-//! Transport-independent requests, operations and entity snapshots.
-//! REST DTOs are defined separately.
+//! Requests, operations and projected entity snapshots.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
@@ -58,9 +57,7 @@ impl fmt::Display for EntityKey {
     }
 }
 
-/// Opaque freshness token, compared by equality and never recomputed here.
-/// REST strips RFC 9110 entity-tag quotes on receipt and restores them on send;
-/// all clients expose the same token bytes.
+/// Opaque freshness token; compare for equality.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Validator(Vec<u8>);
 
@@ -110,10 +107,7 @@ pub const MAX_BATCH_GET_KEYS: usize = 100;
 pub struct BatchGetEntitiesRequest {
     pub items: Vec<BatchGetItem>,
     pub projection: Projection,
-    /// Ask a caching client for an authoritative read, bypassing its freshness window.
-    /// SDK-only: never sent on the wire. Today's clients do not cache, so every read is
-    /// already authoritative and they ignore it; it takes effect with the SDK's caching
-    /// client.
+    /// Bypass any client cache for an authoritative read. Not sent on the wire.
     pub fresh: bool,
 }
 
@@ -217,10 +211,8 @@ impl FieldSelection {
 
 /// Which fields a read asks for.
 ///
-/// Equality is structural: `Default` and an explicit selection of the same fields are
-/// different requests, because kind-narrowed list helpers give `Default` their own
-/// document selection. On the wire, and for validators and cursors, compare
-/// [`Self::normalized`] instead: there `Default` is the explicit default selection.
+/// `Default` and an explicit selection compare differently. Use [`Self::normalized`]
+/// to compare effective field sets; typed list helpers give `Default` their documents.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum Projection {
     /// The read's default: the document-free [`EntityField::DEFAULT`] fields on
@@ -264,8 +256,8 @@ pub enum EntityLookup {
     NotFound,
 }
 
-/// Projected entity with mandatory identity, kind and lifecycle. Documents are stored
-/// materializations: `None` is unselected/inapplicable; `Some(Null)` is selected null.
+/// Projected entity with mandatory identity, kind and lifecycle.
+/// `None` is unselected or inapplicable; `Some(Null)` is a selected JSON null.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entity {
     pub gts_id: GtsId,
@@ -281,6 +273,7 @@ pub struct Entity {
     pub effective_traits: Option<JsonDocument>,
     /// Type Schemas only.
     pub effective_traits_schema: Option<JsonDocument>,
+    /// Managed Type Schemas only; see [`Provenance`].
     pub provenance: Option<Provenance>,
 }
 
@@ -292,9 +285,7 @@ impl Entity {
     }
 }
 
-/// A Type Schema as a kind-narrowed read returns it: [`Entity`] with the kind in the
-/// type. Documents follow the read's projection — `None` is unselected, `Some(Null)` a
-/// selected null — and are the server's materializations; nothing is computed here.
+/// Projected Type Schema. Unselected fields are `None`; selected JSON null is `Some(Null)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeSchema {
     pub type_id: GtsTypeId,
@@ -306,12 +297,11 @@ pub struct TypeSchema {
     pub resolved_schema: Option<JsonDocument>,
     pub effective_traits: Option<JsonDocument>,
     pub effective_traits_schema: Option<JsonDocument>,
+    /// How the current revision was admitted; `None` when unselected.
     pub provenance: Option<Provenance>,
 }
 
-/// An Instance as a kind-narrowed read returns it; see [`TypeSchema`]. `type_id` is the
-/// Type Schema it conforms to, named by its own identifier; read that schema with
-/// `get_type_schema`.
+/// Projected Instance; `type_id` identifies its conforming Type Schema.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instance {
     pub id: GtsInstanceId,
@@ -321,7 +311,6 @@ pub struct Instance {
     pub origin: Option<Origin>,
     /// The authored document.
     pub content: Option<JsonDocument>,
-    pub provenance: Option<Provenance>,
 }
 
 impl TryFrom<Entity> for TypeSchema {
@@ -354,13 +343,13 @@ impl TryFrom<Entity> for Instance {
     type Error = Entity;
 
     fn try_from(snapshot: Entity) -> Result<Self, Self::Error> {
-        // An Instance has no derived form: a materialization on one is inconsistent data,
-        // refused rather than dropped.
+        // Reject Type Schema-only fields rather than silently dropping them.
         if snapshot.kind != EntityKind::Instance
             || snapshot.gts_id.is_type()
             || snapshot.resolved_schema.is_some()
             || snapshot.effective_traits.is_some()
             || snapshot.effective_traits_schema.is_some()
+            || snapshot.provenance.is_some()
         {
             return Err(snapshot);
         }
@@ -380,9 +369,16 @@ impl TryFrom<Entity> for Instance {
             lifecycle_status: snapshot.lifecycle_status,
             origin: snapshot.origin,
             content: snapshot.content,
-            provenance: snapshot.provenance,
         })
     }
+}
+
+/// Admission metadata of a managed Type Schema, selected as one group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Provenance {
+    /// Whether the cross-minor check was skipped when this revision was admitted.
+    /// `false` does not imply that a check ran. See [`RegisterItem::skip_compatibility_check`].
+    pub compatibility_check_skipped: bool,
 }
 
 /// Type Schema or Instance; a GTS identifier's trailing `~` decides.
@@ -408,7 +404,7 @@ impl EntityKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Origin {
-    /// The write precondition and timestamps reconciliation reads.
+    /// Managed entity version and timestamps.
     Managed {
         resource_version: u64,
         created_at: OffsetDateTime,
@@ -420,15 +416,6 @@ pub enum Origin {
 pub enum LifecycleStatus {
     Active,
     Deleted,
-}
-
-/// How the current revision was admitted; selected as one group.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Provenance {
-    pub gts_spec_version: String,
-    pub gts_impl_version: String,
-    /// `None` only for Instances.
-    pub compat_forced: Option<bool>,
 }
 
 // discovery.
@@ -497,7 +484,7 @@ pub struct ListEntitiesResponse {
 pub struct IdempotencyKey(String);
 
 impl IdempotencyKey {
-    /// Longest key the registry stores.
+    /// Maximum key length in bytes.
     pub const MAX_LEN: usize = 255;
 
     /// A fresh random key.
@@ -659,8 +646,10 @@ pub struct RegisterItem {
     pub content: JsonDocument,
     /// `Some(v)`: must still be at `v`. `None`: must not exist.
     pub expected_resource_version: Option<u64>,
-    /// Skip the cross-minor compatibility check for this item.
-    pub force: bool,
+    /// Request skipping the cross-minor check for a new minor with a predecessor (major > 0).
+    /// Requires deployment permission; all other validation still applies.
+    /// Read the outcome in [`Provenance::compatibility_check_skipped`].
+    pub skip_compatibility_check: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

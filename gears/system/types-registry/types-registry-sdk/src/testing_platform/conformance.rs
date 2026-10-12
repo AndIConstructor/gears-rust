@@ -125,7 +125,7 @@ fn create(gts_id: &str, content: Value) -> RegisterItem {
         gts_id: gid(gts_id),
         content,
         expected_resource_version: None,
-        force: false,
+        skip_compatibility_check: false,
     }
 }
 
@@ -450,10 +450,9 @@ impl Checker<'_> {
         assert_eq!(
             child.provenance,
             Some(Provenance {
-                gts_spec_version: gts::GTS_SPECIFICATION_VERSION.to_owned(),
-                gts_impl_version: gts::GTS_IMPLEMENTATION_VERSION.to_owned(),
-                compat_forced: Some(false),
-            })
+                compatibility_check_skipped: false
+            }),
+            "a selected unwaived Type Schema reports false, not an absence"
         );
     }
 
@@ -478,9 +477,8 @@ impl Checker<'_> {
             "an Instance has no documents, even when selected"
         );
         assert_eq!(
-            instance.provenance.and_then(|p| p.compat_forced),
-            None,
-            "an Instance has no compatibility verdict"
+            instance.provenance, None,
+            "an Instance has no provenance, even when selected"
         );
 
         let (light, _) = found(self.get(gts_key(CHILD), light()).await);

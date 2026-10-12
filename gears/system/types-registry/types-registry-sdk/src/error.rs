@@ -5,10 +5,7 @@
 //! remain intact in [`TypesRegistryError::Other`]. Item failures decode through
 //! [`AdmissionFailure::from_canonical`].
 //!
-//! Resource-scoped errors carry `resource_type`; decode it with [`Resource::from_wire`].
-//! Extractor validation codes that the registry does not model become
-//! [`ValidationReason::Unknown`]. Out-of-process callers first reconstruct
-//! `CanonicalError` from `Problem`, then apply this projection.
+//! Unknown validation codes become [`ValidationReason::Unknown`].
 
 use thiserror::Error;
 use toolkit_canonical_errors::{CanonicalError, InvalidArgument};
@@ -108,12 +105,11 @@ pub enum TypesRegistryError {
     #[error("cancelled: {detail}")]
     Cancelled { detail: String },
 
-    /// The registry is not currently available (e.g. still initializing).
+    /// The registry is temporarily unavailable.
     #[error("service unavailable: {detail}")]
     Unavailable { detail: String },
 
-    /// Unclassified internal failure (HTTP 500). `detail` is already redacted
-    /// at the canonical boundary — it never carries the server-side diagnostic.
+    /// Unclassified failure (HTTP 500), with redacted detail.
     #[error("internal error: {detail}")]
     Internal { detail: String },
 

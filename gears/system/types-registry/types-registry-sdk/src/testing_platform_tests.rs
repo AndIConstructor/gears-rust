@@ -106,7 +106,7 @@ fn create(id: &str, content: Value) -> RegisterItem {
         gts_id: gts::GtsId::try_new(id).expect("valid identifier"),
         content,
         expected_resource_version: None,
-        force: false,
+        skip_compatibility_check: false,
     }
 }
 

@@ -292,7 +292,7 @@ async fn absent_columns_read_as_none_and_selected_ones_as_some(h: &Harness, back
             && light[0].resolved_schema.is_none()
             && light[0].effective_traits.is_none()
             && light[0].effective_traits_schema.is_none()
-            && light[0].provenance.is_none(),
+            && light[0].compat_forced.is_none(),
         "absent columns must read as None on {backend}: {:?}",
         light[0],
     );
@@ -308,8 +308,7 @@ async fn absent_columns_read_as_none_and_selected_ones_as_some(h: &Harness, back
         "selected columns must read as Some on {backend}: {:?}",
         full[0],
     );
-    let provenance = full[0].provenance.as_ref().expect("schema provenance");
-    assert_eq!(provenance.compat_forced, Some(false), "{backend}");
+    assert_eq!(full[0].compat_forced, Some(false), "{backend}");
 
     let instance =
         InstanceRepo::read_current(&conn, &scope, &[instance_id], FieldSelection::full())
@@ -320,12 +319,8 @@ async fn absent_columns_read_as_none_and_selected_ones_as_some(h: &Harness, back
         Some(r#"{"name":"first"}"#),
         "{backend}"
     );
-    let provenance = instance[0]
-        .provenance
-        .as_ref()
-        .expect("instance provenance");
     assert_eq!(
-        provenance.compat_forced, None,
+        instance[0].compat_forced, None,
         "an Instance has none, on {backend}"
     );
     let light =
@@ -333,7 +328,7 @@ async fn absent_columns_read_as_none_and_selected_ones_as_some(h: &Harness, back
             .await
             .expect("light instance read");
     assert!(
-        light[0].content.is_none() && light[0].provenance.is_none(),
+        light[0].content.is_none() && light[0].compat_forced.is_none(),
         "{backend}"
     );
 }

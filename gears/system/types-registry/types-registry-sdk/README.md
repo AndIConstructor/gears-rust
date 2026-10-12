@@ -52,6 +52,12 @@ let schema = registry.get_type_schema(&ctx, &type_id, with_schema).await?;
 list helpers give it their documents (content, and a Type Schema's materializations). An
 explicit selection is always kept as given.
 
+`EntityField::Provenance` selects a managed Type Schema's `provenance` group as a whole:
+`TypeSchema::provenance` is `None` when unselected and `Some(Provenance { .. })` when
+selected. Its member `compatibility_check_skipped` is a plain `bool`: `true` when
+`skip_compatibility_check` waived an applicable cross-minor compatibility check, `false` when
+it did not — not a claim that a check ran. `Instance` has no `provenance`.
+
 ## Listing
 
 ```rust

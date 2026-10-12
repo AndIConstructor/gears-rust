@@ -232,6 +232,45 @@ mod tests {
         serde_json::to_value(T::schema()).expect("a schema serializes")
     }
 
+    /// The skip request is optional and spelled one way: anything else in an item is
+    /// refused, whatever its value and whatever else the item carries.
+    #[test]
+    fn a_submitted_item_spells_its_skip_request_one_way() {
+        let item = |extra: serde_json::Value| {
+            let mut item =
+                serde_json::json!({ "gts_id": "gts.cf.core.example.type.v1~", "content": {} });
+            item.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            serde_json::from_value::<SubmitEntityDto>(item)
+        };
+        for (extra, expected) in [
+            (serde_json::json!({}), None),
+            (
+                serde_json::json!({ "skip_compatibility_check": false }),
+                Some(false),
+            ),
+            (
+                serde_json::json!({ "skip_compatibility_check": true }),
+                Some(true),
+            ),
+        ] {
+            let parsed = item(extra.clone()).expect("a valid item");
+            assert_eq!(parsed.skip_compatibility_check, expected, "{extra}");
+        }
+        for extra in [
+            serde_json::json!({ "force": true }),
+            serde_json::json!({ "force": false }),
+            serde_json::json!({ "force": true, "skip_compatibility_check": true }),
+        ] {
+            let error = item(extra.clone()).expect_err("not a submission field");
+            assert!(
+                error.to_string().contains("unknown field `force`"),
+                "{extra}: {error}"
+            );
+        }
+    }
+
     /// `OpenAPI` must say what `$select` does: identity, kind and lifecycle are
     /// always present, metadata is never `null`, and a selected document may be `null`.
     #[test]
@@ -337,6 +376,34 @@ mod tests {
                 "kind": "type_schema",
                 "lifecycle_status": "deleted",
                 "content": null,
+            }),
+        );
+    }
+
+    #[test]
+    fn a_selected_false_waiver_is_kept_inside_its_group() {
+        let dto = EntityDto {
+            gts_id: toolkit_gts::gts_id!("cf.core.example.type.v1~").to_owned(),
+            gts_uuid: Uuid::nil(),
+            kind: EntityKindDto::TypeSchema,
+            origin: None,
+            lifecycle_status: LifecycleStatusDto::Active,
+            content: None,
+            resolved_schema: None,
+            effective_traits: None,
+            effective_traits_schema: None,
+            provenance: Some(ProvenanceDto {
+                compatibility_check_skipped: false,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(dto).expect("serialize"),
+            serde_json::json!({
+                "gts_id": toolkit_gts::gts_id!("cf.core.example.type.v1~"),
+                "gts_uuid": Uuid::nil(),
+                "kind": "type_schema",
+                "lifecycle_status": "active",
+                "provenance": { "compatibility_check_skipped": false },
             }),
         );
     }
@@ -845,11 +912,13 @@ pub struct SubmitEntityDto {
     #[serde(default)]
     #[schema(minimum = 1)]
     pub expected_resource_version: Option<i64>,
-    /// ADR-0004: waive one cross-minor check when the deployment permits it.
-    /// Intra-entity revisions are never waivable. The revision records the
-    /// effective waiver as `compat_forced`.
+    /// ADR-0004: skip this candidate's applicable cross-minor compatibility check
+    /// when the deployment permits it. Refused where there is no such check (first
+    /// minor, major 0, major-only); intra-entity revisions and derivation are never
+    /// skipped. Absent means `false`. A Type Schema read reports the effective outcome
+    /// as `provenance.compatibility_check_skipped`.
     #[serde(default)]
-    pub force: Option<bool>,
+    pub skip_compatibility_check: Option<bool>,
 }
 
 /// Entity submission envelope; `items` matches operation and page envelopes.
@@ -1034,7 +1103,8 @@ pub enum DeletionKindDto {
 /// projected item is identifiable, its kind needs no second read, and a tombstone is
 /// never mistaken for an absence. An
 /// unselected field is omitted; a selected document that is JSON `null` stays
-/// present as `null`. The three artifacts are absent on an Instance. Documents
+/// present as `null`. The three artifacts and `provenance` are absent on an
+/// Instance, selected or not. Documents
 /// are written as stored, canonical text: keys sorted, no insignificant whitespace.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
@@ -1067,9 +1137,21 @@ pub struct EntityDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<serde_json::Value>)]
     pub effective_traits_schema: Option<Box<RawValue>>,
+    /// Managed Type Schemas only: how the current revision was admitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub provenance: Option<ProvenanceDto>,
+}
+
+/// Admission metadata of the current revision, selected as one group.
+#[derive(Debug, Clone)]
+#[toolkit_macros::api_dto(response)]
+pub struct ProvenanceDto {
+    /// `true`: an applicable cross-minor compatibility check was deliberately
+    /// waived with ADR-0004 `skip_compatibility_check`. `false`: no such waiver,
+    /// which does not mean a check ran (a first minor or a major-0 version has
+    /// none). Derivation and every other admission check apply either way.
+    pub compatibility_check_skipped: bool,
 }
 
 /// Where an entity comes from. P0 has only the managed variant; federation adds
@@ -1085,16 +1167,6 @@ pub enum OriginDto {
         #[serde(with = "time::serde::rfc3339")]
         updated_at: time::OffsetDateTime,
     },
-}
-
-/// Who admitted the current revision and how. Selected as one group.
-#[derive(Debug, Clone)]
-#[toolkit_macros::api_dto(response)]
-pub struct ProvenanceDto {
-    pub gts_spec_version: String,
-    pub gts_impl_version: String,
-    /// Whether ADR-0004 `force` waived a cross-minor check; `null` for Instances.
-    pub compat_forced: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1323,9 +1395,7 @@ impl From<EntityRecord> for EntityDto {
             effective_traits: record.effective_traits,
             effective_traits_schema: record.effective_traits_schema,
             provenance: record.provenance.map(|p| ProvenanceDto {
-                gts_spec_version: p.gts_spec_version,
-                gts_impl_version: p.gts_impl_version,
-                compat_forced: p.compat_forced,
+                compatibility_check_skipped: p.compatibility_check_skipped,
             }),
         }
     }

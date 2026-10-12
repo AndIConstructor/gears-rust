@@ -58,7 +58,7 @@ fn register_one(gts_id: &str, content: serde_json::Value) -> RegisterEntitiesReq
             gts_id: id(gts_id),
             content,
             expected_resource_version: None,
-            force: false,
+            skip_compatibility_check: false,
         }],
         dry_run: false,
         publisher: publisher(),

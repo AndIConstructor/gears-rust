@@ -1,8 +1,4 @@
-//! Test capture of tracing events as a JSON-logging subscriber writes them, each with the
-//! fields of every span it was emitted in.
-//!
-//! Installed as the thread's default subscriber: a current-thread runtime runs spawned tasks,
-//! and drops futures, on the test's thread, so their events are captured too.
+//! Capture JSON tracing events and span fields on a current-thread test runtime.
 
 use std::collections::BTreeMap;
 use std::io;

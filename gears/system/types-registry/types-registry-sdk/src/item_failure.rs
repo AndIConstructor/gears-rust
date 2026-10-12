@@ -1,9 +1,5 @@
-//! Reversible `CanonicalError` item failures.
-//! `FailedPrecondition` violation 0 carries reason/key/message; later violations carry
-//! `context.<name>`/value/empty description. Unknown reasons and context round-trip unchanged.
-//!
-//! [`reason`] defines codes used in storage, errors and metrics;
-//! [`AdmissionFailureReason`] provides typed dispatch.
+//! Typed encoding and decoding of operation-item failures.
+//! Unknown reason codes and context entries round-trip unchanged.
 
 use std::collections::BTreeMap;
 
@@ -181,7 +177,7 @@ pub enum AdmissionFailureReason {
     UnparsablePayload,
     UnreadableVersion,
     UnrecognizedPayload,
-    /// Preserve an unrecognized stored code without adding a metric label.
+    /// Preserve an unrecognized wire code without adding a metric label.
     Unknown(String),
 }
 
@@ -228,7 +224,7 @@ impl AdmissionFailureReason {
         }
     }
 
-    /// The stable code persisted in error payloads and returned to clients.
+    /// The stable code returned in errors.
     #[must_use]
     pub fn as_wire(&self) -> &str {
         match self {
@@ -338,11 +334,8 @@ impl AdmissionFailure {
         builder.create()
     }
 
-    /// Decodes exactly what [`Self::into_canonical`] produces; `None` for any other shape.
-    ///
-    /// Requires the entity resource type, a primary violation naming that resource,
-    /// and distinct context names with empty descriptions. Other precondition shapes
-    /// (parent or policy refusals) are rejected.
+    /// Decode failures produced by [`Self::into_canonical`]. Returns `None` for other
+    /// errors, including parent and policy refusals.
     #[must_use]
     pub fn from_canonical(error: &CanonicalError) -> Option<Self> {
         let CanonicalError::FailedPrecondition {

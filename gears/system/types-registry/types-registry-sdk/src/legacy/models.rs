@@ -8,10 +8,7 @@ use gts::{GtsId, GtsIdSegment, GtsInstanceId};
 use serde_json::{Map, Value};
 use toolkit_canonical_errors::CanonicalError;
 
-/// SDK-facing GTS type-schema identifier, re-exported from the `gts` crate.
-///
-/// Within the types-registry SDK, schemas are *type-schemas* and their
-/// identifiers are *type ids*.
+/// Type Schema identifier, re-exported from `gts`.
 pub use gts::GtsTypeId;
 use uuid::Uuid;
 
@@ -26,7 +23,6 @@ fn invalid_gts_id_error(message: impl Into<String>) -> CanonicalError {
 }
 
 /// Checks the Type Schema suffix (`~`) without parsing or validating the identifier.
-// TODO(#1752): replace with checked `GtsTypeId` / `GtsInstanceId` constructors upstream.
 #[must_use]
 pub fn is_type_schema_id(s: &str) -> bool {
     s.ends_with('~')
@@ -136,10 +132,7 @@ impl GtsTypeSchema {
 
     /// Derives the GTS parent's `type_id` from the parsed GTS chain.
     ///
-    /// Mirrors gts-rust's chain semantics: for a chained type id like
-    /// `gts.cf.core.events.type.v1~x.commerce.orders.order.v1.0~`, the parent
-    /// is `gts.cf.core.events.type.v1~`. Returns `None` for root (single-segment)
-    /// type-schemas or for ids that don't end with `~`.
+    /// Drops the final type segment. Returns `None` for root or non-type identifiers.
     #[must_use]
     pub fn derive_parent_type_id(type_id: &str) -> Option<GtsTypeId> {
         let parsed = GtsId::try_new(type_id).ok()?;
@@ -203,12 +196,7 @@ impl GtsTypeSchema {
         }
     }
 
-    /// Returns this schema's body with the GTS parent's `$ref` inlined where
-    /// it appears in `allOf` (parent body expanded in place). The shape of
-    /// the JSON Schema is preserved — `allOf`, `oneOf`, `anyOf`, `enum`, etc.
-    /// stay valid.
-    ///
-    /// Non-parent `allOf[].$ref` items (mixin references) are left as-is.
+    /// Inline the parent in `allOf`, preserving other references and schema structure.
     #[must_use]
     pub fn effective_schema(&self) -> Value {
         merge_schema_with_parent(&self.raw_schema, self.parent.as_deref())
@@ -244,26 +232,13 @@ impl GtsTypeSchema {
         out
     }
 
-    /// Trait values merged across the chain.
-    ///
-    /// Resolution order (priority high → low):
-    /// 1. Declared `x-gts-traits` values from `self` and ancestors —
-    ///    rightmost wins, so a leaf's value overrides any parent's.
-    /// 2. Defaults from `x-gts-traits-schema.properties[*].default`
-    ///    declared anywhere in the chain. When two levels both declare a
-    ///    default for the same property, the **deepest** (closest to base)
-    ///    wins — mirroring gts-rust's locking rule that descendants cannot
-    ///    redefine an ancestor's default during schema-trait validation.
-    ///
-    /// Returns `Value::Null` only when neither declared traits nor
-    /// schema-declared defaults exist anywhere in the chain.
-    // TODO(#1723): replace with gts-rust's resolve_schema(...).effective_traits
-    // once that helper is exposed publicly.
+    /// Merge trait values across the chain: explicit values override defaults, and
+    /// this schema overrides ancestors. Defaults prefer the base-most declaration.
+    /// Returns `Value::Null` when no values or defaults exist.
     #[must_use]
     pub fn effective_traits(&self) -> Value {
         let mut acc: Map<String, Value> = Map::new();
-        // Phase 1: declared traits. Walk own → ancestors and only insert
-        // when the key is absent so own (rightmost) wins over ancestors.
+        // Explicit values prefer this schema over ancestors.
         for s in self.ancestors() {
             if let Some(Value::Object(traits)) = s.traits.as_ref() {
                 for (k, v) in traits {
@@ -271,11 +246,7 @@ impl GtsTypeSchema {
                 }
             }
         }
-        // Phase 2: defaults from x-gts-traits-schema. Walk from deepest
-        // base to leaf so the **earliest** default wins on a given key,
-        // matching the locking semantics gts-rust enforces during
-        // validation. `or_insert_with` on the already-populated map means
-        // declared values still beat defaults.
+        // Base defaults win; explicit values remain untouched.
         let chain: Vec<&GtsTypeSchema> = self.ancestors().collect();
         for s in chain.iter().rev() {
             let Some(traits_schema) = s.traits_schema.as_ref() else {
@@ -427,11 +398,7 @@ fn merge_schema_with_parent(schema: &Value, parent: Option<&GtsTypeSchema>) -> V
     Value::Object(out)
 }
 
-/// A registered GTS instance.
-///
-/// The instance carries an `Arc`-shared reference to its [`GtsTypeSchema`],
-/// pre-resolved by the registry's local client (with full ancestor chain
-/// already linked). Inspect via `instance.type_schema.effective_*` directly.
+/// Registered GTS instance with its resolved Type Schema.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GtsInstance {
     /// Deterministic UUID v5 derived from the GTS ID.
@@ -446,8 +413,7 @@ pub struct GtsInstance {
     /// The full instance object (raw `Value`).
     pub object: Value,
 
-    /// Resolved type-schema this instance conforms to (Arc-shared with the
-    /// registry's cache).
+    /// The resolved Type Schema this instance conforms to.
     pub type_schema: Arc<GtsTypeSchema>,
 
     /// Optional description of the entity.

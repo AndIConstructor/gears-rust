@@ -59,7 +59,10 @@ mod wire_vocabulary_round_trip {
             (field::ITEMS_FIELD, field::VALIDATION_FAILED),
             (field::ENTITY_KEY_FIELD, field::VALIDATION_FAILED),
             (field::IF_NONE_MATCH_FIELD, field::VALIDATION_FAILED),
-            (field::FORCE_FIELD, field::VALIDATION_FAILED),
+            (
+                field::SKIP_COMPATIBILITY_CHECK_FIELD,
+                field::VALIDATION_FAILED,
+            ),
             (
                 field::EXPECTED_RESOURCE_VERSION_FIELD,
                 field::VALIDATION_FAILED,

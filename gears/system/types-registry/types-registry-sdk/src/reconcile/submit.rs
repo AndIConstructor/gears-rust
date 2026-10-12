@@ -24,9 +24,7 @@ pub const POLL_INTERVAL_MAX: Duration = Duration::from_secs(1);
 
 /// Submit and poll under one deadline; reconciliation's submit step.
 ///
-/// The outer `Err` is this call's own stop — the caller's cancellation or the deadline —
-/// and the inner one the registry's answer, so a `Cancelled` from the registry is never
-/// mistaken for the caller's.
+/// The outer error is a local stop; the inner error is the registry's answer.
 pub async fn await_registration<A: PlatformTypesRegistryApi + ?Sized>(
     api: &A,
     ctx: &PlatformSecurityContext,

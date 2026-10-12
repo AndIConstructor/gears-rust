@@ -145,7 +145,7 @@ mod narrowed {
     use serde_json::json;
     use uuid::Uuid;
 
-    use crate::models::{Entity, EntityKind, Instance, LifecycleStatus, TypeSchema};
+    use crate::models::{Entity, EntityKind, Instance, LifecycleStatus, Provenance, TypeSchema};
 
     const TYPE: &str = "gts.cf.test.pkg.thing.v1~";
     const INSTANCE: &str = "gts.cf.test.pkg.thing.v1~cf.test.pkg.one.v1";
@@ -183,6 +183,20 @@ mod narrowed {
             schema.effective_traits, None,
             "an unselected one stays unselected"
         );
+        assert_eq!(schema.provenance, None);
+    }
+
+    #[test]
+    fn a_type_schema_keeps_its_selected_provenance() {
+        for skipped in [true, false] {
+            let provenance = Some(Provenance {
+                compatibility_check_skipped: skipped,
+            });
+            let mut from = snapshot(TYPE, EntityKind::TypeSchema);
+            from.provenance = provenance;
+            let schema = TypeSchema::try_from(from).expect("a Type Schema");
+            assert_eq!(schema.provenance, provenance);
+        }
     }
 
     #[test]
@@ -218,6 +232,15 @@ mod narrowed {
         let mut materialized = snapshot(INSTANCE, EntityKind::Instance);
         materialized.effective_traits = Some(json!({}));
         assert_eq!(Instance::try_from(materialized.clone()), Err(materialized));
+
+        // Nor public provenance, which has no field applicable to an Instance.
+        for skipped in [true, false] {
+            let mut flagged = snapshot(INSTANCE, EntityKind::Instance);
+            flagged.provenance = Some(Provenance {
+                compatibility_check_skipped: skipped,
+            });
+            assert_eq!(Instance::try_from(flagged.clone()), Err(flagged));
+        }
     }
 }
 

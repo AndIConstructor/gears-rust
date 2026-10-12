@@ -21,20 +21,11 @@ workspace = true
 [features]
 # Default: production build, no test utilities.
 default = []
-# Test doubles for consumers' unit tests: `testing_platform::MockTypesRegistry`,
-# an in-memory `PlatformTypesRegistryApi` + `TypesRegistryApi`, and the legacy
-# `testing::MockTypesRegistryClient` for `dyn TypesRegistryClient`. Only the test
-# doubles need `toolkit` (`ClientHub`) and `parking_lot`.
+# In-memory clients and fixtures for consumer tests.
 test-util = ["dep:toolkit", "dep:parking_lot"]
 
 [dependencies]
-# Per ADR 0005 the `TypesRegistryClient` trait boundary is `CanonicalError`;
-# the SDK ships `TypesRegistryError` as an opt-in `From<CanonicalError>`
-# projection (see src/error.rs). The single AIP-193 ladder
-# (`From<DomainError> for CanonicalError`) lives in the impl crate's
-# `api::rest::error`; this SDK depends on the canonical-errors crate to
-# project that envelope into the typed view (and to construct the in-process
-# `InvalidArgument` errors its client-side `try_new` constructors emit).
+# API errors and client-side validation.
 toolkit-canonical-errors = { workspace = true }
 
 # Core dependencies for API trait
@@ -43,19 +34,16 @@ thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v5"] }
 serde_json = { workspace = true }
 
-# GTS types (from git dependency)
+# GTS identifiers and schemas.
 gts = { workspace = true }
 toolkit-gts = { workspace = true }
 
-# `PlatformTypesRegistryApi` is a `#[toolkit_contract::contract]`: the macro, its IR
-# and descriptor types, and the platform-plane security context. The SDK does not
-# depend on the `toolkit` runtime (its default `db`/`otel` features) outside tests.
+# Contracts and security contexts.
 toolkit-contract = { workspace = true }
 toolkit-security = { workspace = true }
 time = { workspace = true }
 tracing = { workspace = true }
-# Deadlines, pacing and cancellation of submit/poll and reconciliation. The
-# workspace pins Tokio with `full`; `time` and `macros` are what the SDK uses.
+# Async deadlines, polling and cancellation.
 tokio = { workspace = true, features = ["time", "macros"] }
 # `PublisherVersion`: SemVer parsing and precedence.
 semver = { workspace = true }

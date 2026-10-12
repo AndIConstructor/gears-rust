@@ -415,11 +415,10 @@ impl MockTypesRegistry {
         );
     }
 
-    /// Seeds every Type Schema and Instance declared in the `toolkit-gts` inventory of this
-    /// binary: what the linked gears register at startup.
+    /// Seed all Type Schemas and Instances in this binary's `toolkit-gts` inventory.
     ///
     /// # Panics
-    /// If a declared Type Schema is not valid JSON (a macro regression).
+    /// If a declared Type Schema is not valid JSON.
     pub fn seed_inventory(&self) {
         for entry in toolkit_gts::inventory::iter::<toolkit_gts::InventoryTypeSchema> {
             let schema = serde_json::from_str((entry.schema_fn)().as_str())
@@ -752,8 +751,7 @@ fn decide(
             }
         }
         Candidate::Delete { key, expected } => {
-            // As the registry: an absent target fails its precondition, and lifecycle is asked
-            // before the version, so a tombstone never invites a retry with a newer one.
+            // Check lifecycle before version: tombstones cannot be retried as live entities.
             let Some((gts_id, stored)) = find(entities, key) else {
                 return failed(Reason::PreconditionFailed, "names no entity");
             };
@@ -951,17 +949,16 @@ fn snapshot(
         effective_traits_schema: document(EntityField::EffectiveTraitsSchema, |d| {
             &d.effective_traits_schema
         }),
-        provenance: has(EntityField::Provenance).then(|| Provenance {
-            gts_spec_version: gts::GTS_SPECIFICATION_VERSION.to_owned(),
-            gts_impl_version: gts::GTS_IMPLEMENTATION_VERSION.to_owned(),
-            compat_forced: (kind == EntityKind::TypeSchema).then_some(false),
-        }),
+        // The mock does not model compatibility waivers, so it reports `false`.
+        provenance: (kind == EntityKind::TypeSchema && has(EntityField::Provenance)).then_some(
+            Provenance {
+                compatibility_check_skipped: false,
+            },
+        ),
     })
 }
 
-/// Scoped to the projection, as the real validators are: a token read under one selection
-/// does not condition a read under another. A Type Schema's also covers its resolution, so a
-/// parent's change moves its children's validators.
+/// Bind the token to the projection and resolved documents, including parent changes.
 fn validator(
     stored: &Stored,
     fields: &FieldSelection,
@@ -977,7 +974,7 @@ fn validator(
     )
 }
 
-/// What a discovery cursor is bound to: everything but the page size, as in the real client.
+/// Bind cursors to filters and projection, allowing page-size changes.
 fn binding(query: &ListEntitiesRequest) -> String {
     let filter = &query.filter;
     format!(
@@ -992,7 +989,7 @@ fn binding(query: &ListEntitiesRequest) -> String {
     )
 }
 
-/// The real client's refusal of a cursor resumed under another query.
+/// Refuse a cursor used with a different query.
 fn cursor_not_usable() -> CanonicalError {
     TypeResource::invalid_argument()
         .with_field_violation(
@@ -1074,7 +1071,7 @@ impl MockTypesRegistry {
             return Err(error);
         }
         let fields = query.projection.normalized();
-        // The real defaults: page_size_default 50, page_size_max 100.
+        // Default page size 50, maximum 100.
         let limit = match query.page.limit {
             None => 50,
             Some(asked @ 1..=100) => asked as usize,

@@ -1,11 +1,5 @@
-//! Reconciliation's tracing: the machine-readable fields of an error, and the run guard that
-//! reports a call's end exactly once, however it ends.
-//!
-//! Events carry codes, never free text: an error's `detail`, a violation's description and an
-//! admission message may quote the submitted document. The full error reaches the caller in
-//! the returned outcome or `Err`; an accepted operation's item failures are also persisted,
-//! read with `get_operation`. A synchronous refusal, a conflicting duplicate or a read fault
-//! need not have created an operation; when an error names one, [`operation_id_of`] reads it.
+//! Structured reconciliation events and completion summaries.
+//! Log error codes only: messages may contain document content. Full errors are returned to callers.
 
 use toolkit_canonical_errors::{CanonicalError, InvalidArgument};
 use uuid::Uuid;
@@ -98,8 +92,7 @@ pub fn category(error: &CanonicalError) -> &'static str {
     }
 }
 
-/// The operation an operation-scoped error names: a failed read-back or a deadline passed
-/// while it ran.
+/// The operation ID named by a scoped error.
 pub fn operation_id_of(error: &CanonicalError) -> Option<Uuid> {
     if error.resource_type() != Some(OPERATION_RESOURCE_TYPE) {
         return None;
@@ -188,9 +181,7 @@ impl StopReason {
     }
 }
 
-/// One call's progress. Its outcomes are written as each batch is decided, so a call that is
-/// cancelled or dropped still reports what it observed; `Drop` reports the end unless
-/// [`Self::finish`] already has.
+/// Reports a call once, including progress observed before cancellation or drop.
 pub struct Run {
     started: tokio::time::Instant,
     /// Distinct identifiers desired: duplicates in the input count once.

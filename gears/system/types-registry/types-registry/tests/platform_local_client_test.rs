@@ -25,7 +25,7 @@ use types_registry_sdk::{
     DeleteEntitiesRequest, DeleteItem, DeletionOutcome, EntityField, EntityFilter, EntityKey,
     EntityKind, EntityLookup, FieldSelection, IdempotencyKey, LifecycleStatus, ListEntitiesRequest,
     Operation, OperationStatus, Origin, PageRequest, PlatformTypesRegistryApi, Projection,
-    PublisherContext, RegisterEntitiesRequest, RegisterItem, RegistrationOutcome,
+    Provenance, PublisherContext, RegisterEntitiesRequest, RegisterItem, RegistrationOutcome,
 };
 
 mod common;
@@ -44,23 +44,31 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
+    harness_with(TypesRegistryConfig::default()).await
+}
+
+async fn harness_with(config: TypesRegistryConfig) -> Harness {
     let dir = Arc::new(common::TestDir::new("tr-local-client"));
     let dsn = format!(
         "sqlite://{}?mode=rwc&journal_mode=wal",
         dir.path().join("local.db").display()
     );
     let db = common::provider_for_with_outbox(&dsn, 8).await;
-    serve(db, dir).await
+    serve_with(db, dir, config).await
 }
 
 /// A healthy service with a running outbox over `db`.
-async fn serve(db: Arc<DBProvider<DbError>>, dir: Arc<common::TestDir>) -> Harness {
+async fn serve_with(
+    db: Arc<DBProvider<DbError>>,
+    dir: Arc<common::TestDir>,
+    config: TypesRegistryConfig,
+) -> Harness {
     let dispatch = Arc::new(OutboxDispatch::new());
     let service = Arc::new(RegistryService::new(
         db.db(),
         common::stores(),
         RegistrationPolicy::default(),
-        TypesRegistryConfig::default(),
+        config,
         Arc::clone(&dispatch) as Arc<dyn OperationDispatch>,
         common::metrics(),
     ));
@@ -130,7 +138,7 @@ fn create(gts_id: &str, content: serde_json::Value) -> RegisterItem {
         gts_id: id(gts_id),
         content,
         expected_resource_version: None,
-        force: false,
+        skip_compatibility_check: false,
     }
 }
 
@@ -299,6 +307,90 @@ async fn a_type_schema_whose_id_differs_from_the_item_identifier_is_refused() {
         ),
         "{refused:?}"
     );
+}
+
+/// The typed request reaches acceptance: without deployment permission the refusal
+/// names the SDK's `skip_compatibility_check` field.
+#[tokio::test]
+async fn a_typed_skip_request_is_refused_naming_its_field() {
+    let h = harness().await;
+    let mut item = create(CF_TYPE, schema(CF_TYPE));
+    item.skip_compatibility_check = true;
+
+    let refused = h
+        .client
+        .register_entities(
+            &ctx(),
+            IdempotencyKey::new("k-skip").unwrap(),
+            register(vec![item]),
+        )
+        .await;
+
+    let Err(toolkit_canonical_errors::CanonicalError::InvalidArgument {
+        ctx: toolkit_canonical_errors::InvalidArgument::FieldViolations { field_violations },
+        ..
+    }) = &refused
+    else {
+        panic!("a field refusal: {refused:?}");
+    };
+    assert_eq!(
+        field_violations
+            .iter()
+            .map(|v| v.field.as_str())
+            .collect::<Vec<_>>(),
+        [types_registry_sdk::field::SKIP_COMPATIBILITY_CHECK_FIELD]
+    );
+}
+
+/// Where the deployment permits it, a typed skip request on a later minor is admitted
+/// and its Type Schema reads back `provenance.compatibility_check_skipped = true`.
+#[tokio::test]
+async fn a_typed_skip_request_is_recorded_and_read_back() {
+    let h = harness_with(TypesRegistryConfig {
+        allow_compatibility_force: true,
+        ..TypesRegistryConfig::default()
+    })
+    .await;
+    let first = gts_id!("cf.core.example.minor.v1.0~");
+    let second = gts_id!("cf.core.example.minor.v1.1~");
+    register_and_complete(&h, "k-first", register(vec![create(first, schema(first))])).await;
+    let mut item = create(second, schema(second));
+    item.skip_compatibility_check = true;
+    let items = items_of(register_and_complete(&h, "k-second", register(vec![item])).await);
+    assert_eq!(
+        items[0].outcome.status(),
+        CandidateStatus::Succeeded,
+        "{:?}",
+        items[0].outcome
+    );
+
+    let projection = Projection::Select(FieldSelection::with(&[EntityField::Provenance]));
+    let lookups = h
+        .client
+        .batch_get_entities(
+            &ctx(),
+            batch(
+                vec![
+                    EntityKey::from(id(first)).into(),
+                    EntityKey::from(id(second)).into(),
+                ],
+                projection,
+            ),
+        )
+        .await
+        .expect("reads");
+    let skipped = |key: &str| match &lookups.0[&EntityKey::from(id(key))] {
+        EntityLookup::Found { entity, .. } => {
+            entity.provenance.map(|p| p.compatibility_check_skipped)
+        }
+        other => panic!("{key} is found: {other:?}"),
+    };
+    assert_eq!(
+        skipped(first),
+        Some(false),
+        "the first minor has nothing to skip"
+    );
+    assert_eq!(skipped(second), Some(true));
 }
 
 #[tokio::test]
@@ -765,7 +857,7 @@ async fn reconciliation_through_the_local_client_admits_then_reports_up_to_date(
 }
 
 #[tokio::test]
-async fn a_full_read_carries_every_materialized_document_and_the_provenance() {
+async fn a_full_read_carries_every_materialized_document_and_the_waiver_flag() {
     let h = harness().await;
     register_and_complete(
         &h,
@@ -817,11 +909,17 @@ async fn a_full_read_carries_every_materialized_document_and_the_provenance() {
         snapshot.effective_traits_schema,
         json(&record.effective_traits_schema)
     );
-    let provenance = snapshot.provenance.as_ref().expect("selected");
-    let domain = record.provenance.as_ref().expect("stored");
-    assert_eq!(provenance.gts_spec_version, domain.gts_spec_version);
-    assert_eq!(provenance.gts_impl_version, domain.gts_impl_version);
-    assert_eq!(provenance.compat_forced, domain.compat_forced);
+    assert_eq!(
+        snapshot.provenance,
+        Some(Provenance {
+            compatibility_check_skipped: false
+        }),
+        "selected"
+    );
+    assert_eq!(
+        snapshot.provenance.map(|p| p.compatibility_check_skipped),
+        record.provenance.map(|p| p.compatibility_check_skipped)
+    );
 }
 
 #[tokio::test]

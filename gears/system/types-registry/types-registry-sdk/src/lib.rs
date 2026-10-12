@@ -62,6 +62,5 @@ pub use legacy::models::{
     TypeSchemaQuery, is_type_schema_id,
 };
 
-// GTS types the SDK's models name, so a consumer builds requests without its own `gts`
-// dependency. Leading `::` selects the external crate over this crate's `gts` module.
+// Re-export GTS types needed to construct requests.
 pub use ::gts::{GtsId, GtsIdPattern, GtsIdSegment, GtsInstanceId, GtsTypeId};

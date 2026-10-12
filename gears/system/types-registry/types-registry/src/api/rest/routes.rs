@@ -266,7 +266,8 @@ fn register_reads(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
              the document-free default `gts_id,gts_uuid,kind,origin,lifecycle_status`; \
              documents are selected individually from `content`, \
              `resolved_schema`, `effective_traits` and `effective_traits_schema` (the last \
-             three Type Schemas only), plus the `provenance` group. Names are \
+             three Type Schemas only), plus the `provenance` group of a Type Schema \
+             (omitted on an Instance). Names are \
              case-insensitive; an empty, duplicate, unknown or nested name is a 400. \
              `gts_id`, `gts_uuid`, `kind` and `lifecycle_status` are always returned, \
              whether or not `$select` names them, so a deleted entity is still readable and \
