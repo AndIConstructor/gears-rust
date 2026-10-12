@@ -226,37 +226,62 @@ pub struct ReceivedRecord {
     pub record: Value,
 }
 
+/// Where processing dropped a received record.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DropStage {
+    /// The planner, or the hand-off to it.
+    Planner,
+    /// The sensitive-data checks.
+    Checks,
+    /// Admission.
+    Admission,
+    /// The profile writer.
+    Writer,
+}
+
 /// Why processing dropped a received record.
 #[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum DropCause {
+pub enum DropReason {
+    /// No planner is wired in yet (until Story 5.2).
+    NoPlanner,
     /// Processing could not finish.
     ProcessingFailed,
 }
 
-/// A content-free event for a dropped record: who sent it, for which tenant
-/// and subject, of which type, and why it was dropped. The Planner, the
-/// Sensitive-Data Checks, Admission and the Profile Writer emit it.
+/// A content-free event for a dropped record: the tenant, the subject, the
+/// connector, the record's identity (provenance and version), its type, the
+/// stage that dropped it and why. It carries no record content. Record intake
+/// owns its shape; the Planner, the Sensitive-Data Checks, Admission and the
+/// Profile Writer emit it.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropEvent {
     pub tenant_id: Uuid,
-    pub connector: String,
-    pub type_id: String,
     pub subject_id: Option<Uuid>,
-    pub cause: DropCause,
+    pub connector: String,
+    pub provenance: String,
+    pub version: String,
+    pub type_id: String,
+    pub stage: DropStage,
+    pub reason: DropReason,
 }
 
 impl DropEvent {
     #[must_use]
-    pub fn for_record(record: &ReceivedRecord, cause: DropCause) -> Self {
+    pub fn for_record(record: &ReceivedRecord, stage: DropStage, reason: DropReason) -> Self {
         Self {
             tenant_id: record.tenant_id,
-            connector: record.connector.clone(),
-            type_id: record.envelope.type_id.clone(),
             subject_id: record.envelope.subject_id,
-            cause,
+            connector: record.connector.clone(),
+            provenance: record.envelope.provenance.clone(),
+            version: record.envelope.version.clone(),
+            type_id: record.envelope.type_id.clone(),
+            stage,
+            reason,
         }
     }
 }
@@ -296,9 +321,8 @@ pub trait RecordIdRepository: Send + Sync {
 
 /// Hands a received record to the background processing, which the Planner
 /// builds. It returns at once. It takes the record or refuses it, for example
-/// because its bounded queue is full or no processing is wired in; a refusal
-/// is an error, and intake then keeps no identity of the record, so the
-/// connector can send it again.
+/// because its bounded queue is full; a refusal is an error, and intake then
+/// keeps no identity of the record, so the connector can send it again.
 pub trait RecordHandOff: Send + Sync {
     /// # Errors
     ///

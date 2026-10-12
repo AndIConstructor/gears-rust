@@ -434,13 +434,71 @@ async fn any_other_policy_failure_is_internal_and_hides_its_cause() {
 }
 
 #[tokio::test]
-async fn without_processing_a_record_is_unavailable_and_leaves_no_identity() {
+async fn until_the_planner_exists_a_record_is_received_and_dropped_with_an_event() {
     let db = inmem_db().await;
     let fixture = IntakeFixture {
-        no_processing: true,
+        dropping: true,
         ..IntakeFixture::default()
     };
     let intake = fixture.build(&db);
+    let (ctx, tenant, subject) = (connector(), Uuid::new_v4(), Uuid::new_v4());
+    let record = chat_record(subject, "chat/t/1", "v1");
+
+    let first = intake.submit(&ctx, tenant, record.clone()).await;
+    let again = intake.submit(&ctx, tenant, record).await;
+
+    assert_eq!(first.expect("submit"), IntakeOutcome::Received);
+    assert_eq!(
+        again.expect("resend"),
+        IntakeOutcome::Repeat,
+        "the identity is kept, so a resend is a repeat"
+    );
+    assert_eq!(stored_record_ids(&db).await, 1);
+    let dropped = fixture.events.dropped.lock().unwrap().clone();
+    assert_eq!(dropped.len(), 1, "one drop event, for the received record");
+    assert_eq!(dropped[0].tenant_id, tenant);
+    assert_eq!(dropped[0].subject_id, Some(subject));
+    assert_eq!(dropped[0].connector, ctx.subject_id().to_string());
+    assert_eq!(
+        (dropped[0].provenance.as_str(), dropped[0].version.as_str()),
+        ("chat/t/1", "v1")
+    );
+}
+
+/// A hand-off that refuses every record, as a full queue would.
+struct RefusingHandOff;
+
+impl crate::domain::record_intake::RecordHandOff for RefusingHandOff {
+    fn hand_off(
+        &self,
+        _record: crate::domain::record_intake::ReceivedRecord,
+    ) -> Result<(), DomainError> {
+        Err(DomainError::Unavailable("queue full".to_owned()))
+    }
+}
+
+#[tokio::test]
+async fn a_hand_off_that_refuses_leaves_no_identity_so_the_record_can_be_sent_again() {
+    let db = inmem_db().await;
+    let types = IntakeFixture::default().types;
+    let settings = Arc::new(crate::test_support::settings_service(
+        &db,
+        Arc::new(crate::test_support::AllowResolver),
+        true,
+    ));
+    let intake = crate::domain::record_intake::RecordIntakeService::new(
+        Arc::new(toolkit_db::DBProvider::new(db.clone())),
+        Arc::new(crate::infra::storage::record_ids_repo::SeaOrmRecordIdRepository::new()),
+        settings,
+        crate::domain::record_intake::IntakePorts {
+            types,
+            switch: Arc::new(crate::infra::connector_switch::ConfigConnectorSwitch::new(
+                [],
+            )),
+            hand_off: Arc::new(RefusingHandOff),
+        },
+        authz_resolver_sdk::PolicyEnforcer::new(Arc::new(crate::test_support::AllowResolver)),
+    );
     let (ctx, tenant) = (connector(), Uuid::new_v4());
     let record = chat_record(Uuid::new_v4(), "chat/t/1", "v1");
 

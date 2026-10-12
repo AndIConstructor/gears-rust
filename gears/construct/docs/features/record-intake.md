@@ -38,7 +38,7 @@
 
 ### 1.1 Overview
 
-Record Intake is the single entry for connectors (`cpt-cf-construct-component-results-api`). A connector sends one record per request for one tenant. Intake checks the record against its GTS type and the types it derives from, checks that the connector is on and, for a record about a subject, that personalization is on with no erasure under way. It then keeps the record's identity, so that a resend is a repeat, hands the record to background processing, and answers received, repeat or refused at once. Until the Planner (Story 5.2) delivers the processing, a stub refuses every record: intake answers `503` and keeps nothing, so no record is taken and lost. This document describes Story 5.7.2.
+Record Intake is the single entry for connectors (`cpt-cf-construct-component-results-api`). A connector sends one record per request for one tenant. Intake checks the record against its GTS type and the types it derives from, checks that the connector is on and, for a record about a subject, that personalization is on with no erasure under way. It then keeps the record's identity, so that a resend is a repeat, hands the record to background processing, and answers received, repeat or refused at once. Until the Planner (Story 5.2) delivers the processing, a stub drops every received record with a content-free drop event. This document describes Story 5.7.2.
 
 ### 1.2 Purpose
 
@@ -50,11 +50,13 @@ The PRD requires Construct to take records one at a time, check each against its
 
 **The record identity.** One row per tenant and record identity in `construct__record_ids` (`cpt-cf-construct-dbtable-record-ids`). The identity is (tenant, connector, provenance, version), as the record base type states. Inserting it is the repeat check, so two copies sent at once cannot both be received. The table holds no record content.
 
-**Taking a record.** The identity insert and the hand-off run in one transaction, which commits only after processing took the record. A hand-off that refuses (no processing wired in, or a full queue) rolls the identity back and answers `503`, so the connector can send the record again. A request cancelled before the commit, by a client that goes away or the gateway's timeout, leaves no identity behind either. A request cancelled while the commit is under way can leave the record handed off without its identity; a resend is then processed twice, which the Profile Writer's idempotent write tolerates.
+**Taking a record.** The identity insert and the hand-off run in one transaction, which commits only after processing took the record. A hand-off that refuses (the Planner's full queue) rolls the identity back and answers `503`, so the connector can send the record again. A request cancelled before the commit, by a client that goes away or the gateway's timeout, leaves no identity behind either. A request cancelled while the commit is under way can leave the record handed off without its identity; a resend is then processed twice, which the Profile Writer's idempotent write tolerates.
+
+**Until the Planner exists.** The stub takes every record and drops it, with a drop event: intake answers `202` and keeps the identity, as the story asks. A record received while the stub is wired in is not processed, and a resend after the Planner ships is a repeat; a connector that needs such a record processed sends it with a new version.
 
 **Out of scope**:
 
-- The Planner's entry point and background processing; a stub that refuses every record stands in (Story 5.2).
+- The Planner's entry point and background processing; a stub that drops every record with a drop event stands in (Story 5.2).
 - Connectors on or off in the settings service. This feature reads the switch through a small interface whose first version takes the deployment config (every connector on unless configured off), the fallback Story 5.11 names; declaring and reading it in the settings service waits for 5.11.
 - Writing drop events to the Audit gear, which does not exist yet; they go to the structured log.
 - Erasure and retention of record identities.
@@ -98,7 +100,7 @@ The PRD requires Construct to take records one at a time, check each against its
 - A body that is not JSON: `400`; no JSON content type: `415`. Both are problem responses.
 - The platform does not authorize the connector for the named tenant: `403`. Nothing is read or stored.
 - The record is refused: `422` problem with one field violation (the place as a JSON pointer, or `(record)` for the record as a whole; the broken rule; the reason code) and the record's type as the resource name. Nothing is stored. Reason codes: `ID_IN_PUSH`, `SCHEMA_VIOLATION`, `UNKNOWN_TYPE`, `ABSTRACT_TYPE`, `NOT_A_RECORD_TYPE`, `CONNECTOR_OFF`, `PERSONALIZATION_OFF`, `ERASURE_IN_PROGRESS`.
-- Processing cannot take the record (no planner yet, or a full queue): `503`, and nothing is stored, so the record can be sent again.
+- Processing cannot take the record (the Planner's full queue): `503`, and nothing is stored, so the record can be sent again.
 - The types registry, the settings service or the policy service is unavailable, too slow or throttling: `503`. Any other failure: `500`, without its cause.
 - A refusal names the record's type only once the envelope has accepted it as a well-formed type id, so a malformed `type` is never repeated. The `422` status is the REST route's: through the in-process client a refusal is the same invalid-argument error without an HTTP status.
 
@@ -143,15 +145,15 @@ The PRD requires Construct to take records one at a time, check each against its
 **Output**: Taken, or refused with an unavailable error. The hand-off returns at once; the Planner's implementation puts the record on a bounded queue and refuses when it is full.
 
 **Steps**:
-1. [x] - `p1` - Until the Planner's entry point exists, refuse every record with an unavailable error: intake then rolls the identity back and answers `503` - `inst-hand-off-refuse`
+1. [x] - `p1` - Until the Planner's entry point exists, take every record and drop it: write a drop event (stage `planner`, reason `no_planner`, `cpt-cf-construct-algo-record-intake-drop-event`) and **RETURN** taken, so intake commits the identity and answers `202` - `inst-hand-off-drop`
 
 ### Write a Drop Event
 
 - [x] `p1` - **ID**: `cpt-cf-construct-algo-record-intake-drop-event`
 
-**Input**: A received record that processing drops, and the cause.
+**Input**: A received record that processing drops, the stage that drops it, and the reason.
 
-**Output**: One content-free event: tenant, connector, record type, subject and cause.
+**Output**: One content-free event: tenant, subject, connector, record identity (provenance and version), record type, stage (`planner`, `checks`, `admission`, `writer`) and reason (`no_planner`, `processing_failed`).
 
 **Steps**:
 1. [x] - `p1` - Write the event to the structured log at warn level under the target `construct::audit`, until the Audit gear ships. The subject is a plain id, only when the record names one; no record content is written. The Planner, the Sensitive-Data Checks, Admission and the Profile Writer emit it - `inst-drop-event-log`
@@ -220,29 +222,29 @@ Intake **MUST** read whether a connector is on through one interface. Its first 
 
 - [x] `p1` - **ID**: `cpt-cf-construct-dod-record-intake-hand-off`
 
-A received record **MUST** go to processing through one interface that returns at once and can refuse. It **MUST** carry the tenant, the connector identity and the record, and **MUST NOT** carry the caller's security context or scope; processing builds its own for the tenant. Until the Planner exists, the wired-in hand-off **MUST** refuse every record, so intake answers `503` and keeps no identity.
+A received record **MUST** go to processing through one interface that returns at once and can refuse. It **MUST** carry the tenant, the connector identity and the record, and **MUST NOT** carry the caller's security context or scope; processing builds its own for the tenant. Until the Planner exists, the wired-in hand-off **MUST** take every record and emit the drop event, so intake answers `202` and keeps the identity. A hand-off that refuses **MUST** leave no identity behind.
 
 **Implements**:
 - `cpt-cf-construct-algo-record-intake-hand-off`
 
-**Verified by**: `without_a_planner_the_hand_off_refuses_every_record` (stub), `without_processing_a_record_is_unavailable_and_leaves_no_identity` (service), `without_processing_a_record_gets_503_and_can_be_sent_again` (routes), and the recording hand-off in every received-record test.
+**Verified by**: `without_a_planner_the_hand_off_drops_the_record_with_an_event` (stub), `until_the_planner_exists_a_record_is_received_and_dropped_with_an_event`, `a_hand_off_that_refuses_leaves_no_identity_so_the_record_can_be_sent_again` (service), `until_the_planner_exists_a_record_gets_202_and_a_resend_200` (routes), and the recording hand-off in every received-record test.
 
 ### Drop Event
 
 - [x] `p1` - **ID**: `cpt-cf-construct-dod-record-intake-drop-event`
 
-The system **MUST** define one content-free drop event and write it to the structured log until the Audit gear ships.
+The system **MUST** define one content-free drop event (tenant, subject, connector, record identity, stage, reason) and write it to the structured log until the Audit gear ships.
 
 **Implements**:
 - `cpt-cf-construct-algo-record-intake-drop-event`
 
-**Verified by**: `a_drop_event_names_the_record_and_its_cause`, `the_drop_event_is_logged_without_record_content` (captures the log). Nothing emits it yet; the Planner will.
+**Verified by**: `a_drop_event_names_the_record_its_stage_and_its_reason`, `the_drop_event_is_logged_without_record_content` (captures the log). The stub emits it today; the Planner, the checks, Admission and the writer will.
 
 ### Intake Route
 
 - [x] `p1` - **ID**: `cpt-cf-construct-dod-record-intake-route`
 
-The system **MUST** register `POST /construct/v1/records` with OperationBuilder, authenticated, with the `tenant` query parameter, answering `202` received, `200` repeat, `422` refused and `503` when processing cannot take the record, and RFC 9457 problems for every error. Only the route adds the `422` to a refusal. A refusal is logged once, at info level, where it is mapped. The foundation's placeholder route, client operations, service, repository, entity and note model **MUST** be gone.
+The system **MUST** register `POST /construct/v1/records` with OperationBuilder, authenticated, with the `tenant` query parameter, answering `202` received, `200` repeat, `422` refused and `503` when processing cannot take the record (a full queue), and RFC 9457 problems for every error. Only the route adds the `422` to a refusal. A refusal is logged once, at info level, where it is mapped. The foundation's placeholder route, client operations, service, repository, entity and note model **MUST** be gone.
 
 **Implements**:
 - `cpt-cf-construct-flow-record-intake-submit`
@@ -250,7 +252,7 @@ The system **MUST** register `POST /construct/v1/records` with OperationBuilder,
 **Touches**:
 - API: `POST /construct/v1/records` (the DESIGN's `POST /api/construct/v1/records` behind the gateway prefix)
 
-**Verified by**: `a_received_record_gets_202`, `a_repeat_gets_200`, `a_refused_record_gets_422_naming_type_place_and_rule`, `a_record_with_an_id_gets_422`, `a_connector_without_permission_gets_403`, `a_request_without_a_tenant_gets_a_problem_and_takes_nothing`, `a_body_that_is_not_json_gets_a_problem`, `without_processing_a_record_gets_503_and_can_be_sent_again` (routes), `refused_on_the_route_is_422_naming_the_type_the_place_and_the_rule`, `refused_for_an_in_process_caller_carries_no_http_status`, `a_refusal_of_the_whole_record_names_the_record_as_the_place`, `other_errors_map_the_same_on_the_route_and_in_process` (error mapping), `each_outcome_has_its_wire_name` (DTO).
+**Verified by**: `a_received_record_gets_202`, `a_repeat_gets_200`, `a_refused_record_gets_422_naming_type_place_and_rule`, `a_record_with_an_id_gets_422`, `a_connector_without_permission_gets_403`, `a_request_without_a_tenant_gets_a_problem_and_takes_nothing`, `a_body_that_is_not_json_gets_a_problem`, `until_the_planner_exists_a_record_gets_202_and_a_resend_200` (routes), `refused_on_the_route_is_422_naming_the_type_the_place_and_the_rule`, `refused_for_an_in_process_caller_carries_no_http_status`, `a_refusal_of_the_whole_record_names_the_record_as_the_place`, `other_errors_map_the_same_on_the_route_and_in_process` (error mapping), `each_outcome_has_its_wire_name` (DTO).
 
 ### Client in ClientHub
 
@@ -270,14 +272,14 @@ The system **MUST** register `POST /construct/v1/records` with OperationBuilder,
 - [ ] A connector without permission for the record's tenant is refused (`a_connector_without_permission_is_refused_before_the_record_is_checked`, `a_connector_authorized_only_for_its_own_tenant_cannot_write_into_another`, `a_connector_without_permission_gets_403`).
 - [ ] Records are refused while personalization is off or an erasure is under way, and when the connector is off (`personalization_off_for_the_subject_is_refused`, `an_erasure_under_way_is_refused_even_with_personalization_on`, `a_connector_that_is_off_is_refused`).
 - [ ] A record of a registered derived type is taken with no type-specific code: one schema check covers every type (`a_valid_record_of_every_derived_type_passes`, `a_record_without_a_subject_skips_the_subject_checks`).
-- [ ] While no processing is wired in, a record is answered `503` and nothing is stored, so it can be sent again (`without_processing_a_record_is_unavailable_and_leaves_no_identity`, `without_processing_a_record_gets_503_and_can_be_sent_again`).
+- [ ] Until the Planner exists, a record is answered `202` and dropped with a drop event, and its identity is kept (`until_the_planner_exists_a_record_is_received_and_dropped_with_an_event`, `until_the_planner_exists_a_record_gets_202_and_a_resend_200`).
 - [ ] The tests named in this document pass. They run on an in-memory SQLite database.
 
 ## 7. Non-Functional Considerations
 
 - **Security**: The connector is taken only from the platform. The tenant comes only from the `tenant` query parameter, never from the record, and the platform must authorize the connector for it before anything is read; every read and the insert run under that one decision's scope. A refusal never repeats a value from the record.
 - **Data integrity**: The insert is the repeat check, so two copies sent at once cannot both be received. Record content is never written to a store.
-- **Reliability**: An unavailable, slow or throttling types registry is a `503`, never a guess. Both the types registry and the settings service are resolved from ClientHub on each request, so their start order does not matter. The identity is kept only once processing took the record, so a refused hand-off or a cancelled request leaves nothing behind. A record lost when an instance stops after it was taken leaves its identity behind; a resend is a repeat, as the DESIGN states.
+- **Reliability**: An unavailable, slow or throttling types registry is a `503`, never a guess. Both the types registry and the settings service are resolved from ClientHub on each request, so their start order does not matter. The identity is kept only once processing took the record, so a refused hand-off or a cancelled request leaves nothing behind. While the stub is wired in, every received record is taken and dropped: its identity is kept and the record is not processed. A record lost when an instance stops after it was taken leaves its identity behind; a resend is a repeat, as the DESIGN states.
 - **Observability**: The intake span carries the tenant and the connector, and every error is logged once, inside it, where it is mapped. A refusal is logged at info level with its reason code, type and place. A drop is a warn-level event under `construct::audit`, with no record content.
 - **Performance**: A type's schema is compiled once and kept for the life of the process.
 - **Known risk, outside this feature**: the types registry lets any authenticated caller register a type, with no permission check, so a type that derives from the record base can be added by anyone who can log in. Allow-listing types in Construct would contradict `cpt-cf-construct-fr-record-intake` (a new type needs no Construct change); the authorization belongs in the types registry.

@@ -2,7 +2,7 @@
 
 Record intake for connectors: a connector sends one record per request for one tenant, and Construct checks it against its GTS type and answers at once with received, repeat or refused. A received record is handed to background processing in the same transaction that keeps its identity.
 
-**Until the Planner exists (Story 5.2), no processing is wired in.** Every record that passes the checks is answered `503`, and nothing is stored, so a connector can send it again once processing exists. A refused record still answers `422`, so the checks can be tried now.
+**Until the Planner exists (Story 5.2), every received record is dropped.** A record that passes the checks is answered `202`, its identity is kept, and a content-free drop event is logged; nothing from the record is processed. A resend of the same record is a repeat.
 
 **Features:**
 - One authenticated route, `POST /construct/v1/records?tenant=<tenant id>`, with one permission check (`construct.record` / `send`) for the named tenant
@@ -82,19 +82,23 @@ curl -s -X POST "http://127.0.0.1:8087/cf/construct/v1/records?tenant=00000000-d
   -d '{"type":"gts.cf.connectors.core.record.v1~cf.construct.chat.message.v1~","provenance":"chat_engine/thread-42/msg-7","version":"2026-09-10T09:13:00Z","observed_at":"2026-09-10T09:13:05Z","subject_id":"5d1f2c3a-8b4e-4c6d-9a1b-2c3d4e5f6a7b","payload":{"source":"chat_engine","message_id":"msg-7","thread_id":"thread-42","role":"user","text":"Which of these two papers contradict each other?"}}'
 ```
 
-Response `503`, because no processing is wired in yet:
+Response `202`:
 
 ```json
-{"type":"gts://gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~","title":"Service Unavailable","status":503,"detail":"Service temporarily unavailable","instance":"/construct/v1/records","context":{}}
+{"outcome":"received"}
 ```
 
-The log names the tenant and the connector:
+The log shows the drop event, without the record's content:
 
 ```text
-record_intake{tenant_id=00000000-df51-5b42-9538-d2b56b7ee953 connector=11111111-6a88-4768-9dfc-6bcd5187d9ed}: construct::api::rest::error: construct dependency unavailable msg=record processing is not available yet: no planner is wired in
+record dropped event="record_dropped" tenant_id=00000000-df51-5b42-9538-d2b56b7ee953 subject_id=5d1f2c3a-8b4e-4c6d-9a1b-2c3d4e5f6a7b connector=11111111-6a88-4768-9dfc-6bcd5187d9ed provenance=chat_engine/thread-42/msg-7 version=2026-09-10T09:13:00Z record_type=gts.cf.connectors.core.record.v1~cf.construct.chat.message.v1~ stage="planner" reason="no_planner"
 ```
 
-The same request again answers `503` too: nothing was stored, so it is not a repeat. Once processing exists, a record that passes the checks answers `202` with `{"outcome":"received"}`, and the same identity again answers `200` with `{"outcome":"repeat"}`.
+The same request again answers `200`, and no second drop event is written:
+
+```json
+{"outcome":"repeat"}
+```
 
 ### Errors
 
@@ -111,7 +115,7 @@ All errors are `application/problem+json`. A refused record is `422`; its field 
 | A body that is not valid JSON | `400` |
 | No `Content-Type: application/json` header | `415` |
 | The connector has no permission for the tenant | `403`, reason `ACCESS_DENIED` |
-| No processing is wired in yet, or the types registry, the settings service or the policy service does not answer | `503` |
+| The types registry, the settings service or the policy service does not answer | `503` |
 
 The same record with `"role":"system"` answers `422`:
 
@@ -124,6 +128,6 @@ The same record with `"role":"system"` answers `422`:
 | Issue | Solution |
 |-------|----------|
 | The gear does not start | Check that the config has no unknown key and that every entry in `connectors_off` is a UUID. |
-| Every valid record is `503` | Expected until the Planner exists: no processing is wired in. |
+| A received record changes nothing | Expected until the Planner exists: every received record is dropped, with a drop event in the log. |
 | `404` on `/cf/construct/...` | The example server was started without `--features construct`. |
 | Every record is `UNKNOWN_TYPE` | The record's `type` is not one of the registered connector record types; the SDK registers the base and four derived types. |

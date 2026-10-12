@@ -20,7 +20,8 @@ use uuid::Uuid;
 use crate::api::rest::types::ConcreteIntake;
 use crate::domain::error::DomainError;
 use crate::domain::record_intake::{
-    IntakePorts, ReceivedRecord, RecordHandOff, RecordIntakeService, RecordTypes,
+    DropEvent, IntakeEvents, IntakePorts, ReceivedRecord, RecordHandOff, RecordIntakeService,
+    RecordTypes,
 };
 use crate::domain::subject_settings::{
     SubjectKey, SubjectSettings, SubjectSettingsService, TenantDefaults,
@@ -392,6 +393,18 @@ impl RecordHandOff for RecordingHandOff {
     }
 }
 
+/// Keeps every drop event, so a test can see what was dropped.
+#[derive(Default)]
+pub struct RecordingEvents {
+    pub dropped: std::sync::Mutex<Vec<DropEvent>>,
+}
+
+impl IntakeEvents for RecordingEvents {
+    fn dropped(&self, event: DropEvent) {
+        self.dropped.lock().unwrap().push(event);
+    }
+}
+
 /// The policy service answers with an error instead of a decision.
 pub struct ErroringResolver(pub fn() -> CanonicalError);
 
@@ -429,9 +442,10 @@ pub struct IntakeFixture {
     pub connectors_off: Vec<Uuid>,
     pub personalization_default: bool,
     pub hand_off: Arc<RecordingHandOff>,
-    /// Wire the production stub, which refuses every record, instead of the
-    /// recording hand-off.
-    pub no_processing: bool,
+    /// Wire the production stub, which drops every record with a drop event,
+    /// instead of the recording hand-off. The events go to `events`.
+    pub dropping: bool,
+    pub events: Arc<RecordingEvents>,
     /// A deadline for the policy service, shorter than the enforcer's default.
     pub policy_deadline: Option<std::time::Duration>,
 }
@@ -446,7 +460,8 @@ impl Default for IntakeFixture {
             connectors_off: Vec::new(),
             personalization_default: true,
             hand_off: Arc::new(RecordingHandOff::default()),
-            no_processing: false,
+            dropping: false,
+            events: Arc::new(RecordingEvents::default()),
             policy_deadline: None,
         }
     }
@@ -463,8 +478,10 @@ impl IntakeFixture {
         if let Some(deadline) = self.policy_deadline {
             enforcer = enforcer.with_deadline(deadline);
         }
-        let hand_off: Arc<dyn RecordHandOff> = if self.no_processing {
-            Arc::new(crate::infra::planner_stub::NoProcessingHandOff)
+        let hand_off: Arc<dyn RecordHandOff> = if self.dropping {
+            Arc::new(crate::infra::planner_stub::DroppingHandOff::new(
+                Arc::clone(&self.events) as Arc<dyn IntakeEvents>,
+            ))
         } else {
             Arc::clone(&self.hand_off) as Arc<dyn RecordHandOff>
         };

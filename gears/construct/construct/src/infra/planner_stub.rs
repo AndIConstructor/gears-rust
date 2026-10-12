@@ -1,21 +1,37 @@
+use std::sync::Arc;
+
 use crate::domain::error::DomainError;
-use crate::domain::record_intake::{ReceivedRecord, RecordHandOff};
+use crate::domain::record_intake::{
+    DropEvent, DropReason, DropStage, IntakeEvents, ReceivedRecord, RecordHandOff,
+};
 
 /// [`RecordHandOff`] until the Planner (Story 5.2) delivers the entry point:
-/// it refuses every record. Intake then keeps no identity of the record and
-/// answers 503, so no record is taken and lost; a connector sends it again
-/// once processing exists.
+/// it takes every record and drops it, with a content-free drop event. Intake
+/// answers received and keeps the record's identity, so a resend after the
+/// Planner ships is a repeat: records received while this stub is wired in are
+/// not processed.
 ///
 /// @cpt-dod:cpt-cf-construct-dod-record-intake-hand-off:p1
-#[derive(Debug, Default)]
-pub struct NoProcessingHandOff;
+pub struct DroppingHandOff {
+    events: Arc<dyn IntakeEvents>,
+}
 
-impl RecordHandOff for NoProcessingHandOff {
-    fn hand_off(&self, _record: ReceivedRecord) -> Result<(), DomainError> {
-        // @cpt-begin:cpt-cf-construct-algo-record-intake-hand-off:p1:inst-hand-off-refuse
-        Err(DomainError::Unavailable(
-            "record processing is not available yet: no planner is wired in".to_owned(),
-        ))
-        // @cpt-end:cpt-cf-construct-algo-record-intake-hand-off:p1:inst-hand-off-refuse
+impl DroppingHandOff {
+    #[must_use]
+    pub fn new(events: Arc<dyn IntakeEvents>) -> Self {
+        Self { events }
+    }
+}
+
+impl RecordHandOff for DroppingHandOff {
+    fn hand_off(&self, record: ReceivedRecord) -> Result<(), DomainError> {
+        // @cpt-begin:cpt-cf-construct-algo-record-intake-hand-off:p1:inst-hand-off-drop
+        self.events.dropped(DropEvent::for_record(
+            &record,
+            DropStage::Planner,
+            DropReason::NoPlanner,
+        ));
+        Ok(())
+        // @cpt-end:cpt-cf-construct-algo-record-intake-hand-off:p1:inst-hand-off-drop
     }
 }

@@ -1,16 +1,25 @@
-use crate::domain::record_intake::{DropCause, DropEvent, IntakeEvents};
+use crate::domain::record_intake::{DropEvent, DropReason, DropStage, IntakeEvents};
 
 /// [`IntakeEvents`] written to the structured log, until the Audit gear ships.
-/// The event carries no record content. The Planner emits it for a received
-/// record it drops.
+/// The event carries no record content.
 ///
 /// @cpt-dod:cpt-cf-construct-dod-record-intake-drop-event:p1
 #[derive(Debug, Default)]
 pub struct LogIntakeEvents;
 
-fn cause(cause: DropCause) -> &'static str {
-    match cause {
-        DropCause::ProcessingFailed => "processing_failed",
+fn stage(stage: DropStage) -> &'static str {
+    match stage {
+        DropStage::Planner => "planner",
+        DropStage::Checks => "checks",
+        DropStage::Admission => "admission",
+        DropStage::Writer => "writer",
+    }
+}
+
+fn reason(reason: DropReason) -> &'static str {
+    match reason {
+        DropReason::NoPlanner => "no_planner",
+        DropReason::ProcessingFailed => "processing_failed",
     }
 }
 
@@ -21,10 +30,13 @@ impl IntakeEvents for LogIntakeEvents {
             target: "construct::audit",
             event = "record_dropped",
             tenant_id = %event.tenant_id,
-            connector = %event.connector,
-            record_type = %event.type_id,
             subject_id = event.subject_id.map(tracing::field::display),
-            cause = cause(event.cause),
+            connector = %event.connector,
+            provenance = %event.provenance,
+            version = %event.version,
+            record_type = %event.type_id,
+            stage = stage(event.stage),
+            reason = reason(event.reason),
             "record dropped"
         );
         // @cpt-end:cpt-cf-construct-algo-record-intake-drop-event:p1:inst-drop-event-log

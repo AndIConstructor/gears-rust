@@ -20,7 +20,8 @@ use crate::domain::local_client::LocalClient;
 use crate::domain::record_intake::{IntakePorts, RecordIntakeService};
 use crate::domain::subject_settings::SubjectSettingsService;
 use crate::infra::connector_switch::ConfigConnectorSwitch;
-use crate::infra::planner_stub::NoProcessingHandOff;
+use crate::infra::intake_events::LogIntakeEvents;
+use crate::infra::planner_stub::DroppingHandOff;
 use crate::infra::record_types::RegistryRecordTypes;
 use crate::infra::storage::record_ids_repo::SeaOrmRecordIdRepository;
 use crate::infra::storage::subject_settings_repo::SeaOrmSubjectSettingsRepository;
@@ -100,7 +101,7 @@ impl Gear for ConstructGear {
         let ports = IntakePorts {
             types: Arc::new(RegistryRecordTypes::new(hub)?),
             switch: Arc::new(ConfigConnectorSwitch::new(cfg.connectors_off)),
-            hand_off: Arc::new(NoProcessingHandOff),
+            hand_off: Arc::new(DroppingHandOff::new(Arc::new(LogIntakeEvents))),
         };
         let intake = Arc::new(RecordIntakeService::new(
             db,

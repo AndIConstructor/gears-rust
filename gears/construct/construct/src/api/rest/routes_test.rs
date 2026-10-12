@@ -242,9 +242,9 @@ async fn a_body_that_is_not_json_gets_a_problem() {
 }
 
 #[tokio::test]
-async fn without_processing_a_record_gets_503_and_can_be_sent_again() {
+async fn until_the_planner_exists_a_record_gets_202_and_a_resend_200() {
     let fixture = IntakeFixture {
-        no_processing: true,
+        dropping: true,
         ..IntakeFixture::default()
     };
     let router = router_with(&fixture).await;
@@ -253,13 +253,7 @@ async fn without_processing_a_record_gets_503_and_can_be_sent_again() {
     let first = post(router.clone(), tenant, &record).await;
     let again = post(router, tenant, &record).await;
 
-    for answer in [first, again] {
-        assert_eq!(
-            answer.status,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "body: {}",
-            answer.body
-        );
-        assert!(answer.is_problem());
-    }
+    assert_eq!(first.status, StatusCode::ACCEPTED, "body: {}", first.body);
+    assert_eq!(again.status, StatusCode::OK, "body: {}", again.body);
+    assert_eq!(fixture.events.dropped.lock().unwrap().len(), 1);
 }
