@@ -80,7 +80,10 @@ async fn submit_and_await<A: PlatformTypesRegistryApi + ?Sized>(
     let deadline = crate::reconcile::submit::deadline_after(tokio::time::Instant::now(), budget)?;
     crate::reconcile::submit::await_registration(api, &ctx(), key, request, deadline, cancel)
         .await
-        .unwrap_or_else(|stop| Err(stop.into_error()))
+        .map_or_else(
+            |stop| Err(stop.into_error()),
+            |answer| answer.map_err(crate::reconcile::submit::Failure::into_error),
+        )
 }
 
 #[tokio::test(start_paused = true)]

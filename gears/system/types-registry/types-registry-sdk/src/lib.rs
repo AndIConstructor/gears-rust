@@ -6,6 +6,7 @@
 //! - [`models`] defines requests, operations and projected entity snapshots.
 //! - [`TypesRegistryError`] provides a typed view of canonical errors;
 //!   [`AdmissionFailure`] decodes operation-item failures.
+//! - [`ReconcileReport`] decodes incomplete reconciliation errors.
 //! - [`GtsTypeId`] and [`GtsInstanceId`] are typed GTS identifiers.
 //!
 //! The legacy [`TypesRegistryClient`], its models and its `testing` mock remain
@@ -48,7 +49,10 @@ pub use models::{
     Validator,
 };
 
-pub use reconcile::{ReconcileOptions, ReconcileOutcome, ReconcilePendingCause, Reconciliation};
+pub use reconcile::{
+    ReconcileOptions, ReconcileOutcome, ReconcilePendingCause, ReconcileReport, ReconcileStop,
+    Reconciliation,
+};
 
 // Legacy API and model re-exports.
 mod legacy;

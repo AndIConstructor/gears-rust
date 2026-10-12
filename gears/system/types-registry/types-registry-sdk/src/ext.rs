@@ -52,25 +52,30 @@ pub const MAX_LIST_PAGES: usize = 1_000;
 
 /// Blanket-implemented helpers over [`PlatformTypesRegistryApi`].
 ///
-/// Errors are `CanonicalError`; [`TypesRegistryError`](crate::TypesRegistryError) projects
-/// them, including this trait's own `DeadlineExceeded` and `Cancelled`.
+/// Errors are `CanonicalError`; [`TypesRegistryError`](crate::TypesRegistryError) projects them.
 #[async_trait]
 pub trait PlatformTypesRegistryApiExt: PlatformTypesRegistryApi {
-    /// Reconcile `desired` under `options`: create absent identifiers and
-    /// update differing content. Safe on every start; omitted identifiers are never deleted.
+    /// Create missing entities and update differing content; never delete.
     ///
-    /// [`Reconciliation::UpToDate`] means all documents matched without submission.
-    /// `Reconciled` reports every identifier, including rejected or pending ones;
-    /// `Ok` does not mean all were admitted. Identical duplicates collapse;
-    /// conflicting duplicates are rejected locally.
+    /// `Ok` means all identifiers are admitted; [`Reconciliation::UpToDate`] skips submission.
+    /// Identical duplicates collapse. Conflicting duplicates are rejected; other entities proceed.
     ///
-    /// Cancellation and drop do not cancel accepted writes. Prefer `cancel` and
-    /// `options.deadline` to an outer timeout; a later call reconciles the current state.
+    /// Submissions use `options.batch_size`, which must fit the registry's batch limit.
+    /// Permanent canonical submission refusals stop the call, for local and remote clients alike.
+    /// A `ResourceExhausted` with a quota retry hint resends the same payload and key after it,
+    /// under the deadline. Identified validation or policy refusals reject that candidate;
+    /// unattributed refusals stay pending.
+    /// Unjudged entities keep earlier outcomes or become
+    /// [`Skipped`](crate::ReconcilePendingCause::Skipped). Admission and polling failures
+    /// do not stop remaining batches.
+    ///
+    /// Accepted writes are never rolled back, including on cancellation or drop.
+    /// Use `cancel` and `options.deadline` rather than an outer timeout.
     ///
     /// # Errors
-    /// `InvalidArgument` for an unrepresentable deadline, `Cancelled` when `cancel` fires.
-    /// Registry failures, a `Cancelled` answered by the registry included, are
-    /// per-identifier [`ReconcileOutcome`](crate::ReconcileOutcome)s.
+    /// `FailedPrecondition` contains the report; use
+    /// [`ReconcileReport::from_canonical`](crate::ReconcileReport::from_canonical) for details.
+    /// Caller cancellation and unrepresentable deadlines return `Cancelled` and `InvalidArgument`.
     async fn reconcile_entities_and_await(
         &self,
         ctx: &PlatformSecurityContext,

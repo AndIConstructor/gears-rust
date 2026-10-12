@@ -12,12 +12,17 @@ pub mod aborted {
     /// operation UUID; retrying with the same idempotency key replays it.
     pub const OPERATION_READ_FAILED: &str = "OPERATION_READ_FAILED";
 
+    /// SDK-detected protocol fault with a safe public detail.
+    pub const RECONCILIATION_PROTOCOL_ERROR: &str = "RECONCILIATION_PROTOCOL_ERROR";
+
     /// Typed view of an `Aborted` reason.
     #[derive(Debug, Clone, PartialEq, Eq)]
     #[non_exhaustive]
     pub enum AbortReason {
         /// See [`OPERATION_READ_FAILED`].
         OperationReadFailed,
+        /// See [`RECONCILIATION_PROTOCOL_ERROR`].
+        ReconciliationProtocolError,
         /// Unmodeled reason; preserves the raw wire string.
         Unknown(String),
     }
@@ -28,6 +33,7 @@ pub mod aborted {
         pub fn from_wire(s: &str) -> Self {
             match s {
                 OPERATION_READ_FAILED => Self::OperationReadFailed,
+                RECONCILIATION_PROTOCOL_ERROR => Self::ReconciliationProtocolError,
                 other => Self::Unknown(other.to_owned()),
             }
         }
@@ -37,6 +43,7 @@ pub mod aborted {
         pub fn as_wire(&self) -> &str {
             match self {
                 Self::OperationReadFailed => OPERATION_READ_FAILED,
+                Self::ReconciliationProtocolError => RECONCILIATION_PROTOCOL_ERROR,
                 Self::Unknown(s) => s.as_str(),
             }
         }

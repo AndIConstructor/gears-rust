@@ -35,7 +35,7 @@ pub fn operation_accepted(
         .ok()
         .filter(|uuid| uuid.hyphenated().to_string() == idempotency_key);
     tracing::info!(
-        event = "operation_accepted",
+        log_kind = "operation_accepted",
         %operation_id,
         kind = kind_label(kind),
         dry_run,

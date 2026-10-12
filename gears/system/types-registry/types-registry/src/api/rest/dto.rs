@@ -238,7 +238,7 @@ mod tests {
     fn a_submitted_item_spells_its_skip_request_one_way() {
         let item = |extra: serde_json::Value| {
             let mut item =
-                serde_json::json!({ "gts_id": "gts.cf.core.example.type.v1~", "content": {} });
+                serde_json::json!({ "gts_id": gts_id!("cf.core.example.type.v1~"), "content": {} });
             item.as_object_mut()
                 .expect("object")
                 .extend(extra.as_object().expect("object").clone());

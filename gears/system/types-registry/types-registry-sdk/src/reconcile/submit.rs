@@ -22,6 +22,24 @@ pub const POLL_INTERVAL_INITIAL: Duration = Duration::from_millis(50);
 /// Longest interval between two operation polls.
 pub const POLL_INTERVAL_MAX: Duration = Duration::from_secs(1);
 
+/// Registry error by call stage.
+#[derive(Debug, Clone)]
+pub enum Failure {
+    /// `register_entities` error; acceptance is possible, so retries reuse the key.
+    Submit(CanonicalError),
+    /// Error reading an accepted operation.
+    Poll(CanonicalError),
+}
+
+impl Failure {
+    /// Extract the error without its call stage.
+    pub fn into_error(self) -> CanonicalError {
+        match self {
+            Self::Submit(error) | Self::Poll(error) => error,
+        }
+    }
+}
+
 /// Submit and poll under one deadline; reconciliation's submit step.
 ///
 /// The outer error is a local stop; the inner error is the registry's answer.
@@ -32,7 +50,7 @@ pub async fn await_registration<A: PlatformTypesRegistryApi + ?Sized>(
     request: RegisterEntitiesRequest,
     deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<Result<RegistrationOperation, CanonicalError>, Stop> {
+) -> Result<Result<RegistrationOperation, Failure>, Stop> {
     let mut operation = match bounded(
         deadline,
         cancel,
@@ -42,13 +60,13 @@ pub async fn await_registration<A: PlatformTypesRegistryApi + ?Sized>(
     .await?
     {
         Ok(operation) => operation,
-        Err(error) => return Ok(Err(error)),
+        Err(error) => return Ok(Err(Failure::Submit(error))),
     };
     let operation_id = operation.operation_id;
     // Known at once, so every later event of the submission — and of a lost read — names it.
     tracing::Span::current().record("operation_id", tracing::field::display(operation_id));
     tracing::info!(
-        event = "batch_accepted",
+        log_kind = "batch_accepted",
         %operation_id,
         status = ?operation.status,
         "the registry accepted the submission"
@@ -72,15 +90,18 @@ pub async fn await_registration<A: PlatformTypesRegistryApi + ?Sized>(
         .await?
         {
             Ok(polled) => polled,
-            Err(error) => return Ok(Err(error)),
+            Err(error) => return Ok(Err(Failure::Poll(error))),
         };
         let crate::models::Operation::Registration(polled) = polled else {
-            return Ok(Err(OperationResource::unknown(format!(
-                "the registry answered a poll of registration operation {operation_id} \
-                 with a deletion"
-            ))
-            .with_resource(operation_id.to_string())
-            .create()));
+            return Ok(Err(Failure::Poll(
+                OperationResource::aborted(format!(
+                    "the registry answered a poll of registration operation {operation_id} \
+                     with a deletion"
+                ))
+                .with_reason(crate::reason::aborted::RECONCILIATION_PROTOCOL_ERROR)
+                .with_resource(operation_id.to_string())
+                .create(),
+            )));
         };
         operation = polled;
     }

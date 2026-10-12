@@ -15,7 +15,7 @@ use tracing::Level;
 use tracing_subscriber::filter::LevelFilter;
 
 use super::telemetry_capture::{Capture, Captured};
-use super::{ReconcileOptions, Reconciliation, reconcile};
+use super::{ReconcileOptions, ReconcileReport, ReconcileStop, Reconciliation, reconcile};
 use crate::models::PublisherContext;
 use crate::testing_platform::{Call, Fault, MockTypesRegistry};
 
@@ -98,6 +98,18 @@ fn refuse_candidate(fake: &MockTypesRegistry, id: &str) {
     );
 }
 
+/// Extract the stop reason from an unsettled call.
+fn unsettled(result: Result<Reconciliation, CanonicalError>) -> ReconcileStop {
+    match result {
+        Err(error) => {
+            ReconcileReport::from_canonical(&error)
+                .expect("report")
+                .stop
+        }
+        other => panic!("expected an unsettled report, got {other:?}"),
+    }
+}
+
 fn summary(capture: &Capture) -> Captured {
     capture.one("reconcile_finished")
 }
@@ -166,7 +178,7 @@ async fn an_up_to_date_call_reports_one_quiet_summary_in_its_span() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_refused_candidate_and_the_resubmitted_rest_are_correlated_by_batch_key_and_operation() {
+async fn a_refused_candidate_is_one_warning_naming_its_batch_and_the_rest_rows_are_skipped() {
     let fake = MockTypesRegistry::new();
     refuse_candidate(&fake, B);
     let capture = Capture::install(LevelFilter::INFO);
@@ -178,67 +190,73 @@ async fn a_refused_candidate_and_the_resubmitted_rest_are_correlated_by_batch_ke
     )
     .await;
 
-    assert!(matches!(result, Ok(Reconciliation::Reconciled(_))));
-    let reconcile_id = one_reconcile_id(&capture);
+    assert_eq!(unsettled(result), ReconcileStop::InvalidInput);
+    one_reconcile_id(&capture);
     let keys: Vec<String> = fake
         .submissions()
         .iter()
         .map(|(key, _)| key.as_str().to_owned())
         .collect();
-    assert_eq!(keys.len(), 2);
+    assert_eq!(keys.len(), 1, "nothing is resubmitted");
 
     let refused = capture.one("candidate_refused");
+    assert_eq!(refused.level, Level::WARN);
     assert_eq!(refused.field("gts_id"), Some(B));
+    assert_eq!(refused.field("remaining"), Some("2"));
     assert_eq!(refused.field("category"), Some("invalid_argument"));
     assert_eq!(refused.field("reason"), Some("VALIDATION_FAILED"));
     assert_eq!(refused.field("violation_fields"), Some("entity"));
     assert_eq!(refused.span_field("reconcile_batch", "batch"), Some("1"));
-    assert_eq!(refused.span_field("reconcile_batch", "parent_batch"), None);
     assert_eq!(
         refused.span_field("reconcile_batch", "idempotency_key"),
         Some(keys[0].as_str())
     );
 
-    let accepted = capture.one("batch_accepted");
-    assert_eq!(
-        accepted.span_field("reconcile", "reconcile_id"),
-        Some(reconcile_id.as_str())
-    );
-    assert_eq!(accepted.span_field("reconcile_batch", "batch"), Some("2"));
-    assert_eq!(
-        accepted.span_field("reconcile_batch", "parent_batch"),
-        Some("1")
-    );
-    assert_eq!(
-        accepted.span_field("reconcile_batch", "idempotency_key"),
-        Some(keys[1].as_str())
-    );
-    assert_eq!(
-        accepted.span_field("reconcile_batch", "operation_id"),
-        accepted.field("operation_id"),
-        "the batch span names the operation as soon as it is known"
-    );
-
     let finished = summary(&capture);
-    assert_eq!(
-        finished.level,
-        Level::WARN,
-        "a rejection is not a clean run"
-    );
+    assert_eq!(finished.level, Level::WARN);
     assert_counts(
         &finished,
         &[
-            ("stop", "completed"),
-            ("admitted", "2"),
+            ("stop", "invalid_input"),
+            ("admitted", "0"),
             ("rejected", "1"),
-            ("pending", "0"),
+            ("pending", "2"),
+            ("undecided", "0"),
         ],
     );
-    let unsettled = capture.one("entity_unsettled");
-    assert_eq!(unsettled.field("gts_id"), Some(B));
-    assert_eq!(unsettled.field("outcome"), Some("rejected"));
-    assert_eq!(unsettled.field("retry_hint"), None, "no derived advice");
+    let rows = capture.named("entity_unsettled");
+    let skipped: BTreeSet<&str> = rows
+        .iter()
+        .filter(|r| r.field("cause") == Some("skipped"))
+        .map(|r| {
+            assert_eq!(r.field("category"), None, "no error is invented: {r:#?}");
+            r.field("gts_id").expect("names the identifier")
+        })
+        .collect();
+    assert_eq!(skipped, BTreeSet::from([A, C]));
     assert_nothing_leaks(&capture);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_oversized_batch_reports_one_validation_refusal() {
+    let fake = MockTypesRegistry::new().with_max_batch(2);
+    let capture = Capture::install(LevelFilter::INFO);
+
+    let result = run(
+        &fake,
+        &[doc(A), doc(B), doc(C)],
+        &ReconcileOptions::default(),
+    )
+    .await;
+
+    assert_eq!(unsettled(result), ReconcileStop::InvalidInput);
+    let refused = capture.one("batch_refused");
+    assert_eq!(refused.level, Level::WARN);
+    assert_eq!(refused.span_field("reconcile_batch", "batch"), Some("1"));
+    assert_eq!(capture.named("batch_submitted").len(), 1);
+    assert_eq!(fake.calls(Call::Register), 1);
+    assert_eq!(fake.calls(Call::GetOperation), 0);
+    assert_eq!(summary(&capture).field("stop"), Some("invalid_input"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -281,9 +299,10 @@ async fn a_refusal_of_the_whole_request_is_one_warning_and_pending_rows() {
     );
     let capture = Capture::install(LevelFilter::INFO);
 
-    run(&fake, &[doc(A), doc(B)], &ReconcileOptions::default())
-        .await
-        .expect("reconciles");
+    assert_eq!(
+        unsettled(run(&fake, &[doc(A), doc(B)], &ReconcileOptions::default()).await),
+        ReconcileStop::InvalidInput
+    );
 
     let refused = capture.one("batch_refused");
     assert_eq!(refused.level, Level::WARN);
@@ -291,7 +310,14 @@ async fn a_refusal_of_the_whole_request_is_one_warning_and_pending_rows() {
     assert_eq!(refused.span_field("reconcile_batch", "size"), Some("2"));
     let finished = summary(&capture);
     assert_eq!(finished.level, Level::WARN);
-    assert_counts(&finished, &[("pending", "2"), ("admitted", "0")]);
+    assert_counts(
+        &finished,
+        &[
+            ("stop", "invalid_input"),
+            ("pending", "2"),
+            ("admitted", "0"),
+        ],
+    );
     let rows = capture.named("entity_unsettled");
     assert_eq!(rows.len(), 2);
     assert!(
@@ -311,7 +337,10 @@ async fn a_deadline_passes_exhaustion_and_a_read_failure_are_distinct_stops() {
         deadline: Duration::from_secs(10),
         ..ReconcileOptions::default()
     };
-    run(&fake, &[doc(A)], &options).await.expect("reconciles");
+    assert_eq!(
+        unsettled(run(&fake, &[doc(A)], &options).await),
+        ReconcileStop::Deadline
+    );
     assert_counts(
         &summary(&capture),
         &[("stop", "deadline"), ("pending", "1")],
@@ -326,7 +355,10 @@ async fn a_deadline_passes_exhaustion_and_a_read_failure_are_distinct_stops() {
         passes: NonZeroU32::new(2).expect("two"),
         ..ReconcileOptions::default()
     };
-    run(&fake, &[doc(A)], &options).await.expect("reconciles");
+    assert_eq!(
+        unsettled(run(&fake, &[doc(A)], &options).await),
+        ReconcileStop::PassesExhausted
+    );
     assert_counts(
         &summary(&capture),
         &[
@@ -345,9 +377,10 @@ async fn a_deadline_passes_exhaustion_and_a_read_failure_are_distinct_stops() {
     let fake = MockTypesRegistry::new();
     fake.inject(Fault::on(Call::BatchGet).fail(CanonicalError::internal(SENTINEL).create()));
     let capture = Capture::install(LevelFilter::INFO);
-    run(&fake, &[doc(A)], &one_pass())
-        .await
-        .expect("reconciles");
+    assert_eq!(
+        unsettled(run(&fake, &[doc(A)], &one_pass()).await),
+        ReconcileStop::ReadFailed
+    );
     let finished = summary(&capture);
     assert_eq!(finished.level, Level::WARN);
     assert_counts(&finished, &[("stop", "read_failed"), ("pending", "1")]);
@@ -392,21 +425,25 @@ async fn duplicates_count_once_and_leave_nothing_undecided() {
 
     let fake = MockTypesRegistry::new();
     let capture = Capture::install(LevelFilter::INFO);
-    run(
-        &fake,
-        &[(gid(A), json!({ "one": 1 })), (gid(A), json!({ "two": 2 }))],
-        &ReconcileOptions::default(),
-    )
-    .await
-    .expect("reconciles");
+    unsettled(
+        run(
+            &fake,
+            &[(gid(A), json!({ "one": 1 })), (gid(A), json!({ "two": 2 }))],
+            &ReconcileOptions::default(),
+        )
+        .await,
+    );
     let conflicting = summary(&capture);
     assert_eq!(conflicting.span_field("reconcile", "desired"), Some("1"));
     assert_counts(&conflicting, &[("rejected", "1"), ("undecided", "0")]);
 }
 
-/// A, then a refused B, each in its own batch; C's submission never answers.
+/// A, then B refused by admission, each in its own batch; C's submission never answers.
 fn partially_decided(fake: &MockTypesRegistry) -> ReconcileOptions {
-    refuse_candidate(fake, B);
+    fake.reject(
+        B,
+        crate::item_failure::AdmissionFailureReason::InvalidSchema,
+    );
     fake.inject(
         Fault::on(Call::Register)
             .key(gid(C))
@@ -495,9 +532,7 @@ async fn cancelling_by_token_is_quiet_and_unlike_a_registry_cancellation() {
         Fault::on(Call::BatchGet).fail(crate::gts::OperationResource::cancelled().create()),
     );
     let capture = Capture::install(LevelFilter::INFO);
-    run(&fake, &[doc(A)], &one_pass())
-        .await
-        .expect("reconciles");
+    unsettled(run(&fake, &[doc(A)], &one_pass()).await);
     assert_counts(&summary(&capture), &[("stop", "read_failed")]);
     let row = capture.one("entity_unsettled");
     assert_eq!(row.field("cause"), Some("refused"));
@@ -573,9 +608,7 @@ async fn a_policy_refusal_is_explained_by_its_codes() {
         );
         let capture = Capture::install(LevelFilter::INFO);
 
-        run(&fake, &[doc(A)], &one_pass())
-            .await
-            .expect("reconciles");
+        unsettled(run(&fake, &[doc(A)], &one_pass()).await);
 
         let row = capture.one("entity_unsettled");
         assert_eq!(row.field("category"), Some("failed_precondition"));
@@ -594,7 +627,7 @@ async fn a_deadline_spent_in_the_last_pass_is_the_stop() {
         ..one_pass()
     };
 
-    run(&fake, &[doc(A)], &options).await.expect("reconciles");
+    unsettled(run(&fake, &[doc(A)], &options).await);
 
     assert_counts(
         &summary(&capture),
@@ -620,9 +653,7 @@ async fn a_registry_deadline_within_the_budget_is_not_the_calls_deadline() {
     );
     let capture = Capture::install(LevelFilter::INFO);
 
-    run(&fake, &[doc(A)], &one_pass())
-        .await
-        .expect("reconciles");
+    unsettled(run(&fake, &[doc(A)], &one_pass()).await);
 
     let finished = summary(&capture);
     assert_counts(&finished, &[("stop", "passes_exhausted"), ("pending", "1")]);

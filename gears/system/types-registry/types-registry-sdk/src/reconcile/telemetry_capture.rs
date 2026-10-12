@@ -37,8 +37,8 @@ impl Captured {
             .map(String::as_str)
     }
 
-    pub fn event(&self) -> Option<&str> {
-        self.field("event")
+    pub fn log_kind(&self) -> Option<&str> {
+        self.field("log_kind")
     }
 
     /// Every field and message, for asserting what never appears.
@@ -144,11 +144,11 @@ impl Capture {
             .collect()
     }
 
-    /// The captured events whose `event` field is `name`.
+    /// The captured events whose `log_kind` field is `name`.
     pub fn named(&self, name: &str) -> Vec<Captured> {
         self.events()
             .into_iter()
-            .filter(|e| e.event() == Some(name))
+            .filter(|e| e.log_kind() == Some(name))
             .collect()
     }
 

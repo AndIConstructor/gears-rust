@@ -754,6 +754,94 @@ async fn a_failed_deletion_read_back_is_recovered_by_the_same_key() {
 }
 
 #[tokio::test]
+async fn a_policy_refusal_stops_reconciliation_with_unjudged_entities_skipped() {
+    use toolkit_canonical_errors::CanonicalError;
+    use types_registry_sdk::{
+        PlatformTypesRegistryApiExt, ReconcileOptions, ReconcileOutcome, ReconcilePendingCause,
+        ReconcileReport, ReconcileStop, TypesRegistryError,
+    };
+
+    const DENIED: &str = "gts.acme.closed.example.type.v1~";
+    let h = harness().await;
+    let api: &dyn PlatformTypesRegistryApi = &h.client;
+    let error: CanonicalError = api
+        .reconcile_entities_and_await(
+            &ctx(),
+            &publisher(),
+            &[
+                (id(CF_TYPE), schema(CF_TYPE)),
+                (id(DENIED), schema(DENIED)),
+                (id(CF_OTHER), schema(CF_OTHER)),
+            ],
+            &ReconcileOptions::default(),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect_err("vendor denied by deployment policy");
+    let report = ReconcileReport::from_canonical(&error).expect("report");
+    assert_eq!(report.stop, ReconcileStop::InvalidInput);
+    let ReconcileOutcome::Rejected(error) = &report.outcomes[&id(DENIED)] else {
+        panic!("named policy refusal: {report:?}");
+    };
+    assert!(matches!(
+        TypesRegistryError::from(error.clone()),
+        TypesRegistryError::PolicyRefused { .. }
+    ));
+    for key in [CF_TYPE, CF_OTHER] {
+        assert!(matches!(
+            report.outcomes[&id(key)],
+            ReconcileOutcome::Pending(ReconcilePendingCause::Skipped)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn incomplete_reconciliation_exposes_a_canonical_report_through_the_local_client() {
+    use toolkit_canonical_errors::{CanonicalError, Problem};
+    use types_registry_sdk::{
+        PlatformTypesRegistryApiExt, ReconcileOptions, ReconcileOutcome, ReconcilePendingCause,
+        ReconcileReport, ReconcileStop, Reconciliation,
+    };
+
+    let h = harness().await;
+    let api: &dyn PlatformTypesRegistryApi = &h.client;
+    let mut options = ReconcileOptions::default();
+    options.batch_size = std::num::NonZeroUsize::MIN;
+    let result: Result<Reconciliation, CanonicalError> = api
+        .reconcile_entities_and_await(
+            &ctx(),
+            &publisher(),
+            &[
+                (id(CF_OTHER), schema(CF_OTHER)),
+                (id(CF_TYPE), json!({ "type": "object" })),
+                (id(CF_INSTANCE), json!({ "name": "not submitted" })),
+            ],
+            &options,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+    let error = result.expect_err("missing schema identity stops submission");
+    let transported = CanonicalError::try_from(Problem::from_error(&error).unwrap()).unwrap();
+    let report = ReconcileReport::from_canonical(&transported).expect("canonical report");
+    assert_eq!(report.stop, ReconcileStop::InvalidInput);
+    assert_eq!(report.outcomes.len(), 3);
+    assert!(matches!(
+        report.outcomes[&id(CF_OTHER)],
+        ReconcileOutcome::Admitted
+    ));
+    let ReconcileOutcome::Rejected(CanonicalError::InvalidArgument { resource_name, .. }) =
+        &report.outcomes[&id(CF_TYPE)]
+    else {
+        panic!("expected the original validation error: {report:?}");
+    };
+    assert_eq!(resource_name.as_deref(), Some(CF_TYPE));
+    assert!(matches!(
+        report.outcomes[&id(CF_INSTANCE)],
+        ReconcileOutcome::Pending(ReconcilePendingCause::Skipped)
+    ));
+}
+
+#[tokio::test]
 async fn reconcile_entities_and_await_creates_then_updates_drift_through_a_dyn_client() {
     use types_registry_sdk::{
         PlatformTypesRegistryApiExt, ReconcileOptions, ReconcileOutcome, Reconciliation,
@@ -1044,11 +1132,11 @@ mod captured {
                 .collect()
         }
 
-        /// The lines whose `event` field is `name`.
+        /// The lines whose `log_kind` field is `name`.
         pub fn named(&self, name: &str) -> Vec<Value> {
             self.lines()
                 .into_iter()
-                .filter(|line| line["fields"]["event"] == name)
+                .filter(|line| line["fields"]["log_kind"] == name)
                 .collect()
         }
     }

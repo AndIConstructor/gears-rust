@@ -5,6 +5,9 @@
 /// Violation type for [`crate::TypesRegistryError::ParentNotRegistered`].
 pub const PARENT_NOT_REGISTERED: &str = "PARENT_NOT_REGISTERED";
 
+/// Reconciliation report header; its subject is the stop reason.
+pub const RECONCILIATION_INCOMPLETE: &str = "RECONCILIATION_INCOMPLETE";
+
 /// Prefix of policy-refusal codes, such as `REGISTRATION_POLICY_ALLOWED_VENDORS`.
 /// `resource_name` identifies the candidate; `violations[].subject` identifies the region.
 pub const REGISTRATION_POLICY_PREFIX: &str = "REGISTRATION_POLICY_";

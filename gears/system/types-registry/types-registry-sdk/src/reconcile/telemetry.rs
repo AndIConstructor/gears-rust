@@ -4,7 +4,7 @@
 use toolkit_canonical_errors::{CanonicalError, InvalidArgument};
 use uuid::Uuid;
 
-use super::{Outcomes, ReconcileOutcome, ReconcilePendingCause};
+use super::{Outcomes, ReconcileOutcome, ReconcilePendingCause, ReconcileStop};
 use crate::gts::OPERATION_RESOURCE_TYPE;
 use crate::item_failure::{AdmissionFailure, context};
 
@@ -103,7 +103,7 @@ pub fn operation_id_of(error: &CanonicalError) -> Option<Uuid> {
 /// Every transport attempt of a payload failed; its candidates stay pending.
 pub fn transport_exhausted(attempts: u32, fields: &ErrorFields) {
     tracing::warn!(
-        event = "transport_exhausted",
+        log_kind = "transport_exhausted",
         attempts,
         category = fields.category,
         reason = fields.reason.as_deref(),
@@ -114,7 +114,7 @@ pub fn transport_exhausted(attempts: u32, fields: &ErrorFields) {
 /// A transport failure retried under the same key.
 pub fn transport_retry(fields: &ErrorFields, backoff_ms: u64) {
     tracing::debug!(
-        event = "transport_retry",
+        log_kind = "transport_retry",
         category = fields.category,
         reason = fields.reason.as_deref(),
         backoff_ms,
@@ -122,36 +122,27 @@ pub fn transport_retry(fields: &ErrorFields, backoff_ms: u64) {
     );
 }
 
-/// A synchronous refusal naming one candidate, which is rejected; the rest is resubmitted.
+/// Log a validation stop naming one candidate.
 pub fn candidate_refused(gts_id: &gts::GtsId, remaining: usize, fields: &ErrorFields) {
-    tracing::info!(
-        event = "candidate_refused",
+    tracing::warn!(
+        log_kind = "candidate_refused",
         gts_id = %gts_id,
         remaining,
         category = fields.category,
         reason = fields.reason.as_deref(),
         violation_fields = fields.violation_fields.as_deref(),
-        "registry refused a candidate; resubmitting the rest"
+        "registry refused a candidate's input; nothing more is submitted"
     );
 }
 
-/// A synchronous refusal of the batch's size, which is bisected.
-pub fn batch_split(fields: &ErrorFields) {
-    tracing::info!(
-        event = "batch_split",
-        reason = fields.reason.as_deref(),
-        "registry refused a batch's size; bisecting it"
-    );
-}
-
-/// A synchronous refusal of the request as a whole; its candidates stay pending.
+/// Log a validation stop for the whole request.
 pub fn batch_refused(fields: &ErrorFields) {
     tracing::warn!(
-        event = "batch_refused",
+        log_kind = "batch_refused",
         category = fields.category,
         reason = fields.reason.as_deref(),
         violation_fields = fields.violation_fields.as_deref(),
-        "registry refused the request; its candidates stay pending"
+        "registry refused the request; its candidates stay pending, nothing more is submitted"
     );
 }
 
@@ -163,8 +154,21 @@ pub enum StopReason {
     PassesExhausted,
     Deadline,
     ReadFailed,
+    InvalidInput,
     Cancelled,
     InvalidDeadline,
+}
+
+impl From<ReconcileStop> for StopReason {
+    fn from(stop: ReconcileStop) -> Self {
+        match stop {
+            ReconcileStop::Completed => Self::Completed,
+            ReconcileStop::PassesExhausted => Self::PassesExhausted,
+            ReconcileStop::Deadline => Self::Deadline,
+            ReconcileStop::ReadFailed => Self::ReadFailed,
+            ReconcileStop::InvalidInput => Self::InvalidInput,
+        }
+    }
 }
 
 impl StopReason {
@@ -175,6 +179,7 @@ impl StopReason {
             Self::PassesExhausted => "passes_exhausted",
             Self::Deadline => "deadline",
             Self::ReadFailed => "read_failed",
+            Self::InvalidInput => "invalid_input",
             Self::Cancelled => "cancelled",
             Self::InvalidDeadline => "invalid_deadline",
         }
@@ -234,7 +239,7 @@ impl Run {
         macro_rules! summary {
             ($level:ident) => {
                 tracing::$level!(
-                    event = "reconcile_finished",
+                    log_kind = "reconcile_finished",
                     stop,
                     elapsed_ms,
                     desired = self.desired,
@@ -288,29 +293,31 @@ impl Drop for Run {
 fn unsettled(id: &gts::GtsId, outcome: &ReconcileOutcome) {
     let (outcome, cause, error) = match outcome {
         ReconcileOutcome::Admitted => return,
-        ReconcileOutcome::Rejected(error) => ("rejected", None, error),
+        ReconcileOutcome::Rejected(error) => ("rejected", None, Some(error)),
         ReconcileOutcome::Pending(cause) => {
             let (cause, error) = match cause {
-                ReconcilePendingCause::Dependency(e) => ("dependency", e),
-                ReconcilePendingCause::Conflict(e) => ("conflict", e),
-                ReconcilePendingCause::Unavailable(e) => ("unavailable", e),
-                ReconcilePendingCause::Refused(e) => ("refused", e),
+                ReconcilePendingCause::Dependency(e) => ("dependency", Some(e)),
+                ReconcilePendingCause::Conflict(e) => ("conflict", Some(e)),
+                ReconcilePendingCause::Unavailable(e) => ("unavailable", Some(e)),
+                ReconcilePendingCause::Refused(e) => ("refused", Some(e)),
+                ReconcilePendingCause::Skipped => ("skipped", None),
             };
             ("pending", Some(cause), error)
         }
     };
-    let fields = error_fields(error);
+    let fields = error.map(error_fields);
+    let fields = fields.as_ref();
     tracing::warn!(
-        event = "entity_unsettled",
+        log_kind = "entity_unsettled",
         gts_id = %id,
         outcome,
         cause,
-        category = fields.category,
-        reason = fields.reason.as_deref(),
-        violation_fields = fields.violation_fields.as_deref(),
-        dependency_id = fields.dependency_id.as_deref(),
-        dependency_kind = fields.dependency_kind.as_deref(),
-        diagnostic_code = fields.diagnostic_code.as_deref(),
+        category = fields.map(|f| f.category),
+        reason = fields.and_then(|f| f.reason.as_deref()),
+        violation_fields = fields.and_then(|f| f.violation_fields.as_deref()),
+        dependency_id = fields.and_then(|f| f.dependency_id.as_deref()),
+        dependency_kind = fields.and_then(|f| f.dependency_kind.as_deref()),
+        diagnostic_code = fields.and_then(|f| f.diagnostic_code.as_deref()),
         "an identifier was not admitted"
     );
 }

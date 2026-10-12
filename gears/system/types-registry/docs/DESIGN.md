@@ -1078,7 +1078,7 @@ Its body field is `items`, the same name registration and `:batchDelete` use, so
 
 Optional `dry_run` defaults false and preserves the `202` operation shape. It runs full admission through the commit boundary, so it is not cheaper validation.
 
-`items` is non-empty and synchronously capped by `limits.batch_candidates` (default 100). Splitting removes the candidate overlay between batches, which costs a retry rather than correctness: dependencies converge through the reconciliation loop `cpt-cf-types-registry-fr-two-phase-init` already requires, and since the graph is acyclic (ADR-0012) no group of candidates has to travel together.
+`items` is non-empty and synchronously capped by `limits.batch_candidates` (default 100). Reconciliation forms batches using a `batch_size` within that limit. A permanent submission refusal stops reconciliation and returns its structured error report; `ResourceExhausted` with a quota retry hint is throttling, waited out and resent under the same key within the deadline. The canonical category and context decide, the same for local and remote clients, never the HTTP status. Each batch has its own admission overlay; candidates awaiting dependencies in other batches can retry on later reconciliation passes.
 
 Each item contains its GTS Identifier, authored GTS JSON and optional
 `expected_resource_version`: present requires that version; absent requires

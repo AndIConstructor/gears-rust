@@ -81,9 +81,7 @@ A listing helper follows every page; past `MAX_LIST_PAGES` it fails with
 ```rust
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-use types_registry_sdk::{
-    GtsId, PublisherContext, ReconcileOptions, ReconcileOutcome, Reconciliation,
-};
+use types_registry_sdk::{GtsId, PublisherContext, ReconcileOptions};
 
 let publisher = PublisherContext {
     name: "acme-events".to_owned(),
@@ -102,24 +100,26 @@ let options = ReconcileOptions::default();
 let reconciliation = registry
     .reconcile_entities_and_await(&ctx, &publisher, &desired, &options, &CancellationToken::new())
     .await?;
-// `Ok` does not mean admitted: only `UpToDate` or all-`Admitted` lets a dependent start.
-if let Reconciliation::Reconciled(outcomes) = &reconciliation {
-    let unsettled: Vec<_> = outcomes
-        .iter()
-        .filter(|(_, outcome)| !matches!(outcome, ReconcileOutcome::Admitted))
-        .collect();
-    if !unsettled.is_empty() {
-        anyhow::bail!("types not admitted: {unsettled:?}");
-    }
-}
+// Every desired identifier is admitted.
 ```
 
 Reconciliation creates absent identifiers and updates differing ones; it never deletes. An
 identifier listed twice with different documents is `Rejected` without being submitted.
-`Rejected` is terminal for the document. `Pending` is not: a dependency, a concurrent
-writer, an unreachable registry or a refused call, which a later call may settle. The call
-itself fails only on an unrepresentable deadline or when the caller's token is cancelled, so
-check every outcome.
+`Ok` means every identifier is admitted. Otherwise `FailedPrecondition` carries a report;
+decode it with `ReconcileReport::from_canonical(&error)` for the stop reason and every outcome,
+including admitted identifiers. `Rejected` is terminal for the document; `Pending` may settle
+on a later call. Caller cancellation and an unrepresentable deadline return `Cancelled` and
+`InvalidArgument` without a report.
+
+`ReconcileOptions::batch_size` must fit the registry's configured `limits.batch_candidates`
+(both default to 100). A permanent submission refusal stops the call immediately:
+`InvalidArgument`, `FailedPrecondition`, `Unauthenticated`, `PermissionDenied`, `NotFound`,
+`AlreadyExists`, `OutOfRange`, `Cancelled`, or `ResourceExhausted` without a quota
+`retry_after_seconds`. A `ResourceExhausted` with that hint resends the same request under the same
+key after at least the longest hint, within the deadline; `Aborted`, `Internal`, `Unknown` and
+`ServiceUnavailable` allow up to three attempts per batch. The canonical category and context
+decide, the same for local and remote clients, never the HTTP status. Unjudged identifiers keep
+earlier outcomes or become `Pending(Skipped)`; accepted writes continue.
 
 ## Operations
 
@@ -163,7 +163,7 @@ match registry.get_type_schema(&ctx, &type_id, Projection::Default).await {
 ## Observability
 
 `reconcile_entities_and_await` traces with `tracing` at INFO; nothing needs DEBUG to be
-correlated. Every event has a stable `event` field. Codes only: no document content, and no
+correlated. Every log record has a stable `log_kind` field. Codes only: no document content, and no
 free text of an error (`detail`, a violation's description, an admission message). The full
 error reaches the caller in the returned `ReconcileOutcome` or `Err`; an accepted operation's
 item failures are also persisted and read with `get_operation`. A synchronous refusal, a
@@ -174,16 +174,15 @@ records its `operation_id`; otherwise the caller's error is the only full text.
 | Span (INFO) | Fields |
 |---|---|
 | `reconcile` | `reconcile_id`, `publisher`, `publisher_version`, `inputs` (entries given), `desired` (distinct identifiers), `passes`, `batch_size`, `deadline_ms` |
-| `reconcile_batch` | `batch`, `parent_batch` (the batch a refused remainder or split half came from), `pass`, `size`, `idempotency_key`, `attempt`, `operation_id` (once known) |
+| `reconcile_batch` | `batch`, `pass`, `size`, `idempotency_key`, `attempt`, `operation_id` (once known) |
 
-| Level | `event` | Meaning |
+| Level | `log_kind` | Meaning |
 |---|---|---|
 | INFO | `reconcile_started` | the call began |
 | INFO | `batch_submitted` | a new payload is about to be sent, under its `idempotency_key`; written before any answer |
 | INFO | `batch_accepted` | the registry accepted the batch as `operation_id` |
-| INFO | `candidate_refused` | one candidate refused synchronously (`gts_id`, `category`, `reason`, `violation_fields`); the rest is resubmitted |
-| INFO | `batch_split` | a size refusal, bisected |
-| WARN | `batch_refused` | the request as a whole was refused; its candidates stay pending |
+| WARN | `candidate_refused` | one candidate refused synchronously (`gts_id`, `category`, `reason`, `violation_fields`); the call stops |
+| WARN | `batch_refused` | the request as a whole was refused; its candidates stay pending and the call stops |
 | WARN | `transport_exhausted`, `incomplete_read`, `item_unreported` | transport or protocol trouble |
 | INFO / WARN | `reconcile_finished` | `stop`, `elapsed_ms`, `desired`, `admitted`, `rejected`, `pending`, `undecided`, `passes` |
 | WARN | `entity_unsettled` | one per identifier not admitted, on a normal return: `outcome`, `cause`, `category`, `reason`, `dependency_id`, `dependency_kind`, `diagnostic_code`; `rejected` is final for that document, `pending` may settle in a later call |
@@ -193,7 +192,7 @@ records its `operation_id`; otherwise the caller's error is the only full text.
 dropped (`stop = "dropped"`, with what it had observed and the rest `undecided`) or its
 deadline unrepresentable. It is INFO only for `up_to_date`, a `completed` call that admitted
 everything, and cancellation by the caller's token; anything else is WARN. `stop` is
-`up_to_date`, `completed`, `passes_exhausted`, `deadline`, `read_failed`, `cancelled`,
+`up_to_date`, `completed`, `passes_exhausted`, `deadline`, `read_failed`, `invalid_input`, `cancelled`,
 `invalid_deadline`, `dropped` or `panicked`.
 
 The registry writes INFO `operation_accepted` once an operation is durable — `operation_id`,
