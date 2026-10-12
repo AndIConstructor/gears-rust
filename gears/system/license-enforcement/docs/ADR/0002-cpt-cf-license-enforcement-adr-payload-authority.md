@@ -72,8 +72,8 @@ root. Thus a copied root row denies, and so does the original.
 
 Sub-grants are derived. Delegation stores a sub-grant only if it is a subset of its parent. When `verify` returns
 fields, the check service checks that a sub-grant candidate is a subset of the root fields. It also reads the chain of
-the candidate and checks each link as the only live child. Thus a sub-grant row that is wider than the root denies, and
-a copied sub-grant row denies.
+the candidate and checks each link as the only live child whose parent binding names it. Thus a sub-grant row that is 
+wider than the root denies, and a copied sub-grant row denies.
 
 The check service does not check that each link of the chain is a subset of its parent. In an untrusted build, the
 operator owns these rows (PRD threat model) and can edit all links together. Thus a check between links gives no

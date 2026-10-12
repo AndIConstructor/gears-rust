@@ -294,7 +294,8 @@ what the design needs. They are not complete.
 - The holder tenant holds the grant and distributes it.
 - The resource is a Resource contract type and an optional instance id. The type id includes the version. A grant
   without an instance id covers every instance of the type.
-- The subject type is a Subject contract type. The grant covers the subject that its binding names.
+- The subject type is a Subject contract type. The grant covers the subject that its binding names. The type of a
+  bound subject is the subject type of the grant or derives from it.
 - The binding is none, a subject (type and id), or a delegated sub-grant. A binding that admission fixes never changes.
 - The validity is an own window (not before, expires at, optional grace until) or, for a sub-grant, inherited.
 - The conditions are optional typed constraints over the subject and resource metadata of the check.
@@ -393,7 +394,7 @@ stateDiagram-v2
 | `suspend`, `reinstate` | Vendor                                                          | The grant is a root. It is active for suspend, or suspended for reinstate.                                                                                                                         | Descendants deny through their root. Their stored states do not change.                                                                                              |
 | `revoke`               | Vendor                                                          | The grant is a root and is not terminated.                                                                                                                                                         | Terminates the root and every descendant with the reason revoked. Their bindings stay for audit.                                                                             |
 | `renew`                | Vendor for roots. Grantor for the sub-grants that it delegated. | The grant is not terminated. Without the `issue` intake, only sub-grants can be renewed. A grantor renews only within its own window.                                                         | Extends the validity in place, with the same id and no new evidence. The descendants that inherit the validity get the new window in the same transaction.           |
-| `bind`, `unbind`       | Holder with permission to bind                                  | The grant and its root are not terminated, and admission did not fix the binding. For bind, the binding is none or names a sub-grant whose window ended, and the resource contract admits the type of the subject. For unbind, the binding is a subject. | Bind recalls a sub-grant whose window ended and sets the binding to the subject. Unbind sets it to none.                                                             |
+| `bind`, `unbind`       | Holder with permission to bind                                  | The grant and its root are not terminated, and admission did not fix the binding. For bind, the binding is none or names a sub-grant whose window ended, and the type of the subject is the subject type of the grant or derives from it. For unbind, the binding is a subject. | Bind recalls a sub-grant whose window ended and sets the binding to the subject. Unbind sets it to none.                                                             |
 | `delegate`             | Holder of a grant with a maximum depth above 0                  | The grant and its root are active. The binding of the grant is none or names a sub-grant whose window ended. The recipient is a descendant tenant now and passes the recipient rules.              | Recalls a sub-grant whose window ended. Creates one sub-grant per grant, all in one delegation. The binding of each parent names its sub-grant.                      |
 | `return`               | Holder of a sub-grant                                           | The binding of the sub-grant is none.                                                                                                                                                              | Terminates the sub-grant with the reason returned. The binding of the parent becomes none.                                                                           |
 | `recall`               | Grantor                                                         | The sub-grant is not terminated.                                                                                                                                                                   | Terminates the sub-grant and every descendant with the reason recalled. The subject at the end of the chain becomes unbound. The binding of the parent becomes none. |
@@ -457,12 +458,15 @@ the reported reason comes from the candidate that reached the latest step. Candi
    reason. A candidate in its grace period passes and marks the decision with grace.
 3. Verification: for the first candidate that passes evaluation, the check service calls `verify` of the linked plugin
    with the id and the evidence of its root. A denial reason denies the candidate. A revocation state denies it as
-   `suspended` or `terminated`. If `verify` returns root fields and the candidate is the root, the evaluator evaluates
-   it again on these fields. If the root binds a subject, these fields must fix this binding or permit bind →
-   `chain_invalid`. If the candidate is a sub-grant, the check service checks that it is a subset of these fields, that
+   `suspended` or `terminated`. If `verify` returns root fields and the candidate is the root, the check service checks
+   that their resource covers the request, that their holder is `request.context.tenant`, and that the type of the
+   stored binding is their subject type or derives from it → `chain_invalid`. The evaluator evaluates it again on these
+   fields. If the root binds a subject, these fields must fix this binding or permit bind → `chain_invalid`. 
+   If the candidate is a sub-grant, the check service checks that it is a subset of these fields, that
    these fields do not fix the binding of the root, and that the depth of its chain does not exceed the `max_depth` in
-   these fields → `chain_invalid`. It also checks that each link of its chain is the only live child of its parent →
-   `duplicated` (`cpt-cf-license-enforcement-principle-index-not-authority`). When `verify` returns root fields, for any
+   these fields → `chain_invalid`. It also checks that each link of its chain is the only live child of its parent,
+   and that the binding of the parent names it → `duplicated`
+   (`cpt-cf-license-enforcement-principle-index-not-authority`). When `verify` returns root fields, for any
    candidate, the check service checks that the store holds exactly one row that is not terminated with the id of the
    root → `duplicated`. It does not check that each link is a subset of its parent. In an untrusted build, the operator
    owns these rows and can edit all links together. Thus the root is the only limit that the check can prove. When the
@@ -499,7 +503,7 @@ the ids and does not need the registry.
 | `duplicated`                                     | From the plugin: the evidence does not name the root. From the check service, when `verify` returned fields: a link is not the only live child of its parent, or the parent binding does not name the link, or the store holds more than one live row with the id of the root. |
 | `awaiting_acceptance`, `suspended`, `terminated` | The root or the candidate is in that state, stored or by the revocation state from `verify`. Diagnostics carry the termination reason.                                                                      |
 | `not_yet_valid`, `expired`, `grace_expired`      | The effective window fails at the evaluation instant                                                                                                                                                        |
-| `chain_invalid`                                  | From the check service, when `verify` returned fields: the sub-grant is not a subset of the root fields, or the stored binding is not one that the root fields permit. Or a parent link of its chain is broken. |
+| `chain_invalid`                                  | From the check service, when `verify` returned fields: the sub-grant is not a subset of the root fields, the root fields do not match the request or the type of the stored binding, or the stored binding is not one that the root fields permit. Or a parent link of its chain is broken. |
 | `condition_unmet`                                | A condition is false, or its attribute is absent                                                                                                                                                            |
 | `condition_budget_exceeded`                      | Condition evaluation exceeded the per-check budget in evaluation steps                                                                                                                                      |
 

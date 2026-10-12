@@ -923,7 +923,8 @@ freshness TTL of each artifact and indefinitely for one without.
 - [ ] Every management mutation is idempotent by client token, versioned, and PDP-authorized with tenant scope from
   `SecurityContext`; a tenant administrator cannot issue, suspend, revoke, or renew a root grant.
 - [ ] Return moves only unbound grants; renewing a root grant extends every sub-grant that inherits its validity.
-- [ ] Replacing a grant revokes it and carries its bindings over in one operation; no check in between denies.
+- [ ] Replacing a grant terminates it with the reason replaced and carries its bindings over in one operation; no
+  check in between denies.
 - [ ] Registering a new resource or subject contract type requires no code change in this module.
 - [ ] No root grant reaches the store except through the linked admission plugin; an untrusted build's plugin verifies
   before admitting, rejects replayed and version-regressed artifacts, and leaves no parameter-based create
