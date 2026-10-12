@@ -14,6 +14,7 @@ use quota_enforcement_sdk::{
     QuotaEnforcementStoragePluginV1, QuotaFilter, QuotaId, QuotaStatus, QuotaView, TenantId,
 };
 use time::OffsetDateTime;
+use toolkit_macros::domain_model;
 use toolkit_security::{AccessScope, SecurityContext};
 
 use super::events::{ChangeKind, quota_changed};
@@ -37,6 +38,7 @@ const LOG_TARGET: &str = "qe.quotas";
 
 /// The lifecycle component, borrowed from the bound service for one call.
 // @cpt-dod:cpt-cf-quota-enforcement-dod-quota-crud:p1
+#[domain_model]
 pub struct QuotaManagement<'a> {
     admission: &'a Admission,
     catalog: &'a ProjectionContractCatalog,
