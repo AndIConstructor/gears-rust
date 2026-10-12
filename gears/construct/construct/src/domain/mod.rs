@@ -12,6 +12,7 @@ pub(crate) type DbProvider = toolkit_db::DBProvider<toolkit_db::DbError>;
 pub mod error;
 pub mod local_client;
 pub mod record_intake;
+pub mod refusal;
 pub mod subject_settings;
 
 #[cfg(test)]

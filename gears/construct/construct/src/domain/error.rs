@@ -2,7 +2,7 @@ use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::DbError;
 use toolkit_macros::domain_model;
 
-use super::record_intake::Refusal;
+use super::refusal::Refusal;
 
 #[domain_model]
 #[derive(Debug, thiserror::Error)]
@@ -83,5 +83,11 @@ impl From<authz_resolver_sdk::EnforcerError> for DomainError {
         }
         // @cpt-end:cpt-cf-construct-algo-gear-foundation-map-errors:p1:inst-map-enforcer-failed-return
         // @cpt-end:cpt-cf-construct-algo-gear-foundation-map-errors:p1:inst-map-enforcer-failed
+    }
+}
+
+impl From<Refusal> for DomainError {
+    fn from(refusal: Refusal) -> Self {
+        Self::Refused(refusal)
     }
 }

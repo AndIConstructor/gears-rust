@@ -296,7 +296,7 @@ The DESIGN's largest component, subject control, is split across four features. 
   - [ ] `p1` - `cpt-cf-construct-component-results-api`
 
 - **API**:
-  - POST /api/construct/v1/records
+  - POST /api/construct/v1/records?tenant=<id> (the tenant is required; the platform must authorize the caller for it)
 
 - **Sequences**:
 

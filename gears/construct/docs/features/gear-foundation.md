@@ -149,7 +149,7 @@ The migration `initial_001` **MUST** stay unchanged in the migration chain: it c
 **Touches**:
 - DB Table: `construct__foundation_notes` (created by `initial_001`, dropped by `m003_record_ids`)
 
-**Verified by**: `mysql_ddl_uses_binary_uuid_columns`, `postgres_and_sqlite_ddl_use_namespaced_names`, `identifiers_are_namespaced_and_within_63_bytes`, `postgres_and_sqlite_ddl_are_unchanged` (migration `initial_001`), and `the_placeholder_note_table_is_dropped` (migration `m003_record_ids`). Every test runs the whole chain on SQLite.
+**Verified by**: `mysql_ddl_uses_binary_uuid_columns`, `postgres_and_sqlite_ddl_use_namespaced_names`, `identifiers_are_namespaced_and_within_63_bytes` (migration `initial_001`; they check the generated DDL), and `the_placeholder_note_table_is_dropped` (migration `m003_record_ids`; it runs the migration chain on SQLite and checks that the table is created, then dropped).
 
 ## 6. Acceptance Criteria
 

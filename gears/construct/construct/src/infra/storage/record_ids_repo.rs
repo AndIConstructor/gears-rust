@@ -24,14 +24,16 @@ impl SeaOrmRecordIdRepository {
 }
 
 /// The key of a record identity: the SHA-256, in hex, of its connector,
-/// provenance and version, each followed by a NUL so that no two different
-/// identities run together into the same input.
+/// provenance and version, each preceded by its length in bytes (8 bytes,
+/// big-endian). The lengths make the encoding injective, so no two different
+/// identities hash the same input, whatever bytes the parts hold, NUL included.
 #[must_use]
 pub fn record_key(id: &RecordId) -> String {
     let mut hash = Context::new(&SHA256);
     for part in [&id.connector, &id.provenance, &id.version] {
-        hash.update(part.as_bytes());
-        hash.update(&[0]);
+        let bytes = part.as_bytes();
+        hash.update(&(bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
     }
     hex::encode(hash.finish())
 }

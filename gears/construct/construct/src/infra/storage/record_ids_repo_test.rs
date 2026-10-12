@@ -86,4 +86,7 @@ fn the_key_separates_the_parts_of_the_identity() {
     // Moving characters across a boundary gives another identity.
     assert_ne!(key("ab", "c", "v"), key("a", "bc", "v"));
     assert_ne!(key("c", "pv", ""), key("c", "p", "v"));
+    // A NUL inside a part does not stand for a boundary.
+    assert_ne!(key("c", "p\0", "q"), key("c", "p", "\0q"));
+    assert_ne!(key("c\0", "p", "v"), key("c", "\0p", "v"));
 }
