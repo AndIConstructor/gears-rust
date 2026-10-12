@@ -169,7 +169,7 @@ Every table has `tenant_id`, and every query is built through the secure ORM wit
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-storage-engines`
 
-SeaORM through toolkit-db, with SQLite, PostgreSQL and MariaDB in the migrations. The migration runner applies migrations in name order; names are `m0001_…` to `m0046_…`, so name order is number order and a new migration takes the next number.
+SeaORM through toolkit-db, with SQLite, PostgreSQL and MariaDB in the migrations. The migration runner applies migrations in name order; names are `m0001_…` to `m0047_…`, so name order is number order and a new migration takes the next number.
 
 ## 3. Technical Architecture
 
@@ -463,7 +463,7 @@ Tasks have no table: the queue is in memory.
 
 #### Migrations
 
-`m0001_initial` to `m0046_review_comment_snippets`, applied in name order by the toolkit migration runner. A change to a table that already holds rows is additive, and every migration has a `down()` (see the PRD's schema-change rule). A new migration takes the next number.
+`m0001_initial` to `m0047_mariadb_uuid_columns`, applied in name order by the toolkit migration runner. `m0047` repairs a MariaDB database created before the MySQL schema stored UUIDs as `BINARY(16)`: an empty table still holding a `VARCHAR(36)` UUID column is converted, and a table that holds rows stops the migration with a message to drop the `gm_*` tables, since that schema never stored a usable row; on PostgreSQL and SQLite it does nothing. A change to a table that already holds rows is additive, and every migration has a `down()` (see the PRD's schema-change rule). A new migration takes the next number.
 
 ### 3.8 Core Algorithms
 

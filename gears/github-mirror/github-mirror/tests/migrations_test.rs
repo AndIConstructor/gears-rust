@@ -232,8 +232,9 @@ async fn migrations_apply_and_roll_back_on_a_clean_database() {
     // so there is nothing further to assert for the individual columns.
 }
 
-/// The last twelve migrations only add columns (`m0045` also its own table),
-/// so they are the first twelve to roll back. Undoing exactly those leaves
+/// The last thirteen migrations only add columns (`m0045` also its own table;
+/// `m0047` changes nothing outside MariaDB), so they are the first thirteen to
+/// roll back. Undoing exactly those leaves
 /// every mirrored table in place, which is what makes their `down()` bodies
 /// observable: replace one with `Ok(())` and its column survives here.
 #[tokio::test]
@@ -243,7 +244,7 @@ async fn the_additive_migrations_drop_their_columns_on_rollback() {
         .expect("in-memory database must connect");
 
     Migrator::up(&conn, None).await.expect("up must succeed");
-    Migrator::down(&conn, Some(12))
+    Migrator::down(&conn, Some(13))
         .await
         .expect("rolling back the additive migrations must succeed");
 

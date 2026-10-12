@@ -197,7 +197,6 @@ impl RateLimitController {
         while self.admit_attempt().await? == AdmitStep::Retry {
             parked = true;
         }
-        self.in_flight.fetch_add(1, Ordering::AcqRel);
         debug!(
             in_flight = self.in_flight.load(Ordering::Relaxed),
             "request admitted"
@@ -442,15 +441,26 @@ impl RateLimitController {
     /// Gate 3: enforce the per-token concurrency soft-cap. Returns `true` when
     /// the cap was reached and the caller parked waiting for a freed slot.
     async fn await_slot(&self, soft_cap: u32) -> bool {
-        let current = self.in_flight.load(Ordering::Acquire);
-        if current < soft_cap {
-            return false;
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let mut current = self.in_flight.load(Ordering::Acquire);
+        while current < soft_cap {
+            match self.in_flight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return false,
+                Err(seen) => current = seen,
+            }
         }
         trace!(
             in_flight = current,
             soft_cap, "soft-cap reached; waiting for slot"
         );
-        self.notify.notified().await;
+        notified.await;
         trace!(soft_cap, "soft-cap wait complete; rechecking admission");
         true
     }
