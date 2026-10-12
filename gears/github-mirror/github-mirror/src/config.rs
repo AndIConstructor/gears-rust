@@ -9,6 +9,7 @@ use crate::domain::scope::ScopeConfig;
 use crate::infra::github::compression::Compression;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GithubMirrorConfig {
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,

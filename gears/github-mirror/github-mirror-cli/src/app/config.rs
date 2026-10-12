@@ -7,6 +7,7 @@ use github_mirror::domain::validate::validate_repo_path;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use toolkit::bootstrap::AppConfig;
+use toolkit_utils::SecretString;
 use uuid::Uuid;
 
 pub const DEFAULT_TEMPLATE: &str = include_str!("../default_config.toml");
@@ -108,18 +109,20 @@ pub fn sqlite_file(app: &AppConfig) -> Option<PathBuf> {
     })
 }
 
-pub fn resolve_token(given: Option<String>, file_name: &str) -> Option<String> {
-    if let Some(token) = given
-        .map(|token| token.trim().to_owned())
-        .filter(|token| !token.is_empty())
-    {
+pub fn resolve_token(given: Option<&SecretString>, file_name: &str) -> Option<SecretString> {
+    if let Some(token) = given.and_then(trimmed) {
         return Some(token);
     }
     let path = user_home().ok()?.join(".github-mirror").join(file_name);
     std::fs::read_to_string(path)
         .ok()
-        .map(|text| text.trim().to_owned())
-        .filter(|token| !token.is_empty())
+        .map(SecretString::new)
+        .and_then(|token| trimmed(&token))
+}
+
+fn trimmed(token: &SecretString) -> Option<SecretString> {
+    let text = token.expose().trim();
+    (!text.is_empty()).then(|| SecretString::new(text))
 }
 
 fn merge(base: &mut Value, overrides: Value) {

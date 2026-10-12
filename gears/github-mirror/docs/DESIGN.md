@@ -37,7 +37,7 @@
 
 GitHub Mirror keeps a local, tenant-scoped copy of GitHub repositories and serves it back. A tenant asks for a repository to be synced; the gear queues the sync, walks the repository's listings, fetches the details of what changed, and writes everything into its own `gm_` tables. Reads never call GitHub: they answer from those tables, either on GitHub's own paths (`/repos/{owner}/{name}/issues`, …) or on the gear's own API (`/github-mirror/v1/...`).
 
-The gear is a ToolKit gear (`github-mirror`) in the DDD-light layout: `api/rest` for the endpoints, `domain` for the service, the sync engine and the ports, `infra` for the GitHub client, the HTTP cache and the SeaORM storage. It is built from the reference implementation repotap, whose design document it adapts; the parts of repotap that belong to a single-token command-line tool (Python bindings, the GraphQL batcher, per-token rate controllers) are not part of this gear.
+The gear is a ToolKit gear (`github-mirror`) in the DDD-light layout: `api/rest` for the endpoints, `domain` for the service, the sync engine and the ports, `infra` for the GitHub client, the HTTP cache and the SeaORM storage. It is built from the reference implementation repotap, whose design document it adapts; the parts of repotap that belong to a single-token command-line tool (Python bindings, the GraphQL batcher) are not part of this gear.
 
 A sync is designed to be stopped and started again. The task queue lives in memory and is never persisted; what survives is the HTTP cache (so unchanged pages come back as `304` and cost no quota), the per-family watermarks and the per-entity fingerprints (so unchanged entities are skipped), and a per-repository run status that `POST /sync/resume` uses to find the repositories left unfinished.
 
@@ -54,7 +54,7 @@ A sync is designed to be stopped and started again. The task queue lives in memo
 | `cpt-cf-github-mirror-fr-cost-efficiency` | `p1` | Conditional requests with stored `ETag` / `Last-Modified`; watermark sweeps; the change gate; see [3.8](#38-core-algorithms) |
 | `cpt-cf-github-mirror-fr-memory-efficiency` | `p1` | Listings are written page by page; the task queue applies backpressure at 10,000 pending tasks |
 | `cpt-cf-github-mirror-fr-parallel-fetch` | `p1` | `max_concurrent_syncs` repositories at once, `max_concurrent_tasks` tasks inside one, `max_concurrent_requests` GitHub calls in flight |
-| `cpt-cf-github-mirror-fr-rate-limit` | `p1` | One shared cooldown in the GitHub client honours `Retry-After` / `X-RateLimit-Reset`; see [3.8.9](#389-github-client) |
+| `cpt-cf-github-mirror-fr-rate-limit` | `p1` | Per-token admission gates, quota reserve, authoritative `/rate_limit` reconciliation, AIMD adaptive soft cap and `Retry-After` backoff; see [3.8.9](#389-github-client) |
 | `cpt-cf-github-mirror-fr-sync-deadline` | `p1` | `sync_deadline_minutes` (default 360) stops a run in order; the session ends `failed` with the reason |
 | `cpt-cf-github-mirror-fr-idempotent` | `p1` | Every write is an upsert keyed on the GitHub id and the tenant |
 | `cpt-cf-github-mirror-fr-raw-storage` | `p1` | `gm_http_cache` keeps each fetched page body (compressed) with its validators and content hash |
@@ -87,7 +87,7 @@ Not covered by this design yet: Python bindings (`cpt-cf-github-mirror-fr-python
 | NFR | Design Response |
 |---|---|
 | `cpt-cf-github-mirror-nfr-reliability` | Resumable runs; per-task transactions; claim and lock released on every exit path, including an aborted task |
-| `cpt-cf-github-mirror-nfr-rate-compliance` | Request semaphore, shared cooldown, conditional requests |
+| `cpt-cf-github-mirror-nfr-rate-compliance` | Per-token admission before the shared request permit; AIMD; `Retry-After`; conditional requests |
 | `cpt-cf-github-mirror-nfr-memory-efficiency` | Page-by-page writes; 64 MiB cap on any single response body; queue backpressure |
 | `cpt-cf-github-mirror-nfr-security` | Tenant scoping in storage, policy checks per operation, token read from the credential store and sent only over HTTPS (or loopback) |
 | `cpt-cf-github-mirror-nfr-parallel-sync` | Tenant-fair pool of `max_concurrent_syncs` workers |
@@ -157,7 +157,7 @@ The gear is started and stopped by the framework. `stop()` cancels the pool and 
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-one-token`
 
-The gear is configured with one token: `github_token_secret` names its secret in the credential store, read once at init. All tenants' syncs share its rate limit, so a cooldown pauses every request made with it. A token per tenant is future work.
+The gear is configured with one token: `github_token_secret` names its secret in the credential store, read once at init. All tenants' syncs share its rate limit, so a backoff pauses every request made with it. A token per tenant is future work. Unknown keys in the gear's config are refused at start-up, so the `github_token` key of earlier builds fails loudly instead of leaving the gear unauthenticated.
 
 #### Tenant Isolation in Storage
 
@@ -169,7 +169,7 @@ Every table has `tenant_id`, and every query is built through the secure ORM wit
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-storage-engines`
 
-SeaORM through toolkit-db, with SQLite and PostgreSQL in the migrations. The migration runner applies migrations in name order; names are `m0001_…` to `m0044_…`, so name order is number order and a new migration takes the next number.
+SeaORM through toolkit-db, with SQLite, PostgreSQL and MariaDB in the migrations. The migration runner applies migrations in name order; names are `m0001_…` to `m0046_…`, so name order is number order and a new migration takes the next number.
 
 ## 3. Technical Architecture
 
@@ -214,7 +214,7 @@ SeaORM through toolkit-db, with SQLite and PostgreSQL in the migrations. The mig
           │        │
           ▼        ▼
    GithubClient   SyncWriter / repositories (SeaORM, tenant-scoped)
-   (semaphore, cooldown, HttpCache)
+   (per-token controller, semaphore, HttpCache)
 ```
 
 #### Service
@@ -257,7 +257,7 @@ Per-family high-water mark for incremental listing sweeps.
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-component-github-client`
 
-REST and GraphQL calls with conditional requests, pagination, retries, the rate-limit cooldown and the body cap.
+REST and GraphQL calls with conditional requests, pagination, retries, per-token rate-limit admission and the body cap.
 
 #### HttpCache
 
@@ -463,7 +463,7 @@ Tasks have no table: the queue is in memory.
 
 #### Migrations
 
-`m0001_initial` to `m0044_session_telemetry`, applied in name order by the toolkit migration runner. A change to a table that already holds rows is additive, and every migration has a `down()` (see the PRD's schema-change rule). A new migration takes the next number.
+`m0001_initial` to `m0046_review_comment_snippets`, applied in name order by the toolkit migration runner. A change to a table that already holds rows is additive, and every migration has a `down()` (see the PRD's schema-change rule). A new migration takes the next number.
 
 ### 3.8 Core Algorithms
 
@@ -529,7 +529,7 @@ A run races `sync_deadline_minutes`. When the deadline wins, the run's own cance
 | Behaviour | Value |
 |---|---|
 | Requests in flight | `max_concurrent_requests` (default 8), one semaphore for all syncs |
-| Rate limit | a `429`, or a `403` with rate-limit headers, sets one shared cooldown from `Retry-After` / `X-RateLimit-Reset` (at most 5 minutes per wait, 30 waits per request) |
+| Rate limit | every request is admitted by the token's `RateLimitController` (ADR-0003) before it takes a shared permit: it waits while a backoff runs, while the core budget is down to its reserve (10% of the limit, at most 50), or while the in-flight count is at the soft cap. A `429` or `Retry-After` halves the soft cap and sets the backoff, and a later deadline is never shortened by an earlier one or by a healthy answer; healthy answers grow the cap back toward `max_concurrent_requests`. A GraphQL answer refused with `RATE_LIMITED` holds GraphQL calls only, since its point budget is separate from REST's. A rate-limited request is retried up to 30 times, each wait at most 5 minutes, enough to ride out an hourly window (the reference retries 4 times) |
 | Server errors and send failures | 3 retries, backing off from 2 seconds |
 | Timeouts | 10 s to connect, 60 s per request |
 | Body cap | 64 MiB for any response and any cached body, read piece by piece |
@@ -612,7 +612,7 @@ Configuration is one TOML file (`--config`, default `./github-mirror.toml`) merg
 
 - A token per tenant, with its own rate-limit budget; shared public-repository entries would then need the token in the key, since GitHub's `permissions` field differs per token.
 - An "as of" marker on read endpoints for readers that must not see a repository mid-sync.
-- The CLI, Python bindings and write-back described in the PRD.
+- Python bindings and write-back described in the PRD.
 
 ## 5. Traceability
 

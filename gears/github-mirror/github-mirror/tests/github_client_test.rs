@@ -15,6 +15,7 @@ use github_mirror::infra::github::compression::MAX_BODY_BYTES;
 use httpmock::MockServer;
 use serde_json::json;
 use toolkit_security::AccessScope;
+use toolkit_utils::SecretString;
 
 /// An RFC3339 literal as the instant the mirror stores.
 fn instant(raw: &str) -> chrono::DateTime<chrono::Utc> {
@@ -1006,8 +1007,8 @@ async fn fetch_repository_maps_github_payloads_into_records() {
         })
         .await;
 
-    let client =
-        GithubClient::new(server.base_url(), Some("tok".to_owned())).expect("client must build");
+    let client = GithubClient::new(server.base_url(), Some(SecretString::new("tok")))
+        .expect("client must build");
     let fetched = fetch_repository(&client, "rust-lang", "rust", &opts(full_scope()))
         .await
         .expect("fetch must succeed");
@@ -2928,7 +2929,7 @@ async fn a_next_link_to_another_host_is_refused() {
 fn a_token_may_not_travel_over_plain_http_to_another_host() {
     let refused = GithubClient::new(
         "http://github.internal/api".to_owned(),
-        Some("tok".to_owned()),
+        Some(SecretString::new("tok")),
     );
     let Err(error) = refused else {
         panic!("http plus a token must be refused");
@@ -2961,7 +2962,7 @@ fn a_token_may_not_travel_over_plain_http_to_another_host() {
         ),
     ] {
         assert!(
-            GithubClient::new(url.to_owned(), token.map(ToOwned::to_owned)).is_ok(),
+            GithubClient::new(url.to_owned(), token.map(SecretString::new)).is_ok(),
             "{url} must be allowed: {why}"
         );
     }
@@ -2984,8 +2985,8 @@ async fn check_rate_limit_reads_every_pool_with_core_and_graphql_first() {
             }));
         })
         .await;
-    let client =
-        GithubClient::new(server.base_url(), Some("tok".to_owned())).expect("client must build");
+    let client = GithubClient::new(server.base_url(), Some(SecretString::new("tok")))
+        .expect("client must build");
 
     let read = client.rate_limit().await.expect("the quotas must read");
 

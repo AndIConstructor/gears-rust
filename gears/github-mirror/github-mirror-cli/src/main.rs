@@ -21,6 +21,7 @@ use toolkit::runtime::{DbOptions, HostRuntime};
 use toolkit::{ClientHub, GearRegistry};
 use toolkit_db::DbManager;
 use toolkit_security::SecurityContext;
+use toolkit_utils::SecretString;
 use uuid::Uuid;
 
 use crate::app::commands::{self, Entity};
@@ -47,18 +48,20 @@ struct Cli {
         global = true,
         env = "GITHUB_TOKEN",
         hide_env_values = true,
+        value_parser = |raw: &str| Ok::<_, std::convert::Infallible>(SecretString::new(raw)),
         help = "GitHub token; falls back to GITHUB_TOKEN, then ~/.github-mirror/gh_token.txt"
     )]
-    token: Option<String>,
+    token: Option<SecretString>,
 
     #[arg(
         long,
         global = true,
         env = "CF_PLATFORM_TOKEN",
         hide_env_values = true,
+        value_parser = |raw: &str| Ok::<_, std::convert::Infallible>(SecretString::new(raw)),
         help = "Platform login token; falls back to CF_PLATFORM_TOKEN, then ~/.github-mirror/platform_token.txt"
     )]
-    platform_token: Option<String>,
+    platform_token: Option<SecretString>,
 
     #[arg(
         long,
@@ -270,15 +273,15 @@ async fn run(cli: Cli) -> Result<()> {
         bail!("no command given; see --help");
     };
 
-    let platform_token = config::resolve_token(cli.platform_token, "platform_token.txt").ok_or_else(|| {
+    let platform_token = config::resolve_token(cli.platform_token.as_ref(), "platform_token.txt").ok_or_else(|| {
         anyhow!(
             "no platform token: pass --platform-token, set CF_PLATFORM_TOKEN or write ~/.github-mirror/platform_token.txt"
         )
     })?;
-    let github_token = config::resolve_token(cli.token, "gh_token.txt");
+    let github_token = config::resolve_token(cli.token.as_ref(), "gh_token.txt");
     let loaded = config::load(
         &cli.config,
-        github_token.as_deref(),
+        github_token.as_ref().map(SecretString::expose),
         StorageFlags {
             storage_dir: cli.storage_dir,
             database_url: cli.database_url,
@@ -316,12 +319,12 @@ async fn run(cli: Cli) -> Result<()> {
 async fn execute(
     runtime: &Runtime,
     command: Command,
-    platform_token: &str,
+    platform_token: &SecretString,
     tenant_id: Option<Uuid>,
     database_file: Option<&Path>,
 ) -> Result<Value> {
     let service = runtime.service().await?;
-    let ctx = runtime.authenticate(platform_token).await?;
+    let ctx = runtime.authenticate(platform_token.expose()).await?;
     if let Some(expected) = tenant_id
         && expected != ctx.subject_tenant_id()
     {

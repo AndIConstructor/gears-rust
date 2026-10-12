@@ -45,6 +45,7 @@ struct Inner {
     reset_at: Option<DateTime<Utc>>,
     /// Park callers until this time (set on 429 / secondary rate limit).
     backoff_until: Option<DateTime<Utc>>,
+    graphql_until: Option<DateTime<Utc>>,
     /// Maximum concurrent in-flight requests for this token (AIMD-controlled).
     soft_cap: u32,
     /// Total hourly quota for reference.
@@ -61,6 +62,7 @@ impl Default for Inner {
             remaining: u32::MAX,
             reset_at: None,
             backoff_until: None,
+            graphql_until: None,
             soft_cap: SOFT_CAP_DEFAULT,
             limit: 5000,
             authoritative: None,
@@ -253,6 +255,23 @@ impl RateLimitController {
             "rate-limit gate snapshot"
         );
         snapshot
+    }
+
+    pub async fn hold_graphql(&self, delay: std::time::Duration) {
+        let until = chrono::Duration::from_std(delay)
+            .ok()
+            .and_then(|delta| Utc::now().checked_add_signed(delta))
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
+        let mut g = self.inner.lock().await;
+        g.graphql_until = Some(g.graphql_until.map_or(until, |current| current.max(until)));
+    }
+
+    pub async fn graphql_wait(&self) -> Option<std::time::Duration> {
+        let until = self.inner.lock().await.graphql_until?;
+        (until - Utc::now())
+            .to_std()
+            .ok()
+            .filter(|wait| !wait.is_zero())
     }
 
     pub async fn backing_off(&self) -> bool {
@@ -461,7 +480,7 @@ impl RateLimitController {
         Self::ingest_core_budget(&mut g, headers);
         if http_status == 429 || headers.retry_after_secs.is_some() {
             Self::back_off(&mut g, headers);
-        } else {
+        } else if g.backoff_until.is_none_or(|until| until <= Utc::now()) {
             g.backoff_until = None;
             Self::grow_soft_cap(&mut g, max_cap);
         }
@@ -499,12 +518,17 @@ impl RateLimitController {
                 .ok()
                 .and_then(chrono::Duration::try_seconds)
                 .unwrap_or(chrono::Duration::MAX);
-            g.backoff_until = Some(
+            Self::extend_backoff(
+                g,
                 Utc::now()
                     .checked_add_signed(delta)
                     .unwrap_or(DateTime::<Utc>::MAX_UTC),
             );
         }
+    }
+
+    fn extend_backoff(g: &mut Inner, until: DateTime<Utc>) {
+        g.backoff_until = Some(g.backoff_until.map_or(until, |current| current.max(until)));
     }
 
     fn grow_soft_cap(g: &mut Inner, max_cap: u32) {
@@ -581,7 +605,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backing_off_holds_from_a_retry_after_until_the_next_good_answer() {
+    async fn a_good_answer_does_not_end_a_backoff_before_its_deadline() {
         let ctrl = RateLimitController::new();
         assert!(!ctrl.backing_off().await);
 
@@ -593,7 +617,7 @@ mod tests {
         assert!(ctrl.backing_off().await);
 
         ctrl.observe(&RateLimitHeaders::default(), 200, 20).await;
-        assert!(!ctrl.backing_off().await);
+        assert!(ctrl.backing_off().await);
     }
 
     #[tokio::test]

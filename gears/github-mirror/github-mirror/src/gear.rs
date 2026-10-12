@@ -13,6 +13,7 @@ use authz_resolver_sdk::{AuthZResolverApi, PolicyEnforcer};
 use credstore_sdk::{CredStoreClientV1, SecretRef};
 use github_mirror_sdk::GithubMirrorClientV1;
 use toolkit_security::SecurityContext;
+use toolkit_utils::SecretString;
 use uuid::Uuid;
 
 use crate::api::rest::routes;
@@ -48,7 +49,7 @@ const SERVICE_SUBJECT_TYPE: &str = "gts.cf.core.security.subject_service.v1~";
 async fn github_token(
     ctx: &GearCtx,
     secret: Option<&GithubTokenSecret>,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<SecretString>> {
     let Some(secret) = secret else {
         return Ok(None);
     };
@@ -76,9 +77,9 @@ async fn github_token(
                 secret.tenant_id
             )
         })?;
-    let token = String::from_utf8(found.value.as_bytes().to_vec())
+    let token = std::str::from_utf8(found.value.as_bytes())
         .map_err(|e| anyhow::anyhow!("the GitHub token secret is not UTF-8: {e}"))?;
-    Ok(Some(token).filter(|t| !t.is_empty()))
+    Ok((!token.is_empty()).then(|| SecretString::new(token)))
 }
 
 // This attribute is the one place the gear's name is written:

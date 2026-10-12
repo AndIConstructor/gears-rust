@@ -166,8 +166,19 @@ const LIST_LIMITS: LimitCfg = LimitCfg {
     max: 200,
 };
 
-fn map_odata_error(e: impl std::fmt::Display) -> DomainError {
-    DomainError::internal(e.to_string())
+fn map_odata_error(e: &toolkit_odata::Error) -> DomainError {
+    use toolkit_odata::Error as E;
+    let field = match e {
+        E::Db(_) | E::ParsingUnavailable(_) => return DomainError::internal(e.to_string()),
+        E::InvalidFilter(_) => "$filter",
+        E::InvalidOrderByField(_) => "$orderby",
+        E::InvalidLimit => "limit",
+        _ => "cursor",
+    };
+    DomainError::Validation {
+        field: field.to_owned(),
+        message: e.to_string(),
+    }
 }
 
 fn map_scope_error(e: ScopeError) -> DomainError {
@@ -1980,7 +1991,7 @@ async fn repo_list_in<C: DBRunner>(
         Into::into,
     )
     .await
-    .map_err(map_odata_error)
+    .map_err(|e| map_odata_error(&e))
 }
 
 async fn repo_list_window_in<C: DBRunner>(
@@ -3755,7 +3766,7 @@ async fn commit_file_list_by_commit_in<C: DBRunner>(
         Into::into,
     )
     .await
-    .map_err(map_odata_error)
+    .map_err(|e| map_odata_error(&e))
 }
 
 async fn review_thread_upsert_in<C: DBRunner>(
@@ -3829,7 +3840,7 @@ async fn review_thread_list_by_pull_in<C: DBRunner>(
         Into::into,
     )
     .await
-    .map_err(map_odata_error)
+    .map_err(|e| map_odata_error(&e))
 }
 
 async fn commit_comment_upsert_in<C: DBRunner>(
@@ -5255,7 +5266,7 @@ impl HttpCache for SeaOrmHttpCache {
     async fn get(
         &self,
         scope: &AccessScope,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         key: &CacheKey,
     ) -> Result<Option<CachedResponse>, DomainError> {
         let conn = self.db.conn()?;
@@ -5263,7 +5274,11 @@ impl HttpCache for SeaOrmHttpCache {
         let row = HttpCacheEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(sea_orm::Condition::all().add(http_cache::Column::CacheKey.eq(key.as_str())))
+            .filter(
+                sea_orm::Condition::all()
+                    .add(http_cache::Column::TenantId.eq(tenant_id))
+                    .add(http_cache::Column::CacheKey.eq(key.as_str())),
+            )
             .one(&conn)
             .await
             .map_err(map_scope_error)?;
@@ -5342,7 +5357,7 @@ impl HttpCache for SeaOrmHttpCache {
     async fn clear(
         &self,
         scope: &AccessScope,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         url_prefixes: &[&str],
     ) -> Result<u64, DomainError> {
         // Guarded because an empty `Condition::any()` matches every row, and
@@ -5355,7 +5370,11 @@ impl HttpCache for SeaOrmHttpCache {
         let result = HttpCacheEntity::delete_many()
             .secure()
             .scope_with(scope)
-            .filter(url_below_any(url_prefixes))
+            .filter(
+                sea_orm::Condition::all()
+                    .add(http_cache::Column::TenantId.eq(tenant_id))
+                    .add(url_below_any(url_prefixes)),
+            )
             .exec(&conn)
             .await
             .map_err(map_scope_error)?;
@@ -5366,7 +5385,7 @@ impl HttpCache for SeaOrmHttpCache {
     async fn expire(
         &self,
         scope: &AccessScope,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         fetched_before: chrono::DateTime<Utc>,
     ) -> Result<u64, DomainError> {
         let conn = self.db.conn()?;
@@ -5375,7 +5394,11 @@ impl HttpCache for SeaOrmHttpCache {
         let result = HttpCacheEntity::delete_many()
             .secure()
             .scope_with(scope)
-            .filter(sea_orm::Condition::all().add(http_cache::Column::FetchedAt.lt(cutoff)))
+            .filter(
+                sea_orm::Condition::all()
+                    .add(http_cache::Column::TenantId.eq(tenant_id))
+                    .add(http_cache::Column::FetchedAt.lt(cutoff)),
+            )
             .exec(&conn)
             .await
             .map_err(map_scope_error)?;
@@ -5386,7 +5409,7 @@ impl HttpCache for SeaOrmHttpCache {
     async fn size(
         &self,
         scope: &AccessScope,
-        _tenant_id: Uuid,
+        tenant_id: Uuid,
         url_prefixes: &[&str],
     ) -> Result<u64, DomainError> {
         #[derive(sea_orm::FromQueryResult)]
@@ -5410,7 +5433,11 @@ impl HttpCache for SeaOrmHttpCache {
         let rows: Vec<Total> = HttpCacheEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(url_below_any(url_prefixes))
+            .filter(
+                sea_orm::Condition::all()
+                    .add(http_cache::Column::TenantId.eq(tenant_id))
+                    .add(url_below_any(url_prefixes)),
+            )
             .project_all(&conn, |select| {
                 select
                     .select_only()

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use toolkit_security::AccessScope;
+use toolkit_utils::SecretString;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone as _, Utc};
@@ -267,7 +268,7 @@ impl Drop for Admission<'_> {
 struct RateLimitProbe {
     http: reqwest::Client,
     url: String,
-    token: Option<String>,
+    token: Option<SecretString>,
 }
 
 impl std::fmt::Debug for RateLimitProbe {
@@ -287,7 +288,7 @@ impl QuotaProbe for RateLimitProbe {
             .header("Accept", ACCEPT_JSON)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
         if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
+            request = request.bearer_auth(token.expose());
         }
         let body: serde_json::Value = request
             .send()
@@ -382,7 +383,7 @@ pub struct GithubClient {
     http: reqwest::Client,
     api_base_url: String,
     api_origin: url::Origin,
-    token: Option<String>,
+    token: Option<SecretString>,
     cache: Arc<dyn HttpCache>,
     /// Ceiling on requests in flight, shared by every sync using this client.
     /// GitHub's secondary rate limit reacts to concurrency, so the ceiling is
@@ -403,7 +404,7 @@ impl GithubClient {
     /// # Errors
     /// Whatever [`Self::with_cache`] returns: this is that call with a cache
     /// that stores nothing.
-    pub fn new(api_base_url: String, token: Option<String>) -> Result<Self, DomainError> {
+    pub fn new(api_base_url: String, token: Option<SecretString>) -> Result<Self, DomainError> {
         Self::with_cache(api_base_url, token, Arc::new(NoCache))
     }
 
@@ -416,7 +417,7 @@ impl GithubClient {
     /// for a `next` link to be compared against.
     pub fn with_cache(
         api_base_url: String,
-        token: Option<String>,
+        token: Option<SecretString>,
         cache: Arc<dyn HttpCache>,
     ) -> Result<Self, DomainError> {
         let parsed = url::Url::parse(&api_base_url)
@@ -674,7 +675,7 @@ impl GithubClient {
             .header("Accept", ACCEPT_JSON)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
         if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
+            request = request.bearer_auth(token.expose());
         }
         match cached {
             Some(CachedResponse {
@@ -1096,13 +1097,17 @@ impl GithubClient {
         // GraphQL shares the REST ceilings: both spend the same token's
         // budget, though the controller only reads the core budget headers.
         let (body, _admission, _permit, mut line) = loop {
+            if let Some(wait) = self.controller.graphql_wait().await {
+                self.pause(wait, telemetry, cancel).await?;
+                continue;
+            }
             let (admission, permit) = self.admit(telemetry, cancel).await?;
             let mut request = self
                 .http
                 .post(&url)
                 .json(&serde_json::json!({ "query": query, "variables": variables }));
             if let Some(token) = &self.token {
-                request = request.bearer_auth(token);
+                request = request.bearer_auth(token.expose());
             }
             let (outcome, took) = self.send(request, &sent, telemetry, cancel).await?;
             let response = match outcome {
@@ -1187,7 +1192,7 @@ impl GithubClient {
                     report_graphql_budget(attempt, delay);
                     drop(permit);
                     drop(admission);
-                    self.pause(delay, telemetry, cancel).await?;
+                    self.controller.hold_graphql(delay).await;
                     attempt += 1;
                 }
                 GraphqlRead::RateLimited { body, bytes, .. }
@@ -3041,7 +3046,7 @@ impl GithubPort for GithubClient {
             files,
             commits,
             review_threads,
-            review_threads_complete: threads_complete,
+            review_threads_complete: threads_complete && !more_to_come,
             declared,
             contributors: reviewers.into_records(),
         })
@@ -3410,7 +3415,7 @@ impl GithubPort for GithubClient {
             .header("Accept", ACCEPT_JSON)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
         if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
+            request = request.bearer_auth(token.expose());
         }
         let body: serde_json::Value = request
             .send()

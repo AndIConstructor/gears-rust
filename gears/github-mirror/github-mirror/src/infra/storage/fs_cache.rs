@@ -45,22 +45,20 @@ impl FilesystemHttpCache {
         (dir.join(key), dir.join(format!("{key}{META_SUFFIX}")))
     }
 
-    async fn entries(&self, tenant_id: Uuid) -> Result<Vec<(PathBuf, PathBuf, Meta)>, DomainError> {
+    async fn shard_entries(shard: &Path) -> Result<Vec<(PathBuf, PathBuf, Meta)>, DomainError> {
         let mut entries = Vec::new();
-        for dir in list_dir(&self.partition(tenant_id)).await? {
-            for (body_path, meta_path) in list_dir(&dir)
-                .await?
-                .into_iter()
-                .filter_map(|path| body_of(&path).map(|body| (body, path)))
-            {
-                let Some(raw) = read_optional(&meta_path).await? else {
-                    continue;
-                };
-                let Ok(meta) = serde_json::from_slice::<Meta>(&raw) else {
-                    continue;
-                };
-                entries.push((body_path, meta_path, meta));
-            }
+        for (body_path, meta_path) in list_dir(shard)
+            .await?
+            .into_iter()
+            .filter_map(|path| body_of(&path).map(|body| (body, path)))
+        {
+            let Some(raw) = read_optional(&meta_path).await? else {
+                continue;
+            };
+            let Ok(meta) = serde_json::from_slice::<Meta>(&raw) else {
+                continue;
+            };
+            entries.push((body_path, meta_path, meta));
         }
         Ok(entries)
     }
@@ -71,11 +69,13 @@ impl FilesystemHttpCache {
         doomed: impl Fn(&Meta) -> bool + Send + Sync,
     ) -> Result<u64, DomainError> {
         let mut removed = 0;
-        for (body_path, meta_path, meta) in self.entries(tenant_id).await? {
-            if doomed(&meta) {
-                remove_optional(&body_path).await?;
-                remove_optional(&meta_path).await?;
-                removed += 1;
+        for shard in list_dir(&self.partition(tenant_id)).await? {
+            for (body_path, meta_path, meta) in Self::shard_entries(&shard).await? {
+                if doomed(&meta) {
+                    remove_optional(&body_path).await?;
+                    remove_optional(&meta_path).await?;
+                    removed += 1;
+                }
             }
         }
         Ok(removed)
@@ -268,9 +268,11 @@ impl HttpCache for FilesystemHttpCache {
             return Ok(0);
         }
         let mut total = 0;
-        for (body_path, meta_path, meta) in self.entries(tenant_id).await? {
-            if below_any(&meta.url, url_prefixes) {
-                total += size_of(&body_path).await? + size_of(&meta_path).await?;
+        for shard in list_dir(&self.partition(tenant_id)).await? {
+            for (body_path, meta_path, meta) in Self::shard_entries(&shard).await? {
+                if below_any(&meta.url, url_prefixes) {
+                    total += size_of(&body_path).await? + size_of(&meta_path).await?;
+                }
             }
         }
         Ok(total)

@@ -40,6 +40,7 @@ toolkit = { workspace = true, features = ["bootstrap"] }
 toolkit-db = { workspace = true, features = ["sqlite", "pg", "mysql"] }
 toolkit-odata = { workspace = true }
 toolkit-security = { workspace = true }
+toolkit-utils = { workspace = true }
 
 anyhow = { workspace = true }
 chrono = { workspace = true }
