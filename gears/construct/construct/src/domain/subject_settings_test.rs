@@ -17,7 +17,7 @@ use crate::domain::error::DomainError;
 use crate::domain::subject_settings::{SubjectSettings, SubjectSettingsService, TenantDefaults};
 use crate::infra::storage::subject_settings_repo::SeaOrmSubjectSettingsRepository;
 use crate::test_support::{
-    AllowResolver, DenyResolver, context_in, inmem_db, seed_subject_settings,
+    AllowResolver, DenyResolver, context_in, context_of, inmem_db, seed_subject_settings,
 };
 
 type ConcreteService = SubjectSettingsService<SeaOrmSubjectSettingsRepository>;
@@ -257,5 +257,186 @@ async fn service_asks_for_the_subject_settings_resource_and_the_tenant() {
             Some(subject),
             Some(tenant.to_string()),
         )]
+    );
+}
+
+#[tokio::test]
+async fn owner_reads_its_own_settings() {
+    let db = inmem_db().await;
+    let svc = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(false));
+    let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
+    seed_subject_settings(&db, tenant, subject, ERASING).await;
+
+    let own = svc
+        .owner_settings(&context_of(subject, tenant), subject)
+        .await
+        .expect("own settings");
+
+    assert_eq!(own, ERASING);
+}
+
+#[tokio::test]
+async fn owner_changes_personalization_and_the_next_read_sees_it() {
+    let db = inmem_db().await;
+    let svc = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(true));
+    let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
+    let ctx = context_of(subject, tenant);
+
+    let stored = svc
+        .set_personalization(&ctx, subject, false)
+        .await
+        .expect("first change creates the row");
+    assert_eq!(stored, SubjectSettings::new_subject(false));
+    assert_eq!(
+        svc.owner_settings(&ctx, subject).await.expect("read"),
+        stored
+    );
+
+    let stored = svc
+        .set_personalization(&ctx, subject, true)
+        .await
+        .expect("second change updates the row");
+    assert_eq!(stored, SubjectSettings::new_subject(true));
+    assert_eq!(
+        svc.owner_settings(&ctx, subject).await.expect("read"),
+        stored
+    );
+}
+
+#[tokio::test]
+async fn turning_personalization_on_does_not_end_an_erasure() {
+    let db = inmem_db().await;
+    let svc = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(true));
+    let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
+    seed_subject_settings(&db, tenant, subject, ERASING).await;
+
+    let stored = svc
+        .set_personalization(&context_of(subject, tenant), subject, true)
+        .await
+        .expect("change");
+
+    assert_eq!(
+        stored,
+        SubjectSettings {
+            personalization_enabled: true,
+            erasure_in_progress: true,
+        }
+    );
+}
+
+#[tokio::test]
+async fn another_subject_is_refused_before_the_policy_service_is_asked() {
+    let db = inmem_db().await;
+    let resolver = Arc::new(RecordingResolver::default());
+    let svc = service_with(&db, resolver.clone(), StubDefaults::new(true));
+    let (tenant, owner) = (Uuid::new_v4(), Uuid::new_v4());
+    seed_subject_settings(&db, tenant, owner, ERASING).await;
+    let someone_else = context_of(Uuid::new_v4(), tenant);
+
+    let read = svc.owner_settings(&someone_else, owner).await;
+    let change = svc.set_personalization(&someone_else, owner, true).await;
+
+    assert!(
+        matches!(read, Err(DomainError::Forbidden(_))),
+        "got {read:?}"
+    );
+    assert!(
+        matches!(change, Err(DomainError::Forbidden(_))),
+        "got {change:?}"
+    );
+    assert!(resolver.asked.lock().unwrap().is_empty());
+    let unchanged = svc
+        .owner_settings(&context_of(owner, tenant), owner)
+        .await
+        .expect("owner read");
+    assert_eq!(unchanged, ERASING, "the refused change stored nothing");
+}
+
+#[tokio::test]
+async fn a_subject_of_another_tenant_is_refused() {
+    let db = inmem_db().await;
+    let svc = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(true));
+    let (own_tenant, other_tenant) = (Uuid::new_v4(), Uuid::new_v4());
+    let other_subject = Uuid::new_v4();
+    seed_subject_settings(&db, other_tenant, other_subject, ERASING).await;
+    let caller = context_of(Uuid::new_v4(), own_tenant);
+
+    let read = svc.owner_settings(&caller, other_subject).await;
+    let change = svc.set_personalization(&caller, other_subject, true).await;
+
+    assert!(
+        matches!(read, Err(DomainError::Forbidden(_))),
+        "got {read:?}"
+    );
+    assert!(
+        matches!(change, Err(DomainError::Forbidden(_))),
+        "got {change:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_change_in_one_tenant_leaves_the_same_subject_in_another_tenant_alone() {
+    let db = inmem_db().await;
+    let svc = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(true));
+    let (first, second, subject) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_subject_settings(&db, second, subject, ERASING).await;
+
+    svc.set_personalization(&context_of(subject, first), subject, false)
+        .await
+        .expect("change in the first tenant");
+
+    let in_second = svc
+        .owner_settings(&context_of(subject, second), subject)
+        .await
+        .expect("read in the second tenant");
+    assert_eq!(in_second, ERASING);
+}
+
+#[tokio::test]
+async fn owner_without_permission_is_denied_and_nothing_is_stored() {
+    let db = inmem_db().await;
+    let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
+    let ctx = context_of(subject, tenant);
+    let denied = service_with(&db, Arc::new(DenyResolver), StubDefaults::new(true));
+
+    let change = denied.set_personalization(&ctx, subject, false).await;
+    let read = denied.owner_settings(&ctx, subject).await;
+
+    assert!(
+        matches!(change, Err(DomainError::Forbidden(_))),
+        "got {change:?}"
+    );
+    assert!(
+        matches!(read, Err(DomainError::Forbidden(_))),
+        "got {read:?}"
+    );
+    let allowed = service_with(&db, Arc::new(AllowResolver), StubDefaults::new(true));
+    assert_eq!(
+        allowed.owner_settings(&ctx, subject).await.expect("read"),
+        SubjectSettings::new_subject(true),
+        "the denied change stored nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_change_asks_for_the_update_action() {
+    let db = inmem_db().await;
+    let resolver = Arc::new(RecordingResolver::default());
+    let svc = service_with(&db, resolver.clone(), StubDefaults::new(true));
+    let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
+
+    svc.set_personalization(&context_of(subject, tenant), subject, false)
+        .await
+        .expect("change");
+
+    let asked = resolver.asked.lock().unwrap().clone();
+    assert_eq!(
+        asked.first(),
+        Some(&(
+            "construct.subject_settings".to_owned(),
+            "update".to_owned(),
+            Some(subject),
+            Some(tenant.to_string()),
+        ))
     );
 }

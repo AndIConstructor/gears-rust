@@ -9,14 +9,19 @@
   - [1.3 Actors](#13-actors)
   - [1.4 References](#14-references)
 - [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
+  - [View One's Own Settings](#view-ones-own-settings)
+  - [Change One's Own Setting](#change-ones-own-setting)
 - [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [Read a Subject's Settings](#read-a-subjects-settings)
+  - [Owner Only](#owner-only)
   - [Read the Tenant's Personalization Default](#read-the-tenants-personalization-default)
+  - [Start the Settings Service](#start-the-settings-service)
 - [4. States (CDSL)](#4-states-cdsl)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [Subject Settings Table](#subject-settings-table)
   - [Settings Read](#settings-read)
   - [Tenant Default From the Settings Service](#tenant-default-from-the-settings-service)
+  - [Subject's Settings Routes](#subjects-settings-routes)
 - [6. Acceptance Criteria](#6-acceptance-criteria)
 - [7. Non-Functional Considerations](#7-non-functional-considerations)
 
@@ -31,7 +36,7 @@
 
 ### 1.1 Overview
 
-Subject Settings keeps, per subject, whether personalization is on and whether an erasure of the subject is under way. Record Intake, Admission and the Profile Reader read these two states. A subject Construct holds no row for starts with the tenant's personalization default, a tenant setting in the settings service. This document describes the first part of the feature, which Story 5.7.1 builds: the table, the read that other features call, and the tenant default.
+Subject Settings keeps, per subject, whether personalization is on and whether an erasure of the subject is under way. Record Intake, Admission and the Profile Reader read these two states. A subject Construct holds no row for starts with the tenant's personalization default, a tenant setting in the settings service. The subject reads and changes its own setting through two routes. This document describes the part of the feature that Story 5.7.1 builds: the table, the read that other features call, the tenant default, and the subject's settings routes.
 
 ### 1.2 Purpose
 
@@ -39,17 +44,18 @@ The PRD requires Construct to keep, for each subject, whether personalization is
 
 The table has one row per tenant and subject: the tenant id, the subject id, personalization on or off, and whether an erasure is under way. A subject without a row has not changed a setting. Its settings are the tenant's default with no erasure under way, and reading them stores nothing, so a change of the tenant default reaches every subject that has not chosen.
 
+The subject reads and changes its personalization setting through `GET` and `PUT /api/construct/v1/subjects/{subject_id}/settings` (the code registers `/construct/v1/...`; the gateway adds the prefix). Owner only: the path names the caller, or the call is refused with 403. A change applies from the next request. It never touches the erasure flag: turning personalization on during an erasure stores the choice, and the erasure keeps everything off until it is done, as the DESIGN says.
+
 **Out of scope** in this part (Story 5.7.1):
 
-- The subject's settings routes, `GET` and `PUT /api/construct/v1/subjects/{subject_id}/settings`. Story 5.7 leaves out the subject's own routes. So there is no write of a row yet, and no SDK client method for settings.
-- The settings in the subject's view and in the export, which belong to Subject Control.
-- Marking and clearing the erasure. Erasure owns that; the column exists so that it can.
-- Declaring the personalization default in the settings service. Nothing declares Construct's settings there yet (Story 5.11 decides whether the settings service runs in Construct's host). Until it does, a configured fallback stands in for the tenant setting.
-- Wiring the read into the gear's startup. The first feature that reads the settings, Record Intake, builds the service in `init` and adds the config key for the fallback.
+- The settings in the subject's view and in the export, which belong to Subject Control (Story 5.7.8).
+- SDK client methods for settings.
+- Marking and clearing the erasure. Erasure (Story 5.7.9) owns that; the column exists so that it can.
+- Declaring the personalization default in the settings service. Nothing declares Construct's settings there yet (Story 5.11 decides whether the settings service runs in Construct's host). Until it does, the config key `personalization_default` (default on) stands in for the tenant setting.
 - Retiring the foundation's placeholder route, client operations and table. Record Intake does that.
 - Refusing records, dropping plans and hiding facts when personalization is off or an erasure is under way. Record Intake, Admission and the Profile Reader do that.
 
-**Requirements**: `cpt-cf-construct-fr-settings` (partial: the stored state and the tenant default). `cpt-cf-construct-fr-subject-access` is shared with Subject Control and is not touched in this part.
+**Requirements**: `cpt-cf-construct-fr-settings`: the stored state, the tenant default, and the subject's read and change of its setting. Refusing records, dropping plans and hiding facts while personalization is off belong to the features named above. `cpt-cf-construct-fr-subject-access` is shared with Subject Control and is not touched in this part.
 
 **Principles**: None.
 
@@ -57,7 +63,8 @@ The table has one row per tenant and subject: the tenant id, the subject id, per
 
 | Actor | Role in Feature |
 |-------|-----------------|
-| `cpt-cf-construct-actor-platform-auth` | Decides, through the AuthZ resolver, whether the caller may read a subject's settings. Supplies the caller's tenant in the security context. |
+| `cpt-cf-construct-actor-subject` | Reads its own settings and turns personalization on or off. |
+| `cpt-cf-construct-actor-platform-auth` | Authenticates the caller and supplies its subject id and tenant in the security context. Decides, through the AuthZ resolver, whether the caller may read or change the settings ("Control the profiles one owns"). |
 | `cpt-cf-construct-actor-settings-service` | Holds the tenant's personalization default for new subjects. |
 | `cpt-cf-construct-actor-tenant-admin` | Sets the personalization default in the settings service. Construct keeps no tenant settings of its own. |
 
@@ -70,9 +77,52 @@ The table has one row per tenant and subject: the tenant id, the subject id, per
 
 ## 2. Actor Flows (CDSL)
 
-**Use cases**: None in this part. The subject's settings routes come later (see 1.2).
+The read in section 3 is also a domain service that Record Intake, Admission and the Profile Reader call in process, without the owner check.
 
-This part has no public surface. The read is a domain service that Record Intake, Admission and the Profile Reader call in process.
+### View One's Own Settings
+
+- [x] `p1` - **ID**: `cpt-cf-construct-flow-subject-settings-view`
+
+**Actor**: `cpt-cf-construct-actor-subject`
+
+**Success Scenarios**:
+- The subject reads its own settings and gets 200 with its subject id, whether personalization is on, and whether an erasure is under way. A subject without stored settings gets the tenant's default and no erasure under way.
+
+**Error Scenarios**:
+- The path names another subject, in this tenant or another: 403. The policy service is not asked.
+- The platform does not allow the caller to read the settings: 403.
+- The subject id in the path is not a UUID: 400.
+- The permission check or the tenant default cannot be read in time, or the settings service is unavailable: 503. Any other failure: 500.
+
+**Steps**:
+1. [x] - `p1` - Caller sends `GET /construct/v1/subjects/{subject_id}/settings`. The route is marked authenticated - `inst-view-send`
+2. [x] - `p1` - API: the extractors take the security context, the service and the subject id from the path; a subject id that is not a UUID gets 400 - `inst-view-parse`
+3. [x] - `p1` - Run `cpt-cf-construct-algo-subject-settings-owner-only` - `inst-view-owner`
+4. [x] - `p1` - Run `cpt-cf-construct-algo-subject-settings-read` for the subject - `inst-view-read`
+5. [x] - `p1` - **RETURN** 200 with `subject_id`, `personalization_enabled` and `erasure_in_progress` - `inst-view-return`
+
+### Change One's Own Setting
+
+- [x] `p1` - **ID**: `cpt-cf-construct-flow-subject-settings-change`
+
+**Actor**: `cpt-cf-construct-actor-subject`
+
+**Success Scenarios**:
+- The subject turns personalization on or off and gets 200 with the settings as stored. The next request sees the change.
+
+**Error Scenarios**:
+- The path names another subject, in this tenant or another: 403, and nothing is stored. The policy service is not asked.
+- The platform does not allow the caller to change the settings: 403, and nothing is stored.
+- The body is not valid JSON: 400. It lacks `personalization_enabled`, the value is not a boolean, or it has another field, such as `erasure_in_progress`: 422.
+- The permission check fails: 503 when a retry may help, 500 otherwise. The database fails: 500.
+
+**Steps**:
+1. [x] - `p1` - Caller sends `PUT /construct/v1/subjects/{subject_id}/settings` with `{"personalization_enabled": true|false}`. The route is marked authenticated - `inst-change-send`
+2. [x] - `p1` - API: the extractors take the security context, the service, the subject id from the path and the JSON body. The body refuses unknown fields - `inst-change-parse`
+3. [x] - `p1` - Run `cpt-cf-construct-algo-subject-settings-owner-only` - `inst-change-owner`
+4. [x] - `p1` - Ask the AuthZ resolver, through the policy enforcer, to decide on `construct.subject_settings` with the action `update`, the subject id as the resource id and the caller's tenant as the owner-tenant property. A denial is 403 - `inst-change-scope`
+5. [x] - `p1` - DB: INSERT the row (tenant, subject, personalization) through the secure ORM, checked against the scope; ON CONFLICT on (tenant, subject) UPDATE only `personalization_enabled`. A new row takes the column default for the erasure flag (no erasure under way); an existing row keeps its flag - `inst-change-store`
+6. [x] - `p1` - DB: read the row back within the scope. **RETURN** 200 with the settings as stored - `inst-change-return`
 
 ## 3. Processes / Business Logic (CDSL)
 
@@ -89,6 +139,19 @@ This part has no public surface. The read is a domain service that Record Intake
 2. [x] - `p1` - DB: acquire a connection and SELECT the row of the subject from `construct__subject_settings` through the secure ORM, filtered by the scope. A row of another tenant is outside the scope and is not read - `inst-read-select`
 3. [x] - `p1` - **IF** the row exists, **RETURN** its two states - `inst-read-stored`
 4. [x] - `p1` - Otherwise run `cpt-cf-construct-algo-subject-settings-tenant-default` for the tenant. **RETURN** personalization as the default says and no erasure under way. Store nothing - `inst-read-default`
+
+### Owner Only
+
+- [x] `p1` - **ID**: `cpt-cf-construct-algo-subject-settings-owner-only`
+
+**Input**: The security context and the subject id in the path.
+
+**Output**: Allowed, or a forbidden error.
+
+**Steps**:
+1. [x] - `p1` - **IF** the subject id is the caller's (`SecurityContext::subject_id`), continue. The caller's tenant is the only tenant the routes work in, so a subject of another tenant is never the caller - `inst-owner-compare`
+2. [x] - `p1` - Otherwise refuse with a forbidden error, before the policy service is asked and before anything is read or written - `inst-owner-refuse`
+3. [x] - `p1` - On the routes the refusal is 403 with the reason `ACCESS_DENIED` and the resource type `gts.cf.construct.subject.settings.v1~`; the internal message stays out of the answer. A 403 rather than a 404: a subject without stored settings answers 200, so a 404 would not look like any real subject - `inst-owner-refuse-return`
 
 ### Read the Tenant's Personalization Default
 
@@ -110,9 +173,20 @@ Errors are not logged here: as in the foundation, every domain error is logged o
 5. [x] - `p1` - **IF** the settings service is unavailable, or the failure is one a retry may cure (deadline exceeded, resource exhausted: the categories the foundation also treats as retryable), **RETURN** an unavailable error. The settings service's retry delay is not passed on, because the unavailable error carries none, as on the policy-service path. The fallback is not used: a guess could turn personalization on for a tenant whose default is off - `inst-default-unavailable`
 6. [x] - `p1` - **IF** the read fails for any other reason, such as a denied read or a not found that is not the declaration's, **RETURN** an internal error - `inst-default-failed`
 
+### Start the Settings Service
+
+- [x] `p1` - **ID**: `cpt-cf-construct-algo-subject-settings-start`
+
+**Input**: The gear configuration, the database provider, the policy enforcer and ClientHub.
+
+**Output**: The settings service, held by the gear for its routes.
+
+**Steps**:
+1. [x] - `p1` - In `init`, build the tenant default from ClientHub and the config key `personalization_default` (default on; an unknown key is refused), and the settings service on the database provider and the policy enforcer. Store it once; a second initialization fails. The REST capability hook registers the two routes with it - `inst-settings-start`
+
 ## 4. States (CDSL)
 
-None in this part. The two states are stored values, not a state machine: a subject turns personalization on and off through the settings routes, and Erasure sets and clears the erasure flag. Both come later.
+None. The two states are stored values, not a state machine: the subject turns personalization on and off through the settings routes, and Erasure sets and clears the erasure flag.
 
 ## 5. Definitions of Done
 
@@ -160,6 +234,25 @@ The system **MUST** read the personalization default from the settings service t
 
 **Verified by**: `without_a_settings_client_the_configured_default_stands`, `the_tenant_value_wins_over_the_configured_default`, `reads_the_construct_key_for_the_tenant_scope`, `an_undeclared_setting_falls_back_to_the_configured_default`, `a_retired_setting_falls_back_to_the_configured_default`, `a_not_found_for_anything_but_the_declaration_is_an_internal_error`, `an_unavailable_settings_service_is_an_unavailable_error`, `a_retryable_failure_is_an_unavailable_error`, `a_read_without_an_answer_in_time_is_an_unavailable_error`, `any_other_failure_is_an_internal_error`, `a_value_that_is_not_a_boolean_is_an_internal_error`, `the_fallback_keeps_answering_after_its_first_warning`. The settings client is a stub registered in a ClientHub; the real settings service was not run. No test checks the log output, so the warn-once logging is verified by review only.
 
+### Subject's Settings Routes
+
+- [x] `p1` - **ID**: `cpt-cf-construct-dod-subject-settings-routes`
+
+The system **MUST** serve `GET` and `PUT /construct/v1/subjects/{subject_id}/settings`, authenticated, owner only, with their own permission checks (`get`, `update`). A change **MUST** apply from the next request, **MUST NOT** change the erasure flag, and **MUST** refuse a body with any field other than `personalization_enabled`. Another subject or tenant **MUST** be refused with 403 before the policy service is asked, and nothing is stored.
+
+**Implements**:
+- `cpt-cf-construct-flow-subject-settings-view`
+- `cpt-cf-construct-flow-subject-settings-change`
+- `cpt-cf-construct-algo-subject-settings-owner-only`
+- `cpt-cf-construct-algo-subject-settings-start`
+
+**Touches**:
+- API: `GET`, `PUT /construct/v1/subjects/{subject_id}/settings`
+- DB Table: `construct__subject_settings`
+- Config: `personalization_default`
+
+**Verified by**: `owner_without_stored_settings_gets_200_with_the_tenant_default`, `owner_changes_the_setting_and_reads_it_back`, `the_erasure_flag_is_shown_and_survives_a_change`, `another_subject_gets_403_for_both_routes`, `a_subject_of_another_tenant_gets_403`, `owner_the_platform_denies_gets_403`, `a_body_that_tries_to_set_the_erasure_flag_gets_422`, `a_body_without_the_setting_gets_422_and_bad_json_gets_400`, `a_subject_id_that_is_not_a_uuid_gets_400` (routes), `owner_reads_its_own_settings`, `owner_changes_personalization_and_the_next_read_sees_it`, `turning_personalization_on_does_not_end_an_erasure`, `another_subject_is_refused_before_the_policy_service_is_asked`, `a_subject_of_another_tenant_is_refused`, `a_change_in_one_tenant_leaves_the_same_subject_in_another_tenant_alone`, `owner_without_permission_is_denied_and_nothing_is_stored`, `a_change_asks_for_the_update_action` (service), `setting_personalization_creates_a_row_without_an_erasure`, `setting_personalization_keeps_the_erasure_flag_of_an_existing_row`, `setting_personalization_outside_the_scope_is_forbidden` (repository), and `personalization_default_is_read` (config). The routes run in process on in-memory SQLite with stub policy services. `init` is not run in tests; the real gateway (the 401 case), the real AuthZ resolver and MySQL/PostgreSQL were not exercised.
+
 ## 6. Acceptance Criteria
 
 - [ ] The table is scoped by tenant through the secure data path; a cross-tenant read returns nothing (`row_of_another_tenant_is_not_found`, `settings_of_another_tenant_are_not_visible`).
@@ -169,12 +262,15 @@ The system **MUST** read the personalization default from the settings service t
 - [ ] The default is read from the settings service through ClientHub, with a stub in the tests (`the_tenant_value_wins_over_the_configured_default`, `reads_the_construct_key_for_the_tenant_scope`), and falls back to the configured value only when there is no settings client or no declaration (`without_a_settings_client_the_configured_default_stands`, `an_undeclared_setting_falls_back_to_the_configured_default`, `a_retired_setting_falls_back_to_the_configured_default`, `a_not_found_for_anything_but_the_declaration_is_an_internal_error`).
 - [ ] A settings service that is unavailable, too slow or throttling gives an unavailable error, never the fallback (`an_unavailable_settings_service_is_an_unavailable_error`, `a_retryable_failure_is_an_unavailable_error`, `a_read_without_an_answer_in_time_is_an_unavailable_error`).
 - [ ] One row per tenant and subject: a second row is refused, and an insert without the erasure flag stores it cleared (`second_row_for_the_same_tenant_and_subject_is_refused`, `erasure_flag_defaults_to_cleared_when_the_insert_leaves_it_out`).
+- [ ] The owner reads and changes its setting through the routes, and the next read sees the change (`owner_without_stored_settings_gets_200_with_the_tenant_default`, `owner_changes_the_setting_and_reads_it_back`).
+- [ ] Another subject or tenant is refused with 403 on both routes, before the policy service is asked, and nothing is stored (`another_subject_gets_403_for_both_routes`, `a_subject_of_another_tenant_gets_403`, `another_subject_is_refused_before_the_policy_service_is_asked`, `a_subject_of_another_tenant_is_refused`).
+- [ ] A change keeps the erasure flag, and the body cannot set it (`the_erasure_flag_is_shown_and_survives_a_change`, `turning_personalization_on_does_not_end_an_erasure`, `a_body_that_tries_to_set_the_erasure_flag_gets_422`).
 - [ ] The tests named in this document pass. They run on an in-memory SQLite database.
 
 ## 7. Non-Functional Considerations
 
-- **Security**: The tenant comes only from the security context. Each read asks the AuthZ resolver for its own permission, and the scope it returns filters the select, so another tenant's row is never read. The settings service is read with the caller's security context.
-- **Data integrity**: One row per tenant and subject, enforced by the primary key. Reading never writes. The erasure flag starts cleared.
+- **Security**: The tenant and the caller come only from the security context. The routes are owner only: another subject is refused before anything else happens. Each read and each change asks the AuthZ resolver for its own permission, and the scope it returns filters the select and checks the insert, so another tenant's row is never read or written. The body cannot set the erasure flag. The settings service is read with the caller's security context.
+- **Data integrity**: One row per tenant and subject, enforced by the primary key. Reading never writes. A change is one upsert that updates only `personalization_enabled`, so two changes at once cannot create two rows, and the erasure flag starts cleared and is never changed by the subject.
 - **Reliability**: An unavailable, slow or throttling settings service is an error, not a silent default, because personalization is a privacy setting. Each read is bounded by a timeout (5 seconds by default). The settings client is resolved on each read, so a settings service that starts after Construct is picked up.
 - **Observability**: The read carries a tracing span with the tenant id and the subject id. The first use of the fallback for each reason is logged at warn level with the tenant id, the key and the reason, later uses at debug level. Errors are logged once, where they are mapped to a response, as in the foundation; their message names the setting key.
 - **Rollback**: The migration has a `down` step that drops the table. It has no test.

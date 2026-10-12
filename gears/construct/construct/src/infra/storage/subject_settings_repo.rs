@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use sea_orm::{ColumnTrait, Condition, EntityTrait};
-use toolkit_db::secure::{DBRunner, SecureEntityExt};
+use sea_orm::{ActiveValue, ColumnTrait, Condition, EntityTrait};
+use toolkit_db::secure::{DBRunner, SecureEntityExt, SecureInsertExt, SecureOnConflict};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -41,5 +41,42 @@ impl SubjectSettingsRepository for SeaOrmSubjectSettingsRepository {
         // @cpt-end:cpt-cf-construct-algo-subject-settings-read:p1:inst-read-select
 
         Ok(row.map(Into::into))
+    }
+
+    async fn set_personalization<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        subject_id: Uuid,
+        personalization_enabled: bool,
+    ) -> Result<(), DomainError> {
+        // The erasure flag is left out of the insert, so a new row takes the
+        // column default (no erasure under way), and out of the update, so an
+        // existing row keeps it.
+        let row = entity::ActiveModel {
+            tenant_id: ActiveValue::Set(tenant_id),
+            subject_id: ActiveValue::Set(subject_id),
+            personalization_enabled: ActiveValue::Set(personalization_enabled),
+            erasure_in_progress: ActiveValue::NotSet,
+        };
+        let on_conflict = SecureOnConflict::<SubjectSettingsEntity>::columns([
+            entity::Column::TenantId,
+            entity::Column::SubjectId,
+        ])
+        .update_columns([entity::Column::PersonalizationEnabled])
+        .map_err(map_scope_error)?;
+
+        // @cpt-begin:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-store
+        SubjectSettingsEntity::insert(row.clone())
+            .secure()
+            .scope_with_model(scope, &row)
+            .map_err(map_scope_error)?
+            .on_conflict(on_conflict)
+            .exec(conn)
+            .await
+            .map_err(map_scope_error)?;
+        // @cpt-end:cpt-cf-construct-flow-subject-settings-change:p1:inst-change-store
+        Ok(())
     }
 }

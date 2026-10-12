@@ -124,3 +124,66 @@ async fn second_row_for_the_same_tenant_and_subject_is_refused() {
         .expect("find");
     assert_eq!(found, Some(ERASING), "the first row is unchanged");
 }
+
+#[tokio::test]
+async fn setting_personalization_creates_a_row_without_an_erasure() {
+    let db = inmem_db().await;
+    let conn = db.conn().expect("connection");
+    let repo = SeaOrmSubjectSettingsRepository::new();
+    let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
+    let scope = AccessScope::for_tenant(tenant);
+
+    repo.set_personalization(&conn, &scope, tenant, subject, false)
+        .await
+        .expect("create");
+
+    let found = repo.find(&conn, &scope, subject).await.expect("find");
+    assert_eq!(found, Some(SubjectSettings::new_subject(false)));
+}
+
+#[tokio::test]
+async fn setting_personalization_keeps_the_erasure_flag_of_an_existing_row() {
+    let db = inmem_db().await;
+    let conn = db.conn().expect("connection");
+    let repo = SeaOrmSubjectSettingsRepository::new();
+    let (tenant, subject) = (Uuid::new_v4(), Uuid::new_v4());
+    let scope = AccessScope::for_tenant(tenant);
+    seed_subject_settings(&db, tenant, subject, ERASING).await;
+
+    repo.set_personalization(&conn, &scope, tenant, subject, true)
+        .await
+        .expect("update");
+
+    let found = repo.find(&conn, &scope, subject).await.expect("find");
+    assert_eq!(
+        found,
+        Some(SubjectSettings {
+            personalization_enabled: true,
+            erasure_in_progress: true,
+        })
+    );
+}
+
+#[tokio::test]
+async fn setting_personalization_outside_the_scope_is_forbidden() {
+    let db = inmem_db().await;
+    let conn = db.conn().expect("connection");
+    let repo = SeaOrmSubjectSettingsRepository::new();
+    let (own, other, subject) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    seed_subject_settings(&db, other, subject, ERASING).await;
+
+    let err = repo
+        .set_personalization(&conn, &AccessScope::for_tenant(own), other, subject, true)
+        .await
+        .expect_err("a row of another tenant is outside the scope");
+
+    assert!(
+        matches!(err, crate::domain::error::DomainError::Forbidden(_)),
+        "got {err:?}"
+    );
+    let untouched = repo
+        .find(&conn, &AccessScope::for_tenant(other), subject)
+        .await
+        .expect("find");
+    assert_eq!(untouched, Some(ERASING));
+}

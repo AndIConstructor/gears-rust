@@ -2,22 +2,26 @@
 //! database with the gear's migrations, a security context, and stub policy
 //! services.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use authz_resolver_sdk::{
-    AuthZResolverApi,
+    AuthZResolverApi, PolicyEnforcer,
     constraints::{Constraint, InPredicate, Predicate},
     models::{EvaluationRequest, EvaluationResponse, EvaluationResponseContext},
 };
 use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::secure::ScopeError;
-use toolkit_db::{ConnectOpts, Db, connect_db};
+use toolkit_db::{ConnectOpts, DBProvider, Db, connect_db};
 use toolkit_security::{AccessScope, PlatformSecurityContext, SecurityContext, pep_properties};
 use uuid::Uuid;
 
-use crate::domain::subject_settings::SubjectSettings;
+use crate::domain::error::DomainError;
+use crate::domain::subject_settings::{SubjectSettings, SubjectSettingsService, TenantDefaults};
 use crate::infra::storage::migrations::Migrator;
 use crate::infra::storage::subject_settings_entity;
+use crate::infra::storage::subject_settings_repo::SeaOrmSubjectSettingsRepository;
 
 /// Allows every request and constrains the answer to the subject's tenant and,
 /// when the request names one, the resource id (like a real PDP).
@@ -103,11 +107,45 @@ pub async fn inmem_db() -> Db {
 }
 
 pub fn context_in(tenant_id: Uuid) -> SecurityContext {
+    context_of(Uuid::new_v4(), tenant_id)
+}
+
+/// The security context of one subject in one tenant.
+pub fn context_of(subject_id: Uuid, tenant_id: Uuid) -> SecurityContext {
     SecurityContext::builder()
-        .subject_id(Uuid::new_v4())
+        .subject_id(subject_id)
         .subject_tenant_id(tenant_id)
         .build()
         .unwrap()
+}
+
+/// The same personalization default for every tenant.
+pub struct FixedDefaults(pub bool);
+
+#[async_trait]
+impl TenantDefaults for FixedDefaults {
+    async fn personalization_default(
+        &self,
+        _ctx: &SecurityContext,
+        _tenant_id: Uuid,
+    ) -> Result<bool, DomainError> {
+        Ok(self.0)
+    }
+}
+
+/// A subject settings service on `db`, with `resolver` as the policy service
+/// and `personalization_default` as every tenant's default.
+pub fn settings_service(
+    db: &Db,
+    resolver: Arc<dyn AuthZResolverApi>,
+    personalization_default: bool,
+) -> SubjectSettingsService<SeaOrmSubjectSettingsRepository> {
+    SubjectSettingsService::new(
+        Arc::new(DBProvider::new(db.clone())),
+        Arc::new(SeaOrmSubjectSettingsRepository::new()),
+        Arc::new(FixedDefaults(personalization_default)),
+        PolicyEnforcer::new(resolver),
+    )
 }
 
 /// Stores one subject's settings row in `tenant_id`, through the secure ORM
