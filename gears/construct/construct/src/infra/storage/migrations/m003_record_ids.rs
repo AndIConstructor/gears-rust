@@ -41,7 +41,9 @@ const DROP_PLACEHOLDER: &str = "DROP TABLE IF EXISTS construct__foundation_notes
 /// record identity. The identity (connector, provenance, version) can be
 /// longer than a `MySQL` key allows, so the key holds its SHA-256 in hex,
 /// `record_key`; the parts are kept beside it. The subject index serves
-/// erasure, which removes a subject's rows.
+/// erasure, which removes a subject's rows. On `MySQL` the table pins the
+/// character set `utf8mb4`, as the foundation's table does, so a provenance
+/// with 4-byte characters is stored whatever the server default.
 fn ddl_for(backend: sea_orm::DatabaseBackend) -> Option<&'static str> {
     Some(match backend {
         sea_orm::DatabaseBackend::Postgres => {
@@ -71,7 +73,7 @@ CREATE TABLE IF NOT EXISTS construct__record_ids (
     received_at TIMESTAMP(6) NOT NULL,
     PRIMARY KEY (tenant_id, record_key),
     INDEX idx_construct__record_ids__subject (tenant_id, subject_id)
-);
+) DEFAULT CHARACTER SET utf8mb4;
                 "
         }
         sea_orm::DatabaseBackend::Sqlite => {
@@ -158,6 +160,12 @@ mod tests {
             .await
             .expect("the rest applies");
         assert!(!has_notes(&db).await, "m003_record_ids drops it");
+    }
+
+    #[test]
+    fn mysql_ddl_pins_utf8mb4() {
+        let sql = ddl_for(DatabaseBackend::MySql).expect("mysql ddl");
+        assert!(sql.contains(") DEFAULT CHARACTER SET utf8mb4;"));
     }
 
     #[test]
