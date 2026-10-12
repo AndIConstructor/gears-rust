@@ -123,6 +123,7 @@ impl Bootstrap {
         }
     }
 
+    /// Run the bootstrap steps, naming the dependency that failed.
     async fn run_steps(&self) -> Result<Bound, (Dependency, DomainError)> {
         // @cpt-begin:cpt-cf-quota-enforcement-flow-gear-bootstrap:p1:inst-boot-start
         // Exactly one active storage plugin: the instance the configured vendor
