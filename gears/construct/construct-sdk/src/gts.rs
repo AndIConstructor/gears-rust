@@ -9,28 +9,28 @@
 //!
 //! @cpt-dod:cpt-cf-construct-dod-record-intake-types:p1
 
-use toolkit_gts::InventoryTypeSchema;
+use toolkit_gts::{InventoryTypeSchema, gts_id};
 
 /// The abstract base every connector record type derives from. It fixes the
 /// envelope: `type`, `provenance`, `version`, `observed_at`, the optional
 /// `subject_id`, and the `payload` a derived type refines.
-pub const RECORD_BASE_TYPE: &str = "gts.cf.connectors.core.record.v1~";
+pub const RECORD_BASE_TYPE: &str = gts_id!("cf.connectors.core.record.v1~");
 
 /// A raw chat message from the chat export.
 pub const CHAT_MESSAGE_TYPE: &str =
-    "gts.cf.connectors.core.record.v1~cf.construct.chat.message.v1~";
+    gts_id!("cf.connectors.core.record.v1~cf.construct.chat.message.v1~");
 
 /// A fact candidate from an enrichment connector.
 pub const ENRICHMENT_FACT_CANDIDATE_TYPE: &str =
-    "gts.cf.connectors.core.record.v1~cf.construct.enrichment.fact_candidate.v1~";
+    gts_id!("cf.connectors.core.record.v1~cf.construct.enrichment.fact_candidate.v1~");
 
 /// A course catalog entry from the mastery connector.
 pub const MASTERY_COURSE_CATALOG_TYPE: &str =
-    "gts.cf.connectors.core.record.v1~cf.construct.mastery.course_catalog.v1~";
+    gts_id!("cf.connectors.core.record.v1~cf.construct.mastery.course_catalog.v1~");
 
 /// A student's mastery from the mastery connector.
 pub const MASTERY_STUDENT_MASTERY_TYPE: &str =
-    "gts.cf.connectors.core.record.v1~cf.construct.mastery.student_mastery.v1~";
+    gts_id!("cf.connectors.core.record.v1~cf.construct.mastery.student_mastery.v1~");
 
 /// The schema of the record base type: the envelope every record must pass.
 pub const RECORD_BASE_SCHEMA: &str =
