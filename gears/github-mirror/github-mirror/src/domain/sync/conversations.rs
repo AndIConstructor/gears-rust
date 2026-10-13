@@ -23,6 +23,7 @@ use crate::domain::repo::{
 /// The least a blockquote must share, after normalisation, with an earlier
 /// comment to be read as a reply to it.
 pub const MIN_QUOTE_OVERLAP: usize = 16;
+const GROUPING_BATCH: usize = 500;
 pub const INLINE: &str = "inline";
 pub const TOPLEVEL: &str = "toplevel";
 const PULL_REQUEST: &str = "pull_request";
@@ -52,17 +53,39 @@ pub async fn group_conversations(
         .await?
         .into_iter()
         .collect();
-    let inline = group_inline(repo, scope, tenant_id, repo_id, changed_since).await?;
-    let toplevel = group_toplevel(
-        repo,
-        scope,
-        tenant_id,
-        repo_id,
-        &pull_numbers,
-        changed_since,
-    )
-    .await?;
-    Ok(ConversationStats { inline, toplevel })
+    let mut stats = ConversationStats::default();
+    let pulls = parents_to_group(repo, scope, repo_id, INLINE, changed_since).await?;
+    for batch in pulls.chunks(GROUPING_BATCH) {
+        stats.inline += group_inline(repo, scope, tenant_id, repo_id, batch).await?;
+    }
+    let issues = parents_to_group(repo, scope, repo_id, TOPLEVEL, changed_since).await?;
+    for batch in issues.chunks(GROUPING_BATCH) {
+        stats.toplevel +=
+            group_toplevel(repo, scope, tenant_id, repo_id, &pull_numbers, batch).await?;
+    }
+    Ok(stats)
+}
+
+async fn parents_to_group(
+    repo: &dyn ConversationRepository,
+    scope: &AccessScope,
+    repo_id: i64,
+    conv_type: &str,
+    changed_since: Option<DateTime<Utc>>,
+) -> Result<Vec<i64>, DomainError> {
+    let mut parents = if conv_type == INLINE {
+        repo.pulls_with_review_comments_since(scope, repo_id, changed_since)
+            .await?
+    } else {
+        repo.issues_with_comments_since(scope, repo_id, changed_since)
+            .await?
+    };
+    if changed_since.is_none() {
+        parents.extend(repo.conversation_parents(scope, repo_id, conv_type).await?);
+        parents.sort_unstable();
+        parents.dedup();
+    }
+    Ok(parents)
 }
 
 async fn group_inline(
@@ -70,27 +93,11 @@ async fn group_inline(
     scope: &AccessScope,
     tenant_id: Uuid,
     repo_id: i64,
-    changed_since: Option<DateTime<Utc>>,
+    pulls: &[i64],
 ) -> Result<u64, DomainError> {
-    let in_scope: Option<Vec<i64>> = match changed_since {
-        None => None,
-        Some(since) => {
-            let pulls = repo
-                .pulls_with_review_comments_since(scope, repo_id, since)
-                .await?;
-            if pulls.is_empty() {
-                return Ok(0);
-            }
-            Some(pulls)
-        }
-    };
-
     let comments = repo
-        .review_comments_for_grouping(scope, repo_id, in_scope.as_deref())
+        .review_comments_for_grouping(scope, repo_id, pulls)
         .await?;
-    if comments.is_empty() {
-        return Ok(0);
-    }
     let by_id: HashMap<i64, &ReviewCommentForGrouping> =
         comments.iter().map(|c| (c.id, c)).collect();
     let root_of: HashMap<i64, i64> = comments
@@ -108,7 +115,7 @@ async fn group_inline(
 
     let mut threads_by_pull: HashMap<i64, Vec<ReviewThreadForGrouping>> = HashMap::new();
     for thread in repo
-        .review_threads_for_grouping(scope, repo_id, in_scope.as_deref())
+        .review_threads_for_grouping(scope, repo_id, pulls)
         .await?
     {
         threads_by_pull
@@ -143,7 +150,7 @@ async fn group_inline(
         }
     }
 
-    let existing = existing_by_root(repo, scope, repo_id, INLINE, in_scope.as_deref()).await?;
+    let existing = existing_by_root(repo, scope, repo_id, INLINE, pulls).await?;
     for (root, conversation) in &conversations {
         let record =
             conversation.record(repo_id, INLINE, *root, resolved_by_root.get(root).copied());
@@ -151,6 +158,7 @@ async fn group_inline(
             repo.upsert(scope, tenant_id, record).await?;
         }
     }
+    remove_stale(repo, scope, repo_id, INLINE, &existing, &conversations).await?;
     for c in &comments {
         let desired = root_of.get(&c.id).copied();
         if c.conversation_id != desired {
@@ -167,24 +175,9 @@ async fn group_toplevel(
     tenant_id: Uuid,
     repo_id: i64,
     pull_numbers: &HashSet<i64>,
-    changed_since: Option<DateTime<Utc>>,
+    issues: &[i64],
 ) -> Result<u64, DomainError> {
-    let in_scope: Option<Vec<i64>> = match changed_since {
-        None => None,
-        Some(since) => {
-            let issues = repo
-                .issues_with_comments_since(scope, repo_id, since)
-                .await?;
-            if issues.is_empty() {
-                return Ok(0);
-            }
-            Some(issues)
-        }
-    };
-
-    let mut comments = repo
-        .comments_for_grouping(scope, repo_id, in_scope.as_deref())
-        .await?;
+    let mut comments = repo.comments_for_grouping(scope, repo_id, issues).await?;
     comments.sort_by(|a, b| {
         a.issue_number
             .cmp(&b.issue_number)
@@ -194,10 +187,7 @@ async fn group_toplevel(
 
     let mut root_of: HashMap<i64, i64> = HashMap::new();
     let mut conversations: HashMap<i64, Conversation> = HashMap::new();
-    let Some(first) = comments.first() else {
-        return Ok(0);
-    };
-    let mut current_issue = first.issue_number;
+    let mut current_issue = comments.first().map_or(0, |c| c.issue_number);
     let mut prior: Vec<(i64, String)> = Vec::new();
 
     for c in &comments {
@@ -231,13 +221,14 @@ async fn group_toplevel(
         prior.push((c.id, normalized));
     }
 
-    let existing = existing_by_root(repo, scope, repo_id, TOPLEVEL, in_scope.as_deref()).await?;
+    let existing = existing_by_root(repo, scope, repo_id, TOPLEVEL, issues).await?;
     for (root, conversation) in &conversations {
         let record = conversation.record(repo_id, TOPLEVEL, *root, None);
         if existing.get(root) != Some(&record) {
             repo.upsert(scope, tenant_id, record).await?;
         }
     }
+    remove_stale(repo, scope, repo_id, TOPLEVEL, &existing, &conversations).await?;
     for c in &comments {
         let desired = root_of.get(&c.id).copied();
         if c.conversation_id != desired {
@@ -248,26 +239,36 @@ async fn group_toplevel(
     Ok(count(conversations.len()))
 }
 
+async fn remove_stale(
+    repo: &dyn ConversationRepository,
+    scope: &AccessScope,
+    repo_id: i64,
+    conv_type: &str,
+    existing: &HashMap<i64, LogicalConversation>,
+    derived: &HashMap<i64, Conversation>,
+) -> Result<(), DomainError> {
+    let stale: Vec<i64> = existing
+        .keys()
+        .filter(|root| !derived.contains_key(root))
+        .copied()
+        .collect();
+    if !stale.is_empty() {
+        repo.delete(scope, repo_id, conv_type, &stale).await?;
+    }
+    Ok(())
+}
+
 async fn existing_by_root(
     repo: &dyn ConversationRepository,
     scope: &AccessScope,
     repo_id: i64,
     conv_type: &str,
-    in_scope: Option<&[i64]>,
+    parents: &[i64],
 ) -> Result<HashMap<i64, LogicalConversation>, DomainError> {
-    let rows = match in_scope {
-        None => repo.list(scope, repo_id, None).await?,
-        Some(parents) => {
-            let mut out = Vec::new();
-            for &parent in parents {
-                out.extend(repo.list(scope, repo_id, Some(parent)).await?);
-            }
-            out
-        }
-    };
-    Ok(rows
+    Ok(repo
+        .conversations_of(scope, repo_id, conv_type, parents)
+        .await?
         .into_iter()
-        .filter(|row| row.conv_type == conv_type)
         .map(|row| (row.root_comment_id, row))
         .collect())
 }

@@ -2031,45 +2031,60 @@ pub trait ConversationRepository: Send + Sync {
         repo_id: i64,
     ) -> Result<Vec<i64>, DomainError>;
 
-    /// Top-level comments of the whole repository (`None`) or of the issues
-    /// and pull requests listed.
+    /// Top-level comments of the issues and pull requests listed.
     async fn comments_for_grouping(
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        issue_numbers: Option<&[i64]>,
+        issue_numbers: &[i64],
     ) -> Result<Vec<CommentForGrouping>, DomainError>;
 
     async fn review_comments_for_grouping(
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        pull_numbers: Option<&[i64]>,
+        pull_numbers: &[i64],
     ) -> Result<Vec<ReviewCommentForGrouping>, DomainError>;
 
     async fn review_threads_for_grouping(
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        pull_numbers: Option<&[i64]>,
+        pull_numbers: &[i64],
     ) -> Result<Vec<ReviewThreadForGrouping>, DomainError>;
 
     /// Issues and pull requests with a top-level comment a sync wrote at or
-    /// after `since`.
+    /// after `since`, or with any top-level comment when `since` is `None`.
     async fn issues_with_comments_since(
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        since: DateTime<Utc>,
+        since: Option<DateTime<Utc>>,
     ) -> Result<Vec<i64>, DomainError>;
 
-    /// Pull requests with a review comment a sync wrote at or after `since`.
+    /// Pull requests with a review comment a sync wrote at or after `since`,
+    /// or with any review comment when `since` is `None`.
     async fn pulls_with_review_comments_since(
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        since: DateTime<Utc>,
+        since: Option<DateTime<Utc>>,
     ) -> Result<Vec<i64>, DomainError>;
+
+    async fn conversation_parents(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        conv_type: &str,
+    ) -> Result<Vec<i64>, DomainError>;
+
+    async fn conversations_of(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        conv_type: &str,
+        parent_numbers: &[i64],
+    ) -> Result<Vec<LogicalConversation>, DomainError>;
 
     /// Every conversation of the repository, or those under one issue or
     /// pull-request number, ordered by parent, type and root.
@@ -2086,6 +2101,14 @@ pub trait ConversationRepository: Send + Sync {
         tenant_id: Uuid,
         record: LogicalConversation,
     ) -> Result<(), DomainError>;
+
+    async fn delete(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        conv_type: &str,
+        root_comment_ids: &[i64],
+    ) -> Result<u64, DomainError>;
 
     async fn set_comment_conversation(
         &self,

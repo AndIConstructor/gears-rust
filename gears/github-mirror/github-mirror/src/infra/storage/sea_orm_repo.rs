@@ -6390,24 +6390,15 @@ impl SeaOrmConversationRepository {
 
 const GROUPING_CHUNK: usize = 500;
 
-fn parent_chunks(numbers: Option<&[i64]>) -> Vec<Option<&[i64]>> {
-    match numbers {
-        None => vec![None],
-        Some(all) => all.chunks(GROUPING_CHUNK).map(Some).collect(),
-    }
-}
-
 fn rows_of_parents<C: ColumnTrait>(
     repo_column: C,
     repo_id: i64,
     parent_column: C,
-    parents: Option<&[i64]>,
+    parents: &[i64],
 ) -> sea_orm::Condition {
-    let mut condition = sea_orm::Condition::all().add(repo_column.eq(repo_id));
-    if let Some(parents) = parents {
-        condition = condition.add(parent_column.is_in(parents.iter().copied()));
-    }
-    condition
+    sea_orm::Condition::all()
+        .add(repo_column.eq(repo_id))
+        .add(parent_column.is_in(parents.iter().copied()))
 }
 
 fn conversation_from_model(m: logical_conversations::Model) -> LogicalConversation {
@@ -6426,6 +6417,32 @@ fn conversation_from_model(m: logical_conversations::Model) -> LogicalConversati
 #[derive(sea_orm::FromQueryResult)]
 struct ParentNumber {
     number: i64,
+}
+
+#[derive(sea_orm::FromQueryResult)]
+struct CommentGroupingRow {
+    id: i64,
+    issue_number: i64,
+    body: Option<String>,
+    created_at: String,
+    conversation_id: Option<i64>,
+}
+
+#[derive(sea_orm::FromQueryResult)]
+struct ReviewCommentGroupingRow {
+    id: i64,
+    pull_number: i64,
+    in_reply_to_id: Option<i64>,
+    created_at: String,
+    conversation_id: Option<i64>,
+}
+
+#[derive(sea_orm::FromQueryResult)]
+struct ReviewThreadGroupingRow {
+    id: String,
+    pull_number: i64,
+    is_resolved: bool,
+    comments_count: i64,
 }
 
 #[async_trait]
@@ -6455,12 +6472,12 @@ impl ConversationRepository for SeaOrmConversationRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        issue_numbers: Option<&[i64]>,
+        issue_numbers: &[i64],
     ) -> Result<Vec<CommentForGrouping>, DomainError> {
         let conn = self.db.conn()?;
         let mut out = Vec::new();
-        for chunk in parent_chunks(issue_numbers) {
-            let rows = CommentEntity::find()
+        for chunk in issue_numbers.chunks(GROUPING_CHUNK) {
+            let rows: Vec<CommentGroupingRow> = CommentEntity::find()
                 .secure()
                 .scope_with(scope)
                 .filter(rows_of_parents(
@@ -6469,7 +6486,18 @@ impl ConversationRepository for SeaOrmConversationRepository {
                     comments::Column::IssueNumber,
                     chunk,
                 ))
-                .all(&conn)
+                .project_all(&conn, |select| {
+                    select
+                        .select_only()
+                        .columns([
+                            comments::Column::Id,
+                            comments::Column::IssueNumber,
+                            comments::Column::Body,
+                            comments::Column::CreatedAt,
+                            comments::Column::ConversationId,
+                        ])
+                        .into_model::<CommentGroupingRow>()
+                })
                 .await
                 .map_err(map_scope_error)?;
             out.extend(rows.into_iter().map(|m| CommentForGrouping {
@@ -6487,12 +6515,12 @@ impl ConversationRepository for SeaOrmConversationRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        pull_numbers: Option<&[i64]>,
+        pull_numbers: &[i64],
     ) -> Result<Vec<ReviewCommentForGrouping>, DomainError> {
         let conn = self.db.conn()?;
         let mut out = Vec::new();
-        for chunk in parent_chunks(pull_numbers) {
-            let rows = ReviewCommentEntity::find()
+        for chunk in pull_numbers.chunks(GROUPING_CHUNK) {
+            let rows: Vec<ReviewCommentGroupingRow> = ReviewCommentEntity::find()
                 .secure()
                 .scope_with(scope)
                 .filter(rows_of_parents(
@@ -6501,7 +6529,18 @@ impl ConversationRepository for SeaOrmConversationRepository {
                     review_comments::Column::PullNumber,
                     chunk,
                 ))
-                .all(&conn)
+                .project_all(&conn, |select| {
+                    select
+                        .select_only()
+                        .columns([
+                            review_comments::Column::Id,
+                            review_comments::Column::PullNumber,
+                            review_comments::Column::InReplyToId,
+                            review_comments::Column::CreatedAt,
+                            review_comments::Column::ConversationId,
+                        ])
+                        .into_model::<ReviewCommentGroupingRow>()
+                })
                 .await
                 .map_err(map_scope_error)?;
             out.extend(rows.into_iter().map(|m| ReviewCommentForGrouping {
@@ -6519,12 +6558,12 @@ impl ConversationRepository for SeaOrmConversationRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        pull_numbers: Option<&[i64]>,
+        pull_numbers: &[i64],
     ) -> Result<Vec<ReviewThreadForGrouping>, DomainError> {
         let conn = self.db.conn()?;
         let mut out = Vec::new();
-        for chunk in parent_chunks(pull_numbers) {
-            let rows = ReviewThreadEntity::find()
+        for chunk in pull_numbers.chunks(GROUPING_CHUNK) {
+            let rows: Vec<ReviewThreadGroupingRow> = ReviewThreadEntity::find()
                 .secure()
                 .scope_with(scope)
                 .filter(rows_of_parents(
@@ -6533,7 +6572,17 @@ impl ConversationRepository for SeaOrmConversationRepository {
                     review_threads::Column::PullNumber,
                     chunk,
                 ))
-                .all(&conn)
+                .project_all(&conn, |select| {
+                    select
+                        .select_only()
+                        .columns([
+                            review_threads::Column::Id,
+                            review_threads::Column::PullNumber,
+                            review_threads::Column::IsResolved,
+                            review_threads::Column::CommentsCount,
+                        ])
+                        .into_model::<ReviewThreadGroupingRow>()
+                })
                 .await
                 .map_err(map_scope_error)?;
             out.extend(rows.into_iter().map(|m| ReviewThreadForGrouping {
@@ -6550,17 +6599,17 @@ impl ConversationRepository for SeaOrmConversationRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        since: DateTimeUtc,
+        since: Option<DateTimeUtc>,
     ) -> Result<Vec<i64>, DomainError> {
         let conn = self.db.conn()?;
+        let mut condition = sea_orm::Condition::all().add(comments::Column::RepoId.eq(repo_id));
+        if let Some(since) = since {
+            condition = condition.add(comments::Column::ExtractedAt.gte(since));
+        }
         let rows: Vec<ParentNumber> = CommentEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                sea_orm::Condition::all()
-                    .add(comments::Column::RepoId.eq(repo_id))
-                    .add(comments::Column::ExtractedAt.gte(since)),
-            )
+            .filter(condition)
             .project_all(&conn, |select| {
                 select
                     .select_only()
@@ -6577,17 +6626,18 @@ impl ConversationRepository for SeaOrmConversationRepository {
         &self,
         scope: &AccessScope,
         repo_id: i64,
-        since: DateTimeUtc,
+        since: Option<DateTimeUtc>,
     ) -> Result<Vec<i64>, DomainError> {
         let conn = self.db.conn()?;
+        let mut condition =
+            sea_orm::Condition::all().add(review_comments::Column::RepoId.eq(repo_id));
+        if let Some(since) = since {
+            condition = condition.add(review_comments::Column::ExtractedAt.gte(since));
+        }
         let rows: Vec<ParentNumber> = ReviewCommentEntity::find()
             .secure()
             .scope_with(scope)
-            .filter(
-                sea_orm::Condition::all()
-                    .add(review_comments::Column::RepoId.eq(repo_id))
-                    .add(review_comments::Column::ExtractedAt.gte(since)),
-            )
+            .filter(condition)
             .project_all(&conn, |select| {
                 select
                     .select_only()
@@ -6598,6 +6648,63 @@ impl ConversationRepository for SeaOrmConversationRepository {
             .await
             .map_err(map_scope_error)?;
         Ok(rows.into_iter().map(|row| row.number).collect())
+    }
+
+    async fn conversation_parents(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        conv_type: &str,
+    ) -> Result<Vec<i64>, DomainError> {
+        let conn = self.db.conn()?;
+        let rows: Vec<ParentNumber> = LogicalConversationEntity::find()
+            .secure()
+            .scope_with(scope)
+            .filter(
+                sea_orm::Condition::all()
+                    .add(logical_conversations::Column::RepoId.eq(repo_id))
+                    .add(logical_conversations::Column::ConvType.eq(conv_type)),
+            )
+            .project_all(&conn, |select| {
+                select
+                    .select_only()
+                    .column_as(logical_conversations::Column::ParentNumber, "number")
+                    .distinct()
+                    .into_model::<ParentNumber>()
+            })
+            .await
+            .map_err(map_scope_error)?;
+        Ok(rows.into_iter().map(|row| row.number).collect())
+    }
+
+    async fn conversations_of(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        conv_type: &str,
+        parent_numbers: &[i64],
+    ) -> Result<Vec<LogicalConversation>, DomainError> {
+        let conn = self.db.conn()?;
+        let mut out = Vec::new();
+        for chunk in parent_numbers.chunks(GROUPING_CHUNK) {
+            let rows = LogicalConversationEntity::find()
+                .secure()
+                .scope_with(scope)
+                .filter(
+                    rows_of_parents(
+                        logical_conversations::Column::RepoId,
+                        repo_id,
+                        logical_conversations::Column::ParentNumber,
+                        chunk,
+                    )
+                    .add(logical_conversations::Column::ConvType.eq(conv_type)),
+                )
+                .all(&conn)
+                .await
+                .map_err(map_scope_error)?;
+            out.extend(rows.into_iter().map(conversation_from_model));
+        }
+        Ok(out)
     }
 
     async fn list(
@@ -6668,6 +6775,36 @@ impl ConversationRepository for SeaOrmConversationRepository {
             .await
             .map_err(map_scope_error)?;
         Ok(())
+    }
+
+    async fn delete(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        conv_type: &str,
+        root_comment_ids: &[i64],
+    ) -> Result<u64, DomainError> {
+        let conn = self.db.conn()?;
+        let mut removed = 0;
+        for chunk in root_comment_ids.chunks(GROUPING_CHUNK) {
+            removed += LogicalConversationEntity::delete_many()
+                .secure()
+                .scope_with(scope)
+                .filter(
+                    sea_orm::Condition::all()
+                        .add(logical_conversations::Column::RepoId.eq(repo_id))
+                        .add(logical_conversations::Column::ConvType.eq(conv_type))
+                        .add(
+                            logical_conversations::Column::RootCommentId
+                                .is_in(chunk.iter().copied()),
+                        ),
+                )
+                .exec(&conn)
+                .await
+                .map_err(map_scope_error)?
+                .rows_affected;
+        }
+        Ok(removed)
     }
 
     async fn set_comment_conversation(
