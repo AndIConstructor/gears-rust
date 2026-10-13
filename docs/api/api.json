@@ -1594,7 +1594,7 @@
         "type": "object"
       },
       "ChangeRecognitionScheduleRequest": {
-        "description": "The `POST /recognition-schedules/{schedule_id}/changes` request body: change or\ncancel an ASC 606 recognition schedule (design §3.6 / §4.6). `{schedule_id}`\n(the ACTIVE schedule to change) comes from the PATH; the target seller ledger\nis the body's own `tenant_id` (tenant in body, not path — the vhp-core REST\nconvention); the `(entry, post)` PEP gate authorizes it (a change marks/mints\nschedule state). `change_id` is the idempotency key (a replay returns the prior\nresult, minting no second schedule). `action` is `\"cancel\"` | `\"replace\"`.\n`treatment` is the upstream modification-accounting decision: `\"prospective\"` /\n`\"separate_contract\"` apply; `\"catch_up\"` / unknown is rejected\n`MODIFICATION_TREATMENT_REVIEW` (the ledger never silently treats a\nmodification as prospective). `new_segments` is required for a `replace` (the\nNEW version's plan of the remaining deferred), ignored for a `cancel`.",
+        "description": "The `POST /recognition-schedules/{schedule_id}/changes` request body: change or\ncancel an ASC 606 recognition schedule (design §3.6 / §4.6). `{schedule_id}`\n(the ACTIVE schedule to change) comes from the PATH; the target seller ledger\nis the body's own `tenant_id` (tenant in body, not path — the platform REST\nconvention); the `(entry, post)` PEP gate authorizes it (a change marks/mints\nschedule state). `change_id` is the idempotency key (a replay returns the prior\nresult, minting no second schedule). `action` is `\"cancel\"` | `\"replace\"`.\n`treatment` is the upstream modification-accounting decision: `\"prospective\"` /\n`\"separate_contract\"` apply; `\"catch_up\"` / unknown is rejected\n`MODIFICATION_TREATMENT_REVIEW` (the ledger never silently treats a\nmodification as prospective). `new_segments` is required for a `replace` (the\nNEW version's plan of the remaining deferred), ignored for a `cancel`.",
         "properties": {
           "action": {
             "description": "The change action: `\"cancel\"` | `\"replace\"`.",
@@ -3413,7 +3413,7 @@
         "description": "The response to a create: the declaration, and whether a retired one was\nrevived or the active one evolved rather than a new setting declared."
       },
       "CreditApplicationRequest": {
-        "description": "The `POST /credit-applications` request body: ONE wire shape for both wallet\nkinds, discriminated by `kind` (`\"grant\"` | `\"apply\"`). The target seller\nledger is the body's own `tenant_id` (tenant in body, not path — the vhp-core\nREST convention); the `(credit_application, write)` PEP gate authorizes it.\n`currency` + `currency_scale` constrain the whole application: a grant's\n`money` and every apply target must carry the same pair (a mismatch is a\nnamed error, never an implicit conversion).\n\nThe kind-specific fields are all optional on the wire and validated in\n[`Self::into_sdk`]: a `grant` requires `money` + `credit_grant_event_type`\n(and ignores `targets`); an `apply` requires a non-empty `targets` (and ignores\nthe grant fields). A missing required field or an unknown `kind` is rejected\n`400 InvalidArgument` before the SDK type is built.",
+        "description": "The `POST /credit-applications` request body: ONE wire shape for both wallet\nkinds, discriminated by `kind` (`\"grant\"` | `\"apply\"`). The target seller\nledger is the body's own `tenant_id` (tenant in body, not path — the platform\nREST convention); the `(credit_application, write)` PEP gate authorizes it.\n`currency` + `currency_scale` constrain the whole application: a grant's\n`money` and every apply target must carry the same pair (a mismatch is a\nnamed error, never an implicit conversion).\n\nThe kind-specific fields are all optional on the wire and validated in\n[`Self::into_sdk`]: a `grant` requires `money` + `credit_grant_event_type`\n(and ignores `targets`); an `apply` requires a non-empty `targets` (and ignores\nthe grant fields). A missing required field or an unknown `kind` is rejected\n`400 InvalidArgument` before the SDK type is built.",
         "properties": {
           "credit_application_id": {
             "description": "The `CREDIT_APPLY` idempotency business id (a replay returns the prior post).",
@@ -3552,7 +3552,7 @@
         "type": "object"
       },
       "CreditNoteRequest": {
-        "description": "The `POST /credit-notes` request body: a compensating credit note against a\nposted invoice (design §4.2). The target seller ledger is the body's own\n`tenant_id` (tenant in body, not path — the vhp-core REST convention); the\n`(entry, post)` PEP gate authorizes it (a credit note posts a balanced\ncompensating journal entry — the same data-plane post action as the\nrecognition run / invoice post). Idempotent on `credit_note_id` (the\n`(tenant, CREDIT_NOTE, credit_note_id)` engine claim): a replay returns the\nprior posting with `replayed = true`.\n\n`amount` is **incl-tax**; `tax_amount` is the reversed-tax slice of it;\n`requested_deferred` is the **split intent** — how much of the ex-tax\nrevenue portion (`amount − tax_amount`) targets the unreleased deferred\nbalance (the rest reduces recognized revenue). `goodwill = true` ⇒ an AR-only\ngoodwill credit (debits `GOODWILL`, touches no schedule, MUST carry\n`requested_deferred = 0`). A malformed shape (negative amounts, tax over\namount, deferred over ex-tax, empty reason, goodwill-with-deferred) is rejected\n`400` (`AMOUNT_OUT_OF_RANGE` / `InvalidArgument`) by the domain `validate_shape`;\nan indeterminable split is `CREDIT_NOTE_SPLIT_AMBIGUOUS`; an over-headroom note\nis `CREDIT_NOTE_EXCEEDS_HEADROOM`.",
+        "description": "The `POST /credit-notes` request body: a compensating credit note against a\nposted invoice (design §4.2). The target seller ledger is the body's own\n`tenant_id` (tenant in body, not path — the platform REST convention); the\n`(entry, post)` PEP gate authorizes it (a credit note posts a balanced\ncompensating journal entry — the same data-plane post action as the\nrecognition run / invoice post). Idempotent on `credit_note_id` (the\n`(tenant, CREDIT_NOTE, credit_note_id)` engine claim): a replay returns the\nprior posting with `replayed = true`.\n\n`amount` is **incl-tax**; `tax_amount` is the reversed-tax slice of it;\n`requested_deferred` is the **split intent** — how much of the ex-tax\nrevenue portion (`amount − tax_amount`) targets the unreleased deferred\nbalance (the rest reduces recognized revenue). `goodwill = true` ⇒ an AR-only\ngoodwill credit (debits `GOODWILL`, touches no schedule, MUST carry\n`requested_deferred = 0`). A malformed shape (negative amounts, tax over\namount, deferred over ex-tax, empty reason, goodwill-with-deferred) is rejected\n`400` (`AMOUNT_OUT_OF_RANGE` / `InvalidArgument`) by the domain `validate_shape`;\nan indeterminable split is `CREDIT_NOTE_SPLIT_AMBIGUOUS`; an over-headroom note\nis `CREDIT_NOTE_EXCEEDS_HEADROOM`.",
         "properties": {
           "amount": {
             "$ref": "#/components/schemas/MoneyDto",
@@ -3716,7 +3716,7 @@
         "type": "object"
       },
       "CurrencyScaleDto": {
-        "description": "One non-ISO currency-scale row to seed.",
+        "description": "One currency-scale row to seed: a code with no ISO 4217 minor-unit scale (such as `XTS`, or a\ncode ISO does not list), at its posting scale. A row for an ISO 4217 code with a scale may only\nrepeat that scale; another scale refuses the whole request (400).",
         "properties": {
           "currency": {
             "type": "string"
@@ -5526,7 +5526,7 @@
         "type": "object"
       },
       "FxRateIngestRequest": {
-        "description": "Secondary manual / seed ingest of one FX rate into the local `ledger_fx_rate`\nstore (the primary path is the `RateProviderV1` plugin pull, design §4.6 /\ndecision 2). Upsert-keyed on `(tenant_id, base_currency, quote_currency,\nprovider)`: re-posting the same tuple overwrites the quote (`rate` /\n`as_of` / `fallback_order`) — idempotent on `(tenant, base, quote, provider,\nas_of)`. `tenant_id` rides the body (the vhp-core write convention, no tenant\nin the path).",
+        "description": "Secondary manual / seed ingest of one FX rate into the local `ledger_fx_rate`\nstore (the primary path is the `RateProviderV1` plugin pull, design §4.6 /\ndecision 2). Upsert-keyed on `(tenant_id, base_currency, quote_currency,\nprovider)`: re-posting the same tuple overwrites the quote (`rate` /\n`as_of` / `fallback_order`) — idempotent on `(tenant, base, quote, provider,\nas_of)`. `tenant_id` rides the body (the platform write convention, no tenant\nin the path).",
         "properties": {
           "as_of": {
             "description": "The publication timestamp that drives the staleness rule.",
@@ -10358,7 +10358,7 @@
         "type": "object"
       },
       "PostInvoiceRequestDto": {
-        "description": "The `POST /journal-entries` request body: a fully-recognized invoice\n(Variant A) to post. The target seller ledger is the body's own `tenant_id`\n(tenant in body, not path — the vhp-core REST convention); the `(entry,\npost)` PEP gate authorizes it.",
+        "description": "The `POST /journal-entries` request body: a fully-recognized invoice\n(Variant A) to post. The target seller ledger is the body's own `tenant_id`\n(tenant in body, not path — the platform REST convention); the `(entry,\npost)` PEP gate authorizes it.",
         "properties": {
           "correlation_id": {
             "description": "Caller-supplied trace token propagated onto the entry (NOT an authority\nclaim — the poster identity is the authenticated subject, stamped\nserver-side, never read from the body).",
@@ -11559,7 +11559,14 @@
             "type": "boolean"
           },
           "currency": {
+            "description": "The price's currency as stored with the price: its book's.",
             "type": "string"
+          },
+          "currency_scale": {
+            "description": "The currency's scale stored with the price, a JSON integer; never the current table's.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "dim_value": {
             "description": "The value's chain; null for the default chain.",
@@ -11665,6 +11672,7 @@
           "charge_kind",
           "book_id",
           "currency",
+          "currency_scale",
           "version_no",
           "model",
           "price",
@@ -13117,6 +13125,7 @@
             "type": "string"
           },
           "min_fee": {
+            "description": "Exact decimal text, a JSON string; a JSON number is 400 `MIN_FEE_INVALID` (D-528).",
             "type": [
               "string",
               "null"
@@ -13205,6 +13214,16 @@
               "string",
               "null"
             ]
+          },
+          "currency": {
+            "description": "The price's currency, its book's, stored with the price.",
+            "type": "string"
+          },
+          "currency_scale": {
+            "description": "The currency's scale stored with the price, a JSON integer: the table's scale when the\nprice was written or last edited. An approved price keeps it whatever the table says later.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "dim_value": {
             "type": [
@@ -13317,6 +13336,8 @@
           "price_book_entry_id",
           "version_no",
           "model",
+          "currency",
+          "currency_scale",
           "price_json",
           "eligibility",
           "effective_from",
@@ -13369,6 +13390,7 @@
             ]
           },
           "min_fee": {
+            "description": "Exact decimal text, a JSON string, or `null` to clear it; a JSON number is 400\n`MIN_FEE_INVALID` (D-528).",
             "type": [
               "string",
               "null"
@@ -13637,6 +13659,16 @@
       "PricingResolveBindingDto": {
         "description": "The price bound for the period, as stored.",
         "properties": {
+          "currency": {
+            "description": "The price's currency as stored with the price: its book's.",
+            "type": "string"
+          },
+          "currency_scale": {
+            "description": "The currency's scale stored with the price: the number of minor digits its money posts\nwith, a JSON integer. A later change of the currency table does not change it.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "dim_used": {
             "description": "The chain the bound price belongs to: the value, or null for the default chain.",
             "type": [
@@ -13699,6 +13731,8 @@
         },
         "required": [
           "price_id",
+          "currency",
+          "currency_scale",
           "price",
           "eligibility",
           "effective_from",
@@ -13744,14 +13778,8 @@
             "type": "string"
           },
           "currency": {
-            "description": "The book's currency.",
+            "description": "The book's currency. Each binding carries its price's own currency spec: the scale is\nstored per price, so prices of one book written under different scales each keep theirs.",
             "type": "string"
-          },
-          "currency_minor_digits": {
-            "description": "The currency's scale: the number of minor digits money carries.",
-            "format": "int32",
-            "minimum": 0,
-            "type": "integer"
           },
           "date": {
             "description": "The date resolved, `YYYY-MM-DD`.",
@@ -13776,10 +13804,6 @@
             "format": "int32",
             "type": "integer"
           },
-          "rounding_policy": {
-            "description": "The tenant's `default_rounding`, as stored: a string, since no CHECK guards the column\n(D-437, D-439).",
-            "type": "string"
-          },
           "state": {
             "$ref": "#/components/schemas/PricingResolvedRevisionState",
             "description": "The revision's state as it reads today (D-447): `published`, `superseded`, or `scheduled`\nfor a revision asked on or after its sale date while that date has not come yet (D-454). No\nother revision resolves."
@@ -13792,8 +13816,6 @@
           "state",
           "book_id",
           "currency",
-          "currency_minor_digits",
-          "rounding_policy",
           "date",
           "items"
         ],
@@ -14055,10 +14077,6 @@
               "null"
             ]
           },
-          "default_rounding": {
-            "description": "One of the five modes (D-437) once written through the door; a string, not an enum: no\nCHECK guards the column, and a legacy value reads back as stored (D-439).",
-            "type": "string"
-          },
           "default_tax_category": {
             "type": [
               "string",
@@ -14099,7 +14117,6 @@
         },
         "required": [
           "default_timing",
-          "default_rounding",
           "invoice_line_templates",
           "currencies",
           "version"
@@ -14121,10 +14138,6 @@
               "string",
               "null"
             ]
-          },
-          "default_rounding": {
-            "description": "`half_up`, `half_even`, `half_down`, `up` or `down` (D-437).",
-            "type": "string"
           },
           "default_tax_category": {
             "type": [
@@ -14154,7 +14167,6 @@
         },
         "required": [
           "default_timing",
-          "default_rounding",
           "invoice_line_templates",
           "currencies"
         ],
@@ -15283,7 +15295,7 @@
         "type": "object"
       },
       "ProvisioningRequestDto": {
-        "description": "The provisioning request body: the target seller tenant, accounts, currency\nscales, and the fiscal-calendar config to seed in one transaction. The\ntenant is carried in the **body** (not the path) — the gear's REST surface is\ntenant-from-context/body per the vhp-core convention (RBAC/RMS), and a\nprovision targets a seller the caller authorizes via the PEP gate.",
+        "description": "The provisioning request body: the target seller tenant, accounts, currency\nscales, and the fiscal-calendar config to seed in one transaction. The\ntenant is carried in the **body** (not the path) — the gear's REST surface is\ntenant-from-context/body per the platform convention (RBAC/RMS), and a\nprovision targets a seller the caller authorizes via the PEP gate.",
         "properties": {
           "accounts": {
             "items": {
@@ -16462,7 +16474,7 @@
         ]
       },
       "RecordDisputePhaseRequest": {
-        "description": "The `POST /disputes/{dispute_id}/phases` request body: record one phase of a\nchargeback dispute. `{dispute_id}` (the dispute's external id) comes from the\nPATH; the target seller ledger is the body's own `tenant_id` (tenant in body,\nnot path — the vhp-core REST convention); the `(dispute, write)` PEP gate\nauthorizes it. The LEDGER chooses the variant at `opened` from `funds_at_open`\n(`\"withheld\"` ⇒ cash-hold, `\"not_moved\"` ⇒ AR-reclass); `phase` is one of\n`\"opened\" | \"won\" | \"lost\" | \"partial\"` (Group B implements `opened`).\n`cycle` defaults to 1 and increments on a re-open. `invoice_id` is required\nfor an AR-reclass `opened` (the disputed `(payer, invoice)` grain), ignored\nfor cash-hold. `disputed_amount` carries its currency and stored scale;\n`effective_at` `None` ⇒ stamped at post time.",
+        "description": "The `POST /disputes/{dispute_id}/phases` request body: record one phase of a\nchargeback dispute. `{dispute_id}` (the dispute's external id) comes from the\nPATH; the target seller ledger is the body's own `tenant_id` (tenant in body,\nnot path — the platform REST convention); the `(dispute, write)` PEP gate\nauthorizes it. The LEDGER chooses the variant at `opened` from `funds_at_open`\n(`\"withheld\"` ⇒ cash-hold, `\"not_moved\"` ⇒ AR-reclass); `phase` is one of\n`\"opened\" | \"won\" | \"lost\" | \"partial\"` (Group B implements `opened`).\n`cycle` defaults to 1 and increments on a re-open. `invoice_id` is required\nfor an AR-reclass `opened` (the disputed `(payer, invoice)` grain), ignored\nfor cash-hold. `disputed_amount` carries its currency and stored scale;\n`effective_at` `None` ⇒ stamped at post time.",
         "properties": {
           "cycle": {
             "description": "Re-entrancy counter; `None` ⇒ 1 (the first cycle).",
@@ -16733,7 +16745,7 @@
         "type": "object"
       },
       "RefundRequest": {
-        "description": "The `POST /refunds` request body: one PSP refund phase to record (the\n**money-out** side that unwinds a settled receipt). The target seller ledger\nis the body's own `tenant_id` (tenant in body, not path — the vhp-core REST\nconvention); the `(entry, post)` PEP gate authorizes it (a refund posts a\nbalanced journal entry into the seller's ledger, like the credit/debit notes,\ndesign §8 / Phase-1 precedent). `pattern` selects the economic shape\n(`\"A_UNALLOCATED\"` / `\"B_RESTORE_AR\"`); `phase` the lifecycle stage\n(`\"initiated\"` / `\"confirmed\"` / `\"rejected\"` / `\"voided\"` /\n`\"unknown_final\"`). `invoice_id` is required for Pattern B (the AR it\nrestores), absent for Pattern A. `two_stage` defaults to `true` (the\nconservative `REFUND_CLEARING` shape). `relates_to_refund_id` + `direction`\ndrive a refund-of-refund (Group E); a first-order refund omits both (direction\ndefaults to outbound). `amount` carries its currency and stored scale, which\nMUST match the origin settlement's.",
+        "description": "The `POST /refunds` request body: one PSP refund phase to record (the\n**money-out** side that unwinds a settled receipt). The target seller ledger\nis the body's own `tenant_id` (tenant in body, not path — the platform REST\nconvention); the `(entry, post)` PEP gate authorizes it (a refund posts a\nbalanced journal entry into the seller's ledger, like the credit/debit notes,\ndesign §8 / Phase-1 precedent). `pattern` selects the economic shape\n(`\"A_UNALLOCATED\"` / `\"B_RESTORE_AR\"`); `phase` the lifecycle stage\n(`\"initiated\"` / `\"confirmed\"` / `\"rejected\"` / `\"voided\"` /\n`\"unknown_final\"`). `invoice_id` is required for Pattern B (the AR it\nrestores), absent for Pattern A. `two_stage` defaults to `true` (the\nconservative `REFUND_CLEARING` shape). `relates_to_refund_id` + `direction`\ndrive a refund-of-refund (Group E); a first-order refund omits both (direction\ndefaults to outbound). `amount` carries its currency and stored scale, which\nMUST match the origin settlement's.",
         "properties": {
           "amount": {
             "$ref": "#/components/schemas/MoneyDto",
@@ -17913,7 +17925,7 @@
         "type": "object"
       },
       "RevaluationRunRequest": {
-        "description": "Trigger an unrealized (Mode-B) revaluation for one period across the monetary\nscopes `{AR, UNALLOCATED, REUSABLE_CREDIT}` (design §4.5). `tenant_id` rides\nthe body (the vhp-core write convention). Each scope is idempotent on\n`(tenant, period_id, scope)` — re-posting the same period replays the\nalready-posted scopes. A no-op when the tenant is Mode-A\n(`revaluation_enabled = false`).",
+        "description": "Trigger an unrealized (Mode-B) revaluation for one period across the monetary\nscopes `{AR, UNALLOCATED, REUSABLE_CREDIT}` (design §4.5). `tenant_id` rides\nthe body (the platform write convention). Each scope is idempotent on\n`(tenant, period_id, scope)` — re-posting the same period replays the\nalready-posted scopes. A no-op when the tenant is Mode-A\n(`revaluation_enabled = false`).",
         "properties": {
           "period_id": {
             "description": "The period to revalue (`YYYYMM`). Must be an OPEN period at run time (the\nrun posts INTO it); a CLOSED/absent period is rejected by the posting gate.",
@@ -18684,7 +18696,7 @@
         "type": "object"
       },
       "SetFxRevaluationModeRequest": {
-        "description": "A new FX revaluation-mode version to write (VHP-1986). `effective_from`\ndefaults to now when omitted. An unknown `revaluation_mode` is rejected (400),\nnever coerced.",
+        "description": "A new FX revaluation-mode version to write. `effective_from`\ndefaults to now when omitted. An unknown `revaluation_mode` is rejected (400),\nnever coerced.",
         "properties": {
           "effective_from": {
             "description": "When this version takes effect; defaults to now.",
@@ -18731,7 +18743,7 @@
         "type": "object"
       },
       "SetPostingPolicyRequest": {
-        "description": "A new posting-policy version to write (VHP-1853). `effective_from` defaults to\nnow when omitted. An unknown `missing_mapping_mode`, or empty / non-positive /\nnon-monotone `ar_aging_thresholds`, is rejected (400), never coerced.",
+        "description": "A new posting-policy version to write. `effective_from` defaults to\nnow when omitted. An unknown `missing_mapping_mode`, or empty / non-positive /\nnon-monotone `ar_aging_thresholds`, is rejected (400), never coerced.",
         "properties": {
           "ar_aging_thresholds": {
             "description": "AR-aging bucket upper-bounds: strictly increasing positive day counts\n(e.g. `[30, 60, 90]` → `current / 1-30 / 31-60 / 61-90 / 90+`).",
@@ -18903,7 +18915,7 @@
         "type": "object"
       },
       "SettlePaymentRequest": {
-        "description": "The `POST /payments` request body: a settled payment to record (the\n**money-in** side). The target seller ledger is the body's own `tenant_id`\n(tenant in body, not path — the vhp-core REST convention); the `(payment,\nwrite)` PEP gate authorizes it. `gross` and `fee` carry their currency and\nstored scale; the scale is validated against the provisioned currency\nconfig at post time (a mismatch is rejected, never rescaled). `effective_at`\n`None` ⇒ the receipt is stamped at post time.",
+        "description": "The `POST /payments` request body: a settled payment to record (the\n**money-in** side). The target seller ledger is the body's own `tenant_id`\n(tenant in body, not path — the platform REST convention); the `(payment,\nwrite)` PEP gate authorizes it. `gross` and `fee` carry their currency and\nstored scale; the scale is validated against the provisioned currency\nconfig at post time (a mismatch is rejected, never rescaled). `effective_at`\n`None` ⇒ the receipt is stamped at post time.",
         "properties": {
           "effective_at": {
             "description": "Receipt instant; `None` ⇒ stamped at post time (current-month period).",
@@ -20852,7 +20864,7 @@
         "type": "object"
       },
       "TriggerRecognitionRunRequest": {
-        "description": "The `POST /recognition-runs` request body: trigger an ASC 606 recognition\nrun for one fiscal period (release the period's due `PENDING` segments). The\ntarget seller ledger is the body's own `tenant_id` (tenant in body, not path\n— the vhp-core REST convention); the `(entry, post)` PEP gate authorizes it\n(a run posts `DR CL / CR Revenue` journal entries). `run_id` is the\nrun-trigger idempotency key: `None` ⇒ the ledger mints a fresh one (a first,\nun-keyed trigger); a stable one makes retries idempotent (a replay returns\nthe prior run reference without starting a second run).",
+        "description": "The `POST /recognition-runs` request body: trigger an ASC 606 recognition\nrun for one fiscal period (release the period's due `PENDING` segments). The\ntarget seller ledger is the body's own `tenant_id` (tenant in body, not path\n— the platform REST convention); the `(entry, post)` PEP gate authorizes it\n(a run posts `DR CL / CR Revenue` journal entries). `run_id` is the\nrun-trigger idempotency key: `None` ⇒ the ledger mints a fresh one (a first,\nun-keyed trigger); a stable one makes retries idempotent (a replay returns\nthe prior run reference without starting a second run).",
         "properties": {
           "period_id": {
             "description": "The fiscal period to release due segments for (`YYYYMM`).",
@@ -32988,7 +33000,7 @@
         ]
       },
       "post": {
-        "description": "Writes a new effective-dated FX revaluation-mode version (`MODE_A` defer-to-ERP | `MODE_B` BSS-is-ledger-of-record) for the caller's tenant (VHP-1986). Append-only: a new version supersedes; the revaluation job / period-close pick the latest effective_from (highest version on a tie). An unknown mode is rejected (400), never coerced. Requires `config_write.v1`.",
+        "description": "Writes a new effective-dated FX revaluation-mode version (`MODE_A` defer-to-ERP | `MODE_B` BSS-is-ledger-of-record) for the caller's tenant. Append-only: a new version supersedes; the revaluation job / period-close pick the latest effective_from (highest version on a tie). An unknown mode is rejected (400), never coerced. Requires `config_write.v1`.",
         "operationId": "bss_ledger.set_fx_revaluation_mode",
         "requestBody": {
           "content": {
@@ -35793,7 +35805,7 @@
         ]
       },
       "post": {
-        "description": "Writes a new effective-dated invoice-posting policy version (the missing-mapping mode + the AR-aging bucket thresholds) for the caller's tenant (VHP-1853). Append-only: a new version supersedes; the orchestrator / aging read pick the latest effective_from (highest version on a tie). An unknown mode or empty / non-positive / non-monotone thresholds are rejected (400), never coerced. Requires `config_write.v1`.",
+        "description": "Writes a new effective-dated invoice-posting policy version (the missing-mapping mode + the AR-aging bucket thresholds) for the caller's tenant. Append-only: a new version supersedes; the orchestrator / aging read pick the latest effective_from (highest version on a tie). An unknown mode or empty / non-positive / non-monotone thresholds are rejected (400), never coerced. Requires `config_write.v1`.",
         "operationId": "bss_ledger.set_posting_policy",
         "requestBody": {
           "content": {
@@ -35871,7 +35883,7 @@
     },
     "/bss-ledger/v1/provisioning": {
       "post": {
-        "description": "Seeds the chart of accounts, non-ISO currency scales, the fiscal-calendar config, and the initial OPEN fiscal period for the seller legal-entity named by the body's `tenant_id`. Re-calls are additive: existing rows are a no-op.",
+        "description": "Seeds the chart of accounts, the currency scales of codes with no ISO 4217 minor-unit scale, the fiscal-calendar config, and the initial OPEN fiscal period for the seller legal-entity named by the body's `tenant_id`. An ISO 4217 code always has its ISO scale: a row for it may only repeat that scale, and another scale refuses the whole request with 400 and writes nothing. Re-calls are additive: existing rows are a no-op.",
         "operationId": "bss_ledger.provision",
         "requestBody": {
           "content": {
@@ -38070,7 +38082,7 @@
     },
     "/bss-pricing/v1/approval-units/{id}/approve": {
       "post": {
-        "description": "Records an approving vote on the generation the reviewer saw; the vote that reaches the quorum applies the unit (a plan revision whose sale date is after today is scheduled for that date, D-449). The vote's note is at most 2000 characters. Refusals: 400 GENERATION_MISMATCH, UNIT_STALE or NOTE_TOO_LONG; 403 SOD_VIOLATION for the submitter or the author; 409 DUPLICATE_VOTE, UNIT_ALREADY_DECIDED or APPLY_REFUSED, and PRICE_ALREADY_STARTED when a price the unit cancels started after its submit (D-520); 503 REGISTRY_UNAVAILABLE when Products cannot answer a read the applying vote's rules make: a plan revision's checks, or a usage chain's dated metering (D-402).",
+        "description": "Records an approving vote on the generation the reviewer saw; the vote that reaches the quorum applies the unit (a plan revision whose sale date is after today is scheduled for that date, D-449). The vote's note is at most 2000 characters. Refusals: 400 GENERATION_MISMATCH, UNIT_STALE or NOTE_TOO_LONG; 403 SOD_VIOLATION for the submitter or the author; 409 DUPLICATE_VOTE, UNIT_ALREADY_DECIDED or APPLY_REFUSED, and PRICE_ALREADY_STARTED when a price the unit cancels started after its submit (D-520), CURRENCY_SCALE_CHANGED when a draft of the unit is stored at another scale than the currency table gives today (the submitter withdraws the unit, edits the draft and submits it again; a cancel or end row keeps its price's scale and is never refused for it), or BOOK_CURRENCY_INVALID when the table no longer lists the book's currency; 503 REGISTRY_UNAVAILABLE when Products cannot answer a read the applying vote's rules make: a plan revision's checks, or a usage chain's dated metering (D-402).",
         "operationId": "bss_pricing.approve_unit",
         "parameters": [
           {
@@ -42296,7 +42308,7 @@
         ]
       },
       "post": {
-        "description": "Adds a draft price to an entry's chain, and a temporary price's return partner with it; the Idempotency-Key replays the answer. The money is in the entry's model and the price carries no model of its own (D-427). The note is at most 2000 characters (D-457). Refusals: 400 for a rule the price breaks (for example PRICE_MISSING for money of another model's shape, AMOUNT_INVALID, WINDOW_START_IN_PAST, DIM_VALUE_UNKNOWN or PRICE_INSIDE_TEMPORARY), or NOTE_TOO_LONG; 409 ENTRY_REFERENCE_LOST.",
+        "description": "Adds a draft price to an entry's chain, and a temporary price's return partner with it; the Idempotency-Key replays the answer. The money is in the entry's model and the price carries no model of its own (D-427). The note is at most 2000 characters (D-457). Every decimal is a JSON string of plain decimal text, stored in its canonical form (30.00 is stored as 30; D-527, D-528). Refusals: 400 for a rule the price breaks (for example PRICE_MISSING for money of another model's shape, AMOUNT_INVALID for a decimal sent as a JSON number, text that is not plain decimal text, a negative value or a zero package size, the message naming the field, AMOUNT_OUT_OF_RANGE for a decimal over its limit (a rate takes 12 fractional places, a threshold or a package size 28, and any decimal 28 digits), MIN_FEE_INVALID, WINDOW_START_IN_PAST, DIM_VALUE_UNKNOWN or PRICE_INSIDE_TEMPORARY), or NOTE_TOO_LONG; 409 ENTRY_REFERENCE_LOST, or BOOK_CURRENCY_INVALID when the currency table no longer lists the book's currency. A new price, and a temporary price's return, store the book's currency at the scale the currency table gives it today (currency, currency_scale; D-531).",
         "operationId": "bss_pricing.create_price",
         "parameters": [
           {
@@ -42708,7 +42720,7 @@
         }
       },
       "post": {
-        "description": "Creates a price book of the tenant with a code, a name, one currency, an optional validity window and an optional description of at most 2000 characters (D-444); the Idempotency-Key replays the first answer. The currency must be one the tenant settings offer, when they offer any (D-438). The code is at most 64 characters and the name 200 (D-457). Refusals: 400 BOOK_CODE_REQUIRED, BOOK_NAME_REQUIRED, BOOK_CURRENCY_INVALID, BOOK_VALIDITY_INVALID, BOOK_DESCRIPTION_TOO_LONG, or FIELD_TOO_LONG on a code or a name over its cap; 409 CURRENCY_NOT_OFFERED, BOOK_CODE_TAKEN or IDEMPOTENCY_CONFLICT.",
+        "description": "Creates a price book of the tenant with a code, a name, one currency, an optional validity window and an optional description of at most 2000 characters (D-444); the Idempotency-Key replays the first answer. The currency must be one the currency table resolves: an ISO 4217 code with a scale, or a non-ISO code the deployment's currency_scales adds (D-529); else 400 BOOK_CURRENCY_INVALID. It must also be one the tenant settings offer, when they offer any (D-438). The code is at most 64 characters and the name 200 (D-457). Refusals: 400 BOOK_CODE_REQUIRED, BOOK_NAME_REQUIRED, BOOK_CURRENCY_INVALID, BOOK_VALIDITY_INVALID, BOOK_DESCRIPTION_TOO_LONG, or FIELD_TOO_LONG on a code or a name over its cap; 409 CURRENCY_NOT_OFFERED, BOOK_CODE_TAKEN or IDEMPOTENCY_CONFLICT.",
         "operationId": "bss_pricing.create_book",
         "parameters": [
           {
@@ -43933,7 +43945,7 @@
         ]
       },
       "post": {
-        "description": "Submits the book's draft prices, all of them or the listed price_ids, optionally on a common effective date, as one prices approval unit; at quorum 0 it applies at once. An optional note for the approver is stored on the unit as submit_note (D-464). Refusals: 400 NOTE_TOO_LONG for a note over 2000 characters, judged before anything is read; 400 NO_DRAFT_PRICES, PRICE_NOT_IN_BOOK or PAIR_SPLIT, or END_DATE_INVALID for an end (D-521); 409 PRICE_LOCKED_PENDING or UNIT_CONTENDED, or a guard of a cancel or an end (PRICE_NOT_SCHEDULED, PRICE_CHANGE_PENDING when another pending change or the same unit names its price, PRICE_BOUND, PRICE_ALREADY_ENDED, D-520, D-521), or a price of a released entry (BOOK_ARCHIVED while its book is archived, else ENTRY_REFERENCE_RELEASED, D-522); 503 REGISTRY_UNAVAILABLE when Products cannot answer a usage chain's dated metering read (D-402).",
+        "description": "Submits the book's draft prices, all of them or the listed price_ids, optionally on a common effective date, as one prices approval unit; at quorum 0 it applies at once. An optional note for the approver is stored on the unit as submit_note (D-464). Refusals: 400 NOTE_TOO_LONG for a note over 2000 characters, judged before anything is read; 400 NO_DRAFT_PRICES, PRICE_NOT_IN_BOOK or PAIR_SPLIT, or END_DATE_INVALID for an end (D-521); 409 PRICE_LOCKED_PENDING or UNIT_CONTENDED, or a guard of a cancel or an end (PRICE_NOT_SCHEDULED, PRICE_CHANGE_PENDING when another pending change or the same unit names its price, PRICE_BOUND, PRICE_ALREADY_ENDED, D-520, D-521), or a price of a released entry (BOOK_ARCHIVED while its book is archived, else ENTRY_REFERENCE_RELEASED, D-522), or CURRENCY_SCALE_CHANGED for a draft stored at another scale than the currency table gives today (edit the draft and submit it again), or BOOK_CURRENCY_INVALID when the table no longer lists the book's currency; 503 REGISTRY_UNAVAILABLE when Products cannot answer a usage chain's dated metering read (D-402).",
         "operationId": "bss_pricing.publish_changes",
         "parameters": [
           {
@@ -44440,7 +44452,7 @@
         ]
       },
       "patch": {
-        "description": "Changes an unlocked draft price of its author at the version the author read (If-Match). The temporary half of a draft takes effective_from and temporary_until: its pair is built again over the new dates in the same transaction (D-443) - its return re-derived in place, deleted when the chain's next price starts on the new end or nothing of the chain is in force there, or created when a price is to be returned to - and both halves are judged as the create judges them; the answer is the edited price, its paired_price_id naming its partner now, or null. A return's own dates, a temporary price's chain (dim_value), an end on any other price and a null end are 400 TEMPORARY_PRICE_FIXED. Refusals: 400 for a rule the change breaks (for example WINDOW_END_INVALID, WINDOW_START_IN_PAST or TEMPORARY_SPANS_A_CHANGE), or NOTE_TOO_LONG on a note over 2000 characters (D-457); 403 NOT_DRAFT_AUTHOR; 409 PRICE_NOT_DRAFT (the price or its partner, or a cancel or end row, which is deleted instead, D-520) or STALE_REVISION.",
+        "description": "Changes an unlocked draft price of its author at the version the author read (If-Match). The temporary half of a draft takes effective_from and temporary_until: its pair is built again over the new dates in the same transaction (D-443) - its return re-derived in place, deleted when the chain's next price starts on the new end or nothing of the chain is in force there, or created when a price is to be returned to - and both halves are judged as the create judges them; the answer is the edited price, its paired_price_id naming its partner now, or null. A return's own dates, a temporary price's chain (dim_value), an end on any other price and a null end are 400 TEMPORARY_PRICE_FIXED. Every PATCH, whatever it changes, stores the currency scale the currency table gives the book's currency today, and the fee is judged on that scale: a draft refused with CURRENCY_SCALE_CHANGED is edited (a note is enough) and submitted again. Of a temporary pair whose dates stay, only the edited half takes the new scale. Refusals: 400 for a rule the change breaks (for example AMOUNT_INVALID or AMOUNT_OUT_OF_RANGE as on the create, MIN_FEE_INVALID, WINDOW_END_INVALID, WINDOW_START_IN_PAST or TEMPORARY_SPANS_A_CHANGE), or NOTE_TOO_LONG on a note over 2000 characters (D-457); 403 NOT_DRAFT_AUTHOR; 409 PRICE_NOT_DRAFT (the price or its partner, or a cancel or end row, which is deleted instead, D-520), STALE_REVISION, or BOOK_CURRENCY_INVALID when the currency table no longer lists the book's currency.",
         "operationId": "bss_pricing.patch_price",
         "parameters": [
           {
@@ -44867,7 +44879,7 @@
     },
     "/bss-pricing/v1/prices/{id}/submit": {
       "post": {
-        "description": "Puts one draft price into a prices approval unit; at quorum 0 the unit applies at once. A half of a temporary pair is not submitted alone: it is 400 PAIR_SPLIT, and the pair goes through POST /price-books/{id}/publish-changes, which completes it (D-405). It takes no body and no note: a note for the approver travels with publish-changes (D-464). Refusals: 400 BODY_UNEXPECTED for a body with any key; 400 PAIR_SPLIT, or a rule the price breaks at submit (for example WINDOW_START_IN_PAST, PAIR_RETURN_STALE or CHAIN_MODEL_CHANGED, or END_DATE_INVALID for an end, D-521); 409 PRICE_NOT_DRAFT, PRICE_LOCKED_PENDING or UNIT_CONTENDED, or a guard of a cancel or an end (PRICE_NOT_SCHEDULED, PRICE_CHANGE_PENDING, PRICE_BOUND, PRICE_ALREADY_ENDED, D-520, D-521), or a price of a released entry (BOOK_ARCHIVED while its book is archived, else ENTRY_REFERENCE_RELEASED, D-522); 503 REGISTRY_UNAVAILABLE when Products cannot answer a usage chain's dated metering read (D-402).",
+        "description": "Puts one draft price into a prices approval unit; at quorum 0 the unit applies at once. A half of a temporary pair is not submitted alone: it is 400 PAIR_SPLIT, and the pair goes through POST /price-books/{id}/publish-changes, which completes it (D-405). It takes no body and no note: a note for the approver travels with publish-changes (D-464). Refusals: 400 BODY_UNEXPECTED for a body with any key; 400 PAIR_SPLIT, or a rule the price breaks at submit (for example WINDOW_START_IN_PAST, PAIR_RETURN_STALE or CHAIN_MODEL_CHANGED, or END_DATE_INVALID for an end, D-521); 409 PRICE_NOT_DRAFT, PRICE_LOCKED_PENDING or UNIT_CONTENDED, or a guard of a cancel or an end (PRICE_NOT_SCHEDULED, PRICE_CHANGE_PENDING, PRICE_BOUND, PRICE_ALREADY_ENDED, D-520, D-521), or a price of a released entry (BOOK_ARCHIVED while its book is archived, else ENTRY_REFERENCE_RELEASED, D-522), or CURRENCY_SCALE_CHANGED for a draft stored at another scale than the currency table gives today (edit the draft and submit it again), or BOOK_CURRENCY_INVALID when the table no longer lists the book's currency; 503 REGISTRY_UNAVAILABLE when Products cannot answer a usage chain's dated metering read (D-402).",
         "operationId": "bss_pricing.submit_price",
         "parameters": [
           {
@@ -45275,7 +45287,7 @@
     },
     "/bss-pricing/v1/settings": {
       "get": {
-        "description": "Returns the tenant's billing defaults (timing, rounding, GL code, tax category), invoice-line templates by SKU type and the currencies a new book may take (empty: any), with who wrote them last and when, and its version as the ETag; the defaults apply, with no writer, until the settings are first written. An If-None-Match that matches that ETag by weak comparison is 304 with an empty body and the same ETag; both answers carry Cache-Control private, no-cache (D-518).",
+        "description": "Returns the tenant's billing defaults (timing, GL code, tax category), invoice-line templates by SKU type and the currencies a new book may take (empty: any), with who wrote them last and when, and its version as the ETag; the defaults apply, with no writer, until the settings are first written. An If-None-Match that matches that ETag by weak comparison is 304 with an empty body and the same ETag; both answers carry Cache-Control private, no-cache (D-518).",
         "operationId": "bss_pricing.get_settings",
         "parameters": [
           {
@@ -45422,7 +45434,7 @@
         ]
       },
       "put": {
-        "description": "Replaces the tenant settings at the version the caller read (If-Match), currencies included (required; [] offers any currency, D-438), and records the caller and the time. Rounding is half_up, half_even, half_down, up or down (D-437). A GL code or a tax category other than the stored one is at most 64 characters, and a line template other than the one stored for its SKU type 2000; a stored text sent back unchanged passes whatever its length (D-457). Refusals: 400 TIMING_INVALID, ROUNDING_REQUIRED, ROUNDING_INVALID, SKU_TYPE_INVALID, CURRENCY_INVALID, an invalid line template (LINE_TEMPLATE_EMPTY, LINE_TEMPLATE_INVALID), or FIELD_TOO_LONG on a changed default_gl, default_tax_category or invoice_line_templates over its cap; 409 STALE_REVISION.",
+        "description": "Replaces the tenant settings at the version the caller read (If-Match), currencies included (required; [] offers any currency, D-438), and records the caller and the time. Each offered currency is one the currency table resolves, listed once; else 400 CURRENCY_INVALID naming the code and the reason (D-529), or with a fixed message that does not repeat a value that is not three uppercase letters. A GL code or a tax category other than the stored one is at most 64 characters, and a line template other than the one stored for its SKU type 2000; a stored text sent back unchanged passes whatever its length (D-457). Refusals: 400 TIMING_INVALID, SKU_TYPE_INVALID, CURRENCY_INVALID, an invalid line template (LINE_TEMPLATE_EMPTY, LINE_TEMPLATE_INVALID), or FIELD_TOO_LONG on a changed default_gl, default_tax_category or invoice_line_templates over its cap; 409 STALE_REVISION.",
         "operationId": "bss_pricing.put_settings",
         "parameters": [
           {
