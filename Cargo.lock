@@ -3192,11 +3192,14 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "cf-gears-license-resolver-sdk",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-contract",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-security",
  "cf-gears-types-registry",
  "cf-gears-types-registry-sdk",
  "gts",
@@ -3219,14 +3222,20 @@ name = "cf-gears-license-resolver-sdk"
 version = "0.1.4"
 dependencies = [
  "async-trait",
+ "axum",
+ "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-contract",
  "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-http",
  "cf-gears-toolkit-security",
  "gts",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
+ "utoipa",
  "uuid",
 ]
 

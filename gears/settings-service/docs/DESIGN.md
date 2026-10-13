@@ -468,7 +468,7 @@ The AuthZ Resolver gates read/mutate against `gts.cf.core.settings.*` resources.
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-licence-entitlement-fail-closed`
 
-Visibility gating by `licence_feature` uses the the License Resolver via `LicenseResolverClient` (in-process ClientHub): given the caller `Context` and a `licence_feature`, it returns allow/deny, **fail-closed** (deny on error). Applied on REST read/browse/search paths only — not the in-process Settings Reader hot path.
+Visibility gating by `licence_feature` uses the the License Resolver via `LicenseResolverApi` (in-process ClientHub): given the caller `Context` and a `licence_feature`, it returns allow/deny, **fail-closed** (deny on error). Applied on REST read/browse/search paths only — not the in-process Settings Reader hot path.
 
 #### Audit & events
 
@@ -546,7 +546,7 @@ The *definition* of a setting — distinct from its runtime value(s). Authored b
 | `data_classification` | `DataClassification` | Yes | Sensitivity class of the setting's **value**: `public` / `pii` / `secret`. `secret` is *derived* from the value type's `secret` trait (it always accompanies `has_secret_trait = true`); `pii` is *declared* by the author, because a PII-bearing value — an alerting contact address, an operator name — need not carry the `secret` trait yet must not reach a caller unauthorized for unmasked PII. Default `public`. Drives masking (§4.2 *Secret Manager*) and the search corpus (§4.2 *Search*). |
 | `source` | `DeclarationSource` | Yes | `admin_authored` or `module_contributed`. |
 | `owner_module` | string | No | Owning module namespace; required when `source = module_contributed`. |
-| `licence_feature` | string | No | Feature/licence flag gating visibility; enforced server-side on the REST read paths via the License Resolver (`LicenseResolverClient`; see §4.2 *Category Management* / *Declaration Management*/§4.2 *Search* and §4.8). |
+| `licence_feature` | string | No | Feature/licence flag gating visibility; enforced server-side on the REST read paths via the License Resolver (`LicenseResolverApi`; see §4.2 *Category Management* / *Declaration Management*/§4.2 *Search* and §4.8). |
 | `status` | `DeclarationStatus` | Yes | `active` or `retired`. |
 | `description` | string (0..4096) | No | Human-readable description. |
 | `last_change_at` | `timestamptz` | Yes | When the **declaration's definition** last changed: the Schema Default, the value type, the status, and the metadata that changes what a reader is served — `data_classification`, `requires_step_up`, `anonymous_exposable`, `licence_feature`, `domain_affinity`. A `description` or `mode` edit moves `updated_at` (the tag) and **not** this column — **definition only, NOT a max over its values** (a value-aggregating field would leak cross-tenant activity). This is the *declaration arm* of the effective-value recency `max` computed on the admin read (§4.3); the *value arm* is `SettingValue.last_change_at`. |
@@ -786,7 +786,7 @@ graph TD
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-component-category-management`
 
-**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverClient` (License Resolver — feature/licence entitlement), Audit Emitter
+**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverApi` (License Resolver — feature/licence entitlement), Audit Emitter
 
 **Operations:**
 
@@ -803,7 +803,7 @@ graph TD
 
 Manages **admin-authored** declarations and serves reads for both authored and contributed declarations. Contributed declarations are written only via the Reconciler (§4.2 *Contribution Reconciler*).
 
-**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Category Management, PostgreSQL, `LicenseResolverClient` (License Resolver — feature/licence entitlement), Audit Emitter
+**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Category Management, PostgreSQL, `LicenseResolverApi` (License Resolver — feature/licence entitlement), Audit Emitter
 
 **Operations:**
 
@@ -1089,7 +1089,7 @@ What isolates tenants, then, is two checks: the entry's tenant, which the store 
 
 - [x] `p1` - **ID**: `cpt-cf-settings-service-component-search`
 
-**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverClient` (License Resolver — feature/licence entitlement)
+**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverApi` (License Resolver — feature/licence entitlement)
 
 **Operations:**
 
@@ -1955,7 +1955,7 @@ Three rules keep it reviewable:
 | API authorization | `PolicyEnforcer` over the AuthZ Resolver, fail-closed; tenant scope forced server-side. |
 | Tenant subtree isolation | Every read/search/list/mutate is constrained to the caller's own subtree server-side (own tenant or a descendant); a target outside the subtree is rejected; never relies on client-side filtering (`cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-nfr-scope-isolation`). |
 | Tenant Access vs Scope Class | Administrative reads require access other than `hidden`; tenant writes require the writer's access to be `overridable`. Scope Class independently determines where values may exist (§4.1 *TenantAccessRestriction*). |
-| Feature/licence gating | Gated settings/categories excluded server-side across all REST read/browse/search paths via License Resolver entitlement checks (`LicenseResolverClient`, fail-closed); the in-process `SettingsReaderClient` hot path is not licence-gated — services receive values regardless of UI entitlement (`cpt-cf-settings-service-fr-feature-license-gating`). |
+| Feature/licence gating | Gated settings/categories excluded server-side across all REST read/browse/search paths via License Resolver entitlement checks (`LicenseResolverApi`, fail-closed); the in-process `SettingsReaderClient` hot path is not licence-gated — services receive values regardless of UI entitlement (`cpt-cf-settings-service-fr-feature-license-gating`). |
 | Audit | Every mutation writes an immutable audit record (`cpt-cf-settings-service-fr-audit-mutations`). |
 | Secret confidentiality | `secret`-trait values are stored by reference in the Credential Store (the credstore backend); masked on every **administrative** read/search/list/audit path, with **no human reveal path**. Plaintext is returned only through the **machine-only** reader path (`resolve_secret`, §4.5), authorized per setting against the calling service and audited as a secret-use event; never cached in plaintext (§4.2 *Secret Manager*, *Cache & Invalidation*). |
 | File confidentiality | A `file-reference` value carries an id, never content, so nothing in this service masks or proxies a file — and nothing here checks it either. Access to the file is enforced entirely by `file-storage` on its own control and data planes, for every reader including the one that wrote the reference (§3 *Files*). |
@@ -2209,7 +2209,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | `MockTenantResolver` | Ancestry/subtree responses | `.with_ancestors(scope, vec![...])`, `.with_subtree(...)` |
 | `MockChangePublisher` | Capture published `change_notification` / `cache_invalidate` signals | assert on captured signals |
 | `MockSimpleUserSettings` | — | not needed: this service neither stores nor reads the mode preference; mode is a tag on each item (§4.3) |
-| `MockLicenseResolverClient` | feature/licence entitlement allow/deny (fail-closed) | `.with_decision(feature, Allow/Deny)`, `.with_error(...)` |
+| `MockLicenseResolverApi` | feature/licence entitlement allow/deny (fail-closed) | `.with_decision(feature, Allow/Deny)`, `.with_error(...)` |
 | `MockSecretManager` | store/mask/resolve secret values | `.with_ref(...)`, `.with_resolve(Ok/Err)` |
 | `MockEventPublisher` | Capture published events | assert on captured events |
 | `MockAuditSink` | Capture audit records | assert on captured records |
@@ -2283,7 +2283,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Module contribution — compatible upgrade preserves values | repos | Declaration updated; admin values preserved (`cpt-cf-settings-service-fr-contributed-lifecycle`) |
 | Module contribution — breaking change flags values | repos | Affected overrides `needs-review`, and a write to one is refused until it is fixed |
 | Cascading impact — descendants listed | resolver subtree, capped (default 5,000 scanned; `limit` default 100/max 500) | Affected descendants with current vs new; bounded + `truncated` flag; non-blocking (`cpt-cf-settings-service-fr-cascading-inheritance`, §4.2 *Value Writer*) |
-| Licence/feature gating — entitled vs not | `MockLicenseResolverClient` (allow/deny/error) | Gated declaration excluded when denied; **fail-closed** on error (hidden); ungated visible (`cpt-cf-settings-service-fr-feature-license-gating`) |
+| Licence/feature gating — entitled vs not | `MockLicenseResolverApi` (allow/deny/error) | Gated declaration excluded when denied; **fail-closed** on error (hidden); ungated visible (`cpt-cf-settings-service-fr-feature-license-gating`) |
 | Domain-affinity filtering | repos | Categories/settings filtered to the current domain; cross-domain hidden; declaration `domain_affinity` overrides category default |
 | Error mapping — domain → API variants | none | Every variant has a `From` impl, 100% coverage |
 
@@ -2316,7 +2316,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Dependency | Mock | Why |
 |---|---|---|
 | `AuthZResolverClient` (under `PolicyEnforcer`) | `MockAuthZClient` (Allow) / `DenyingAuthZClient` | Isolate from AuthZ infra — the enforcer is a struct, so the substitution point is the client beneath it |
-| License Resolver (licence/feature) | `MockLicenseResolverClient` (allow/deny, fail-closed) | Deterministic entitlement gating without the License Resolver |
+| License Resolver (licence/feature) | `MockLicenseResolverApi` (allow/deny, fail-closed) | Deterministic entitlement gating without the License Resolver |
 | Audit sink | `MockAuditSink` | Capture audit records to assert mutations are audited |
 | GTS Registry | `MockGtsValidator` | Deterministic type validation |
 | Tenant Resolver | `MockTenantResolver` | Deterministic ancestry |
@@ -2362,7 +2362,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Anonymous read — no tenant enumeration | unknown `tenant`, and a known tenant with nothing flagged | Byte-identical `200` with an empty set in both cases; no `404`, no distinguishable error |
 | Anonymous read — no token required, writes absent | request without a bearer; `PUT`/`POST` on the same path | `200` without authentication; every other method `405` |
 | `anonymous_exposable` refused for secret and PII | `PATCH /settings-service/v1/declarations/{id}` setting the flag on a `secret` and on a `pii` declaration | Rejected by the schema `CHECK`, not only the handler (§4.7); un-marking always allowed |
-| Licence/feature gating across read paths | `GET /settings-service/v1/settings/{key}`, `GET /settings-service/v1/search`, `GET /settings-service/v1/categories`, `GET /settings-service/v1/declarations` | Un-entitled caller (`MockLicenseResolverClient` deny) gets gated setting/category excluded on every read/search/list path; fail-closed on decision error (`cpt-cf-settings-service-fr-feature-license-gating`) |
+| Licence/feature gating across read paths | `GET /settings-service/v1/settings/{key}`, `GET /settings-service/v1/search`, `GET /settings-service/v1/categories`, `GET /settings-service/v1/declarations` | Un-entitled caller (`MockLicenseResolverApi` deny) gets gated setting/category excluded on every read/search/list path; fail-closed on decision error (`cpt-cf-settings-service-fr-feature-license-gating`) |
 | Domain-affinity filtering | `GET /settings-service/v1/categories`, `GET /settings-service/v1/declarations` | Results filtered to the admin's current domain; cross-domain hidden; platform-admin "All domains" view returns all |
 | Audit written on every mutation | `POST`/`PATCH`/`PUT`/`DELETE` | Each mutating call writes an audit record (actor, target, pre/post masked, request id) captured via `MockAuditSink` (`cpt-cf-settings-service-fr-audit-mutations`) |
 | Mode never filters | a category holding both `standard` and `advanced` settings | Browse and search return every setting with its `mode`; no request parameter changes the set (`cpt-cf-settings-service-fr-standard-advanced-mode`) |
