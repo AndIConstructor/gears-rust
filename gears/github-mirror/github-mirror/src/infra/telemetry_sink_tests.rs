@@ -26,9 +26,14 @@ fn entry(status: u16) -> TelemetryEntry {
     }
 }
 
-fn record(file: &Path, session_id: Uuid, status: u16) -> Result<(), DomainError> {
+fn record(
+    sink: &JsonlTelemetrySink,
+    file: &Path,
+    session_id: Uuid,
+    status: u16,
+) -> Result<(), DomainError> {
     let entry = entry(status);
-    JsonlTelemetrySink.record(
+    sink.record(
         file,
         &TelemetryLine {
             session_id,
@@ -39,8 +44,9 @@ fn record(file: &Path, session_id: Uuid, status: u16) -> Result<(), DomainError>
     )
 }
 
-#[test]
-fn each_record_appends_one_json_line_and_creates_the_folders() {
+#[tokio::test]
+async fn each_record_appends_one_json_line_and_creates_the_folders() {
+    let sink = JsonlTelemetrySink::start().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let file = dir
         .path()
@@ -49,8 +55,9 @@ fn each_record_appends_one_json_line_and_creates_the_folders() {
         .join("rust.jsonl");
     let session_id = Uuid::new_v4();
 
-    record(&file, session_id, 200).unwrap();
-    record(&file, session_id, 304).unwrap();
+    record(&sink, &file, session_id, 200).unwrap();
+    record(&sink, &file, session_id, 304).unwrap();
+    sink.flush().await;
 
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.ends_with('\n'));
@@ -68,26 +75,32 @@ fn each_record_appends_one_json_line_and_creates_the_folders() {
     assert_eq!(lines[1]["tasks_pending"], 3);
 }
 
-#[test]
-fn an_existing_file_is_appended_to_not_replaced() {
+#[tokio::test]
+async fn an_existing_file_is_appended_to_not_replaced() {
+    let sink = JsonlTelemetrySink::start().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("rust.jsonl");
     std::fs::write(&file, "{\"earlier\":true}\n").unwrap();
 
-    record(&file, Uuid::new_v4(), 200).unwrap();
+    record(&sink, &file, Uuid::new_v4(), 200).unwrap();
+    sink.flush().await;
 
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.starts_with("{\"earlier\":true}\n"));
     assert_eq!(text.lines().count(), 2);
 }
 
-#[test]
-fn a_file_that_cannot_be_created_is_an_error() {
+#[tokio::test]
+async fn a_file_that_cannot_be_created_does_not_stop_later_lines() {
+    let sink = JsonlTelemetrySink::start().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let blocker = dir.path().join("taken");
     std::fs::write(&blocker, "").unwrap();
+    let file = dir.path().join("rust.jsonl");
 
-    let result = record(&blocker.join("rust.jsonl"), Uuid::new_v4(), 200);
+    record(&sink, &blocker.join("rust.jsonl"), Uuid::new_v4(), 200).unwrap();
+    record(&sink, &file, Uuid::new_v4(), 200).unwrap();
+    sink.flush().await;
 
-    assert!(result.is_err());
+    assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 1);
 }

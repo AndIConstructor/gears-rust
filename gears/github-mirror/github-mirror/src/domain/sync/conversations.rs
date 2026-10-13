@@ -10,6 +10,7 @@
 //! Every member comment gets its root comment's id as `conversation_id`.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
 use chrono::{DateTime, Utc};
 use toolkit_security::AccessScope;
@@ -188,26 +189,23 @@ async fn group_toplevel(
     let mut root_of: HashMap<i64, i64> = HashMap::new();
     let mut conversations: HashMap<i64, Conversation> = HashMap::new();
     let mut current_issue = comments.first().map_or(0, |c| c.issue_number);
-    let mut prior: Vec<(i64, String)> = Vec::new();
+    let mut newest_with: HashMap<u64, (usize, i64)> = HashMap::new();
 
-    for c in &comments {
+    for (position, c) in comments.iter().enumerate() {
         if c.issue_number != current_issue {
             current_issue = c.issue_number;
-            prior.clear();
+            newest_with.clear();
+            tokio::task::yield_now().await;
         }
         let body = c.body.as_deref().unwrap_or("");
-        let normalized = normalize(body);
-        let quoted = normalize(&quoted_lines(body));
-        let root = if !quoted.is_empty()
-            && let Some((earlier, _)) = prior
-                .iter()
-                .rev()
-                .find(|(_, earlier_body)| overlaps(&quoted, earlier_body, MIN_QUOTE_OVERLAP))
-        {
-            root_of.get(earlier).copied().unwrap_or(*earlier)
-        } else {
-            c.id
-        };
+        let earlier = window_hashes(&normalize(&quoted_lines(body)))
+            .into_iter()
+            .filter_map(|window| newest_with.get(&window).copied())
+            .max()
+            .map(|(_, id)| id);
+        let root = earlier.map_or(c.id, |earlier| {
+            root_of.get(&earlier).copied().unwrap_or(earlier)
+        });
         root_of.insert(c.id, root);
         let kind = if pull_numbers.contains(&c.issue_number) {
             PULL_REQUEST
@@ -218,7 +216,9 @@ async fn group_toplevel(
             .entry(root)
             .or_insert_with(|| Conversation::new(kind, c.issue_number))
             .observe(&c.created_at);
-        prior.push((c.id, normalized));
+        for window in window_hashes(&normalize(body)) {
+            newest_with.insert(window, (position, c.id));
+        }
     }
 
     let existing = existing_by_root(repo, scope, repo_id, TOPLEVEL, issues).await?;
@@ -373,15 +373,14 @@ fn normalize(text: &str) -> String {
         .to_lowercase()
 }
 
-/// Whether `quoted` and `body`, both normalised, share a run of at least
-/// `min` consecutive characters.
-fn overlaps(quoted: &str, body: &str, min: usize) -> bool {
-    let chars: Vec<char> = quoted.chars().collect();
-    if chars.len() < min {
-        return false;
-    }
-    chars.windows(min).any(|window| {
-        let needle: String = window.iter().collect();
-        body.contains(&needle)
-    })
+fn window_hashes(text: &str) -> Vec<u64> {
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .windows(MIN_QUOTE_OVERLAP)
+        .map(|window| {
+            let mut hasher = DefaultHasher::new();
+            window.hash(&mut hasher);
+            hasher.finish()
+        })
+        .collect()
 }

@@ -223,7 +223,7 @@ impl Gear for GithubMirrorGear {
                     })
                     .collect(),
             },
-            Arc::new(JsonlTelemetrySink),
+            Arc::new(JsonlTelemetrySink::start()?),
         ));
 
         self.service

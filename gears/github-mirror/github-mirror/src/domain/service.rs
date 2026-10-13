@@ -4562,6 +4562,7 @@ impl Service {
         let outcome = self
             .sync_within_deadline(job, &scope, &progress, &telemetry, cancel)
             .await;
+        self.telemetry_sink.flush().await;
 
         let completed = outcome.is_ok();
         match &outcome {

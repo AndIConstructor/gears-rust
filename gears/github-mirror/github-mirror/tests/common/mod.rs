@@ -581,7 +581,10 @@ pub fn service_with_deadline(
             cache_max_age_days: None,
             tenant_cache_max_age_days: std::collections::HashMap::new(),
         },
-        std::sync::Arc::new(github_mirror::infra::telemetry_sink::JsonlTelemetrySink),
+        std::sync::Arc::new(
+            github_mirror::infra::telemetry_sink::JsonlTelemetrySink::start()
+                .expect("telemetry writer starts"),
+        ),
     ))
 }
 
