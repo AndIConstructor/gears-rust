@@ -82,6 +82,7 @@ impl GithubPort for TwoPageIssues {
                 contributors: Vec::new(),
                 complete: ListingCompleteness::none(),
                 page1_etag: Some(PAGE_ONE_ETAG.to_owned()),
+                stage_etag: None,
                 unchanged: false,
                 swept_to_end: false,
                 next: Some(PAGE_TWO.to_owned()),

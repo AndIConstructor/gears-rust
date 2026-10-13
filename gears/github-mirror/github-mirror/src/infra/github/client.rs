@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -102,6 +103,22 @@ fn stage_of(stages: &[Stage], url: &str) -> Result<usize, DomainError> {
 /// else the first page of the following stage, else nothing.
 fn continue_after(stages: &[Stage], stage: usize, page_next: Option<String>) -> Option<String> {
     page_next.or_else(|| stages.get(stage + 1).map(|next| next.first.clone()))
+}
+
+fn stage_etag(stage: &Stage, url: &str, etag: Option<&String>) -> Option<(String, String)> {
+    if stage.first != url {
+        return None;
+    }
+    etag.map(|etag| (stage.tail.to_owned(), etag.clone()))
+}
+
+fn seen_before(
+    stage_etag: Option<&(String, String)>,
+    stored: Option<&BTreeMap<String, String>>,
+) -> bool {
+    stage_etag
+        .zip(stored)
+        .is_some_and(|((tail, etag), stored)| stored.get(tail) == Some(etag))
 }
 
 fn is_compare_url(url: &str) -> bool {
@@ -2666,6 +2683,7 @@ impl GithubPort for GithubClient {
         let ListCursor {
             updated_after,
             page1_etag,
+            stage_etags,
             continue_from,
             ..
         } = cursor;
@@ -2673,6 +2691,11 @@ impl GithubPort for GithubClient {
             return Ok(IssueListing::default());
         }
         let bound = updated_after_param(updated_after);
+        let newest_first = if updated_after.is_some() {
+            "&sort=updated&direction=desc"
+        } else {
+            ""
+        };
         let stages = [
             Stage {
                 tail: "/issues",
@@ -2683,7 +2706,7 @@ impl GithubPort for GithubClient {
             Stage {
                 tail: "/issues/comments",
                 first: self.absolute(&format!(
-                    "/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}{bound}"
+                    "/repos/{owner}/{name}/issues/comments?per_page={FIRST_PAGE_SIZE}{newest_first}{bound}"
                 )),
             },
             Stage {
@@ -2704,8 +2727,9 @@ impl GithubPort for GithubClient {
                 if continue_from.is_none() {
                     listing.page1_etag.clone_from(&page.etag);
                     if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
-                        tracing::debug!(url = %redacted_word(&url), "page one is unchanged; the sweep stops here");
+                        tracing::debug!(url = %redacted_word(&url), "page one is unchanged; moving on to the next listing");
                         listing.unchanged = true;
+                        listing.next = continue_after(&stages, 0, None);
                         return Ok(listing);
                     }
                 }
@@ -2724,6 +2748,16 @@ impl GithubPort for GithubClient {
             }
             1 => {
                 let page: FetchedPage<Vec<GhComment>> = self.get_page(&url, options).await?;
+                if updated_after.is_some() {
+                    listing.stage_etag = stage_etag(&stages[stage], &url, page.etag.as_ref());
+                }
+                if seen_before(listing.stage_etag.as_ref(), stage_etags) {
+                    tracing::debug!(url = %redacted_word(&url), "page one is unchanged; moving on to the next listing");
+                    listing.unchanged = true;
+                    listing.next = continue_after(&stages, stage, None);
+                    listing.swept_to_end = listing.next.is_none();
+                    return Ok(listing);
+                }
                 listing.contributors =
                     derive_issue_people(repo_id, &[], &page.parsed).into_records();
                 listing.comments = page
@@ -2738,6 +2772,14 @@ impl GithubPort for GithubClient {
             }
             _ => {
                 let page: FetchedPage<Vec<GhIssueEvent>> = self.get_page(&url, options).await?;
+                listing.stage_etag = stage_etag(&stages[stage], &url, page.etag.as_ref());
+                if seen_before(listing.stage_etag.as_ref(), stage_etags) {
+                    tracing::debug!(url = %redacted_word(&url), "page one is unchanged; moving on to the next listing");
+                    listing.unchanged = true;
+                    listing.next = continue_after(&stages, stage, None);
+                    listing.swept_to_end = listing.next.is_none();
+                    return Ok(listing);
+                }
                 listing.issue_events = page
                     .parsed
                     .into_iter()
@@ -2818,6 +2860,7 @@ impl GithubPort for GithubClient {
         let ListCursor {
             updated_after,
             page1_etag,
+            stage_etags,
             continue_from,
             ..
         } = cursor;
@@ -2849,8 +2892,9 @@ impl GithubPort for GithubClient {
             if continue_from.is_none() {
                 listing.page1_etag.clone_from(&page.etag);
                 if page1_etag.is_some() && page.etag.as_deref() == page1_etag {
-                    tracing::debug!(url = %redacted_word(&url), "page one is unchanged; the sweep stops here");
+                    tracing::debug!(url = %redacted_word(&url), "page one is unchanged; moving on to the next listing");
                     listing.unchanged = true;
+                    listing.next = continue_after(&stages, 0, None);
                     return Ok(listing);
                 }
             }
@@ -2879,6 +2923,14 @@ impl GithubPort for GithubClient {
             listing.next = continue_after(&stages, stage, next_page);
         } else {
             let page: FetchedPage<Vec<GhReviewComment>> = self.get_page(&url, options).await?;
+            listing.stage_etag = stage_etag(&stages[stage], &url, page.etag.as_ref());
+            if seen_before(listing.stage_etag.as_ref(), stage_etags) {
+                tracing::debug!(url = %redacted_word(&url), "page one is unchanged; moving on to the next listing");
+                listing.unchanged = true;
+                listing.next = continue_after(&stages, stage, None);
+                listing.swept_to_end = listing.next.is_none();
+                return Ok(listing);
+            }
             listing.contributors = derive_pull_people(repo_id, &[], &page.parsed).into_records();
             listing.review_comments = page
                 .parsed
@@ -3068,6 +3120,7 @@ impl GithubPort for GithubClient {
             page1_etag,
             last_head_sha,
             continue_from,
+            ..
         } = cursor;
         if !options.scope.objects.commits {
             return Ok(CommitListing::default());

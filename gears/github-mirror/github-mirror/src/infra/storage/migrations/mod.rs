@@ -47,6 +47,7 @@ pub mod m0044_session_telemetry;
 pub mod m0045_logical_conversations;
 pub mod m0046_review_comment_snippets;
 pub mod m0047_mariadb_uuid_columns;
+pub mod m0048_stage_etags;
 pub mod support;
 
 pub struct Migrator;
@@ -102,6 +103,7 @@ impl MigratorTrait for Migrator {
             Box::new(m0045_logical_conversations::Migration),
             Box::new(m0046_review_comment_snippets::Migration),
             Box::new(m0047_mariadb_uuid_columns::Migration),
+            Box::new(m0048_stage_etags::Migration),
         ]
     }
 }

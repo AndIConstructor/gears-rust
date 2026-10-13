@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use strum::IntoEnumIterator;
@@ -181,8 +181,10 @@ pub struct IssueListing {
     /// The validator page one of the issues listing carried, for the next
     /// sweep to compare against.
     pub page1_etag: Option<String>,
-    /// Page one matched the validator the caller passed, so no page was
-    /// walked and every vector above is empty.
+    pub stage_etag: Option<(String, String)>,
+    /// Page one of the listing this call reached matched the validator the
+    /// caller passed, so that listing was skipped and every vector above is
+    /// empty.
     pub unchanged: bool,
     /// The issues walk reached its last page. Unlike `complete`, this stays
     /// true when an `updated_after` bound narrowed the walk: everything asked for was
@@ -224,8 +226,10 @@ pub struct PullListing {
     /// The validator page one of the pull-request listing carried, for the
     /// next sweep to compare against.
     pub page1_etag: Option<String>,
-    /// Page one matched the validator the caller passed, so no page was
-    /// walked and every vector above is empty.
+    pub stage_etag: Option<(String, String)>,
+    /// Page one of the listing this call reached matched the validator the
+    /// caller passed, so that listing was skipped and every vector above is
+    /// empty.
     pub unchanged: bool,
     /// The pull-request walk reached its last page; see
     /// [`IssueListing::swept_to_end`].
@@ -377,6 +381,7 @@ pub struct RepoRef<'a> {
 pub struct ListCursor<'a> {
     pub updated_after: Option<DateTime<Utc>>,
     pub page1_etag: Option<&'a str>,
+    pub stage_etags: Option<&'a BTreeMap<String, String>>,
     pub last_head_sha: Option<&'a str>,
     pub continue_from: Option<&'a str>,
 }

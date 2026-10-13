@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use github_mirror_sdk::{
@@ -1768,6 +1770,7 @@ pub struct SyncWatermarkRecord {
     pub family: String,
     pub last_seen_updated_at: Option<String>,
     pub page1_etag: Option<String>,
+    pub stage_etags: BTreeMap<String, String>,
     pub last_head_sha: Option<String>,
     pub sweep_in_progress: bool,
     pub candidate_high_water: Option<String>,

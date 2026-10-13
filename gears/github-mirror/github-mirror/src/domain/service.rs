@@ -5175,14 +5175,7 @@ impl Service {
         for family in Family::SWEPT {
             if let Some(end) = run.swept_end(family) {
                 self.sweep_watermark
-                    .promote(
-                        &run.scope,
-                        run.tenant_id,
-                        run.repo_id()?,
-                        family,
-                        end.page1_etag,
-                        end.head_sha,
-                    )
+                    .promote(&run.scope, run.tenant_id, run.repo_id()?, family, end)
                     .await?;
             }
         }
