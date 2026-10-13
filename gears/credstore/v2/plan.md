@@ -6,7 +6,7 @@
 
 - v2 is not registered in the server, has no REST routes and no database connection until the switch.
 - No gear, plugin or app depends on the v2 crates; consumers keep using v1.
-- v1 and v2 must never be linked into one binary: they share the plugin-spec GTS id, and later the gear name, routes and metric names.
+- v1 and v2 must never be linked into one binary: they will share the gear name, routes and metric names at the switch.
 - The v2 crates are `publish = false`; their package names differ from v1 until the switch.
 - v1 and its database stay untouched until the switch.
 
@@ -14,6 +14,7 @@
 
 - v2 carries the v1 schema migration (`m0001`) and the v1 → v2 schema migration (`m0002`), so after the switch it starts on the existing v1 database once its stored values have been moved.
 - The migration of stored secret values from v1 to v2 is not committed to `main`; it lives in a temporary branch and is run from there. `m0002` refuses to run, and changes nothing, while the database holds an `active` row (`status = 2`) and the tool has not recorded that copying finished (or `discard_values`), so before the switch the operator runs the tool from that branch (DESIGN §8). A database with no such rows passes.
+- The later migration of existing v1 data (type id remap, `fallback = none` on rows left without a value) is recorded in DESIGN §8, "Data of existing v1 installations"; this file is deleted at the switch.
 
 ## Order of PRs
 
