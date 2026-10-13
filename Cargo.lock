@@ -2645,6 +2645,7 @@ dependencies = [
  "async-trait",
  "cf-gears-tenant-resolver-sdk",
  "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-odata",
  "cf-gears-toolkit-security",
