@@ -88,6 +88,91 @@ fn scale_31_product_stays_exact() {
 }
 
 #[test]
+fn ceil_is_the_smallest_integer_not_below_the_value() {
+    for (numerator, denominator, expected) in [
+        (7, 3, "3"),
+        (6, 3, "2"),
+        (0, 1, "0"),
+        (-7, 3, "-2"),
+        (-6, 3, "-2"),
+        (1, 3, "1"),
+        (-1, 3, "0"),
+        (1, 1_000, "1"),
+        (-1, 1_000, "0"),
+        (3, 2, "2"),
+        (-3, 2, "-1"),
+        (5, 1, "5"),
+        (-5, 1, "-5"),
+    ] {
+        let value = fraction(BigInt::from(numerator), BigInt::from(denominator));
+        assert_eq!(value.ceil().unwrap(), exact(expected));
+    }
+}
+
+#[test]
+fn ceil_of_a_decimal_keeps_a_whole_value_and_lifts_a_fraction() {
+    let cases = [
+        ("0", "0"),
+        ("2", "2"),
+        ("2.0000000000000000000000000001", "3"),
+        ("2.9999999999999999999999999999", "3"),
+        ("-2.9999999999999999999999999999", "-2"),
+        ("-0.0000000000000000000000000001", "0"),
+        ("0.0000000000000000000000000001", "1"),
+    ];
+    // One comparison of all cases: a failure shows the whole list, in case order.
+    let ceilings: Vec<ExactAmount> = cases
+        .iter()
+        .map(|(input, _)| exact(input).ceil().unwrap())
+        .collect();
+    let expected: Vec<ExactAmount> = cases.iter().map(|(_, ceiling)| exact(ceiling)).collect();
+    assert_eq!(ceilings, expected);
+}
+
+#[test]
+fn ceil_of_a_negative_fraction_is_zero_without_a_sign() {
+    let ceiling = exact("-0.5").ceil().unwrap();
+    assert!(!ceiling.is_negative());
+    assert_eq!(ceiling.canonical_at_scale(0).unwrap(), "0");
+    assert_eq!(ceiling.denominator, BigInt::one());
+}
+
+#[test]
+fn ceil_result_is_a_reduced_integer() {
+    let ceiling = fraction(BigInt::from(100), BigInt::from(30))
+        .ceil()
+        .unwrap();
+    assert_eq!(ceiling.numerator, BigInt::from(4));
+    assert_eq!(ceiling.denominator, BigInt::one());
+}
+
+#[test]
+fn ceil_handles_the_largest_budget_values_and_rejects_beyond_it() {
+    let largest = BigInt::from(10).pow(256) - 1_u8;
+    let whole = fraction(largest.clone(), BigInt::one());
+    assert_eq!(whole.ceil().unwrap(), whole);
+    // Just over a whole number rounds up without leaving the budget.
+    let half = fraction(largest, BigInt::from(2));
+    assert_eq!(
+        half.ceil().unwrap(),
+        fraction(BigInt::from(10).pow(256) / 2_u8, BigInt::one())
+    );
+    let beyond = BigInt::from(10).pow(256);
+    for invalid in [
+        ExactAmount {
+            numerator: beyond.clone(),
+            denominator: BigInt::one(),
+        },
+        ExactAmount {
+            numerator: BigInt::one(),
+            denominator: beyond,
+        },
+    ] {
+        assert_eq!(invalid.ceil(), Err(ExactError::ArithmeticLimit));
+    }
+}
+
+#[test]
 fn reduction_normalizes_sign_and_zero() {
     let reduced = fraction(BigInt::from(12), BigInt::from(-18));
     assert_eq!(reduced.numerator, BigInt::from(-2));

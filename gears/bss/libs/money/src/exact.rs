@@ -118,6 +118,22 @@ impl ExactAmount {
         )
     }
 
+    /// The smallest integer that is not below the value: `7/3` gives `3`, `-7/3` gives `-2`
+    /// and `-1/3` gives `0`. The result is an exact whole number, not a posting.
+    ///
+    /// # Errors
+    /// Returns [`ExactError::ArithmeticLimit`] if the fraction exceeds its budget.
+    pub fn ceil(&self) -> Result<Self, ExactError> {
+        self.check_budget()?;
+        // Integer division truncates toward zero, which is already the ceiling of a negative
+        // value; only a positive value with a remainder needs one more.
+        let mut whole = &self.numerator / &self.denominator;
+        if self.numerator.is_positive() && !(&self.numerator % &self.denominator).is_zero() {
+            whole += 1;
+        }
+        Self::reduce(whole, BigInt::one())
+    }
+
     /// Encode an exact posting at the supplied currency scale without rounding.
     ///
     /// # Errors

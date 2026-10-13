@@ -2184,9 +2184,11 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
+ "cf-gears-bss-money",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-contract",
  "cf-gears-toolkit-security",
+ "proptest",
  "rust_decimal",
  "serde_json",
  "thiserror 2.0.20",
