@@ -4325,7 +4325,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-toolkit-auth"
-version = "0.7.11"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4337,6 +4337,7 @@ dependencies = [
  "http-body-util",
  "httpmock",
  "jsonwebtoken",
+ "parking_lot",
  "rand 0.10.1",
  "serde",
  "serde_json",
