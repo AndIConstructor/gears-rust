@@ -5,6 +5,8 @@ use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::models::TenantMode;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
 use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use toolkit_db::secure::DBRunner;
 use toolkit_macros::domain_model;
 use toolkit_security::{AccessScope, SecurityContext, pep_properties};
@@ -44,6 +46,9 @@ pub struct Envelope {
     pub provenance: String,
     pub version: String,
     pub subject_id: Option<Uuid>,
+    /// When the connector formed the record, or observed it at the source.
+    /// The profile writer stores it as the fact's `produced_at`.
+    pub observed_at: OffsetDateTime,
 }
 
 impl Envelope {
@@ -79,11 +84,20 @@ impl Envelope {
         };
         let provenance = text("provenance")?;
         let version = text("version")?;
+        let observed_at = OffsetDateTime::parse(&text("observed_at")?, &Rfc3339).map_err(|_| {
+            Refusal::new(
+                RefusalReason::SchemaViolation,
+                Some(&type_id),
+                Place::pointer("/observed_at"),
+                "format",
+            )
+        })?;
         Ok(Self {
             type_id,
             provenance,
             version,
             subject_id,
+            observed_at,
         })
     }
 }

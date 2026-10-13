@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
+use time::format_description::well_known::Rfc3339;
 use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit_canonical_errors::{Problem, resource_error};
 use toolkit_security::SecurityContext;
@@ -58,6 +59,10 @@ async fn a_valid_record_is_received_handed_off_and_its_identity_kept() {
     assert_eq!(received[0].connector, ctx.subject_id().to_string());
     assert_eq!(received[0].envelope.subject_id, Some(subject));
     assert_eq!(received[0].envelope.provenance, "chat/t/1");
+    assert_eq!(
+        received[0].envelope.observed_at,
+        time::OffsetDateTime::parse("2026-09-10T09:13:05Z", &Rfc3339).unwrap()
+    );
     assert_eq!(stored_record_ids(&db).await, 1);
 }
 
@@ -562,4 +567,43 @@ fn every_refusal_reason_has_its_wire_code() {
     for (reason, code) in expected {
         assert_eq!(reason.code(), code, "{reason:?}");
     }
+}
+
+#[tokio::test]
+async fn an_observed_at_in_lower_case_form_is_read() {
+    let db = inmem_db().await;
+    let fixture = IntakeFixture::default();
+    let intake = fixture.build(&db);
+    let mut record = chat_record(Uuid::new_v4(), "chat/t/1", "v1");
+    record["observed_at"] = json!("2026-09-10t09:13:05.5+02:00");
+
+    let outcome = intake
+        .submit(&connector(), Uuid::new_v4(), record)
+        .await
+        .expect("submit");
+
+    assert_eq!(outcome, IntakeOutcome::Received);
+    assert_eq!(
+        fixture.received()[0].envelope.observed_at,
+        time::OffsetDateTime::parse("2026-09-10T07:13:05.5Z", &Rfc3339).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn an_observed_at_that_is_no_real_date_is_refused_with_its_place() {
+    let db = inmem_db().await;
+    let fixture = IntakeFixture::default();
+    let intake = fixture.build(&db);
+    let mut record = chat_record(Uuid::new_v4(), "chat/t/1", "v1");
+    record["observed_at"] = json!("2026-02-30T10:00:00Z");
+
+    let result = intake.submit(&connector(), Uuid::new_v4(), record).await;
+
+    let Err(DomainError::Refused(refusal)) = result else {
+        panic!("refused, got {result:?}");
+    };
+    assert_eq!(refusal.reason, RefusalReason::SchemaViolation);
+    assert_eq!(refusal.place, Place::pointer("/observed_at"));
+    assert!(fixture.received().is_empty());
+    assert_eq!(stored_record_ids(&db).await, 0);
 }

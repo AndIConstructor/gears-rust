@@ -23,6 +23,11 @@ fn received(subject_id: Option<Uuid>) -> ReceivedRecord {
             provenance: "chat_engine/thread-42/msg-7".to_owned(),
             version: "v1".to_owned(),
             subject_id,
+            observed_at: time::OffsetDateTime::parse(
+                "2026-09-10T08:05:00Z",
+                &time::format_description::well_known::Rfc3339,
+            )
+            .unwrap(),
         },
         record: json!({ "payload": { "text": SECRET } }),
     }
