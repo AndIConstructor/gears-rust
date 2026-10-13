@@ -474,6 +474,11 @@ check-release-config: py-env
 	$(call print_target_banner)
 	@$(PYTHON) tools/scripts/check_release_config.py
 
+## Run the release resolver tests (resolve_release.py + deploy/components.yaml manifest integrity)
+check-release-resolver: py-env
+	$(call print_target_banner)
+	@$(PYTHON) -m unittest discover -s tools/scripts/tests
+
 # -------- Code security checks --------
 
 .PHONY: deny deny-magika fips-policy security

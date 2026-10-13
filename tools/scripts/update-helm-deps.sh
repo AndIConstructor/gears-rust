@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-helm_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$helm_root/../.." && pwd)"
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+helm_root="$repo_root/deploy/helm"
 platform_chart="$helm_root/toolkit-platform"
 
 # Auto-discover every chart that depends on the toolkit-common library and resolve
