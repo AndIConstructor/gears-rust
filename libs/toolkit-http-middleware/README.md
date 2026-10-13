@@ -17,10 +17,15 @@ maintaining their own.
 - Header extractors for `Authorization: Bearer` and `X-ToolKit-Internal-Token`
 - `AnonymousRoute` marker so routes that carry no JWT pass through without `401`
 - Per-route policy for gear listeners: `RouteAuthPolicy` + `route_auth_middleware`
-  select auth before both planes (anonymous routes get an anonymous `SecurityContext`);
-  `platform_route_middleware` requires a validated internal token and refuses any
-  unvalidated presented credential. `layer_route_auth` installs all four layers in the
-  required order — prefer it over wiring them by hand
+  select auth before both planes (anonymous routes get an anonymous `SecurityContext`).
+  A request carries one plane: `retain_route_plane` refuses one presenting both an
+  `Authorization` header and an internal token with `401` `MIXED_CREDENTIALS`, on every
+  route, and drops a lone credential of the other plane unvalidated — the bearer on a
+  platform route, the internal token on an authenticated or unlisted one.
+  `platform_route_middleware` requires a validated internal token; `security_context_middleware`
+  applies the same admission, so a platform route fails closed even without the gate.
+  `layer_route_auth` installs all four layers in the required order — prefer it over wiring
+  them by hand
 - Renders rejections as canonical RFC 9457 `application/problem+json`
 
 ## What it does NOT do

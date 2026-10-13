@@ -895,7 +895,7 @@ async fn platform_routes_through_the_real_assembly() {
             p,
             Some(AXIS_BEARER),
             Some(AXIS_SA),
-            ok,
+            unauthorized,
             "platform: bearer + token",
         ),
         (
@@ -982,7 +982,8 @@ async fn platform_routes_through_the_real_assembly() {
 #[tokio::test]
 async fn platform_routes_fail_closed_without_an_authenticator() {
     use Method as M;
-    // No tenant plane: a presented bearer cannot be validated, so it is refused.
+    // No tenant plane: the token alone is admitted; a bearer beside it is refused as mixed
+    // credentials before either plane runs.
     for (method, bearer, token, want, case) in [
         (M::GET, None, Some(AXIS_SA), StatusCode::OK, "token"),
         (

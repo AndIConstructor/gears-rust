@@ -8,10 +8,9 @@ use std::{
 use crate::middleware::common;
 
 use authn_resolver_sdk::{AuthNResolverClient, AuthNResolverError};
-use secrecy::ExposeSecret;
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_gateway::ProxyRegistry;
-use toolkit_http_middleware::{admit_platform, extract_bearer_http};
+use toolkit_http_middleware::{admit_platform, retain_route_plane};
 use toolkit_security::{RouteAuth, SecurityContext};
 
 /// Route matcher for a specific HTTP method (authenticated routes).
@@ -69,14 +68,16 @@ pub enum AuthRequirement {
     None,
     /// Authentication required.
     Required,
-    /// Requires a validated `X-ToolKit-Internal-Token`; a presented bearer is validated but cannot
-    /// admit the caller alone.
+    /// Requires a validated `X-ToolKit-Internal-Token`; a presented bearer is never validated.
     Platform,
 }
 
 /// Request-scoped auth decision shared by the inner layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ResolvedRequirement(pub(crate) AuthRequirement);
+pub(crate) struct ResolvedRequirement(
+    /// The route's resolved authentication requirement for this request.
+    pub(crate) AuthRequirement,
+);
 
 /// Inserted only by [`platform_gate_middleware`] after platform admission; permits tenant
 /// scope checks to be bypassed. The private field keeps construction inside this module.
@@ -273,7 +274,30 @@ pub(crate) fn policy_path(req: &axum::extract::Request) -> String {
     common::resolve_path(req, path)
 }
 
-/// Enforce [`admit_platform`] even with `auth_disabled`; mark success with [`PlatformAdmitted`].
+/// Keep one plane per request before either authenticator runs, even with `auth_disabled`:
+/// [`retain_route_plane`] refuses both credentials and drops the one the route's plane
+/// does not use.
+pub async fn route_plane_middleware(
+    axum::extract::State(route_policy): axum::extract::State<GatewayRoutePolicy>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let requirement = route_policy.requirement_of(&req);
+    let auth = match requirement {
+        AuthRequirement::None => RouteAuth::Anonymous,
+        AuthRequirement::Required => RouteAuth::Authenticated,
+        AuthRequirement::Platform => RouteAuth::Platform,
+    };
+    if let Err(refusal) = retain_route_plane(auth, &mut req) {
+        return refusal.into_response();
+    }
+    req.extensions_mut()
+        .insert(ResolvedRequirement(requirement));
+    next.run(req).await
+}
+
+/// Enforce [`admit_platform`] even with `auth_disabled`, and mark an admitted request with
+/// [`PlatformAdmitted`].
 pub async fn platform_gate_middleware(
     axum::extract::State(route_policy): axum::extract::State<GatewayRoutePolicy>,
     mut req: axum::extract::Request,
@@ -350,24 +374,9 @@ pub async fn authn_middleware(
                 Err(err) => authn_error_to_response(&err),
             }
         }
-        // Validate presented bearers; only the internal token admits a platform caller.
-        // The validated tenant context is forwarded as-is: platform admission bypasses
-        // tenant `route_policies` scopes, so platform handlers must not authorize on it.
-        // A malformed or repeated `Authorization` header inserts no context, so
-        // `platform_gate_middleware` refuses it as an unverified bearer.
-        AuthRequirement::Platform => {
-            let Ok(token) = extract_bearer_http(req.headers()) else {
-                return next.run(req).await;
-            };
-            match state.authn_client.authenticate(token.expose_secret()).await {
-                Ok(result) => {
-                    log_auth_succeeded(req.method(), path.as_str(), &result.security_context);
-                    req.extensions_mut().insert(result.security_context);
-                    next.run(req).await
-                }
-                Err(err) => authn_error_to_response(&err),
-            }
-        }
+        // Only the internal token admits a platform caller; the bearer is never validated
+        // here, and `route_plane_middleware` has already dropped it.
+        AuthRequirement::Platform => next.run(req).await,
     }
 }
 
@@ -832,26 +841,6 @@ mod tests {
     }
 
     #[test]
-    fn head_inherits_a_platform_get_unless_declared_itself() {
-        let mut anonymous_matchers = HashMap::new();
-        let mut head = AnonymousRouteMatcher::new();
-        head.insert("/b").unwrap();
-        anonymous_matchers.insert(Method::HEAD, head);
-
-        let policy = platform_policy(
-            &[(Method::GET, "/a"), (Method::GET, "/b")],
-            HashMap::new(),
-            anonymous_matchers,
-        );
-
-        assert_eq!(
-            policy.resolve(&Method::HEAD, "/a"),
-            AuthRequirement::Platform
-        );
-        assert_eq!(policy.resolve(&Method::HEAD, "/b"), AuthRequirement::None);
-    }
-
-    #[test]
     fn head_resolves_as_get_unless_declared_itself() {
         let mut route_matchers = HashMap::new();
         let mut get_matcher = RouteMatcher::new();
@@ -876,6 +865,28 @@ mod tests {
             "an explicit HEAD declaration keeps precedence"
         );
         assert_eq!(policy.resolve(&Method::HEAD, "/c"), AuthRequirement::None);
+    }
+
+    #[test]
+    fn head_follows_an_anonymous_get_under_default_deny() {
+        // axum serves HEAD through the GET handler, so HEAD takes the GET route's policy.
+        let mut anonymous_matchers = HashMap::new();
+        let mut get_matcher = AnonymousRouteMatcher::new();
+        get_matcher.insert("/public").unwrap();
+        anonymous_matchers.insert(Method::GET, get_matcher);
+
+        let policy = build_test_policy(HashMap::new(), anonymous_matchers, true);
+
+        assert_eq!(
+            policy.resolve(&Method::HEAD, "/public"),
+            AuthRequirement::None,
+            "HEAD on an anonymous GET route is as anonymous as the GET"
+        );
+        assert_eq!(
+            policy.resolve(&Method::HEAD, "/undeclared"),
+            AuthRequirement::Required,
+            "an undeclared HEAD keeps the default-deny requirement"
+        );
     }
 
     #[test]

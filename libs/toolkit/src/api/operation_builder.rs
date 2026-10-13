@@ -1315,8 +1315,8 @@ where
         }
     }
 
-    /// Require a validated `X-ToolKit-Internal-Token`; validate any presented bearer too.
-    /// Missing internal auth or bearer-only calls yield 401. `OpenAPI` uses
+    /// Require a validated `X-ToolKit-Internal-Token`; a bearer alone is never validated and
+    /// yields 401, as do missing internal auth and a bearer beside the token. `OpenAPI` uses
     /// [`INTERNAL_TOKEN_SECURITY_SCHEME`]; discovery excludes the route. Handlers read
     /// `Extension<PlatformSecurityContext>`; a license decision is still required.
     pub fn platform_authenticated(mut self) -> OperationBuilder<H, R, S, AuthSet, L> {

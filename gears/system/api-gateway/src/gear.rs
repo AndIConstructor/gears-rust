@@ -462,6 +462,8 @@ impl ApiGateway {
             auth::platform_gate_middleware,
         ));
 
+        let plane_policy = route_policy.clone();
+
         // 10) Auth
         if config.auth_disabled {
             // Build security contexts for compatibility during migration
@@ -510,6 +512,12 @@ impl ApiGateway {
                 internal_auth_middleware::<DynInternalAuthenticator>,
             ));
         }
+
+        // 10a) One plane per request, settled before either authenticator runs.
+        router = router.layer(from_fn_with_state(
+            plane_policy,
+            auth::route_plane_middleware,
+        ));
 
         // 11) Error mapping (outer to auth so it can translate auth/handler errors)
         router = router.layer(from_fn(toolkit::api::error_layer::error_mapping_middleware));

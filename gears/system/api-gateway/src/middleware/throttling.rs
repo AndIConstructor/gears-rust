@@ -581,21 +581,20 @@ fn check_key_type(
              (require_security_context=false) operation; identity keying requires authentication"
         );
     }
-    if spec.auth == RouteAuth::Anonymous {
-        bail!(
+    match spec.auth {
+        RouteAuth::Anonymous => bail!(
             "throttling: zone '{zone}' is identity-keyed but operation {} {} allows anonymous \
              access; every anonymous client would share one key",
             spec.method,
             spec.path
-        );
-    }
-    if spec.auth == RouteAuth::Platform {
-        bail!(
+        ),
+        RouteAuth::Platform => bail!(
             "throttling: zone '{zone}' is identity-keyed but operation {} {} is platform-authenticated; \
              a platform caller carries no tenant identity to key on",
             spec.method,
             spec.path
-        );
+        ),
+        RouteAuth::Authenticated => {}
     }
     if cfg.auth_disabled {
         bail!(

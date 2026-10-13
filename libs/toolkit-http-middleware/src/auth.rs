@@ -16,14 +16,16 @@
 //! **Middleware order:** install the stack with [`layer_route_auth`], which applies
 //! [`route_auth_middleware`] (policy) → [`internal_auth_middleware`] →
 //! [`security_context_middleware`] → [`platform_route_middleware`] (gate) → handler
-//! (DESIGN § 3.2). Platform routes fail closed only when the gate sits inside both
-//! planes, so prefer the helper over wiring the four layers by hand. The two planes are
+//! (DESIGN § 3.2). Platform routes fail closed in [`security_context_middleware`] as well,
+//! but only the helper guarantees the order, so prefer it over wiring the layers by hand. The two planes are
 //! independent: each handles its own credential, and [`PeerAuthenticated`] is never a
 //! prerequisite for JWT validation; [`security_context_middleware`] does not consult it.
+//! A request carries one plane: [`route_auth_middleware`] refuses one presenting both
+//! credentials and drops the credential a route's plane does not use ([`retain_route_plane`]).
 //!
-//! Routes that carry no tenant JWT (probes, platform-plane-only handlers) are
-//! marked with the [`AnonymousRoute`] request extension by the gear/bootstrap
-//! layer; note this is distinct from `OperationSpec.exposed`, which controls
+//! Routes that carry no tenant JWT are marked by [`route_auth_middleware`]: probes and
+//! other anonymous routes with the [`AnonymousRoute`] request extension, platform-plane-only
+//! handlers with [`RouteAuth::Platform`]; note this is distinct from `OperationSpec.exposed`, which controls
 //! gateway registration. The concrete authenticator adapters are injected via
 //! Axum state at the same layer.
 
@@ -185,6 +187,8 @@ where
 /// Unlisted routes require a bearer. Anonymous routes get an anonymous
 /// [`SecurityContext`] that a validated bearer replaces, so handlers extracting
 /// `Extension<SecurityContext>` work without credentials and without a tenant plane.
+/// Applies [`retain_route_plane`] before either authenticator runs, treating an unlisted
+/// route as [`RouteAuth::Authenticated`].
 pub async fn route_auth_middleware(
     State(policy): State<Arc<RouteAuthPolicy>>,
     mut request: Request,
@@ -194,26 +198,91 @@ pub async fn route_auth_middleware(
         .extensions()
         .get::<MatchedPath>()
         .and_then(|path| policy.resolve(request.method(), path.as_str()));
+    if let Err(refusal) = retain_route_plane(auth.unwrap_or(RouteAuth::Authenticated), &mut request)
+    {
+        return refusal.into_response();
+    }
     if let Some(auth) = auth {
-        if auth == RouteAuth::Anonymous {
-            request.extensions_mut().insert(AnonymousRoute);
-            request
-                .extensions_mut()
-                .insert(SecurityContext::anonymous());
+        match auth {
+            RouteAuth::Anonymous => {
+                request.extensions_mut().insert(AnonymousRoute);
+                request
+                    .extensions_mut()
+                    .insert(SecurityContext::anonymous());
+            }
+            RouteAuth::Authenticated | RouteAuth::Platform => {}
         }
         request.extensions_mut().insert(auth);
     }
     next.run(request).await
 }
 
-/// Always install inside both auth planes; applies only to [`RouteAuth::Platform`].
-/// Requires a validated platform caller and rejects any unvalidated presented credential with 401.
-/// Handlers receive `Extension<PlatformSecurityContext>`.
-pub async fn platform_route_middleware(request: Request, next: Next) -> Response {
-    if request.extensions().get::<RouteAuth>() != Some(&RouteAuth::Platform) {
-        return next.run(request).await;
+/// `401` `MIXED_CREDENTIALS` from [`retain_route_plane`]: a request carries one plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MixedCredentials;
+
+impl MixedCredentials {
+    /// The `401`'s machine-readable reason.
+    pub const REASON: &'static str = "MIXED_CREDENTIALS";
+}
+
+impl IntoResponse for MixedCredentials {
+    fn into_response(self) -> Response {
+        unauthenticated(Self::REASON)
     }
-    if let Err(refusal) = admit_platform(&request) {
+}
+
+/// Keep one plane per request, ahead of both authenticators.
+///
+/// A request presenting both an `Authorization` header and an `X-ToolKit-Internal-Token`
+/// is refused on every route. Otherwise a lone credential of the other plane is dropped
+/// unvalidated, together with any context already built from it: the bearer on a
+/// [`RouteAuth::Platform`] route, the internal token on a [`RouteAuth::Authenticated`] one.
+/// [`RouteAuth::Anonymous`] keeps a lone credential of either plane.
+///
+/// # Errors
+/// [`MixedCredentials`] when both credentials are presented.
+pub fn retain_route_plane(auth: RouteAuth, request: &mut Request) -> Result<(), MixedCredentials> {
+    let headers = request.headers();
+    if headers.contains_key(AUTHORIZATION) && headers.contains_key(INTERNAL_TOKEN_HEADER) {
+        tracing::info!(
+            method = %request.method(),
+            route = matched_route(request),
+            reason = MixedCredentials::REASON,
+            "request refused: credentials of both auth planes"
+        );
+        return Err(MixedCredentials);
+    }
+    match auth {
+        RouteAuth::Anonymous => {}
+        RouteAuth::Authenticated => {
+            request.headers_mut().remove(INTERNAL_TOKEN_HEADER);
+            request.extensions_mut().remove::<PlatformSecurityContext>();
+            request.extensions_mut().remove::<PeerAuthenticated>();
+        }
+        RouteAuth::Platform => {
+            request.headers_mut().remove(AUTHORIZATION);
+            request.extensions_mut().remove::<SecurityContext>();
+        }
+    }
+    Ok(())
+}
+
+/// The matched route template, or the raw path before routing.
+fn matched_route(request: &Request) -> &str {
+    request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| request.uri().path(), MatchedPath::as_str)
+}
+
+/// Always install inside both auth planes; applies only to [`RouteAuth::Platform`].
+/// Requires a validated platform caller; handlers receive `Extension<PlatformSecurityContext>`
+/// and never a tenant [`SecurityContext`], since [`retain_route_plane`] drops the bearer.
+pub async fn platform_route_middleware(request: Request, next: Next) -> Response {
+    if request.extensions().get::<RouteAuth>() == Some(&RouteAuth::Platform)
+        && let Err(refusal) = admit_platform(&request)
+    {
         return refusal.into_response();
     }
     next.run(request).await
@@ -223,8 +292,8 @@ pub async fn platform_route_middleware(request: Request, next: Next) -> Response
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PlatformRefusal {
-    /// A bearer was presented that no installed plane validated.
-    UnverifiedBearer,
+    /// Both an `Authorization` header and an internal token were presented.
+    MixedCredentials,
     /// An internal token was presented that no installed plane validated.
     UnverifiedInternalToken,
     /// No validated platform caller.
@@ -236,7 +305,7 @@ impl PlatformRefusal {
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
-            Self::UnverifiedBearer => "UNVERIFIED_BEARER",
+            Self::MixedCredentials => MixedCredentials::REASON,
             Self::UnverifiedInternalToken => "UNVERIFIED_INTERNAL_TOKEN",
             Self::MissingInternalToken => "MISSING_INTERNAL_TOKEN",
         }
@@ -249,41 +318,32 @@ impl IntoResponse for PlatformRefusal {
     }
 }
 
-/// Check platform admission and log refusals at info, with the caller's subject when a
-/// validated tenant context is present.
+/// Check platform admission, which only a validated internal token grants, and log
+/// refusals at info. Refuses both credentials itself, so a stack without
+/// [`retain_route_plane`] still carries one plane.
 ///
 /// # Errors
-/// [`PlatformRefusal`] for unvalidated required credentials.
+/// [`PlatformRefusal`] for both credentials or without a validated platform caller.
 pub fn admit_platform(request: &Request) -> Result<(), PlatformRefusal> {
-    let extensions = request.extensions();
-    let tenant = extensions
-        .get::<SecurityContext>()
-        .is_some_and(|ctx| !ctx.is_anonymous());
-    let platform = extensions
+    let headers = request.headers();
+    let platform = request
+        .extensions()
         .get::<PlatformSecurityContext>()
         .is_some_and(|ctx| !ctx.is_outbound_marker());
-
-    let refusal = if request.headers().contains_key(AUTHORIZATION) && !tenant {
-        PlatformRefusal::UnverifiedBearer
-    } else if request.headers().contains_key(INTERNAL_TOKEN_HEADER) && !platform {
-        PlatformRefusal::UnverifiedInternalToken
-    } else if !platform {
-        PlatformRefusal::MissingInternalToken
-    } else {
-        return Ok(());
-    };
-    let route = extensions
-        .get::<MatchedPath>()
-        .map_or_else(|| request.uri().path(), MatchedPath::as_str);
-    let subject_id = extensions
-        .get::<SecurityContext>()
-        .filter(|ctx| !ctx.is_anonymous())
-        .map(SecurityContext::subject_id);
+    let refusal =
+        if headers.contains_key(AUTHORIZATION) && headers.contains_key(INTERNAL_TOKEN_HEADER) {
+            PlatformRefusal::MixedCredentials
+        } else if platform {
+            return Ok(());
+        } else if headers.contains_key(INTERNAL_TOKEN_HEADER) {
+            PlatformRefusal::UnverifiedInternalToken
+        } else {
+            PlatformRefusal::MissingInternalToken
+        };
     tracing::info!(
         method = %request.method(),
-        route,
+        route = matched_route(request),
         reason = refusal.reason(),
-        subject_id = ?subject_id,
         "platform route refused"
     );
     Err(refusal)
@@ -299,7 +359,8 @@ pub fn admit_platform(request: &Request) -> Result<(), PlatformRefusal> {
 ///   `Authorization` header is rejected with `401`.
 /// - An anonymous / system-only route (carrying the [`AnonymousRoute`] marker)
 ///   with no `Authorization` header passes through.
-/// - Without Authorization, [`RouteAuth::Platform`] delegates to [`platform_route_middleware`].
+/// - [`RouteAuth::Platform`] is never bearer-validated: it is admitted here as by
+///   [`platform_route_middleware`], so it fails closed without the gate.
 /// - A rejected token is `401`; an unreachable backend is `503`; any other
 ///   unexpected authentication failure is `500`.
 ///
@@ -325,26 +386,34 @@ pub async fn security_context_middleware<A>(
 where
     A: BearerAuthenticator + 'static,
 {
-    // Without a bearer, the inner platform gate decides admission.
-    let is_anonymous = request.extensions().get::<AnonymousRoute>().is_some()
-        || request.extensions().get::<RouteAuth>() == Some(&RouteAuth::Platform);
+    // The tenant plane has no say on a platform route; admitting here keeps it closed
+    // without the gate.
+    if request.extensions().get::<RouteAuth>() == Some(&RouteAuth::Platform) {
+        return match admit_platform(&request) {
+            Ok(()) => next.run(request).await,
+            Err(refusal) => refusal.into_response(),
+        };
+    }
+    let is_anonymous = request.extensions().get::<AnonymousRoute>().is_some();
 
     match extract_bearer_http(request.headers()) {
         Ok(token) => match authenticator.authenticate(token.expose_secret()).await {
             Ok(secctx) => {
                 request.extensions_mut().insert(secctx);
-                next.run(request).await
             }
-            Err(err) => authn_error_to_response(&err),
+            Err(err) => return authn_error_to_response(&err),
         },
         // No credential presented: allow through only for anonymous/system-only
         // routes; protected routes require a user context.
-        Err(SecurityContextHttpError::MissingAuthHeader) if is_anonymous => next.run(request).await,
-        Err(SecurityContextHttpError::MissingAuthHeader) => unauthenticated("MISSING_BEARER"),
+        Err(SecurityContextHttpError::MissingAuthHeader) if is_anonymous => {}
+        Err(SecurityContextHttpError::MissingAuthHeader) => {
+            return unauthenticated("MISSING_BEARER");
+        }
         Err(SecurityContextHttpError::InvalidAuthHeader | SecurityContextHttpError::EmptyToken) => {
-            unauthenticated("INVALID_BEARER")
+            return unauthenticated("INVALID_BEARER");
         }
     }
+    next.run(request).await
 }
 
 /// Map a neutral [`AuthNError`] to a canonical `problem+json` response.

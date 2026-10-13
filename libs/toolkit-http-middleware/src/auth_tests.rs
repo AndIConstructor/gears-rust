@@ -5,7 +5,8 @@ use axum::{
     body::{Body, to_bytes},
     routing::get,
 };
-use http::{Request as HttpRequest, StatusCode, header};
+use http::{HeaderMap, Request as HttpRequest, StatusCode, header};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use toolkit_security::{
     InternalAuthNError, InternalAuthenticator, PlatformIdentity, SecurityContext,
 };
@@ -434,9 +435,63 @@ async fn anon_echo(Extension(ctx): Extension<SecurityContext>) -> &'static str {
     }
 }
 
+/// Tenant-side echo: whether the platform context and the internal token header reached it.
+async fn tenant_echo(
+    platform: Option<Extension<PlatformSecurityContext>>,
+    headers: HeaderMap,
+) -> String {
+    format!(
+        "platform={} token_header={}",
+        platform.is_some(),
+        headers.contains_key(INTERNAL_HEADER)
+    )
+}
+
 /// Stack built by [`layer_route_auth`]; auth planes are optional.
 /// `/p` is platform, `/anon` anonymous, `/auth` authenticated, `/unlisted` unspecified.
 fn platform_route_app(bearer: bool, internal: bool) -> Router {
+    counted_route_app(bearer, internal).0
+}
+
+/// Calls each authenticator has received.
+#[derive(Clone, Default)]
+struct Calls {
+    bearer: Arc<AtomicUsize>,
+    internal: Arc<AtomicUsize>,
+}
+
+impl Calls {
+    fn get(&self) -> (usize, usize) {
+        (
+            self.bearer.load(Ordering::SeqCst),
+            self.internal.load(Ordering::SeqCst),
+        )
+    }
+}
+
+/// [`SubjectAuthenticator`] counting its calls.
+struct CountedBearer(Arc<AtomicUsize>);
+
+impl BearerAuthenticator for CountedBearer {
+    async fn authenticate(&self, token: &str) -> Result<SecurityContext, AuthNError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        SubjectAuthenticator.authenticate(token).await
+    }
+}
+
+/// [`StubInternalAuthenticator`] counting its calls.
+struct CountedInternal(Arc<AtomicUsize>);
+
+impl InternalAuthenticator for CountedInternal {
+    async fn authenticate(&self, token: &str) -> Result<PlatformIdentity, InternalAuthNError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        StubInternalAuthenticator.authenticate(token).await
+    }
+}
+
+/// [`platform_route_app`] with the calls its authenticators receive.
+fn counted_route_app(bearer: bool, internal: bool) -> (Router, Calls) {
+    let calls = Calls::default();
     let policy: RouteAuthPolicy = [
         (Method::GET, "/p".to_owned(), RouteAuth::Platform),
         (Method::POST, "/p".to_owned(), RouteAuth::Platform),
@@ -449,14 +504,15 @@ fn platform_route_app(bearer: bool, internal: bool) -> Router {
     let router = Router::new()
         .route("/p", get(platform_echo).post(platform_echo))
         .route("/anon", get(anon_echo))
-        .route("/auth", get(|| async { "auth" }))
-        .route("/unlisted", get(|| async { "unlisted" }));
-    layer_route_auth(
+        .route("/auth", get(tenant_echo))
+        .route("/unlisted", get(tenant_echo));
+    let router = layer_route_auth(
         router,
         policy,
-        bearer.then(|| DynBearerAuthenticator::new(SubjectAuthenticator)),
-        internal.then(|| DynInternalAuthenticator::new(StubInternalAuthenticator)),
-    )
+        bearer.then(|| DynBearerAuthenticator::new(CountedBearer(calls.bearer.clone()))),
+        internal.then(|| DynInternalAuthenticator::new(CountedInternal(calls.internal.clone()))),
+    );
+    (router, calls)
 }
 
 const BEARER_TENANT: &str = "Bearer tenant-token";
@@ -508,25 +564,24 @@ fn assert_reason(result: &(StatusCode, Option<String>, String), reason: &str, ca
 #[tokio::test]
 async fn a_platform_route_admits_a_validated_internal_token() {
     for method in [Method::GET, Method::POST] {
-        for (bearer, token, want) in [
-            (None, Some(SA_GOOD), "flight-control"),
-            (Some(BEARER_TENANT), Some(SA_GOOD), "flight-control+tenant"),
-        ] {
-            let (status, _, body) = call(
-                platform_route_app(true, true),
-                method.clone(),
-                "/p",
-                bearer,
-                token,
-            )
-            .await;
-            assert_eq!((status, body.as_str()), (StatusCode::OK, want), "{method}");
-        }
+        let (status, _, body) = call(
+            platform_route_app(true, true),
+            method.clone(),
+            "/p",
+            None,
+            Some(SA_GOOD),
+        )
+        .await;
+        assert_eq!(
+            (status, body.as_str()),
+            (StatusCode::OK, "flight-control"),
+            "{method}"
+        );
     }
 }
 
 #[tokio::test]
-async fn a_platform_route_refuses_a_bearer_alone_and_any_invalid_credential() {
+async fn a_platform_route_refuses_a_bearer_alone_and_an_invalid_token() {
     for (bearer, token, reason, case) in [
         (None, None, "MISSING_INTERNAL_TOKEN", "neither"),
         (
@@ -537,15 +592,9 @@ async fn a_platform_route_refuses_a_bearer_alone_and_any_invalid_credential() {
         ),
         (
             Some(BEARER_FORGED),
-            Some(SA_GOOD),
-            "AUTHN_FAILED",
-            "forged bearer beside valid token",
-        ),
-        (
-            Some("Basic dXNlcjpwYXNz"),
-            Some(SA_GOOD),
-            "INVALID_BEARER",
-            "non-bearer scheme beside valid token",
+            None,
+            "MISSING_INTERNAL_TOKEN",
+            "forged bearer alone",
         ),
         (None, Some("forged"), "INTERNAL_AUTH_FAILED", "forged token"),
     ] {
@@ -559,6 +608,48 @@ async fn a_platform_route_refuses_a_bearer_alone_and_any_invalid_credential() {
         .await;
         assert_reason(&result, reason, case);
     }
+}
+
+/// Both planes without the inner gate, as a hand-wired stack might be built.
+fn platform_app_without_gate() -> Router {
+    let policy: RouteAuthPolicy = [(Method::GET, "/p".to_owned(), RouteAuth::Platform)]
+        .into_iter()
+        .collect();
+    Router::new()
+        .route("/p", get(platform_echo))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(DynBearerAuthenticator::new(SubjectAuthenticator)),
+            security_context_middleware::<DynBearerAuthenticator>,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(DynInternalAuthenticator::new(StubInternalAuthenticator)),
+            internal_auth_middleware::<DynInternalAuthenticator>,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(policy),
+            route_auth_middleware,
+        ))
+}
+
+#[tokio::test]
+async fn the_tenant_plane_admits_platform_routes_without_the_gate() {
+    for (bearer, case) in [
+        (None, "neither"),
+        (Some(BEARER_TENANT), "valid bearer alone"),
+        (Some(BEARER_FORGED), "forged bearer alone"),
+    ] {
+        let result = call(platform_app_without_gate(), Method::GET, "/p", bearer, None).await;
+        assert_reason(&result, "MISSING_INTERNAL_TOKEN", case);
+    }
+    let (status, _, body) = call(
+        platform_app_without_gate(),
+        Method::GET,
+        "/p",
+        None,
+        Some(SA_GOOD),
+    )
+    .await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "flight-control"));
 }
 
 #[tokio::test]
@@ -584,7 +675,7 @@ async fn head_inherits_the_get_policy() {
 }
 
 #[tokio::test]
-async fn without_a_tenant_plane_a_presented_bearer_is_refused() {
+async fn without_a_tenant_plane_a_platform_route_admits_only_a_token() {
     let (status, _, body) = call(
         platform_route_app(false, true),
         Method::GET,
@@ -599,10 +690,10 @@ async fn without_a_tenant_plane_a_presented_bearer_is_refused() {
         Method::GET,
         "/p",
         Some(BEARER_TENANT),
-        Some(SA_GOOD),
+        None,
     )
     .await;
-    assert_reason(&result, "UNVERIFIED_BEARER", "bearer beside valid token");
+    assert_reason(&result, "MISSING_INTERNAL_TOKEN", "bearer alone");
 }
 
 #[tokio::test]
@@ -613,12 +704,6 @@ async fn without_a_platform_plane_every_platform_request_is_refused() {
             Some(SA_GOOD),
             "UNVERIFIED_INTERNAL_TOKEN",
             "token alone",
-        ),
-        (
-            Some(BEARER_TENANT),
-            Some(SA_GOOD),
-            "UNVERIFIED_INTERNAL_TOKEN",
-            "bearer beside token",
         ),
         (None, None, "MISSING_INTERNAL_TOKEN", "neither"),
     ] {
@@ -635,17 +720,86 @@ async fn without_a_platform_plane_every_platform_request_is_refused() {
 }
 
 #[tokio::test]
-async fn an_anonymous_tenant_context_does_not_count_as_a_validated_bearer() {
-    // An anonymous bearer context cannot validate a tenant caller, even beside a valid token.
-    let result = call(
-        platform_route_app(true, true),
-        Method::GET,
-        "/p",
-        Some("Bearer valid-token"),
-        Some(SA_GOOD),
-    )
-    .await;
-    assert_reason(&result, "UNVERIFIED_BEARER", "anonymous tenant context");
+async fn both_credentials_are_refused_before_either_authenticator() {
+    for path in ["/p", "/auth", "/anon", "/unlisted"] {
+        for authorization in [
+            BEARER_TENANT,
+            BEARER_FORGED,
+            "Basic dXNlcjpwYXNz",
+            "Bearer ",
+        ] {
+            for token in [SA_GOOD, "forged"] {
+                for (bearer_plane, internal_plane) in
+                    [(true, true), (true, false), (false, true), (false, false)]
+                {
+                    let (app, calls) = counted_route_app(bearer_plane, internal_plane);
+                    let case = format!(
+                        "{path} {authorization:?} token={token} \
+                         planes=({bearer_plane}, {internal_plane})"
+                    );
+                    let result =
+                        call(app, Method::GET, path, Some(authorization), Some(token)).await;
+                    assert_reason(&result, MixedCredentials::REASON, &case);
+                    assert_eq!(calls.get(), (0, 0), "{case}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_lone_credential_of_the_other_plane_is_dropped_unvalidated() {
+    let (app, calls) = counted_route_app(true, true);
+    let result = call(app, Method::GET, "/p", Some(BEARER_FORGED), None).await;
+    assert_reason(
+        &result,
+        "MISSING_INTERNAL_TOKEN",
+        "forged bearer on a platform route",
+    );
+    assert_eq!(calls.get(), (0, 0));
+    for path in ["/auth", "/unlisted"] {
+        let (app, calls) = counted_route_app(true, true);
+        let result = call(app, Method::GET, path, None, Some("forged")).await;
+        assert_reason(&result, "MISSING_BEARER", path);
+        assert_eq!(calls.get(), (0, 0), "{path}");
+        // Without a tenant plane the handler runs, without the token or a platform context.
+        let (app, calls) = counted_route_app(false, true);
+        let (status, _, body) = call(app, Method::GET, path, None, Some(SA_GOOD)).await;
+        assert_eq!(
+            (status, body.as_str()),
+            (StatusCode::OK, "platform=false token_header=false"),
+            "{path}"
+        );
+        assert_eq!(calls.get(), (0, 0), "{path}");
+    }
+    // Anonymous routes keep validating a lone credential of either plane.
+    let (app, calls) = counted_route_app(true, true);
+    let result = call(app, Method::GET, "/anon", None, Some("forged")).await;
+    assert_401(&result, "forged token on an anonymous route");
+    assert_eq!(calls.get(), (0, 1));
+}
+
+#[tokio::test]
+async fn a_misordered_policy_still_drops_the_other_planes_context() {
+    // The policy inside the platform plane: the token is validated before the policy drops it.
+    let policy: RouteAuthPolicy = [(Method::GET, "/auth".to_owned(), RouteAuth::Authenticated)]
+        .into_iter()
+        .collect();
+    let app = Router::new()
+        .route("/auth", get(tenant_echo))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(policy),
+            route_auth_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(DynInternalAuthenticator::new(StubInternalAuthenticator)),
+            internal_auth_middleware::<DynInternalAuthenticator>,
+        ));
+    let (status, _, body) = call(app, Method::GET, "/auth", None, Some(SA_GOOD)).await;
+    assert_eq!(
+        (status, body.as_str()),
+        (StatusCode::OK, "platform=false token_header=false")
+    );
 }
 
 /// Injects a sentinel context before the gate; the handler itself reads no context.
@@ -675,6 +829,35 @@ async fn the_gate_does_not_admit_the_outbound_marker() {
     )
     .await;
     assert_reason(&result, "MISSING_INTERNAL_TOKEN", "outbound marker");
+}
+
+#[tokio::test]
+async fn platform_admission_refuses_both_credentials_without_the_policy_layer() {
+    // `RouteAuth::Platform` set by hand, so `retain_route_plane` never runs: the token is
+    // validated, and admission alone must still refuse the pair.
+    let internal = || {
+        axum::middleware::from_fn_with_state(
+            Arc::new(DynInternalAuthenticator::new(StubInternalAuthenticator)),
+            internal_auth_middleware::<DynInternalAuthenticator>,
+        )
+    };
+    let gate_only = Router::new()
+        .route("/p", get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(platform_route_middleware))
+        .layer(internal())
+        .layer(Extension(RouteAuth::Platform));
+    let tenant_plane_only = Router::new()
+        .route("/p", get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(DynBearerAuthenticator::new(SubjectAuthenticator)),
+            security_context_middleware::<DynBearerAuthenticator>,
+        ))
+        .layer(internal())
+        .layer(Extension(RouteAuth::Platform));
+    for (app, case) in [(gate_only, "gate"), (tenant_plane_only, "tenant plane")] {
+        let result = call(app, Method::GET, "/p", Some(BEARER_TENANT), Some(SA_GOOD)).await;
+        assert_reason(&result, MixedCredentials::REASON, case);
+    }
 }
 
 #[tokio::test]

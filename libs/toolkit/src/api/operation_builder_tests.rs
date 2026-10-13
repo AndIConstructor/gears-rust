@@ -474,16 +474,6 @@ fn authenticated() {
 }
 
 #[test]
-fn platform_authenticated_requires_the_platform_plane() {
-    let platform = OperationBuilder::<Missing, Missing, ()>::post("/tests/v1/a")
-        .platform_authenticated()
-        .no_license_required()
-        .handler(test_handler)
-        .json_response(http::StatusCode::OK, "OK");
-    assert_eq!(platform.spec.auth, RouteAuth::Platform);
-}
-
-#[test]
 fn every_auth_declaration_classifies_as_its_operation_auth() {
     let authed = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/a")
         .authenticated()
