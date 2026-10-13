@@ -34,6 +34,7 @@ pub struct Subject {
     /// non-empty, at most 255 characters per the base schema.
     /// Absent for a type-level subject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(min_length = 1, max_length = 255)]
     pub id: Option<String>,
     /// Licensing-relevant properties conforming to the derived contract's
     /// metadata schema. Semantically opaque to the resolver; shape-validated
@@ -67,6 +68,7 @@ pub struct Resource {
     /// non-empty, at most 255 characters per the base schema.
     /// Absent = whole-type check; how that is answered is the backend's policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(min_length = 1, max_length = 255)]
     pub id: Option<String>,
     /// Licensing-relevant properties conforming to the derived contract's
     /// metadata schema. Semantically opaque to the resolver; shape-validated

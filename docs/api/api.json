@@ -7403,6 +7403,8 @@
         "properties": {
           "id": {
             "description": "Optional instance id — a well-known name or a UUID (natural key);\nnon-empty, at most 255 characters per the base schema.\nAbsent = whole-type check; how that is answered is the backend's policy.",
+            "maxLength": 255,
+            "minLength": 1,
             "type": [
               "string",
               "null"
@@ -7429,6 +7431,8 @@
         "properties": {
           "id": {
             "description": "Optional instance id — a well-known name or a UUID (natural key);\nnon-empty, at most 255 characters per the base schema.\nAbsent for a type-level subject.",
+            "maxLength": 255,
+            "minLength": 1,
             "type": [
               "string",
               "null"
