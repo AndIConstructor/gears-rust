@@ -39,7 +39,7 @@ pub enum DomainError {
     UnsupportedTransition { detail: String },
     /// A write violated the secret type's traits, or names a type that
     /// conflicts with the one already in play (`TYPE_IMMUTABLE`,
-    /// `TYPE_MISMATCH_WITH_INHERITED`). `reason` is the stable
+    /// `TYPE_MISMATCH_WITH_INHERITED`, `TYPE_MISMATCH_WITH_DESCENDANT`). `reason` is the stable
     /// machine-readable code surfaced on the wire (e.g.
     /// `SHARING_NOT_ALLOWED_FOR_TYPE`); `field` names the offending request
     /// field for the canonical field violation.
@@ -49,7 +49,7 @@ pub enum DomainError {
         reason: &'static str,
         detail: String,
     },
-    /// A request is malformed independently of any secret type (ADR-0004):
+    /// A request is malformed independently of any secret type (ADR-0007):
     /// `SECRET_REQUIRED`, `EMPTY_PATCH`, `NULL_NOT_ALLOWED`,
     /// `PRECONDITION_REQUIRED`, `TYPE_REQUIRED`. `reason` is the stable
     /// machine-readable code; `field` names the offending request field.
