@@ -357,6 +357,13 @@ The system **MUST** accept a normalized reasoning configuration (enable/disable,
 
 The system **MUST** accept requests with user-defined function tools (unified OpenAI-like format, GTS reference, or inline GTS schema), resolve schema references, and forward them to the provider. The system **MUST** return tool calls in a unified format for the consumer to execute. The system **MUST NOT** execute tools — this is consumer responsibility.
 
+The system **MUST** accept tool selection controls and map them to the provider's equivalents:
+
+- `tool_choice`: `none` (model must not call tools), `auto` (model decides), `required` (model must call at least one tool), or a specific function by name (model must call that function)
+- `parallel_tool_calls`: whether the model may return several tool calls in one response
+
+A `tool_choice` that names a function not defined in the request **MUST** be rejected with a validation error. A `tool_choice` value or `parallel_tool_calls` setting the model does not support is handled as an unsupported generic parameter (`cpt-cf-llm-gateway-fr-generation-parameters-v1`): rejected with `unsupported_parameter` by default, or dropped and listed in `ignored_parameters` when `drop_unsupported_params` is set.
+
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`, `cpt-cf-llm-gateway-actor-type-registry`
 
 #### Web Search Tool
@@ -916,10 +923,10 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: Model available for tenant, model supports function calling.
 
 **Flow**:
-1. Consumer sends create_response with tool definitions
+1. Consumer sends create_response with tool definitions and, optionally, `tool_choice` and `parallel_tool_calls`
 2. Gateway resolves model info via Model Registry and selects the provider plugin
 3. Gateway resolves schemas via Type Registry (for reference and inline GTS formats)
-4. Plugin converts tools to provider format
+4. Plugin converts tools and tool selection controls to provider format
 5. Plugin sends request via Outbound API Gateway
 6. Provider returns tool_calls
 7. Gateway returns tool_calls in unified format
@@ -934,11 +941,14 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - **Schema resolution failure**: Gateway returns schema-not-found error if GTS reference is unresolvable.
 - **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 - **Partial tool execution**: Consumer sends partial tool results; Gateway forwards to provider for continued generation.
+- **Unknown function in tool_choice**: Gateway returns validation error if `tool_choice` names a function not defined in the request.
+- **Unsupported tool selection control**: Gateway returns unsupported_parameter error if the model does not support the requested `tool_choice` value or `parallel_tool_calls` setting; with `drop_unsupported_params` set, Gateway drops it and lists it in `ignored_parameters`.
 
 **Acceptance criteria**:
 - Tool definitions supported: reference, inline GTS, unified format (OpenAI-like)
 - Gateway web search (`cf:web_search`) and provider-specific tools (`<provider>:<tool>`) can be combined with function tools in one request (see UC-021)
 - Tool calls returned in unified format
+- `tool_choice` (`none`, `auto`, `required`, specific function) and `parallel_tool_calls` mapped to provider equivalents
 - Response in normalized format
 
 #### UC-011: Structured Output
