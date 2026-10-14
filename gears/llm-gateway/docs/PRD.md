@@ -149,6 +149,15 @@ No dedicated human actors. All interactions with LLM Gateway are mediated throug
 - **Data exchanged**: Inbound: normalized request, model info (as received from Model Registry), optional provider API key. Outbound: normalized response or stream of chunks, generic usage, provider-specific raw usage, cost in AI credits.
 - **Availability**: Plugins are compiled into the same binary and registered at startup. If no plugin is registered for the model's provider type, Gateway returns a provider-not-supported error.
 
+#### OAGW
+
+**ID**: `cpt-cf-llm-gateway-actor-oagw`
+
+- **Role**: Outbound API Gateway — the only path from provider plugins to providers. Executes provider HTTP calls (`proxy_request`) to registered upstreams and routes and applies circuit breaking; may handle upstream authentication for models without a secret reference.
+- **Direction**: outbound (called by provider plugins)
+- **Data exchanged**: Provider-formatted HTTP requests (OAGW alias and path built from the model's `base_url` and the provider API path); receives provider HTTP responses and streams.
+- **Availability**: If OAGW is unavailable, the provider cannot be reached and Gateway returns a provider-unavailable error. An open circuit for a provider is reported the same way.
+
 #### CredStore
 
 **ID**: `cpt-cf-llm-gateway-actor-credstore`
@@ -204,6 +213,15 @@ Note: Gateway may report more AI credits than the tenant's allocated quota becau
 - **Direction**: outbound
 - **Data exchanged**: Model resolution requests (model identifier, tenant context); receives model info: provider GTS type, provider model name, `base_url`, secret reference, capabilities, generic default settings, provider-specific settings including pricing.
 - **Availability**: If Model Registry is unavailable, Gateway returns a model-resolution-unavailable error. Gateway cannot route requests without model resolution.
+
+#### FileStorage
+
+**ID**: `cpt-cf-llm-gateway-actor-filestorage`
+
+- **Role** (P2): Platform gear that stores and serves media files. Gateway resolves FileStorage URLs in media inputs and stores generated media (images, audio, video) in it.
+- **Direction**: outbound
+- **Data exchanged**: Media reads by FileStorage URL (bytes prefetched when the provider plugin requires them); uploads of generated media, receiving a retrievable URL.
+- **Availability**: Required only for requests that reference FileStorage URLs or generate media. If FileStorage is unavailable, such requests fail with a storage error; other requests are unaffected.
 
 ## 3. Operational Concept & Environment
 
@@ -321,7 +339,7 @@ The system **MUST** isolate provider-specific logic in provider plugins implemen
 
 The Gateway **MUST** select the plugin by the provider GTS type in the resolved model info and forward model info to the plugin as received from Model Registry. Model Registry **MUST** be able to validate provider-specific model settings against the plugin's settings schema.
 
-**Actors**: `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-type-registry`, `cpt-cf-llm-gateway-actor-model-registry`
+**Actors**: `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-type-registry`, `cpt-cf-llm-gateway-actor-model-registry`, `cpt-cf-llm-gateway-actor-oagw`
 
 #### Custom Model Endpoints
 
@@ -329,7 +347,7 @@ The Gateway **MUST** select the plugin by the provider GTS type in the resolved 
 
 The system **MUST** support models with a custom `base_url` (self-hosted or OpenAI-compatible endpoints such as Ollama or vLLM). The model's `base_url` is defined in Model Registry and comes with the model info. The provider plugin **MUST** build the OAGW alias and path from that `base_url` and the provider API path.
 
-**Actors**: `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-model-registry`
+**Actors**: `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-model-registry`, `cpt-cf-llm-gateway-actor-oagw`
 
 #### Provider Credentials
 
@@ -515,7 +533,7 @@ Cross-cutting concern — applies to all operations, no dedicated UC.
 
 The system **MUST** accept FileStorage URLs for image, file, audio, and video inputs, resolve the media (prefetching bytes when the provider plugin requires it), and store generated media in FileStorage, returning a retrievable URL.
 
-**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`
+**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-filestorage`
 
 #### Image Generation
 
@@ -539,7 +557,7 @@ The system **MUST** accept a text input, synthesize audio via the resolved provi
 
 The system **MUST** accept messages with a video reference (FileStorage URL or external URL), resolve the media, route to a video-capable model, and return the analysis with usage metrics.
 
-**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
+**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`, `cpt-cf-llm-gateway-actor-filestorage`
 
 #### Async Jobs
 
@@ -585,7 +603,7 @@ Note: The specific mechanism and component providing rate limiting is an open qu
 
 The system **MUST** accept messages with an audio reference (FileStorage URL or external URL), resolve the media, route to an STT-capable model, and return the transcription with usage metrics.
 
-**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
+**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`, `cpt-cf-llm-gateway-actor-filestorage`
 
 #### Video Generation
 
