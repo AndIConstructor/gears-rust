@@ -439,14 +439,20 @@ struct Stand {
 
 /// Bring up `PostgreSQL` 19 beta, or explain why not.
 ///
-/// `None` means skip, and only for one reason: the registry no longer has the
-/// pinned beta tag. `SQL/PGQ` exists on 19 beta 1–3 only (reverted in beta 4,
-/// absent from GA), and Docker Hub withdraws beta tags after GA, so a 404 on the
-/// pull is the expected end of this suite rather than a fault (gears-rust
-/// #5343). Any other startup failure -- no Docker, a registry outage, a rate
-/// limit, a bad reference -- fails the case, so the suite cannot pass without
-/// having run. `GEARS_TEST_PG_GRAPH_REQUIRED=1` turns the withdrawn-tag skip
-/// into a failure too.
+/// `None` means skip, for two reasons only:
+///
+/// - the registry no longer has the pinned beta tag. `SQL/PGQ` exists on 19
+///   beta 1–3 only (reverted in beta 4, absent from GA), and Docker Hub
+///   withdraws beta tags after GA, so a 404 on the pull is the expected end of
+///   this suite rather than a fault (gears-rust #5343);
+/// - the host has no Docker at all (no client can be created), as on the macOS
+///   and Windows test lanes, which run this module whenever the workspace
+///   enables `pgq`.
+///
+/// Any other startup failure -- a daemon that is configured but does not
+/// answer, a registry outage, a rate limit, a bad reference -- fails the case,
+/// so the suite cannot pass without having run where Docker is present.
+/// `GEARS_TEST_PG_GRAPH_REQUIRED=1` turns both skips into failures too.
 async fn stand() -> Option<Stand> {
     let request = test_containers::postgres_graph()
         .with_env_var("POSTGRES_PASSWORD", "pass")
@@ -465,13 +471,20 @@ async fn stand() -> Option<Stand> {
             let rendered = error.to_string();
             let tag_withdrawn = rendered.contains("failed to pull the image")
                 && rendered.contains("status code 404");
+            let no_docker = rendered.contains("failed to initialize a docker client");
             assert!(
-                tag_withdrawn,
-                "PostgreSQL 19 ({}) could not start, and not because the beta tag \
-                 was withdrawn; only that skips this suite: {error}",
+                tag_withdrawn || no_docker,
+                "PostgreSQL 19 ({}) could not start, and neither because the beta \
+                 tag was withdrawn nor because this host has no Docker; only those \
+                 skip this suite: {error}",
                 test_containers::postgres_graph_tag()
             );
-            eprintln!("PostgreSQL 19 beta tag withdrawn - skipping the SQL/PGQ lane: {error}");
+            let why = if tag_withdrawn {
+                "beta tag withdrawn"
+            } else {
+                "no Docker on this host"
+            };
+            eprintln!("PostgreSQL 19 unavailable ({why}) - skipping the SQL/PGQ lane: {error}");
             return None;
         }
     };
