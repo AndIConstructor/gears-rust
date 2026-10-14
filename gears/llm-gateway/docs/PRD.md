@@ -699,20 +699,30 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 **Flow**:
 1. Consumer sends embed(model, input[])
-2. Gateway resolves provider via Model Registry
-3. Gateway sends request via Outbound API Gateway
-4. Provider returns vectors
-5. Gateway returns vectors with usage
+2. Gateway resolves model info via Model Registry
+3. Gateway validates that the model supports embeddings
+4. Gateway selects the provider plugin by the model info provider GTS type
+5. Gateway fetches the provider API key from CredStore (if the model has a secret reference)
+6. Gateway calls the plugin with the request, model info, and key
+7. Plugin converts the request to provider format, applies model settings, sets the key in request headers
+8. Plugin calls the provider via OAGW (`proxy_request`)
+9. Plugin converts the provider response to normalized vectors and computes cost in AI credits
+10. Gateway reports usage and returns the vectors with usage
 
 **Postconditions**: Vectors returned, usage reported.
 
 **Alternative Flows**:
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway normalizes provider error to Gateway error format and returns to consumer.
 - **Invalid input**: Gateway returns validation error if input is empty or exceeds provider limits.
+- **Invalid model**: Gateway returns model-not-found error if model is unavailable for tenant.
+- **No plugin for provider**: Gateway returns provider-not-supported error.
+- **Credentials unavailable**: Gateway returns credentials-unavailable error if the key cannot be fetched from CredStore.
+- **Model not capable**: Gateway returns capability_not_supported error if model does not support embeddings.
 
 **Acceptance criteria**:
-- Vectors returned in normalized format
-- Usage metrics included (AI credit amount)
+- Vectors returned in normalized format regardless of provider
+- Usage included: cost in AI credits, generic token usage, provider raw usage
+- Provider errors normalized to Gateway error format
 
 #### UC-004: Vision (Image Analysis)
 
