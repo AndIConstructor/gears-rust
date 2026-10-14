@@ -421,6 +421,25 @@ The system **MUST** verify that the resolved model supports the capabilities req
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`
 
+#### Provider Error Normalization
+
+- [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-provider-error-normalization-v1`
+
+The provider plugin **MUST** map provider errors to a fixed set of normalized categories, so that consumers can branch on the category regardless of provider. The system **MUST** support at least the following categories:
+
+- `context_length_exceeded` — input exceeds the model context window; the consumer can trim history and retry
+- `rate_limited` — provider rate limit hit; includes `retry_after` when the provider supplies it
+- `content_filtered` — request or response blocked by the provider's content policy
+- `invalid_request` — request rejected by the provider as malformed or unsupported; retrying without changes will not help
+- `authentication_failed` — provider rejected the API key
+- `provider_unavailable` — provider outage, overload, server error, or network failure; the request may succeed on retry
+
+Errors that do not match any category **MUST** be returned as `provider_error`. Every normalized error **MUST** include the provider's original error code and message and the `provider_request_id` (when available). Errors that occur mid-stream **MUST** be delivered as a stream error event with the same category.
+
+Cross-cutting concern — applies to all operations, no dedicated UC.
+
+**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-provider`
+
 #### Request Traceability
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-request-traceability-v1`
@@ -652,7 +671,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Postconditions**: Response returned, usage reported.
 
 **Alternative Flows**:
-- **Provider error**: Gateway normalizes provider error to Gateway error format and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 - **Timeout** (P2): Gateway enforces TTFT and total timeouts; on expiry triggers fallback (if configured) or returns timeout error.
 - **Invalid model**: Gateway returns model-not-found error if model is unavailable for tenant.
 - **No plugin for provider**: Gateway returns provider-not-supported error.
@@ -662,7 +681,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Acceptance criteria**:
 - Response in normalized format regardless of provider
 - Usage included: cost in AI credits, generic token usage, provider raw usage
-- Provider errors normalized to Gateway error format
+- Provider errors returned with a normalized category, the original provider code and message, and `provider_request_id`
 
 #### UC-002: Streaming Chat Completion
 
@@ -713,7 +732,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Postconditions**: Vectors returned, usage reported.
 
 **Alternative Flows**:
-- **Provider error**: Gateway normalizes provider error to Gateway error format and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 - **Invalid input**: Gateway returns validation error if input is empty or exceeds provider limits.
 - **Invalid model**: Gateway returns model-not-found error if model is unavailable for tenant.
 - **No plugin for provider**: Gateway returns provider-not-supported error.
@@ -723,7 +742,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Acceptance criteria**:
 - Vectors returned in normalized format regardless of provider
 - Usage included: cost in AI credits, generic token usage, provider raw usage
-- Provider errors normalized to Gateway error format
+- Provider errors returned with a normalized category, the original provider code and message, and `provider_request_id`
 
 #### UC-004: Vision (Image Analysis)
 
@@ -745,7 +764,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Alternative Flows**:
 - **Media resolution failure**: Gateway returns media-not-found error if an image cannot be retrieved or decoded.
 - **FileStorage URL** (P2): Gateway resolves the media via FileStorage before dispatch.
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 
 **Acceptance criteria**:
 - Multiple images supported per request
@@ -770,7 +789,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Postconditions**: Image stored, URL returned, usage reported.
 
 **Alternative Flows**:
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 - **FileStorage upload failure**: Gateway returns storage error; generated image is lost.
 
 **Acceptance criteria**:
@@ -797,7 +816,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 **Alternative Flows**:
 - **Media resolution failure**: Gateway returns media-not-found error if audio URL is invalid or inaccessible.
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 
 **Acceptance criteria**:
 - Transcription in normalized format
@@ -821,7 +840,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Postconditions**: Audio stored, URL returned, usage reported.
 
 **Alternative Flows**:
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 - **FileStorage upload failure**: Gateway returns storage error; generated audio is lost.
 
 **Acceptance criteria**:
@@ -848,7 +867,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 **Alternative Flows**:
 - **Media resolution failure**: Gateway returns media-not-found error if video URL is invalid or inaccessible.
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 
 **Acceptance criteria**:
 - Response in normalized format
@@ -872,7 +891,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Postconditions**: Video stored, URL returned, usage reported.
 
 **Alternative Flows**:
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 - **FileStorage upload failure**: Gateway returns storage error; generated video is lost.
 
 **Acceptance criteria**:
@@ -904,7 +923,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 **Alternative Flows**:
 - **Schema resolution failure**: Gateway returns schema-not-found error if GTS reference is unresolvable.
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 - **Partial tool execution**: Consumer sends partial tool results; Gateway forwards to provider for continued generation.
 
 **Acceptance criteria**:
@@ -932,7 +951,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 **Alternative Flows**:
 - **Schema validation failure**: Gateway returns validation_error with details if response does not match schema.
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 
 **Acceptance criteria**:
 - Response validated against provided schema
@@ -959,7 +978,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Alternative Flows**:
 - **Media resolution failure**: Gateway returns media-not-found error if the document cannot be retrieved or decoded.
 - **FileStorage URL** (P2): Gateway resolves the document via FileStorage before dispatch.
-- **Provider error**: Gateway normalizes error and returns to consumer.
+- **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 
 **Acceptance criteria**:
 - Response in normalized format
