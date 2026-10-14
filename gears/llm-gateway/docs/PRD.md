@@ -48,7 +48,7 @@ LLM Gateway provides unified access to multiple LLM providers. Consumers interac
 
 LLM Gateway is the central integration point between platform consumers and external AI providers. It abstracts provider differences — request formats, authentication, error handling, rate limits — behind a unified API. Consumers send requests in a normalized format; Gateway translates them to provider-specific calls and normalizes responses back.
 
-Provider-specific logic is isolated in **provider plugins**. Each plugin implements a common plugin trait that covers the superset of provider capabilities needed by the Gateway API: it converts normalized requests into provider HTTP requests, parses provider responses back into the normalized format, and computes the call cost in AI credits from the pricing in the model's provider settings. Plugins do not use third-party provider SDK libraries. The Gateway core owns cross-cutting concerns: model resolution, capability checks, credential retrieval, hooks, quota, usage reporting, fallback, and timeouts.
+Provider-specific logic is isolated in **provider plugins**. Each plugin implements a common plugin trait that covers the superset of provider capabilities needed by the Gateway API: it converts normalized requests into provider HTTP requests, parses provider responses back into the normalized format, and computes the call cost in AI credits from the pricing in the model's provider settings. Plugins do not use third-party provider SDK libraries. The Gateway core owns cross-cutting concerns: model resolution, capability checks, credential retrieval, quota, usage reporting, fallback, and timeouts.
 
 The first phase (P1) covers synchronous and streaming chat completion and embeddings, including image and file input passed as base64 data or external URLs, reasoning, tool calling, web search, and structured output. Later phases add media generation (images, audio, video), FileStorage-backed media, async jobs, batch processing, and realtime audio. All provider calls go through the Outbound API Gateway (OAGW). The Gateway obtains provider API keys from CredStore and passes them to the provider plugin, which sets them on the outbound request.
 
@@ -62,9 +62,9 @@ Gateway is stateless for request processing — it does not store conversation h
 
 Platform consumers need access to AI capabilities from multiple LLM providers — OpenAI, Anthropic, Google, and others. Each provider has its own API format, authentication mechanism, error semantics, and rate limiting behavior. Without a unified abstraction, every consumer must implement provider-specific integration logic, handle failover independently, and manage credentials directly. This fragments the codebase, increases the surface area for security issues, and makes it difficult to enforce consistent governance policies across the platform.
 
-The current state requires each consuming gear to negotiate provider differences at the application layer: translating request formats, normalizing error responses, and implementing retry logic per provider. Usage tracking and budget enforcement are ad-hoc or absent, making it impossible to provide tenant-level cost visibility or enforce spending limits. Content moderation and PII filtering require each consumer to integrate interception logic independently, with no guarantee of consistent policy enforcement.
+The current state requires each consuming gear to negotiate provider differences at the application layer: translating request formats, normalizing error responses, and implementing retry logic per provider. Usage tracking and budget enforcement are ad-hoc or absent, making it impossible to provide tenant-level cost visibility or enforce spending limits.
 
-LLM Gateway addresses these problems by providing a single integration point that abstracts provider differences behind a unified API. It centralizes governance — budget enforcement, rate limiting, usage tracking, and audit logging — at the tenant level. Pre-call and post-response interceptors enable consistent content moderation and PII filtering policies without requiring consumer-side implementation.
+LLM Gateway addresses these problems by providing a single integration point that abstracts provider differences behind a unified API. It centralizes governance — budget enforcement, rate limiting, usage tracking, and audit logging — at the tenant level.
 
 ### 1.3 Goals (Business Outcomes)
 
@@ -111,7 +111,6 @@ LLM Gateway addresses these problems by providing a single integration point tha
 | Type Registry | Platform gear storing GTS schemas and instances: provider plugin instances, provider settings schemas, tool schemas |
 | AI credits | Platform billing unit. Provider plugins convert provider usage into AI credits using the model's pricing |
 | Open Responses | Responses-style request/response contract used by the Gateway SDK (`CreateResponseBody`, `ResponseResource`, streaming events) |
-| Hook Plugin | Gears plugin architecture extension point for per-request processing. Multiple plugins can be enabled per tenant and are invoked in order. Pre-call plugins run before the provider plugin and can modify or block requests. Post-call plugins run after the full response is available and are observe-only — the response has already been delivered or is delivered unconditionally, so there is nothing to modify or block. |
 
 ## 2. Actors
 
@@ -167,15 +166,6 @@ No dedicated human actors. All interactions with LLM Gateway are mediated throug
 - **Data exchanged**: Plugin and settings schema registration at startup; schema lookups for tool definitions.
 - **Availability**: Required at startup for plugin registration. If a referenced tool schema cannot be resolved, Gateway returns a schema-not-found error.
 
-#### Hook Plugin
-
-**ID**: `cpt-cf-llm-gateway-actor-hook-plugin`
-
-- **Role**: Pre-call and post-response interception (moderation, PII, transformation).
-- **Direction**: bidirectional
-- **Data exchanged**: Outbound: request/response payloads for inspection; inbound: allow/block/modify decisions with optionally transformed payloads.
-- **Availability**: If Hook Plugin is unavailable, Gateway fails the request with a hook-unavailable error. Gateway does not bypass hooks silently — the tenant's security policy must be enforced.
-
 #### Usage Tracker
 
 **ID**: `cpt-cf-llm-gateway-actor-usage-tracker`
@@ -204,7 +194,7 @@ Note: The specific component that provides quota management is an open question.
 
 - **Role**: Compliance event logging.
 - **Direction**: outbound
-- **Data exchanged**: Audit events (request started, completed, failed, blocked, fallback triggered) with tenant/user/model attribution.
+- **Data exchanged**: Audit events (request started, completed, failed, fallback triggered) with tenant/user/model attribution.
 - **Availability**: Audit Gear unavailability does not block request processing. Audit events are delivered best-effort — Gateway logs a warning if delivery fails but does not reject the consumer request.
 
 #### Model Registry
@@ -261,7 +251,6 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 - FileStorage-backed media input and output
 - Async job execution with durably persisted job state and results
 - Batch processing with durably persisted job ID mappings
-- Pre-call and post-response hook plugin interception
 - Provider fallback and timeout enforcement
 - Per-tenant AI credit quota enforcement via Quota Manager, rate limiting
 - Realtime audio
@@ -499,22 +488,6 @@ On timeout the system **MUST** trigger fallback (if configured) or return a time
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
 
-#### Pre-Call Interceptor
-
-- [ ] `p2` - **ID**: `cpt-cf-llm-gateway-fr-pre-call-interceptor-v1`
-
-The system **MUST** invoke Hook Plugin before sending a request to the provider. The plugin can allow, block, or modify the request.
-
-**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-hook-plugin`
-
-#### Post-Response Interceptor
-
-- [ ] `p2` - **ID**: `cpt-cf-llm-gateway-fr-post-response-interceptor-v1`
-
-The system **MUST** invoke all enabled Hook Plugins in order after the provider plugin returns a fully-assembled, normalized response. For streaming responses, the hook is invoked after all stream chunks have been received and the full response is assembled — the response may already have been delivered to the consumer. For async and batch requests, the hook is invoked after the job completes. Post-call hooks are observe-only: the gateway delivers the response to the consumer unconditionally, and the hook is invoked with a read-only view of the response after delivery (streaming) or as a fire-and-forget step that does not affect response delivery (sync). Batch requests are treated as individual calls — hooks are applied per request as if the requests were not batched.
-
-**Actors**: `cpt-cf-llm-gateway-actor-hook-plugin`, `cpt-cf-llm-gateway-actor-consumer`
-
 #### Per-Tenant Quota Enforcement
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-fr-budget-enforcement-v1`
@@ -577,7 +550,7 @@ The system **MUST** accept a batch of requests for async processing at reduced c
 
 - [ ] `p4` - **ID**: `cpt-cf-llm-gateway-fr-audit-events-v1`
 
-The system **MUST** emit audit events via Audit Gear for compliance: request started, completed, failed, blocked, fallback triggered.
+The system **MUST** emit audit events via Audit Gear for compliance: request started, completed, failed, fallback triggered.
 
 Cross-cutting concern — applies to all operations, no dedicated UC.
 
@@ -610,7 +583,7 @@ Existing consumers of llm-connectors use an OpenAI Chat Completions–compatible
 The following quality domains are handled at the platform level and do not require gear-specific NFRs:
 
 - **Authentication / Authorization**: Handled by platform AuthN/AuthZ gears via SecurityContext. All Gateway endpoints require valid authentication; authorization is enforced per tenant through platform middleware.
-- **Security implementation**: Credential storage handled by CredStore; Gateway only fetches keys per request and never persists or logs them (see `cpt-cf-llm-gateway-fr-provider-credentials-v1`); TLS and network security handled by infrastructure. Content security (PII filtering, moderation) is handled by Hook Plugins, not Gateway itself. Data classification and ownership are documented in § 3.2.
+- **Security implementation**: Credential storage handled by CredStore; Gateway only fetches keys per request and never persists or logs them (see `cpt-cf-llm-gateway-fr-provider-credentials-v1`); TLS and network security handled by infrastructure. Data classification and ownership are documented in § 3.2.
 - **Safety**: Not applicable — LLM Gateway is a software-only API gear with no physical interaction or safety-critical operations.
 - **Usability / Accessibility**: Not applicable — API-only gear with no user interface.
 - **Compliance / Regulatory**: LLM Gateway does not store conversation content. Synchronous request/response data is transient. Async and batch job results are durably persisted for the retention period (up to 48 hours) and may contain provider response data that includes PII depending on consumer requests; Gateway treats all persisted job results as potentially sensitive and relies on retention-based cleanup as the primary data protection control. Compliance requirements for data processed by LLM providers are the responsibility of consumers and the providers themselves.
@@ -638,12 +611,11 @@ The system **MUST** emit OpenTelemetry-compatible operational metrics covering t
 - Usage records reported as incomplete (interrupted streams)
 - Provider fallback events with source/target provider and reason
 - Time-to-first-token latency histogram with model and provider dimensions
-- Hook plugin blocks by hook type (pre-call, post-response)
 - Quota operations: checks (allowed / rejected); reservation and settlement metrics if the reserve/settle model is adopted (see § 13)
 - Schema validation failures for structured output with model and provider dimensions
 - Async job cache misses (job not found on poll)
 
-All metrics **MUST** be emittable via the platform's OpenTelemetry metrics infrastructure. Metric names **MUST** use the `llm_gateway_` prefix. Label cardinality **MUST** remain bounded — labels are limited to enumerable dimensions (model, provider, status, reason, hook type); unbounded values (tenant ID, request ID) **MUST NOT** be used as metric labels.
+All metrics **MUST** be emittable via the platform's OpenTelemetry metrics infrastructure. Metric names **MUST** use the `llm_gateway_` prefix. Label cardinality **MUST** remain bounded — labels are limited to enumerable dimensions (model, provider, status, reason); unbounded values (tenant ID, request ID) **MUST NOT** be used as metric labels.
 
 ## 7. Public Library Interfaces
 
@@ -926,7 +898,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 **Acceptance criteria**:
 - Tool definitions supported: reference, inline GTS, unified format (OpenAI-like)
-- Gateway web search (`cf:web_search`) and provider-specific tools (`<provider>:<tool>`) can be combined with function tools in one request (see UC-023)
+- Gateway web search (`cf:web_search`) and provider-specific tools (`<provider>:<tool>`) can be combined with function tools in one request (see UC-021)
 - Tool calls returned in unified format
 - Response in normalized format
 
@@ -1081,51 +1053,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Total generation timeout enforced
 - On timeout: fallback (if configured) or error
 
-#### UC-017: Pre-Call Interceptor
-
-- [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-pre-call-interceptor-v1`
-**Actor**: `cpt-cf-llm-gateway-actor-consumer`
-
-**Preconditions**: Hook Plugin configured for tenant.
-
-**Flow**:
-1. Consumer sends request
-2. Gateway invokes all enabled Hook Plugins in order (pre_call)
-3. Each plugin can allow, block, or modify the request; modified request is passed to the next plugin
-4. If any plugin blocks: Gateway returns request_blocked error; remaining plugins are not invoked
-5. If all plugins allow/modify: Gateway proceeds with the (possibly modified) request
-
-**Postconditions**: Request processed with (possibly modified) request, or blocked.
-
-**Acceptance criteria**:
-- All enabled plugins are invoked in order
-- Each plugin can allow, block, or modify the request
-- First blocking plugin stops execution and returns request_blocked error
-- Modified request is passed to subsequent plugins and ultimately to the provider plugin
-
-#### UC-018: Post-Response Interceptor
-
-- [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-post-response-interceptor-v1`
-**Actor**: `cpt-cf-llm-gateway-actor-consumer`
-
-**Preconditions**: Hook Plugin configured for tenant.
-
-**Flow**:
-1. Provider plugin returns normalized response (for streaming: after all chunks received and full response assembled; for async/batch: after job completes)
-2. Gateway invokes all enabled Hook Plugins in order (post_response)
-3. Each plugin observes and processes the response (e.g., logging, metrics); plugin outcome has no effect on response delivery
-4. Response is delivered to the consumer regardless of post-call plugin outcome
-
-**Postconditions**: Response delivered; plugins have processed the response.
-
-**Acceptance criteria**:
-- All enabled plugins are invoked in order after the full response is available
-- Post-call plugins are observe-only; plugin outcome has no effect on response delivery
-- Response is always delivered to the consumer regardless of post-call plugin outcome
-- For streaming: hook invoked after stream completes and full response is assembled; response already delivered to consumer
-- For batch: hooks are applied per individual request as if requests were not batched
-
-#### UC-019: Rate Limiting
+#### UC-017: Rate Limiting
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-rate-limiting-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1145,7 +1073,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Rate limits enforced at user level
 - Exceeded requests return rate_limited error
 
-#### UC-020: Batch Processing
+#### UC-018: Batch Processing
 
 - [ ] `p3` - **ID**: `cpt-cf-llm-gateway-usecase-batch-processing-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1168,7 +1096,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Partial results available as completed
 - Batch cancellation supported
 
-#### UC-021: Provider Plugin Registration
+#### UC-019: Provider Plugin Registration
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-provider-plugin-registration-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-provider-plugin`
@@ -1192,7 +1120,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Plugin instance and settings schema are discoverable in Type Registry after startup
 - Settings that do not match the schema are rejected by Model Registry
 
-#### UC-022: Reasoning
+#### UC-020: Reasoning
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-reasoning-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1216,7 +1144,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Multi-turn reasoning works without `previous_response_id` or `store=true`
 - Reasoning tokens reported in generic usage
 
-#### UC-023: Web Search and Provider-Specific Tools
+#### UC-021: Web Search and Provider-Specific Tools
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-web-search-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
