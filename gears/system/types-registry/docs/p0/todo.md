@@ -2259,7 +2259,7 @@ and quickstart, for the seven-route completeness check)
 
 ## Phase 7 — Both clients, real local AM, and every gear on the persistent registry
 
-Plans P26–P31. T28, T29 and T30 are complete; the next task is **T31**. T33 is implemented on branch `toolkit-platform-route-auth` and is checked off only once merged into `main`. The remaining sequence is **T31 → T32 → T33 → T34 → T35 → T36 → T37 → T38**.
+Plans P26–P31. T28, T29 and T30 are complete; the next task is **T31**. T33 is implemented on branch `toolkit-platform-route-auth` and is checked off only once merged into `main`. The remaining sequence is **T31 → T32 → T33 → T34 → T35 → T35a → T35b → T36 → T37 → T38**. T35a adds the resolved-payload validation wrapper and T35b aligns mock Type Schema admission before consumer cutover; existing task numbers stay unchanged.
 
 - **Traits and local clients (T29, T30).** Both contracts, the platform and tenant extension helpers and both local clients land together, in one pull request.
 - **Embedded local handoff (T31).** All linked inventory and `cfg.entities` are admitted into the database before the new APIs are published in ClientHub. A new gear can reconcile in `init()` without waiting for REST, T37 or the fleet migration.
@@ -2669,6 +2669,47 @@ Commits inside the task: (1) resolving wrappers, `rest-server` and `provides` wi
 
 ---
 
+### - [ ] T35a: SDK payload validation over a resolved Type Schema
+
+**Description:** Add `TypeSchema::validate_value(&serde_json::Value)` as a thin adapter to `gts::ResolvedType::validate_payload`, so consumers can use the common GTS validation rules without building a store or configuring their own `jsonschema` validator. The upstream helper is implemented locally in `gts-rust`, branch `feat/resolved-payload-validation`, commit `0b5b7b1`; merge and a compatible published release are prerequisites, not completed dependency adoption. Any GTS/spec migration required by that release must be planned and verified separately before this task, rather than hidden in the wrapper change. One implementation commit after the prerequisite is satisfied; consumer migration stays in T38.
+
+**Acceptance criteria:**
+- [ ] The public method delegates payload validation to the upstream helper, using the returned resolved schema and the selected leaf's authored metadata for abstractness. It neither reconstructs effective artifacts nor reimplements dialect, format, regex or reference rules; it creates no registry client or local store
+- [ ] Rustdoc and the SDK README state the required projection fields (including `content` and `resolved_schema`) and define the error mapping for missing fields and upstream failures without parsing diagnostic strings. Missing fields or unavailable schema resources fail explicitly; validation never silently succeeds. The wrapper does not modify the payload or insert defaults
+- [ ] The contract explicitly checks reference syntax and pattern conformance only (`GtsRefValidation::None` semantics); target presence/validity, lifecycle and availability remain separate registry checks. Type-schema admission and trait/derivation validation remain upstream responsibilities; gear-specific payload envelopes remain with their consumers
+
+**Verification:**
+- [ ] SDK tests compare valid and invalid payload outcomes with the upstream helper for Draft-07, 2019-09 and 2020-12, including format assertions, GTS references, pattern references, inherited `/$id` and concrete descendants of abstract bases
+- [ ] SDK tests reject abstract types, missing projection fields and unresolved external schema resources; defaults do not satisfy a missing required payload property, and inputs remain unchanged
+- [ ] `cargo test -p cf-gears-types-registry-sdk --all-features`; `cargo check -p cf-gears-types-registry-sdk --all-targets --all-features`; the standing `make fmt`, `make clippy` and gear-test gates pass
+- [ ] Manual: the README example reads a Type Schema with the documented projection and validates a payload without retaining a `GtsStore` or making another registry call
+
+**Dependencies:** T29 and T30; a compatible published `gts-rust` release containing `ResolvedType::validate_payload`. T35 is the queue predecessor, not a transport dependency. **Files likely touched:** `TR-SDK/src/models.rs`, `TR-SDK/src/models_tests.rs`, `TR-SDK/README.md`; `Cargo.toml` and `Cargo.lock` only for compatible released-dependency adoption. **Scope:** M (up to five files; broader dependency/spec migration is a separate prerequisite)
+
+---
+
+### - [ ] T35b: Mock Type Schema admission uses GTS validation
+
+**Description:** Make `MockTypesRegistry` validate Type Schema creations and content revisions before reporting success or storing them. Reuse `gts-rust`'s `GtsStore::validate_schema` for schema, derivation and trait checks; an invalid registration must fail at admission, rather than succeed and later fail a document read with `Internal`. Keep explicit `reject()` admission refusals, `Fault` injection for call failures such as `ServiceUnavailable`, and `seed()` as the fixture bypass. This task covers Type Schema content validation, not a second admission engine: publisher guards, database locking, schema-evolution history and complete production-admission parity remain outside its scope.
+
+**Ordered stages — each clears the standing bar:**
+- [ ] **1. Prepare fixtures (M):** replace simplified Type Schema fixtures registered through the contract with valid GTS Type Schemas in `TR-SDK/src/{ext_tests,testing_platform_tests}.rs` and `TR-SDK/src/reconcile/{mod_tests,telemetry_tests}.rs`. Update expected documents with their fixtures; preserve each test's purpose and assertions. The existing mock still passes the complete SDK suite after this stage
+- [ ] **2. Validate admission (M):** add validation in `TR-SDK/src/testing_platform.rs`, regression tests in `testing_platform_tests.rs`, shared real-client/mock cases in `testing_platform/conformance.rs`, and the contract limits in `TR-SDK/README.md`. Do not disable validation or silently repair registration content to keep old fixtures passing
+
+**Acceptance criteria:**
+- [ ] Creation and content revision validate the candidate and its required schema context before changing stored content or resource versions. Invalid schemas, derivation or traits return a terminal item failure with `InvalidSchema`; rejected revisions preserve the previous entity and its readable artifacts. Existing lifecycle, precondition and unchanged-result semantics remain intact
+- [ ] Valid in-batch dependencies work regardless of input order, including child before parent. An invalid or otherwise refused candidate cannot supply a committed dependency to another item; independent valid branches can still succeed. Dry run uses the same validation and outcomes without changing stored entities or versions
+- [ ] Explicit `reject()` and `Fault` rules remain deterministic and preserve their documented precedence; `seed()` can still create intentionally invalid fixtures. Module docs and README state the validation scope and limits, without claiming full production-admission parity or duplicating GTS rules locally
+
+**Verification:**
+- [ ] Shared conformance cases pass against both the mock and the real local client: valid roots/derived types; malformed schema, invalid traits and invalid derivation refused at admission; failed update leaves prior content/version/artifacts unchanged; unordered and mixed-validity batches; dry-run refusal without writes
+- [ ] SDK regression tests preserve injected admission refusals, unavailable-call faults, idempotent replay and the explicit seed bypass; removing candidate validation makes the new admission tests fail
+- [ ] `cargo test -p cf-gears-types-registry-sdk --all-features`; `cargo nextest run -p cf-gears-types-registry`; `make test-types-registry-db`; `cargo check -p cf-gears-types-registry-sdk --all-targets --all-features`; the standing fmt/clippy gates pass
+
+**Dependencies:** T29 and T30 (mock and both contracts). Uses the existing GTS schema-validation API; does not require T35a's new helper or its upstream release. T35a is the queue predecessor only. **Files likely touched:** listed separately for each stage above. **Scope:** L umbrella over the two ordered M stages above, at most four files per stage; fixture preparation precedes enabling validation so every commit stays green
+
+---
+
 ### - [ ] T36: SDK client cache — freshness window, byte bound, `fresh` bypass
 
 **Description:** Port the cache to the new `Entity` models as an SDK decorator over any `dyn PlatformTypesRegistryApi`, covering local and REST clients before T38's cutover (SPEC §8.3, DESIGN §3.3, P7/P22). T22d validators enable revalidation; T22b supplies projection isolation. Visibility and Context-Tenant dimensions stay fixed until P1 tenancy.
@@ -2742,6 +2783,8 @@ Commits inside the task: (1) the hook; (2) generic supervision moved from the SD
 ### Checkpoint 7A — local application and SDK contract handoff
 - [ ] T31's database seed/local ClientHub path and T32's complete AM/IdP/TR group work through existing real AM REST scenarios
 - [ ] Both SDK APIs pass T34/T35's real TCP contract, resolving-client and auth checks; T36's local/REST cache contract and T37's generic hook/supervision/readiness tests pass
+- [ ] T35a's public payload-validation wrapper matches the released GTS helper, rejects incomplete projections and documents the reference checks that require the registry
+- [ ] T35b's mock Type Schema admission passes shared real-client conformance, including invalid candidates, unordered dependencies and dry runs; consumer fixtures remain valid through T38
 - [ ] The handoff documents local AM and verified SDK/TCP usage; it makes no complete cross-process startup/recovery guarantee yet. That application-level proof belongs to T41/Checkpoint 8A
 - [ ] `make ci`, gear tests on three backends, SDK feature builds and `make e2e-local` green; human review. The local handoff and bounded legacy/new coexistence remain as P28/P29 specify; final deployment still waits for Checkpoint 9
 

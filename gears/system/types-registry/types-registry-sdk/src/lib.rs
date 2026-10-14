@@ -44,9 +44,9 @@ pub use models::{
     Entity, EntityField, EntityFilter, EntityKey, EntityKind, EntityLookup, FieldSelection,
     IdempotencyKey, Instance, JsonDocument, LifecycleFilter, LifecycleStatus, ListEntitiesRequest,
     ListEntitiesResponse, Operation, OperationStatus, Origin, PageRequest, Projection, Provenance,
-    PublisherContext, PublisherVersion, PublisherVersionError, RegisterEntitiesRequest,
-    RegisterItem, RegistrationItemResult, RegistrationOperation, RegistrationOutcome, TypeSchema,
-    Validator,
+    PublisherContext, PublisherVersion, PublisherVersionError, ReadOptions,
+    RegisterEntitiesRequest, RegisterItem, RegistrationItemResult, RegistrationOperation,
+    RegistrationOutcome, TypeSchema, Validator,
 };
 
 pub use reconcile::{

@@ -18,7 +18,7 @@ and dependent refresh. Both must be positive. Closure accounting is per document
 candidate overlay; the resolved-size budget applies to the canonical bytes of each effective
 artifact. Exceeding either refuses the candidate without committing partial state.
 
-The executable list uses sequential task IDs **T1–T45**. T1–T30 are complete; **T31–T45 are the 15 remaining tasks**. Task status, acceptance criteria and recorded evidence are preserved; task references are synchronized with this numbering. The next task is T31 (database seeding and local ClientHub handoff), followed by T32 (full local Account Management/IdP/TR migration).
+The executable list uses task IDs **T1–T45**, plus the inserted **T35a** SDK payload-validation and **T35b** mock Type Schema admission tasks. T1–T30 are complete; **T31–T45 plus T35a/T35b are the 17 remaining tasks**. T35a and T35b follow T35 without renumbering existing work. Task status, acceptance criteria and recorded evidence are preserved; task references are synchronized with this numbering. The next task is T31 (database seeding and local ClientHub handoff), followed by T32 (full local Account Management/IdP/TR migration).
 
 ## Decisions and task numbering
 
@@ -100,6 +100,10 @@ T6 config ───────────────────────�
         T34 platform API over REST + platform routes + their e2e callers
                    ▼
         T35 tenant REST + both resolving/provides clients + complete auth closure
+                   ▼
+        T35a SDK resolved-payload validation (needs a compatible released GTS helper)
+                   ▼
+        T35b valid consumer fixtures, then GTS Type Schema admission in the mock
                    ▼
         T36 platform SDK cache ──► T37 post_wiring + supervision + Required readiness
                    │
@@ -203,6 +207,8 @@ exists. From T7 onward the graph is vertical.
 - T33: Toolkit — a platform-authenticated auth axis; one plane per route (own pull request; open until merged)
 - T34: Platform API over REST
 - T35: Tenant REST and both resolving clients — complete SDK transport handoff
+- T35a: SDK payload validation over a resolved Type Schema; depends on a compatible released GTS helper
+- T35b: Mock Type Schema admission uses GTS validation; valid fixtures first, then shared real-client conformance
 - T36: SDK client cache — freshness window, byte bound, `fresh` bypass
 - T37: Toolkit post-wiring lifecycle — hook, supervision and `Required` readiness
 
@@ -258,7 +264,7 @@ collapsed into `invalid_schema`.
 
 **Checkpoint 6** — the P0 REST contract is complete on `/v2/` (P21). **All seven v2 routes are complete** (T22, T24, T25, T26, P17/P19/P20): `batchGet` returns explicit per-key results; discovery is bounded and content-free by default, filters in SQL before the page limit, and its cursor traverses an unchanged matching set exactly once under one `pattern`/`depth`/`kind` filter and normalized `$select`, and all three reads project the requested fields. **Conditional reads work** (T27): an exact read carries a per-request validator and honours `If-None-Match` with a `304` that carries its `ETag`, and `batchGet` reports `unchanged` per key with its `etag`. OpenAPI covers every route and `QUICKSTART.md` covers reads and mutations. Gear tests, `make lychee` and unchanged `make e2e-local` pass; nothing has been cut over yet, and the new SDK trait is not written yet.
 
-**Checkpoint 7A** — T31's seed/local ClientHub path and T32's complete real AM application pass, and both SDKs pass real TCP/resolving/auth contracts. T36's cache and T37's generic lifecycle/supervision/readiness contracts hold. The handoff promises local AM and those SDK contracts, not complete process-level cold-start/recovery behavior. That application proof belongs to T41/Checkpoint 8A. Full CI/backend/local e2e gates and human review remain.
+**Checkpoint 7A** — T31's seed/local ClientHub path and T32's complete real AM application pass, and both SDKs pass real TCP/resolving/auth contracts. T35a's payload-validation wrapper matches the released GTS helper and rejects incomplete projections; T35b's mock Type Schema admission passes shared real-client conformance. T36's cache and T37's generic lifecycle/supervision/readiness contracts hold. The handoff promises local AM and those SDK contracts, not complete process-level cold-start/recovery behavior. That application proof belongs to T41/Checkpoint 8A. Full CI/backend/local e2e gates and human review remain.
 
 **Checkpoint 7** — every gear is on the new SDK and the database (P23, C′, P26). `PlatformTypesRegistryApi` and its helpers work through the real local client, carrying T27's validators; both adapters return operations read through `get_operation`, never a synthesized receipt (T29, D19). The platform REST client passes its contract test on `/types-registry/platform/v1/` and the tenant client on `/types-registry/v1/`; platform routes serve a validated internal token only, tenant reads a validated bearer only (T34, T35, T38, P25). Linked inventory and `cfg.entities` seed through the outbox, a second start reports `unchanged`, and no registration T38's audit listed is refused by immediate validation. `TypesRegistryClient`, ready mode, the in-memory repository and the old v1 routes are gone; reads are cached with the late-fill guard by T36 and throughout T38; T32's earlier local handoff is explicitly uncached. One REST version remains, and the e2e suites pass on the `202` contract (T38). Gear tests on three backends, `make ci`, `make e2e-local`, `make e2e-docker`, `make dylint`.
 
@@ -316,7 +322,7 @@ collapsed into `invalid_schema`.
 
 **Accepted queue (P32): sequential, in numeric order.** Completed phases retain their status and evidence; the next implementation task is **T31**.
 
-1. Phase 7: T31 → T32 → T33 → T34 → T35 → T36 → T37 (Checkpoint 7A) → T38 (Checkpoint 7). T29/T30 are complete; T33 remains its own toolkit pull request.
+1. Phase 7: T31 → T32 → T33 → T34 → T35 → T35a → T35b → T36 → T37 (Checkpoint 7A) → T38 (Checkpoint 7). T29/T30 are complete; T33 remains its own toolkit pull request. T35a delegates to the released GTS snapshot helper; any required GTS/spec migration is a separate prerequisite. T35b prepares valid fixtures before enabling mock Type Schema validation and needs no new upstream helper.
 2. Phase 8: T39 → T40 → T41 (Checkpoint 8A) → T42 → T43 (Checkpoint 8).
 3. Phase 9: T44 → T45 (Checkpoint 9).
 

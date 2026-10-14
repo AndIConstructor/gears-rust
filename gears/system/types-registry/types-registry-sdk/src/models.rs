@@ -235,6 +235,18 @@ impl Projection {
     }
 }
 
+/// Projection and client-cache policy for single and batch typed read helpers.
+///
+/// The default uses [`Projection::Default`] and `fresh: false`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadOptions {
+    /// The fields to retrieve.
+    pub projection: Projection,
+    /// Bypass any client cache for this read. Not sent on the wire.
+    /// Has no effect when the client has no cache.
+    pub fresh: bool,
+}
+
 // results.
 
 /// Every key's answer, keyed by the key as asked.

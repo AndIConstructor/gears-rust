@@ -25,7 +25,8 @@ use types_registry_sdk::{
     DeleteEntitiesRequest, DeleteItem, DeletionOutcome, EntityField, EntityFilter, EntityKey,
     EntityKind, EntityLookup, FieldSelection, IdempotencyKey, LifecycleStatus, ListEntitiesRequest,
     Operation, OperationStatus, Origin, PageRequest, PlatformTypesRegistryApi, Projection,
-    Provenance, PublisherContext, RegisterEntitiesRequest, RegisterItem, RegistrationOutcome,
+    Provenance, PublisherContext, ReadOptions, RegisterEntitiesRequest, RegisterItem,
+    RegistrationOutcome,
 };
 
 mod common;
@@ -891,7 +892,10 @@ async fn reconcile_entities_and_await_creates_then_updates_drift_through_a_dyn_c
         .get_instance(
             &ctx(),
             &instance_id(CF_INSTANCE),
-            Projection::Select(FieldSelection::with(&[EntityField::Content])),
+            ReadOptions {
+                projection: Projection::Select(FieldSelection::with(&[EntityField::Content])),
+                ..ReadOptions::default()
+            },
         )
         .await
         .expect("reads back");

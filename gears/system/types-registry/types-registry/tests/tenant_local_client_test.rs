@@ -25,8 +25,8 @@ use types_registry_sdk::{
     BatchGetEntitiesRequest, BatchGetItem, EntityField, EntityFilter, EntityKey, EntityKind,
     EntityLookup, FieldSelection, IdempotencyKey, ListEntitiesRequest, OperationStatus,
     PageRequest, PlatformTypesRegistryApi, PlatformTypesRegistryApiExt, Projection,
-    PublisherContext, RegisterEntitiesRequest, RegisterItem, TypesRegistryApi, TypesRegistryApiExt,
-    Validator,
+    PublisherContext, ReadOptions, RegisterEntitiesRequest, RegisterItem, TypesRegistryApi,
+    TypesRegistryApiExt, Validator,
 };
 
 mod common;
@@ -153,13 +153,16 @@ async fn an_exact_read_through_the_tenant_helper_is_the_platform_read() {
         ],
     )
     .await;
-    let projection = Projection::Select(FieldSelection::with(&[EntityField::Content]));
+    let options = ReadOptions {
+        projection: Projection::Select(FieldSelection::with(&[EntityField::Content])),
+        ..ReadOptions::default()
+    };
 
     let schema_read = TypesRegistryApiExt::get_type_schema(
         &h.client,
         &tenant(),
         &type_id(CF_TYPE),
-        projection.clone(),
+        options.clone(),
     )
     .await
     .expect("present");
@@ -170,7 +173,7 @@ async fn an_exact_read_through_the_tenant_helper_is_the_platform_read() {
             &h.client,
             &platform(),
             &type_id(CF_TYPE),
-            projection.clone()
+            options.clone()
         )
         .await
         .expect("present")
@@ -180,7 +183,7 @@ async fn an_exact_read_through_the_tenant_helper_is_the_platform_read() {
         &h.client,
         &tenant(),
         id(CF_INSTANCE).to_uuid(),
-        projection.clone(),
+        options.clone(),
     )
     .await
     .expect("present");
@@ -191,7 +194,7 @@ async fn an_exact_read_through_the_tenant_helper_is_the_platform_read() {
             &h.client,
             &platform(),
             id(CF_INSTANCE).to_uuid(),
-            projection
+            options
         )
         .await
         .expect("present")

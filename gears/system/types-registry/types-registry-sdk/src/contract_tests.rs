@@ -150,7 +150,7 @@ async fn the_client_hub_resolves_the_tenant_trait_object_and_its_helpers() {
     use toolkit_security::SecurityContext;
 
     use crate::TypesRegistryApiExt;
-    use crate::models::Projection;
+    use crate::models::ReadOptions;
 
     const TYPE: &str = "gts.cf.test.pkg.thing.v1~";
     let fake = crate::testing_platform::MockTypesRegistry::new();
@@ -165,7 +165,7 @@ async fn the_client_hub_resolves_the_tenant_trait_object_and_its_helpers() {
         .get_type_schema(
             &SecurityContext::anonymous(),
             &gts::GtsTypeId::try_new(TYPE).expect("valid"),
-            Projection::Default,
+            ReadOptions::default(),
         )
         .await
         .expect("an extension helper answers through the trait object");

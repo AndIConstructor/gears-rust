@@ -12,8 +12,8 @@ use super::PlatformTypesRegistryApiExt;
 use crate::contract::PlatformTypesRegistryApi;
 use crate::models::{
     CandidateStatus, EntityKind, FieldSelection, IdempotencyKey, ListEntitiesRequest,
-    OperationStatus, PageRequest, Projection, PublisherContext, RegisterEntitiesRequest,
-    RegisterItem, RegistrationOperation,
+    OperationStatus, PageRequest, Projection, PublisherContext, ReadOptions,
+    RegisterEntitiesRequest, RegisterItem, RegistrationOperation,
 };
 use crate::testing_platform::{Call, Fault, MockTypesRegistry, ProtocolFault};
 
@@ -110,7 +110,12 @@ async fn a_consumer_round_trips_submit_poll_and_read_through_the_trait() {
         .get_type_schema(
             &ctx(),
             &type_id(TYPE),
-            Projection::Select(FieldSelection::with(&[crate::EntityField::Content])),
+            ReadOptions {
+                projection: Projection::Select(FieldSelection::with(&[
+                    crate::EntityField::Content,
+                ])),
+                ..ReadOptions::default()
+            },
         )
         .await
         .expect("reads");
@@ -199,12 +204,16 @@ async fn an_unchecked_id_of_the_other_kind_is_refused_without_a_round_trip() {
     let fake = MockTypesRegistry::new();
 
     let error = fake
-        .get_type_schema(&ctx(), &GtsTypeId::new(INSTANCE), Projection::Default)
+        .get_type_schema(&ctx(), &GtsTypeId::new(INSTANCE), ReadOptions::default())
         .await
         .expect_err("an Instance identifier");
     assert!(matches!(error, CanonicalError::InvalidArgument { .. }));
     let error = fake
-        .get_instance(&ctx(), &GtsInstanceId::new(TYPE, ""), Projection::Default)
+        .get_instance(
+            &ctx(),
+            &GtsInstanceId::new(TYPE, ""),
+            ReadOptions::default(),
+        )
         .await
         .expect_err("a Type Schema identifier");
     assert!(matches!(error, CanonicalError::InvalidArgument { .. }));
@@ -219,7 +228,7 @@ async fn a_reference_to_the_other_kind_is_not_found() {
     let uuid = id(INSTANCE).to_uuid();
 
     let error = fake
-        .get_type_schema_by_uuid(&ctx(), uuid, Projection::Default)
+        .get_type_schema_by_uuid(&ctx(), uuid, ReadOptions::default())
         .await
         .expect_err("an Instance");
     assert!(
@@ -227,13 +236,13 @@ async fn a_reference_to_the_other_kind_is_not_found() {
         "{error:?}"
     );
     assert!(
-        fake.get_instance_by_uuid(&ctx(), uuid, Projection::Default)
+        fake.get_instance_by_uuid(&ctx(), uuid, ReadOptions::default())
             .await
             .is_ok()
     );
 
     let answers = fake
-        .batch_get_type_schemas_by_uuid(&ctx(), &[uuid], Projection::Default)
+        .batch_get_type_schemas_by_uuid(&ctx(), &[uuid], ReadOptions::default())
         .await
         .expect("the read succeeds");
     assert_eq!(answers.get(&uuid), Some(&None), "absent among Type Schemas");
@@ -245,7 +254,11 @@ async fn a_key_named_twice_gets_the_one_answer_under_each_spelling() {
     fake.seed(TYPE, json!({}));
 
     let by_id = fake
-        .batch_get_type_schemas(&ctx(), &[type_id(TYPE), type_id(TYPE)], Projection::Default)
+        .batch_get_type_schemas(
+            &ctx(),
+            &[type_id(TYPE), type_id(TYPE)],
+            ReadOptions::default(),
+        )
         .await
         .expect("the reads succeed");
     assert_eq!(by_id.len(), 1);
@@ -253,7 +266,7 @@ async fn a_key_named_twice_gets_the_one_answer_under_each_spelling() {
 
     let uuid = id(TYPE).to_uuid();
     let by_uuid = fake
-        .batch_get_type_schemas_by_uuid(&ctx(), &[uuid, uuid], Projection::Default)
+        .batch_get_type_schemas_by_uuid(&ctx(), &[uuid, uuid], ReadOptions::default())
         .await
         .expect("the reads succeed");
     assert_eq!(by_uuid.len(), 1);
@@ -270,7 +283,7 @@ async fn every_asked_key_is_answered_and_absence_is_none() {
         .batch_get_type_schemas(
             &ctx(),
             &[type_id(TYPE), absent.clone()],
-            Projection::Default,
+            ReadOptions::default(),
         )
         .await
         .expect("the read succeeds");
@@ -291,7 +304,7 @@ async fn a_large_read_is_split_into_bounded_batches_and_answers_every_key() {
     }
 
     let answers = fake
-        .batch_get_type_schemas(&ctx(), &ids, Projection::Default)
+        .batch_get_type_schemas(&ctx(), &ids, ReadOptions::default())
         .await
         .expect("the reads succeed");
 
@@ -309,7 +322,7 @@ async fn one_malformed_identifier_fails_the_call_before_any_read() {
     ids.push(GtsTypeId::new("not-an-id"));
 
     let error = fake
-        .batch_get_type_schemas(&ctx(), &ids, Projection::Default)
+        .batch_get_type_schemas(&ctx(), &ids, ReadOptions::default())
         .await
         .expect_err("an id that does not parse");
 
@@ -330,7 +343,7 @@ async fn a_mislabeled_kind_is_a_protocol_fault_not_absence() {
 
     // By UUID the kind is not known up front, so a mislabel could pass as "the other kind".
     let single = fake
-        .get_instance_by_uuid(&ctx(), uuid, Projection::Default)
+        .get_instance_by_uuid(&ctx(), uuid, ReadOptions::default())
         .await
         .expect_err("a Type Schema labeled Instance");
     assert!(
@@ -338,7 +351,7 @@ async fn a_mislabeled_kind_is_a_protocol_fault_not_absence() {
         "{single:?}"
     );
     let plural = fake
-        .batch_get_type_schemas_by_uuid(&ctx(), &[uuid], Projection::Default)
+        .batch_get_type_schemas_by_uuid(&ctx(), &[uuid], ReadOptions::default())
         .await
         .expect_err("a Type Schema labeled Instance");
     assert!(
@@ -346,7 +359,7 @@ async fn a_mislabeled_kind_is_a_protocol_fault_not_absence() {
         "{plural:?}"
     );
     let by_id = fake
-        .batch_get_type_schemas(&ctx(), &[type_id(TYPE)], Projection::Default)
+        .batch_get_type_schemas(&ctx(), &[type_id(TYPE)], ReadOptions::default())
         .await
         .expect_err("a Type Schema labeled Instance");
     assert!(
@@ -362,7 +375,7 @@ async fn an_unanswered_key_fails_the_call_rather_than_reading_as_absent() {
     fake.protocol_fault(ProtocolFault::DropAnswers);
 
     let error = fake
-        .batch_get_type_schemas(&ctx(), &[type_id(TYPE)], Projection::Default)
+        .batch_get_type_schemas(&ctx(), &[type_id(TYPE)], ReadOptions::default())
         .await
         .expect_err("the registry left the key unanswered");
 
@@ -541,7 +554,7 @@ async fn a_failed_batch_fails_the_whole_call_and_reads_no_further() {
     );
 
     let error = fake
-        .batch_get_type_schemas(&ctx(), &ids, Projection::Default)
+        .batch_get_type_schemas(&ctx(), &ids, ReadOptions::default())
         .await
         .expect_err("the second batch failed");
 
@@ -561,12 +574,12 @@ async fn an_empty_read_needs_no_transport() {
     let fake = MockTypesRegistry::new();
 
     let none = fake
-        .batch_get_instances_by_uuid(&ctx(), &[], Projection::Default)
+        .batch_get_instances_by_uuid(&ctx(), &[], ReadOptions::default())
         .await
         .expect("an empty read reads nothing");
     assert!(none.is_empty());
     let none = fake
-        .batch_get_type_schemas(&ctx(), &[], Projection::Default)
+        .batch_get_type_schemas(&ctx(), &[], ReadOptions::default())
         .await
         .expect("an empty read reads nothing");
     assert!(none.is_empty());
@@ -731,6 +744,7 @@ mod tenant {
     use crate::contract::TypesRegistryApi;
     use crate::models::{
         EntityField, EntityKind, FieldSelection, ListEntitiesRequest, PageRequest, Projection,
+        ReadOptions,
     };
 
     fn tenant() -> SecurityContext {
@@ -743,7 +757,7 @@ mod tenant {
         let api: &dyn TypesRegistryApi = &fake;
 
         let error = api
-            .get_type_schema(&tenant(), &GtsTypeId::new(INSTANCE), Projection::Default)
+            .get_type_schema(&tenant(), &GtsTypeId::new(INSTANCE), ReadOptions::default())
             .await
             .expect_err("an Instance identifier");
         assert!(matches!(error, CanonicalError::InvalidArgument { .. }));
@@ -751,7 +765,7 @@ mod tenant {
             .batch_get_instances(
                 &tenant(),
                 &[GtsInstanceId::new(TYPE, "")],
-                Projection::Default,
+                ReadOptions::default(),
             )
             .await
             .expect_err("a Type Schema identifier");
@@ -769,18 +783,18 @@ mod tenant {
         let absent = type_id("gts.cf.test.pkg.absent.v1~");
 
         let schema = api
-            .get_type_schema(&tenant(), &type_id(TYPE), Projection::Default)
+            .get_type_schema(&tenant(), &type_id(TYPE), ReadOptions::default())
             .await
             .expect("present");
         assert_eq!(schema.type_id, type_id(TYPE));
         let instance = api
-            .get_instance_by_uuid(&tenant(), id(INSTANCE).to_uuid(), Projection::Default)
+            .get_instance_by_uuid(&tenant(), id(INSTANCE).to_uuid(), ReadOptions::default())
             .await
             .expect("present");
         assert_eq!(instance.id, instance_id(INSTANCE));
         assert_eq!(instance.type_id, type_id(TYPE));
         let other_kind = api
-            .get_type_schema_by_uuid(&tenant(), id(INSTANCE).to_uuid(), Projection::Default)
+            .get_type_schema_by_uuid(&tenant(), id(INSTANCE).to_uuid(), ReadOptions::default())
             .await
             .expect_err("an Instance");
         assert!(matches!(other_kind, CanonicalError::NotFound { .. }));
@@ -789,14 +803,18 @@ mod tenant {
             .batch_get_type_schemas(
                 &tenant(),
                 &[type_id(TYPE), absent.clone()],
-                Projection::Default,
+                ReadOptions::default(),
             )
             .await
             .expect("the reads succeed");
         assert!(schemas[&type_id(TYPE)].is_some());
         assert_eq!(schemas.get(&absent), Some(&None));
         let instances = api
-            .batch_get_instances_by_uuid(&tenant(), &[id(INSTANCE).to_uuid()], Projection::Default)
+            .batch_get_instances_by_uuid(
+                &tenant(),
+                &[id(INSTANCE).to_uuid()],
+                ReadOptions::default(),
+            )
             .await
             .expect("the reads succeed");
         assert!(instances[&id(INSTANCE).to_uuid()].is_some());
@@ -817,7 +835,10 @@ mod tenant {
             .get_instance(
                 &tenant(),
                 &instance_id(INSTANCE),
-                Projection::Select(FieldSelection::light()),
+                ReadOptions {
+                    projection: Projection::Select(FieldSelection::light()),
+                    ..ReadOptions::default()
+                },
             )
             .await
             .expect("present");
@@ -826,7 +847,10 @@ mod tenant {
             .get_instance(
                 &tenant(),
                 &instance_id(INSTANCE),
-                Projection::Select(FieldSelection::with(&[EntityField::Content])),
+                ReadOptions {
+                    projection: Projection::Select(FieldSelection::with(&[EntityField::Content])),
+                    ..ReadOptions::default()
+                },
             )
             .await
             .expect("present");
@@ -910,7 +934,7 @@ async fn spellings_of_one_entity_are_read_once_and_each_answered() {
         .batch_get_type_schemas(
             &ctx(),
             &[type_id(TYPE), padded.clone(), type_id(TYPE)],
-            Projection::Default,
+            ReadOptions::default(),
         )
         .await
         .expect("the read succeeds");
@@ -939,7 +963,7 @@ async fn distinct_keys_beyond_one_batch_are_read_in_full_batches() {
     let asked: Vec<GtsTypeId> = ids.iter().chain(ids.iter()).cloned().collect();
 
     let answers = fake
-        .batch_get_type_schemas(&ctx(), &asked, Projection::Default)
+        .batch_get_type_schemas(&ctx(), &asked, ReadOptions::default())
         .await
         .expect("the reads succeed");
 

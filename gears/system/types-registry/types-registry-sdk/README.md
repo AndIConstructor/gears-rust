@@ -29,7 +29,7 @@ The GTS identifier types the models use (`GtsId`, `GtsTypeId`, `GtsInstanceId`,
 ```rust
 use toolkit_security::PlatformSecurityContext;
 use types_registry_sdk::{
-    GtsTypeId, PlatformTypesRegistryApi, PlatformTypesRegistryApiExt, Projection,
+    GtsTypeId, PlatformTypesRegistryApi, PlatformTypesRegistryApiExt, Projection, ReadOptions,
 };
 
 let registry = hub.get::<dyn PlatformTypesRegistryApi>()?;
@@ -37,20 +37,35 @@ let ctx = PlatformSecurityContext::outbound_marker();
 let type_id = GtsTypeId::try_new("gts.acme.core.events.user_created.v1~")?;
 
 // Document-free by default: identity, kind, lifecycle and origin.
-let light = registry.get_type_schema(&ctx, &type_id, Projection::Default).await?;
+let light = registry.get_type_schema(&ctx, &type_id, ReadOptions::default()).await?;
 
 // Select documents explicitly.
 use types_registry_sdk::{EntityField, FieldSelection};
-let with_schema = Projection::Select(FieldSelection::with(&[
-    EntityField::Content,
-    EntityField::ResolvedSchema,
-]));
+let with_schema = ReadOptions {
+    projection: Projection::Select(FieldSelection::with(&[
+        EntityField::Content,
+        EntityField::ResolvedSchema,
+    ])),
+    ..ReadOptions::default()
+};
 let schema = registry.get_type_schema(&ctx, &type_id, with_schema).await?;
+
+// Bypass a client cache for this read.
+let fresh = registry.get_type_schema(&ctx, &type_id, ReadOptions {
+    fresh: true,
+    ..ReadOptions::default()
+}).await?;
 ```
 
 `Projection::Default` is the document-free field set on single and batch reads, while the
 list helpers give it their documents (content, and a Type Schema's materializations). An
 explicit selection is always kept as given.
+
+Single and batch typed read helpers take `ReadOptions`. Its default uses
+`Projection::Default` and `fresh = false`. The options preserve the projection
+and apply `fresh` to every request, including each chunk of a batch read. `fresh`
+controls the client cache and is not sent on the wire. On a client without a
+cache, this flag has no effect.
 
 `EntityField::Provenance` selects a managed Type Schema's `provenance` group as a whole:
 `TypeSchema::provenance` is `None` when unselected and `Some(Provenance { .. })` when
@@ -148,9 +163,9 @@ A deletion item's `DeletionOutcome` has the same states except `Unchanged`.
 ## Errors
 
 ```rust
-use types_registry_sdk::TypesRegistryError;
+use types_registry_sdk::{ReadOptions, TypesRegistryError};
 
-match registry.get_type_schema(&ctx, &type_id, Projection::Default).await {
+match registry.get_type_schema(&ctx, &type_id, ReadOptions::default()).await {
     Ok(schema) => {}
     Err(error) => match TypesRegistryError::from(error) {
         TypesRegistryError::NotFound { name, .. } => {}
