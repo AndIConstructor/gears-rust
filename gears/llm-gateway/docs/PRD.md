@@ -389,6 +389,13 @@ The system **MUST** accept a JSON schema with the request and validate the provi
 
 The system **MUST** accept generic generation parameters (max output tokens, temperature, top_p, seed, penalties, etc.) and generic cache-control parameters, and map them to the provider's equivalents. The system **MUST** support forwarding provider-specific parameters that have no generic equivalent; which parameters may be forwarded is governed by the model configuration in Model Registry.
 
+The provider plugin **MUST** report which generic parameters the resolved model supports (support can differ between models of the same provider, e.g. reasoning models that reject `temperature`). When a request contains a generic generation parameter the model does not support, the system **MUST**, before calling the provider:
+
+- by default, reject the request with an `unsupported_parameter` error that names the parameter;
+- if the request sets `drop_unsupported_params`, drop the parameter and proceed.
+
+Cache-control parameters are hints: when the provider has no equivalent, the system **MUST** drop them without an error, regardless of `drop_unsupported_params`. Every dropped parameter **MUST** be listed in the response (`ignored_parameters`), so dropping is never silent.
+
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-model-registry`
 
 #### Usage Tracking
@@ -677,11 +684,13 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - **No plugin for provider**: Gateway returns provider-not-supported error.
 - **Credentials unavailable**: Gateway returns credentials-unavailable error if the key cannot be fetched from CredStore.
 - **Model not capable**: Gateway returns capability_not_supported error if model does not support a capability required by the request (e.g., tool calling, image input, web search, reasoning, structured output).
+- **Unsupported generation parameter**: Gateway returns unsupported_parameter error naming the parameter; with `drop_unsupported_params` set, Gateway drops the parameter, proceeds, and lists it in `ignored_parameters` (`cpt-cf-llm-gateway-fr-generation-parameters-v1`).
 
 **Acceptance criteria**:
 - Response in normalized format regardless of provider
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 - Provider errors returned with a normalized category, the original provider code and message, and `provider_request_id`
+- Generic parameters the model does not support are rejected by default, or dropped and listed in `ignored_parameters` when `drop_unsupported_params` is set; unsupported cache-control hints are always dropped and listed
 
 #### UC-002: Streaming Chat Completion
 
