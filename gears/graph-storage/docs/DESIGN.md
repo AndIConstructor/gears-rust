@@ -1657,7 +1657,7 @@ is invisible to vector search while looking present on every other path.
 
 ### 3.5 External Dependencies
 
-- PostgreSQL 16+ with pgvector (storage; HNSW cosine indexes). PostgreSQL 19+ additionally enables the SQL/PGQ backend (SQL:2023 property-graph queries in core); before PG19 GA that means a pinned beta image with pgvector built from a pinned source revision (upstream PG19 support landed July 2026), which is now a per-deployment choice rather than a gear requirement (ADR-0001).
+- PostgreSQL 16+ with pgvector (storage; HNSW cosine indexes). No SQL/PGQ: the SQL/PGQ backend that PostgreSQL 19 betas enabled is retired, because 19 GA ships without it (ADR-0001 addendum, gears-rust #5267).
 - ONNX Runtime and a MiniLM-class sentence-embedding model (default embedding plugin), or a remote inference endpoint (alternative plugin), per ADR-0004.
 
 ### 3.6 Interactions & Sequences
