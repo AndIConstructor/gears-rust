@@ -278,9 +278,6 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 - Conversation state storage — consumers provide full context per request
 - Provider-side conversation state: `previous_response_id`, `store=true`
 - Tool execution — Gateway returns tool calls for consumer to execute. This includes web search: Gateway does not run searches itself; `cf:web_search` is executed by providers that support it
-- Prompt engineering or prompt optimization
-- Direct provider access bypassing OAGW
-- Use of third-party provider SDK libraries inside provider plugins
 - Gateway-side content caching or response deduplication (provider-side prompt caching controls are in scope)
 
 ## 5. Functional Requirements
