@@ -48,7 +48,7 @@ LLM Gateway provides unified access to multiple LLM providers. Consumers interac
 
 LLM Gateway is the central integration point between platform consumers and external AI providers. It abstracts provider differences — request formats, authentication, error handling, rate limits — behind a unified API. Consumers send requests in a normalized format; Gateway translates them to provider-specific calls and normalizes responses back.
 
-Provider-specific logic is isolated in **provider plugins**. Each plugin implements a common plugin trait that covers the superset of provider capabilities needed by the Gateway API: it converts normalized requests into provider HTTP requests, parses provider responses back into the normalized format, and computes the call cost in AI credits from the pricing in the model's provider settings. Plugins do not use third-party provider SDK libraries. The Gateway core owns cross-cutting concerns: model resolution, capability checks, credential retrieval, quota, usage reporting, fallback, and timeouts.
+Provider-specific logic is isolated in **provider plugins**. Each plugin implements a common plugin trait that covers the superset of provider capabilities needed by the Gateway API: it converts normalized requests into provider HTTP requests, parses provider responses back into the normalized format, and computes the call cost in AI credits from the pricing in the model's provider settings. Plugins do not use third-party provider SDK libraries. The Gateway core owns cross-cutting concerns: model resolution, capability checks, credential retrieval, quota, usage reporting, and timeouts.
 
 The first phase (P1) covers synchronous and streaming chat completion and embeddings, including image and file input passed as base64 data or external URLs, reasoning, tool calling, web search, and structured output. Later phases add media generation (images, audio, video), FileStorage-backed media, async jobs, batch processing, and realtime audio. All provider calls go through the Outbound API Gateway (OAGW). The Gateway obtains provider API keys from CredStore and passes them to the provider plugin, which sets them on the outbound request.
 
@@ -70,7 +70,7 @@ LLM Gateway addresses these problems by providing a single integration point tha
 
 **Success Criteria** (required at GA, baseline: new gear — no prior data; measured over 7-day rolling window after initial 30-day burn-in period):
 - Gateway overhead < 50ms P99 at up to 1 000 concurrent requests (excluding provider latency)
-- Availability ≥ 99.9% measured monthly (Gateway infrastructure only — excludes provider outages; fallback-active mode counts as available)
+- Availability ≥ 99.9% measured monthly (Gateway infrastructure only — excludes provider outages)
 - Expected steady-state throughput: up to 500 requests/second; peak: up to 2 000 requests/second
 - Maintenance windows follow platform-defined schedule; Gateway supports rolling restarts with zero-downtime deployments
 
@@ -137,7 +137,7 @@ No dedicated human actors. All interactions with LLM Gateway are mediated throug
 - **Role**: External AI service that processes requests. Accessed by provider plugins via Outbound API Gateway. Includes cloud providers (OpenAI, Anthropic, Google, …) and self-hosted or OpenAI-compatible endpoints (Ollama, vLLM, …) reached through a model-specific `base_url`.
 - **Direction**: outbound
 - **Data exchanged**: Provider-formatted requests (prompts, parameters, tool schemas, API key in request headers); receives completions, embeddings, generated media, tool calls, reasoning output, web search results, usage metrics.
-- **Availability**: Provider unavailability triggers fallback (if configured) or returns a provider-unavailable error to the consumer. OAGW circuit breaking protects against cascading failures.
+- **Availability**: Provider unavailability returns a provider-unavailable error to the consumer. OAGW circuit breaking protects against cascading failures.
 
 #### Provider Plugin
 
@@ -194,7 +194,7 @@ Note: The specific component that provides quota management is an open question.
 
 - **Role**: Compliance event logging.
 - **Direction**: outbound
-- **Data exchanged**: Audit events (request started, completed, failed, fallback triggered) with tenant/user/model attribution.
+- **Data exchanged**: Audit events (request started, completed, failed) with tenant/user/model attribution.
 - **Availability**: Audit Gear unavailability does not block request processing. Audit events are delivered best-effort — Gateway logs a warning if delivery fails but does not reject the consumer request.
 
 #### Model Registry
@@ -252,7 +252,7 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 - FileStorage-backed media input and output
 - Async job execution with durably persisted job state and results
 - Batch processing with durably persisted job ID mappings
-- Provider fallback and timeout enforcement
+- Timeout enforcement
 - Rate limiting
 - Realtime audio
 
@@ -556,14 +556,6 @@ The system **MUST** provide a uniform async experience regardless of whether the
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
 
-#### Provider Fallback
-
-- [ ] `p2` - **ID**: `cpt-cf-llm-gateway-fr-provider-fallback-v1`
-
-The system **MUST** automatically switch to a fallback provider with matching capabilities when the primary provider fails.
-
-**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
-
 #### Timeout Enforcement
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-fr-timeout-v1`
@@ -572,7 +564,7 @@ The system **MUST** enforce the following timeout types:
 - Time-to-first-token (TTFT): max wait for initial response chunk
 - Total generation timeout: max duration for complete response
 
-On timeout the system **MUST** trigger fallback (if configured) or return a timeout error.
+On timeout the system **MUST** return a timeout error.
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
 
@@ -626,7 +618,7 @@ The system **MUST** accept a batch of requests for async processing at reduced c
 
 - [ ] `p4` - **ID**: `cpt-cf-llm-gateway-fr-audit-events-v1`
 
-The system **MUST** emit audit events via Audit Gear for compliance: request started, completed, failed, fallback triggered.
+The system **MUST** emit audit events via Audit Gear for compliance: request started, completed, failed.
 
 Cross-cutting concern — applies to all operations, no dedicated UC.
 
@@ -685,7 +677,6 @@ The system **MUST** emit OpenTelemetry-compatible operational metrics covering t
 - Request counters with model, provider, and status dimensions
 - Streaming: streams started and streams aborted (by reason: client disconnect, timeout, error)
 - Usage records reported as incomplete (interrupted streams)
-- Provider fallback events with source/target provider and reason
 - Time-to-first-token latency histogram with model and provider dimensions
 - Quota operations: checks (allowed / rejected); reservation and settlement metrics if the reserve/settle model is adopted (see § 13)
 - Schema validation failures for structured output with model and provider dimensions
@@ -728,7 +719,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 **Alternative Flows**:
 - **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
-- **Timeout** (P2): Gateway enforces TTFT and total timeouts; on expiry triggers fallback (if configured) or returns timeout error.
+- **Timeout** (P2): Gateway enforces TTFT and total timeouts; on expiry returns timeout error.
 - **Invalid model**: Gateway returns model-not-found error if model is unavailable for tenant.
 - **No plugin for provider**: Gateway returns provider-not-supported error.
 - **Credentials unavailable**: Gateway returns credentials-unavailable error if the key cannot be fetched from CredStore.
@@ -995,7 +986,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 **Acceptance criteria**:
 - Tool definitions supported: reference, inline GTS, unified format (OpenAI-like)
-- Gateway web search (`cf:web_search`) and provider-specific tools (`<provider>:<tool>`) can be combined with function tools in one request (see UC-021)
+- Gateway web search (`cf:web_search`) and provider-specific tools (`<provider>:<tool>`) can be combined with function tools in one request (see UC-020)
 - Tool calls returned in unified format
 - `tool_choice` (`none`, `auto`, `required`, specific function) and `parallel_tool_calls` mapped to provider equivalents
 - Response in normalized format
@@ -1110,30 +1101,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Bidirectional streaming supported
 - Usage summary on close
 
-#### UC-015: Provider Fallback
-
-- [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-provider-fallback-v1`
-**Actor**: `cpt-cf-llm-gateway-actor-consumer`
-
-**Preconditions**: Model available for tenant.
-
-**Flow**:
-1. Consumer sends request with fallback configuration
-2. Gateway resolves provider via Model Registry
-3. Gateway sends request to primary provider
-4. Primary provider fails
-5. Gateway selects fallback from request configuration
-6. Gateway sends request to fallback provider
-7. Gateway returns response (fallback indicated)
-
-**Postconditions**: Response returned via fallback.
-
-**Acceptance criteria**:
-- Fallback configuration provided in request
-- Fallback selection based on capability match
-- Response includes fallback indicator
-
-#### UC-016: Timeout Enforcement
+#### UC-015: Timeout Enforcement
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-timeout-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1144,8 +1112,8 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 1. Consumer sends request
 2. Gateway starts timeout tracking (TTFT, total)
 3. Gateway sends request to provider
-4. If TTFT timeout: Gateway triggers fallback or error
-5. If total timeout: Gateway triggers fallback or error
+4. If TTFT timeout: Gateway returns timeout error
+5. If total timeout: Gateway returns timeout error
 6. Gateway returns response or error
 
 **Postconditions**: Response returned or timeout error.
@@ -1153,9 +1121,9 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Acceptance criteria**:
 - TTFT (time-to-first-token) timeout enforced
 - Total generation timeout enforced
-- On timeout: fallback (if configured) or error
+- On timeout: timeout error returned
 
-#### UC-017: Rate Limiting
+#### UC-016: Rate Limiting
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-rate-limiting-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1175,7 +1143,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Rate limits enforced at user level
 - Exceeded requests return rate_limited error
 
-#### UC-018: Batch Processing
+#### UC-017: Batch Processing
 
 - [ ] `p3` - **ID**: `cpt-cf-llm-gateway-usecase-batch-processing-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1198,7 +1166,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Partial results available as completed
 - Batch cancellation supported
 
-#### UC-019: Provider Plugin Registration
+#### UC-018: Provider Plugin Registration
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-provider-plugin-registration-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-provider-plugin`
@@ -1221,7 +1189,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Plugin instance and settings schema are discoverable in Type Registry after startup
 - Settings that do not match the schema are rejected by Model Registry
 
-#### UC-020: Reasoning
+#### UC-019: Reasoning
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-reasoning-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1245,7 +1213,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Multi-turn reasoning works without `previous_response_id` or `store=true`
 - Reasoning tokens reported in generic usage
 
-#### UC-021: Web Search and Provider-Specific Tools
+#### UC-020: Web Search and Provider-Specific Tools
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-web-search-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1311,7 +1279,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 | Provider API key exposure | Credential leak via logs or memory dumps | Keys fetched per request, never persisted or logged; redaction in plugin request logging |
 | Inaccurate billing of interrupted streams | Under- or over-charging AI credits | Usage explicitly marked incomplete; estimation policy decided with quota ownership (§ 13) |
 | Feature regression vs llm-connectors | Consumers lose web search, reasoning, custom endpoints, providers | Explicit parity list before migration (§ 13) |
-| Provider rate limit exhaustion | Requests rejected by provider | Gateway-level rate limiting, provider fallback chains |
+| Provider rate limit exhaustion | Requests rejected by provider | Gateway-level rate limiting |
 | Database growth from batch jobs | Storage pressure, degraded query performance | Automated retention cleanup, monitoring on table sizes |
 | Provider outage during batch processing | Batch jobs stuck in pending state | Timeout-based job expiration, consumer-visible status updates |
 | Usage record delivery lag | Budget enforcement decisions based on stale data | Guaranteed delivery mechanism with short polling interval |
@@ -1319,7 +1287,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 ## 13. Open Questions
 
 - **Quota enforcement ownership and component** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): Two related decisions must be made together. (1) *Ownership boundary*: does Gateway own quota *enforcement* (atomic preflight reserve + terminal settle + bounded debit on abort) or only *metering* (report usage, external component enforces)? The current `check_quota()` → proceed → `report_usage()` sequence is non-atomic — under concurrent load, multiple requests pass `check_quota()` before any `report_usage()` completes, allowing a tenant to exceed their limit by N×budget (N = concurrent in-flight requests). If Gateway owns enforcement, the reserve/settle pattern is required, not optional — a best-effort gate is effectively decorative under load. If Gateway does metering only, the external component handles enforcement asynchronously. (2) *Component identity*: the specific component that provides quota management is not yet defined — it may be a dedicated Quota Manager gear, an extension of Usage Tracker, or an external service. Both decisions must be resolved before implementing `cpt-cf-llm-gateway-fr-budget-enforcement-v1`.
-- **Budget enforcement edge cases** (Owner: Platform Architecture, Resolve by: with quota enforcement ownership decision above): The following scenarios must be addressed when the ownership boundary is decided: (a) *Provider stream without usage* — if a provider stream closes before delivering usage data (network error, provider error mid-stream, consumer disconnect), usage is reported marked as incomplete (`cpt-cf-llm-gateway-fr-streaming-v1`); policy must specify what is debited in that case: input tokens only, an estimate, or zero; (b) *Fallback billing* — when a primary provider fails after consuming input tokens, policy must define whether partial cost is reported before initiating fallback or only on final completion, with one usage event per committed debit and no double-reporting across fallback attempts; (c) *Background job budgeting* — quota is checked at submission time but the job executes minutes later under a possibly changed quota state, requiring the reserve/settle pattern to span the submission-to-execution gap if Gateway owns enforcement.
+- **Budget enforcement edge cases** (Owner: Platform Architecture, Resolve by: with quota enforcement ownership decision above): The following scenarios must be addressed when the ownership boundary is decided: (a) *Provider stream without usage* — if a provider stream closes before delivering usage data (network error, provider error mid-stream, consumer disconnect), usage is reported marked as incomplete (`cpt-cf-llm-gateway-fr-streaming-v1`); policy must specify what is debited in that case: input tokens only, an estimate, or zero; (b) *Background job budgeting* — quota is checked at submission time but the job executes minutes later under a possibly changed quota state, requiring the reserve/settle pattern to span the submission-to-execution gap if Gateway owns enforcement.
 - **Rate limiting mechanism** (Owner: Platform Architecture, Resolve by: before P2 implementation begins): Rate limiting (`cpt-cf-llm-gateway-fr-rate-limiting-v1`) is closely related to quota management. Whether rate limiting and quota enforcement are provided by the same component or separate components is an open question.
 - **Request monitoring and observability** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): The LLM Gateway needs to track how many requests are being processed, including metrics such as request counts, latency, error rates, and token usage per provider/model. However, the platform does not yet have a standardized approach to monitoring and observability across gears. A platform-wide monitoring strategy must be agreed upon before implementing gear-level metrics, to ensure consistency and avoid fragmented solutions.
 - **Cross-gear request traceability** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): The platform needs a mechanism that assigns a request ID at the incoming requests gateway (api-gateway gear) and propagates it through all inter-gear calls via ClientHub/SDK traits. This would enable end-to-end request tracing across gear boundaries — for example, a consumer request arriving at the API gateway, flowing through LLM Gateway, then to Model Registry and Usage Tracker, all correlated by a single platform-level request ID. Currently, each gear operates with its own request context; there is no standardized correlation ID propagated across inter-gear boundaries. This is a platform-level concern that affects all gears, not just LLM Gateway. The LLM Gateway's response `id` (`cpt-cf-llm-gateway-fr-request-traceability-v1`) provides gear-level traceability, but a platform-wide mechanism is needed for cross-gear correlation.
