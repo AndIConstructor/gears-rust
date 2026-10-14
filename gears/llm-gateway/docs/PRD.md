@@ -212,7 +212,7 @@ Note: The specific component that provides quota management is an open question.
 
 - Reference deployment: LLM Gateway, its provider plugins, Model Registry, and Type Registry (optionally the AuthZ resolver) are compiled into one binary. Model Registry owns its database.
 - Requires persistent storage for guaranteed usage record delivery; from P2, also for async/batch job state
-- All external provider calls route through Outbound API Gateway (OAGW): provider plugins call the OAGW SDK `proxy_request` function. The OAGW alias and path are built from the model's `base_url` plus the provider API path; if the model has no `base_url`, the provider's default URL is used (when one exists). Gateway never calls providers directly.
+- All external provider calls route through Outbound API Gateway (OAGW): provider plugins call the OAGW SDK `proxy_request` function. The OAGW alias and path are built from the model's `base_url` (defined in Model Registry) plus the provider API path. Gateway never calls providers directly.
 - OAGW upstreams and routes are configured outside the Gateway by default. Provider plugins can declare the routes they use, but deciding which base URLs may be called is the deployment's responsibility. Automatic provisioning of upstreams by Model Registry or plugins is an open question (see § 13). Deployments without a full OAGW can substitute a plain HTTP client behind the same SDK interface.
 - P1: image and file inputs are accepted as base64 data or external URLs and forwarded to the provider. From P2: media files are stored and retrieved via the FileStorage gear.
 
@@ -234,7 +234,7 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 **P1**:
 - Unified LLM API aligned with the Open Responses contract (create response, sync and streaming; embeddings)
 - Provider abstraction via provider plugins (OpenAI, Anthropic, Google, OpenAI-compatible and self-hosted endpoints, and others)
-- Custom per-model endpoints (`base_url`), with fallback to the provider's default URL
+- Per-model endpoints: `base_url` defined in Model Registry, including self-hosted and OpenAI-compatible endpoints
 - Provider API key retrieval from CredStore and hand-off to the provider plugin
 - Image and file input as base64 data or external URLs
 - Reasoning configuration and reasoning output, including multi-turn reasoning continuity without server-side state
@@ -328,7 +328,7 @@ The Gateway **MUST** select the plugin by the provider GTS type in the resolved 
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-custom-endpoints-v1`
 
-The system **MUST** support models with a custom `base_url` (self-hosted or OpenAI-compatible endpoints such as Ollama or vLLM). The provider plugin **MUST** build the OAGW alias and path from the model's `base_url` and the provider API path, and **MUST** fall back to the provider's default URL when the model has no `base_url` and the provider has one.
+The system **MUST** support models with a custom `base_url` (self-hosted or OpenAI-compatible endpoints such as Ollama or vLLM). The model's `base_url` is defined in Model Registry and comes with the model info. The provider plugin **MUST** build the OAGW alias and path from that `base_url` and the provider API path.
 
 **Actors**: `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-model-registry`
 
