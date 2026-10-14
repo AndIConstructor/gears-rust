@@ -10,7 +10,9 @@
 //! drop. `DROP PROPERTY GRAPH` is a syntax error on every released server,
 //! and the migration runner holds one transaction, which a failed statement
 //! would abort. A property graph is a `pg_class` row of kind `g`; on a server
-//! without SQL/PGQ the query finds nothing and the migration does nothing.
+//! without SQL/PGQ the query finds nothing and the migration does nothing. The
+//! schema is matched by name against `pg_namespace`, not cast with
+//! `::regnamespace`, which would case-fold a quoted mixed-case schema name.
 //!
 //! `down` does not recreate it: the declaration it was built from is gone,
 //! and nothing would read it.
@@ -29,9 +31,10 @@ impl MigrationTrait for Migration {
         let present = connection
             .query_one_raw(Statement::from_string(
                 backend,
-                "SELECT 1 AS present FROM pg_class \
-                 WHERE relname = 'kb' AND relkind = 'g' \
-                   AND relnamespace = current_schema()::regnamespace",
+                "SELECT 1 AS present FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.relname = 'kb' AND c.relkind = 'g' \
+                   AND n.nspname = current_schema()",
             ))
             .await?
             .is_some();
