@@ -388,6 +388,10 @@ The system **MUST** accept provider-specific tools namespaced with the provider 
 
 The system **MUST** accept a JSON schema with the request and validate the provider response against it, returning either the validated response or a validation error with details.
 
+The system **MUST** also support JSON mode without a schema (`json_object`): the plugin maps it to the provider's JSON mode, and the system validates that the response is well-formed JSON. If the model supports neither JSON mode nor schema-constrained output, the request is rejected with `capability_not_supported`.
+
+Providers accept different subsets of JSON Schema (e.g. Google requires `$ref` to be inlined and does not accept `additionalProperties`). The provider plugin **MUST** adapt the schema to the provider's subset when this can be done without loosening the final result — for example, inlining `$ref` or removing keywords the provider does not accept. Removed constraints remain enforced, because the system validates the response against the original schema, not the adapted one. If the schema cannot be expressed in the provider's subset (e.g. recursive `$ref` for a provider that requires inlining), the system **MUST** reject the request with an `unsupported_schema` error naming the construct, before calling the provider.
+
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
 
 #### Generation Parameters and Provider-Specific Parameters
@@ -959,21 +963,25 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: Model available for tenant.
 
 **Flow**:
-1. Consumer sends create_response with a JSON schema output format
+1. Consumer sends create_response with a JSON schema output format (or `json_object` for JSON mode without a schema)
 2. Gateway resolves model info via Model Registry and selects the provider plugin
-3. Plugin maps the schema to the provider's native structured output and sends the request via Outbound API Gateway
+3. Plugin adapts the schema to the JSON Schema subset the provider accepts, maps it to the provider's native structured output, and sends the request via Outbound API Gateway
 4. Provider returns JSON response
-5. Gateway validates response against schema
+5. Gateway validates the response against the original schema (for `json_object`: that it is well-formed JSON)
 6. Gateway returns validated response with usage (or validation_error if invalid)
 
 **Postconditions**: Valid JSON returned, usage reported.
 
 **Alternative Flows**:
 - **Schema validation failure**: Gateway returns validation_error with details if response does not match schema.
+- **Unsupported schema**: Gateway returns unsupported_schema error naming the construct if the schema cannot be expressed in the provider's JSON Schema subset; the provider is not called.
+- **Model not capable**: Gateway returns capability_not_supported error if the model supports neither JSON mode nor schema-constrained output.
 - **Provider error**: Gateway returns the normalized error category (`cpt-cf-llm-gateway-fr-provider-error-normalization-v1`).
 
 **Acceptance criteria**:
-- Response validated against provided schema
+- Response validated against the original schema, including constraints removed during schema adaptation
+- `json_object` responses validated as well-formed JSON
+- Schemas adapted to the provider's JSON Schema subset where possible; otherwise rejected with unsupported_schema before calling the provider
 - Returns validation_error with details if schema validation fails
 - Response in normalized format
 
