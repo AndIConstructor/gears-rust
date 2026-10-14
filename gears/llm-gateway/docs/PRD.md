@@ -471,6 +471,31 @@ Cross-cutting concern — applies to all operations, no dedicated UC.
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-provider`
 
+#### Completion Status Normalization
+
+- [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-completion-status-v1`
+
+The provider plugin **MUST** map the provider's stop reason to the normalized response `status` and `incomplete_details.reason` of the Open Responses contract, so that consumers can branch on the outcome regardless of provider:
+
+| Outcome | Provider examples | `status` | `incomplete_details.reason` |
+|---|---|---|---|
+| Normal stop, including stop sequence and tool calls | OpenAI `stop`, `tool_calls`; Anthropic `end_turn`, `stop_sequence`, `tool_use`; Google `STOP` | `completed` | — |
+| Truncated by the output token limit | OpenAI `length`; Anthropic `max_tokens`; Google `MAX_TOKENS` | `incomplete` | `max_output_tokens` |
+| Output blocked by the provider's content policy | OpenAI `content_filter`; Google `SAFETY`, `RECITATION` | `incomplete` | `content_filter` |
+
+The consumer can continue generation on `max_output_tokens` and surface a refusal on `content_filter`. A request that the provider blocks before generating any output is a provider error (`content_filtered`, see `cpt-cf-llm-gateway-fr-provider-error-normalization-v1`), not an incomplete response. A stop reason the plugin does not recognize **MUST** be mapped to `completed`. The provider's original stop reason **MUST** be included in the response in every case.
+
+For streaming, every stream **MUST** end with exactly one terminal event — `response.completed`, `response.incomplete`, or `response.failed` — carrying the final status and usage, even when the provider omits one:
+
+- the provider stream ends normally without a stop reason → `response.completed`;
+- the provider connection breaks or the stream ends abnormally → `response.failed` with the normalized error category, and usage marked as incomplete.
+
+When the consumer disconnects there is no one to receive a terminal event; usage is reported as incomplete (`cpt-cf-llm-gateway-fr-streaming-v1`).
+
+Cross-cutting concern — applies to all operations, no dedicated UC.
+
+**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-provider`
+
 #### Request Traceability
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-request-traceability-v1`
@@ -714,6 +739,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Response in normalized format regardless of provider
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 - Provider errors returned with a normalized category, the original provider code and message, and `provider_request_id`
+- Response `status` and `incomplete_details.reason` normalized from the provider stop reason (`cpt-cf-llm-gateway-fr-completion-status-v1`); original stop reason included
 - Generic parameters the model does not support are rejected by default, or dropped and listed in `ignored_parameters` when `drop_unsupported_params` is set; unsupported cache-control hints are always dropped and listed
 
 #### UC-002: Streaming Chat Completion
@@ -729,19 +755,20 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 3. Plugin establishes streaming connection to provider via OAGW
 4. Plugin normalizes each chunk
 5. Gateway streams chunks to Consumer
-6. Gateway sends final usage summary
+6. Gateway ends the stream with exactly one terminal event (`response.completed` or `response.incomplete`) carrying the normalized status and usage, even if the provider sent no explicit stop event
 
 **Postconditions**: Stream completed, usage reported.
 
 **Alternative Flows**:
-- **Mid-stream provider failure**: Gateway closes stream with error event and reports usage marked as incomplete.
+- **Mid-stream provider failure**: Gateway ends the stream with a `response.failed` terminal event carrying the normalized error category and reports usage marked as incomplete.
 - **Consumer disconnects**: Gateway cancels the upstream provider request and reports usage marked as incomplete (optionally with a labeled estimate).
 - **Model not capable**: Gateway returns capability_not_supported error if model does not support streaming.
 
 **Acceptance criteria**:
 - Chunks normalized from provider format
-- Final message includes usage metrics
-- Connection errors propagated to consumer
+- Every stream ends with exactly one terminal event (`response.completed`, `response.incomplete`, or `response.failed`), even when the provider omits one
+- Terminal event includes the normalized status, `incomplete_details.reason` when incomplete, and usage metrics
+- Connection errors propagated to consumer as `response.failed`
 
 #### UC-003: Embeddings Generation
 
