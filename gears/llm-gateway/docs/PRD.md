@@ -1114,7 +1114,6 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 **Alternative Flows**:
 - **Invalid settings**: Model Registry rejects the model with a validation error.
-- **Several plugins for one provider type**: the plugin with the highest priority is selected.
 
 **Acceptance criteria**:
 - Plugin instance and settings schema are discoverable in Type Registry after startup
