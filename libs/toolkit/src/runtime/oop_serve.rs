@@ -772,8 +772,12 @@ impl OopHttpServer {
         }
     }
 
-    /// Publish routes with auth policy, then start presence and dependency resolution.
-    /// Advertising only once serving prevents discovery of unready instances.
+    /// Atomically publish the composed gear routes (with auth policy) and their
+    /// `OpenAPI` document, then start background directory presence.
+    ///
+    /// Presence (registration + heartbeat + self-heal) starts only once the gear
+    /// can serve requests, so discovery never advertises a not-yet-serving instance.
+    /// Dependency resolution runs in the proxy-wiring phase before serving.
     pub(super) fn attach(
         &mut self,
         gear_router: Router,

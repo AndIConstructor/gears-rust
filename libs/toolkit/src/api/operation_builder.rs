@@ -452,8 +452,8 @@ pub struct LicenseReqSpec {
     pub license_names: Vec<String>,
 }
 
-/// Shared platform `OpenAPI` apiKey scheme, re-exported to prevent discovery drift.
-pub use toolkit_security::constants::INTERNAL_TOKEN_SECURITY_SCHEME;
+/// Name of the platform `OpenAPI` apiKey scheme.
+pub use super::openapi_registry::INTERNAL_TOKEN_SECURITY_SCHEME;
 
 /// Per-route credential requirement, shared with listeners and the gateway.
 pub use toolkit_security::RouteAuth;
@@ -548,12 +548,14 @@ pub struct ThrottlingSpec {
     /// `None` when the operation has no in-flight limit.
     pub in_flight_limit_zone: Option<String>,
     /// Whether this operation's throttling must run after authentication
-    /// (so a `SecurityContext` / subject identity is available).
+    /// (so the identity validated by the operation's auth plane is available).
     ///
     /// - `false` (default): the operation is throttled *before* auth, using
     ///   IP-keyed zones only.
     /// - `true`: the operation is throttled *after* auth, allowing
-    ///   identity-keyed zones (keyed by the subject id or a custom extractor).
+    ///   identity-keyed zones: keyed by the tenant subject id on an
+    ///   `.authenticated()` operation, or by the calling workload on a
+    ///   `.platform_authenticated()` one.
     pub require_security_context: bool,
     /// Observe-but-don't-enforce mode.
     ///

@@ -116,7 +116,7 @@ cf-gears-system-sdks = { workspace = true, features = ["directory"] }
 toolkit-contract = { workspace = true, features = ["rest-client"] }
 
 # Security primitives. Not optional: `toolkit-sdk` and `toolkit-contract`
-# already depend on it, and the `OpenAPI` platform scheme name is its constant.
+# already depend on it; operation specs also use its shared `RouteAuth` type.
 toolkit-security = { workspace = true }
 # OoP HTTP server (bootstrap feature): two-plane auth middleware
 toolkit-http-middleware = { workspace = true, optional = true }

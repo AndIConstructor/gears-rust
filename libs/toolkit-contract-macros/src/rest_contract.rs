@@ -1572,7 +1572,10 @@ fn generate_method_route(method: &RestMethodModel, model: &RestContractModel) ->
         },
     };
 
-    // .anonymous() already sets LicenseSet; authenticated builders still need a license decision.
+    // `.anonymous()` already transitions to `LicenseSet`, so `.no_license_required()`
+    // must not follow it: that method is only available in `LicenseNotSet`.
+    // `.authenticated()` and `.platform_authenticated()` leave the license state unset,
+    // so both need the explicit `.no_license_required()` decision below.
     // Platform takes precedence; the parser rejects #[anonymous] on that plane.
     let is_platform_plane = method
         .params

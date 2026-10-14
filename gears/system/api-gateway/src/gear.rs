@@ -260,9 +260,10 @@ impl ApiGateway {
     /// Build route policy from operation specs.
     fn build_route_policy_from_specs(&self) -> Result<auth::GatewayRoutePolicy> {
         // Auth and gateway visibility are independent: `RouteAuth::Anonymous` is the *auth*
-        // axis (no bearer required), NOT external visibility (`exposed`). Explicit route
-        // policy overrides require_auth_by_default; platform auth takes precedence on every
-        // host.
+        // axis (no bearer required), NOT external visibility (`exposed`). The builder
+        // typestate requires an explicit auth choice, so every operation spec declares
+        // its own policy. `require_auth_by_default` is only the fallback for paths with
+        // no declared route policy; platform auth takes precedence on every host.
         let mut routes = vec![
             (Method::GET, "/docs".to_owned(), RouteAuth::Anonymous),
             (

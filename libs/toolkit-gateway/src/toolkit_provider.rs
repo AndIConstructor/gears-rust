@@ -17,7 +17,7 @@ use crate::provider::{GatewayProvider, InstanceSpec};
 use crate::registry::{InstanceRoutes, ProxyRegistry, RouteTemplate};
 use crate::types::{Endpoint, GearInstance, GearName, OpenApiSpec};
 use crate::{API_VISIBILITY_EXPOSED, API_VISIBILITY_EXTENSION};
-use toolkit_security::constants::INTERNAL_TOKEN_SECURITY_SCHEME;
+use toolkit_security::constants::INTERNAL_TOKEN_HEADER;
 
 /// HTTP method keys recognized when scanning an `OpenAPI` path item.
 const HTTP_METHOD_KEYS: [&str; 7] = ["get", "put", "post", "delete", "patch", "head", "options"];
@@ -279,7 +279,7 @@ fn extract_public_routes(spec: &OpenApiSpec<'_>) -> Result<PublicRoutes, Gateway
             let security = operation.get("security").or(doc.get("security"));
             // Never proxy platform operations: the edge strips their required token.
             // The caller reports each rejected route once per gear.
-            if requires_internal_token(security) {
+            if requires_internal_token(security, &doc) {
                 found.platform.push((method, path.clone()));
                 continue;
             }
@@ -307,16 +307,38 @@ fn security_authenticated(security: Option<&serde_json::Value>) -> Option<bool> 
         .map(|reqs| !reqs.is_empty())
 }
 
-/// True when every security alternative (OR) requires the internal-token scheme (AND).
-fn requires_internal_token(security: Option<&serde_json::Value>) -> bool {
+/// True when every security alternative (OR) requires an internal-token header
+/// scheme (AND). Component names are arbitrary; identify the credential by its
+/// `apiKey` definition and case-insensitive HTTP header name.
+fn requires_internal_token(security: Option<&serde_json::Value>, doc: &serde_json::Value) -> bool {
+    let Some(definitions) = doc
+        .pointer("/components/securitySchemes")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
     security
         .and_then(serde_json::Value::as_array)
         .is_some_and(|alternatives| {
             !alternatives.is_empty()
                 && alternatives.iter().all(|requirement| {
-                    requirement
-                        .as_object()
-                        .is_some_and(|schemes| schemes.contains_key(INTERNAL_TOKEN_SECURITY_SCHEME))
+                    requirement.as_object().is_some_and(|schemes| {
+                        schemes.keys().any(|name| {
+                            let Some(definition) = definitions.get(name) else {
+                                return false;
+                            };
+                            definition.get("type").and_then(serde_json::Value::as_str)
+                                == Some("apiKey")
+                                && definition.get("in").and_then(serde_json::Value::as_str)
+                                    == Some("header")
+                                && definition
+                                    .get("name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|header| {
+                                        header.eq_ignore_ascii_case(INTERNAL_TOKEN_HEADER)
+                                    })
+                        })
+                    })
                 })
         })
 }
@@ -379,9 +401,62 @@ mod tests {
             "openapi": "3.1.0",
             "info": { "title": "t", "version": "1.0.0" },
             "security": doc_security.clone(),
+            "components": { "securitySchemes": {
+                "internalToken": {
+                    "type": "apiKey", "in": "header", "name": "x-toolkit-internal-token"
+                }
+            } },
             "paths": paths,
         });
         Bytes::from(serde_json::to_vec(&doc).expect("serialize"))
+    }
+
+    #[test]
+    fn platform_scheme_is_identified_by_credential_header() {
+        use serde_json::json;
+
+        let cases = [
+            (
+                "workload",
+                json!({ "type": "apiKey", "in": "header", "name": "x-toolkit-internal-token" }),
+                true,
+            ),
+            (
+                "workload",
+                json!({ "type": "apiKey", "in": "header", "name": "X-ToolKit-Internal-Token" }),
+                true,
+            ),
+            (
+                "internalToken",
+                json!({ "type": "apiKey", "in": "cookie", "name": "x-toolkit-internal-token" }),
+                false,
+            ),
+            (
+                "internalToken",
+                json!({ "type": "apiKey", "in": "header", "name": "x-other-token" }),
+                false,
+            ),
+            (
+                "internalToken",
+                json!({ "type": "http", "scheme": "bearer" }),
+                false,
+            ),
+        ];
+        for (name, definition, platform) in cases {
+            let mut doc: serde_json::Value = serde_json::from_slice(&security_cases_spec(
+                &json!([{ (name): [] }]),
+                &[
+                    ("/inherited", None),
+                    ("/explicit", Some(json!([{ (name): [] }]))),
+                ],
+            ))
+            .unwrap();
+            doc["components"]["securitySchemes"] = json!({ (name): definition });
+            let spec = OpenApiSpec::SerializedJson(Bytes::from(serde_json::to_vec(&doc).unwrap()));
+            let found = extract_public_routes(&spec).unwrap();
+            assert_eq!(found.platform.len(), if platform { 2 } else { 0 }, "{doc}");
+            assert_eq!(found.routes.len(), if platform { 0 } else { 2 }, "{doc}");
+        }
     }
 
     #[test]

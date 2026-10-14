@@ -29,6 +29,10 @@ use crate::api::operation_builder;
 use toolkit_canonical_errors::problem;
 use toolkit_contract::StreamFraming;
 
+/// Name of the `OpenAPI` apiKey scheme for platform operations, using
+/// [`toolkit_security::constants::INTERNAL_TOKEN_HEADER`].
+pub const INTERNAL_TOKEN_SECURITY_SCHEME: &str = "internalToken";
+
 /// Type alias for schema collections used in API operations.
 type SchemaCollection = Vec<(String, RefOr<Schema>)>;
 
@@ -315,9 +319,7 @@ impl OpenApiRegistryImpl {
 
             // Platform operations require internalToken, not bearerAuth.
             let scheme = match spec.auth {
-                operation_builder::RouteAuth::Platform => {
-                    Some(operation_builder::INTERNAL_TOKEN_SECURITY_SCHEME)
-                }
+                operation_builder::RouteAuth::Platform => Some(INTERNAL_TOKEN_SECURITY_SCHEME),
                 operation_builder::RouteAuth::Authenticated => Some("bearerAuth"),
                 operation_builder::RouteAuth::Anonymous => None,
             };
@@ -363,7 +365,7 @@ impl OpenApiRegistryImpl {
 
         // Platform-plane internal token, required by platform operations
         components = components.security_scheme(
-            operation_builder::INTERNAL_TOKEN_SECURITY_SCHEME,
+            INTERNAL_TOKEN_SECURITY_SCHEME,
             SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
                 toolkit_security::constants::INTERNAL_TOKEN_HEADER,
                 "Platform-plane workload credential, validated by the receiving listener",

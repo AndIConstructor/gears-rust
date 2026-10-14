@@ -1948,3 +1948,68 @@ async fn discovered_axis_routes() {
         );
     }
 }
+
+/// `POST` platform, bound to the identity-keyed `rl_platform` zone.
+const THROTTLED_PLATFORM_PATH: &str = "/tests/v1/api/throttled-platform";
+
+pub struct TestThrottledPlatformGear;
+
+impl RestApiCapability for TestThrottledPlatformGear {
+    fn register_rest(
+        &self,
+        _ctx: &GearCtx,
+        router: Router,
+        openapi: &dyn OpenApiRegistry,
+    ) -> Result<Router> {
+        Ok(OperationBuilder::post(THROTTLED_PLATFORM_PATH)
+            .operation_id("test_throttled.platform")
+            .platform_authenticated()
+            .require_license_features::<License>([])
+            .with_throttling(toolkit::api::ThrottlingSpec {
+                rate_limit_zone: Some("rl_platform".to_owned()),
+                require_security_context: true,
+                ..Default::default()
+            })
+            .handler(context_free_handler)
+            .text_response(http::StatusCode::OK, "OK", "text/plain")
+            .register(router, openapi))
+    }
+}
+
+#[tokio::test]
+async fn platform_identity_throttling_with_auth_disabled() {
+    // The platform plane still validates callers with `auth_disabled`, so an
+    // identity zone keys on the validated caller after the platform gate.
+    let mut config = axis_config(true);
+    config["auth_disabled"] = json!(true);
+    config["rate_limit_zones"] = json!({
+        "rl_platform": {
+            "rate_limit": "1/s",
+            "burst_limit": 1,
+            "key": { "type": "identity" },
+            "max_keys": 10,
+        }
+    });
+    let router = create_router_serving(config, &TestThrottledPlatformGear).await;
+    let call = |token| {
+        axis_call(
+            router.clone(),
+            Method::POST,
+            THROTTLED_PLATFORM_PATH,
+            None,
+            token,
+        )
+    };
+
+    // Refused by the gate before throttling, so they spend no budget.
+    let (status, body, _) = call(None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(body.contains("MISSING_INTERNAL_TOKEN"), "{body}");
+    let (status, body, _) = call(Some("forged")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    let (status, body, _) = call(Some(AXIS_INTERNAL_SECRET)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body, _) = call(Some(AXIS_INTERNAL_SECRET)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+}
