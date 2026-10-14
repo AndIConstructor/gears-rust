@@ -228,21 +228,21 @@ Note: Gateway may report more AI credits than the tenant's allocated quota becau
 ### 3.1 Gear-Specific Environment Constraints
 
 - Reference deployment: LLM Gateway, its provider plugins, Model Registry, and Type Registry (optionally the AuthZ resolver) are compiled into one binary. Model Registry owns its database.
-- Requires persistent storage for guaranteed usage record delivery; from P2, also for async/batch job state
+- From P2, requires persistent storage for async/batch job state; Gateway does not persist usage records
 - All external provider calls route through Outbound API Gateway (OAGW): provider plugins call the OAGW SDK `proxy_request` function. The OAGW alias and path are built from the model's `base_url` (defined in Model Registry) plus the provider API path. Gateway never calls providers directly.
 - OAGW upstreams and routes are configured outside the Gateway by default. Provider plugins can declare the routes they use, but deciding which base URLs may be called is the deployment's responsibility. Automatic provisioning of upstreams by Model Registry or plugins is an open question (see § 13). Deployments without a full OAGW can substitute a plain HTTP client behind the same SDK interface.
 - P1: image and file inputs are accepted as base64 data or external URLs and forwarded to the provider. From P2: media files are stored and retrieved via the FileStorage gear.
 
 ### 3.2 Data Ownership & Classification
 
-Gateway acts as a processor — consumers own request/response data; Gateway owns operational metadata (job state, usage records). Provider response data in persisted job records is held on behalf of the consumer and subject to retention-based cleanup.
+Gateway acts as a processor — consumers own request/response data; Gateway owns operational metadata (job state, usage records sent to Usage Collector). Provider response data in persisted job records is held on behalf of the consumer and subject to retention-based cleanup.
 
 | Data Category | Examples | Persistence | Sensitivity | Owner |
 |---------------|----------|-------------|-------------|-------|
 | Transient request/response | Prompts, completions, embeddings | Not persisted — in-memory only | Consumer-defined (may contain PII) | Consumer |
 | Provider credentials | Provider API keys fetched from CredStore | Not persisted — in-memory for the duration of the call; never logged | Secret | Tenant / platform (stored in CredStore) |
 | Persisted job records | Async job state, batch job ID mappings, job results | Retention-bound (10 min / 48 h) | Potentially sensitive — treated as PII-capable | Consumer (held by Gateway) |
-| Usage telemetry | AI credit amounts, tenant/user/model attribution | Delivered to Usage Collector, then removed | Personal data (pseudonymous) — user ID links usage to an individual | Gateway |
+| Usage telemetry | AI credit amounts, tenant/user/model attribution | Not persisted by Gateway — sent to Usage Collector | Personal data (pseudonymous) — user ID links usage to an individual | Gateway |
 
 ## 4. Scope
 
