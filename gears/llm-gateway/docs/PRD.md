@@ -52,7 +52,7 @@ Provider-specific logic is isolated in **provider plugins**. Each plugin impleme
 
 The first phase (P1) covers synchronous and streaming chat completion and embeddings, including image and file input passed as base64 data or external URLs, reasoning, tool calling, web search, and structured output. Later phases add media generation (images, audio, video), FileStorage-backed media, async jobs, batch processing, and realtime audio. All provider calls go through the Outbound API Gateway (OAGW). The Gateway obtains provider API keys from CredStore and passes them to the provider plugin, which sets them on the outbound request.
 
-Gateway is stateless for request processing — it does not store conversation history or execute tools, and consumers provide full context with each request. Server-side conversation state at the provider (`previous_response_id`, `store=true`) is not used. From P2, Gateway persists async and batch job state (internal-to-provider job ID mappings, job results) to support long-running operations that can take up to 24 hours. Gateway guarantees at-least-once delivery of usage records to the Usage Tracker gear.
+Gateway is stateless for request processing — it does not store conversation history or execute tools, and consumers provide full context with each request. Server-side conversation state at the provider (`previous_response_id`, `store=true`) is not used. From P2, Gateway persists async and batch job state (internal-to-provider job ID mappings, job results) to support long-running operations that can take up to 24 hours. Gateway guarantees at-least-once delivery of usage records to the Usage Collector gear.
 
 **Target Users**:
 - **Platform Developers** — build AI-powered features using Gateway API
@@ -81,7 +81,7 @@ LLM Gateway addresses these problems by providing a single integration point tha
 
 **Capacity Planning Inputs**:
 - Expected async/batch job volume: up to 10 000 jobs/day per tenant at steady state
-- DB row growth: up to 50 000 rows/day across all tenants (job records + usage delivery); bounded by retention cleanup
+- DB row growth: up to 50 000 rows/day across all tenants (job records, from P2); bounded by retention cleanup
 - Storage per async result: up to 1 MB (text responses); up to 100 MB (media generation results stored in FileStorage, not DB)
 
 **Capabilities** (P1):
@@ -92,6 +92,7 @@ LLM Gateway addresses these problems by providing a single integration point tha
 - Tool/function calling, Gateway web search tool, provider-specific tools
 - Structured output with schema validation
 - Usage reporting with cost in AI credits
+- Per-tenant AI credit quota enforcement
 
 **Capabilities** (P2+): media generation (images, audio, video), video and audio understanding, FileStorage-backed media, async jobs, batch processing, realtime audio.
 
@@ -166,27 +167,25 @@ No dedicated human actors. All interactions with LLM Gateway are mediated throug
 - **Data exchanged**: Plugin and settings schema registration at startup; schema lookups for tool definitions.
 - **Availability**: Required at startup for plugin registration. If a referenced tool schema cannot be resolved, Gateway returns a schema-not-found error.
 
-#### Usage Tracker
+#### Usage Collector
 
-**ID**: `cpt-cf-llm-gateway-actor-usage-tracker`
+**ID**: `cpt-cf-llm-gateway-actor-usage-collector`
 
-- **Role**: Receives AI credit consumption reports.
+- **Role**: Separate platform service (`gears/system/usage-collector`) that receives AI credit consumption reports.
 - **Direction**: outbound
-- **Data exchanged**: AI credit consumption records (credit amount, attribution: tenant, user, model; completeness flag for interrupted streams). The provider plugin converts provider usage into AI credits using the pricing in the model's provider settings (obtained from Model Registry). Gateway does not report raw token counts or cost estimates to Usage Tracker — only AI credit amounts.
-- **Availability**: Usage record delivery is guaranteed at-least-once — records are queued and retried until delivered. Usage Tracker unavailability does not block request processing; records are buffered and delivered when the tracker becomes available.
+- **Data exchanged**: AI credit consumption records (credit amount, attribution: tenant, user, model; completeness flag for interrupted streams). The provider plugin converts provider usage into AI credits using the pricing in the model's provider settings (obtained from Model Registry). Gateway does not report raw token counts or cost estimates to Usage Collector — only AI credit amounts.
+- **Availability**: Usage record delivery is guaranteed at-least-once. Usage Collector unavailability does not block request processing.
 
 Note: Gateway may report more AI credits than the tenant's allocated quota because token consumption cannot be predicted before the request completes. This is expected behavior — the quota check is a best-effort gate, not a hard limit.
 
-#### Quota Manager
+#### Quota Enforcement
 
-**ID**: `cpt-cf-llm-gateway-actor-quota-manager`
+**ID**: `cpt-cf-llm-gateway-actor-quota-enforcement`
 
-- **Role**: Checks available AI credit quotas before request execution.
+- **Role**: Separate platform service (`gears/system/quota-enforcement`) that checks available AI credit quotas before request execution.
 - **Direction**: outbound
 - **Data exchanged**: Quota check requests (tenant context); receives quota status (available/exceeded).
-- **Availability**: If Quota Manager is unavailable, Gateway rejects the request with a quota-check-unavailable error. Gateway does not bypass quota checks silently.
-
-Note: The specific component that provides quota management is an open question. The PRD defines the need for a quota-checking dependency but does not prescribe which gear or service fulfills this role.
+- **Availability**: If Quota Enforcement is unavailable, Gateway rejects the request with a quota-check-unavailable error. Gateway does not bypass quota checks silently.
 
 #### Audit Gear
 
@@ -225,7 +224,7 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 | Transient request/response | Prompts, completions, embeddings | Not persisted — in-memory only | Consumer-defined (may contain PII) | Consumer |
 | Provider credentials | Provider API keys fetched from CredStore | Not persisted — in-memory for the duration of the call; never logged | Secret | Tenant / platform (stored in CredStore) |
 | Persisted job records | Async job state, batch job ID mappings, job results | Retention-bound (10 min / 48 h) | Potentially sensitive — treated as PII-capable | Consumer (held by Gateway) |
-| Usage telemetry | AI credit amounts, tenant/user/model attribution | Delivered to Usage Tracker, then removed | Personal data (pseudonymous) — user ID links usage to an individual | Gateway |
+| Usage telemetry | AI credit amounts, tenant/user/model attribution | Delivered to Usage Collector, then removed | Personal data (pseudonymous) — user ID links usage to an individual | Gateway |
 
 ## 4. Scope
 
@@ -245,7 +244,7 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 - Generic generation parameters (max tokens, temperature, top_p, seed, …), generic cache-control parameters, and forwarding of provider-specific parameters
 - Usage in responses: cost in AI credits, generic token usage, provider-specific raw usage
 - AI credit usage tracking with guaranteed at-least-once delivery (cost computed by the provider plugin from model pricing)
-- Per-tenant AI credit quota enforcement via Quota Manager
+- Per-tenant AI credit quota enforcement via Quota Enforcement
 
 **P2+**:
 - Media generation (images, audio, video) and video/audio understanding
@@ -426,23 +425,23 @@ Cache-control parameters are hints: when the provider has no equivalent, the sys
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-usage-tracking-v1`
 
-The system **MUST** return usage with every response: cost in AI credits, generic usage (input, output, cached, and reasoning tokens), and the provider-specific raw usage structure. The provider plugin **MUST** compute the cost by applying the pricing from the model's provider settings. The system **MUST** report AI credit consumption after each request via Usage Tracker with attribution (tenant, user, model), and **MUST** guarantee at-least-once delivery of usage records. Usage for interrupted streams **MUST** be marked as incomplete.
+The system **MUST** return usage with every response: cost in AI credits, generic usage (input, output, cached, and reasoning tokens), and the provider-specific raw usage structure. The provider plugin **MUST** compute the cost by applying the pricing from the model's provider settings. The system **MUST** report AI credit consumption after each request via Usage Collector with attribution (tenant, user, model), and **MUST** guarantee at-least-once delivery of usage records. Usage for interrupted streams **MUST** be marked as incomplete.
 
 Cross-cutting concern — applies to all operations, no dedicated UC.
 
-**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-usage-tracker`, `cpt-cf-llm-gateway-actor-model-registry`
+**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-usage-collector`, `cpt-cf-llm-gateway-actor-model-registry`
 
 #### Per-Tenant Quota Enforcement
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-budget-enforcement-v1`
 
-The system **MUST** check available AI credit quota before execution via Quota Manager and reject requests when the quota is exhausted. After request completion, the system **MUST** report actual AI credit consumption to Usage Tracker.
+The system **MUST** check available AI credit quota before execution via Quota Enforcement and reject requests when the quota is exhausted. After request completion, the system **MUST** report actual AI credit consumption to Usage Collector.
 
 Note: Gateway may consume more AI credits than the allocated quota because token consumption cannot be predicted before the request completes. This is expected behavior — the pre-request quota check is a best-effort gate, not a hard ceiling.
 
 Cross-cutting concern — applies to all operations, no dedicated UC.
 
-**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-quota-manager`, `cpt-cf-llm-gateway-actor-usage-tracker`
+**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-quota-enforcement`, `cpt-cf-llm-gateway-actor-usage-collector`
 
 #### Model Capability Check
 
@@ -500,13 +499,13 @@ Cross-cutting concern — applies to all operations, no dedicated UC.
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-request-traceability-v1`
 
-The response `id` serves as the gateway request identifier. The system **MUST** propagate this identifier throughout the entire request processing pipeline — provider plugin calls, usage events reported to Usage Tracker, error events, and audit events. All internal processing stages **MUST** be correlatable back to the originating response `id`.
+The response `id` serves as the gateway request identifier. The system **MUST** propagate this identifier throughout the entire request processing pipeline — provider plugin calls, usage events reported to Usage Collector, error events, and audit events. All internal processing stages **MUST** be correlatable back to the originating response `id`.
 
-The system **MUST** capture the `provider_request_id` returned by the provider (when available) and include it in usage events reported to Usage Tracker and in error events. This enables end-to-end correlation between gateway operations and provider-side request logs.
+The system **MUST** capture the `provider_request_id` returned by the provider (when available) and include it in usage events reported to Usage Collector and in error events. This enables end-to-end correlation between gateway operations and provider-side request logs.
 
 Cross-cutting concern — applies to all operations, no dedicated UC.
 
-**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`, `cpt-cf-llm-gateway-actor-usage-tracker`
+**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`, `cpt-cf-llm-gateway-actor-usage-collector`
 
 ### P2 — Reliability, Governance & Media
 
@@ -636,7 +635,7 @@ The system **MUST** support horizontal scaling without instance-local state or i
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-nfr-data-retention-v1`
 
-Usage delivery records apply from P1; job records apply from P2 (async) and P3 (batch). Async job records (ID mappings, results) are retained for 10 minutes after completion for LLM completion jobs and 48 hours after completion for batch jobs. Expired records are cleaned up automatically. Usage delivery records are removed after successful delivery.
+Job records apply from P2 (async) and P3 (batch). Async job records (ID mappings, results) are retained for 10 minutes after completion for LLM completion jobs and 48 hours after completion for batch jobs. Expired records are cleaned up automatically.
 
 ### Compatibility
 
@@ -1245,7 +1244,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - [ ] Provider API keys are never persisted or logged by Gateway
 - [ ] Gateway overhead < 50ms P99 excluding provider latency
 - [ ] Availability ≥ 99.9%
-- [ ] Usage records are delivered to Usage Tracker at least once for every completed request
+- [ ] Usage records are delivered to Usage Collector at least once for every completed request
 - [ ] (P2+) All supported modalities (audio, video, generated media) produce normalized responses regardless of provider
 - [ ] (P2+) Async and batch job state survives Gateway instance restarts
 - [ ] (P2+) Expired job records are cleaned up within the defined retention windows
@@ -1258,9 +1257,9 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 | Model Registry | Resolves model identifiers to model info (provider type, model name, `base_url`, secret reference, settings, pricing); validates provider settings against plugin schemas | `p1` |
 | CredStore | Provides provider API keys to Gateway by the model's secret reference | `p1` |
 | Type Registry | Stores provider plugin instances and provider settings schemas; resolves GTS schema references for tool definitions | `p1` |
-| Usage Tracker | Receives AI credit consumption reports | `p1` |
+| Usage Collector | Receives AI credit consumption reports | `p1` |
 | FileStorage | Stores and retrieves media files (images, audio, video, documents) | `p2` |
-| Quota Manager | Checks available AI credit quotas before request execution (specific component TBD — see Open Questions) | `p1` |
+| Quota Enforcement | Checks available AI credit quotas before request execution | `p1` |
 | Audit Gear | Receives compliance audit events | `p4` |
 
 ## 11. Assumptions
@@ -1269,7 +1268,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Provider API keys are stored in CredStore and referenced from model info
 - Model Registry maintains an up-to-date catalog of available models and their capabilities per tenant
 - FileStorage is available for media operations from P2
-- Database is available and shared across all Gateway instances (for usage delivery; from P2 also for job state)
+- From P2, a database is available and shared across all Gateway instances for job state
 
 ## 12. Risks
 
@@ -1286,11 +1285,11 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 ## 13. Open Questions
 
-- **Quota enforcement ownership and component** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): Two related decisions must be made together. (1) *Ownership boundary*: does Gateway own quota *enforcement* (atomic preflight reserve + terminal settle + bounded debit on abort) or only *metering* (report usage, external component enforces)? The current `check_quota()` → proceed → `report_usage()` sequence is non-atomic — under concurrent load, multiple requests pass `check_quota()` before any `report_usage()` completes, allowing a tenant to exceed their limit by N×budget (N = concurrent in-flight requests). If Gateway owns enforcement, the reserve/settle pattern is required, not optional — a best-effort gate is effectively decorative under load. If Gateway does metering only, the external component handles enforcement asynchronously. (2) *Component identity*: the specific component that provides quota management is not yet defined — it may be a dedicated Quota Manager gear, an extension of Usage Tracker, or an external service. Both decisions must be resolved before implementing `cpt-cf-llm-gateway-fr-budget-enforcement-v1`.
+- **Quota enforcement ownership** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): *Ownership boundary*: does Gateway own quota *enforcement* (atomic preflight reserve + terminal settle + bounded debit on abort) or only *metering* (report usage, external component enforces)? The current `check_quota()` → proceed → `report_usage()` sequence is non-atomic — under concurrent load, multiple requests pass `check_quota()` before any `report_usage()` completes, allowing a tenant to exceed their limit by N×budget (N = concurrent in-flight requests). If Gateway owns enforcement, the reserve/settle pattern is required, not optional — a best-effort gate is effectively decorative under load. If Gateway does metering only, the external component handles enforcement asynchronously. The decision must be made before implementing `cpt-cf-llm-gateway-fr-budget-enforcement-v1`.
 - **Budget enforcement edge cases** (Owner: Platform Architecture, Resolve by: with quota enforcement ownership decision above): The following scenarios must be addressed when the ownership boundary is decided: (a) *Provider stream without usage* — if a provider stream closes before delivering usage data (network error, provider error mid-stream, consumer disconnect), usage is reported marked as incomplete (`cpt-cf-llm-gateway-fr-streaming-v1`); policy must specify what is debited in that case: input tokens only, an estimate, or zero; (b) *Background job budgeting* — quota is checked at submission time but the job executes minutes later under a possibly changed quota state, requiring the reserve/settle pattern to span the submission-to-execution gap if Gateway owns enforcement.
 - **Rate limiting mechanism** (Owner: Platform Architecture, Resolve by: before P2 implementation begins): Rate limiting (`cpt-cf-llm-gateway-fr-rate-limiting-v1`) is closely related to quota management. Whether rate limiting and quota enforcement are provided by the same component or separate components is an open question.
 - **Request monitoring and observability** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): The LLM Gateway needs to track how many requests are being processed, including metrics such as request counts, latency, error rates, and token usage per provider/model. However, the platform does not yet have a standardized approach to monitoring and observability across gears. A platform-wide monitoring strategy must be agreed upon before implementing gear-level metrics, to ensure consistency and avoid fragmented solutions.
-- **Cross-gear request traceability** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): The platform needs a mechanism that assigns a request ID at the incoming requests gateway (api-gateway gear) and propagates it through all inter-gear calls via ClientHub/SDK traits. This would enable end-to-end request tracing across gear boundaries — for example, a consumer request arriving at the API gateway, flowing through LLM Gateway, then to Model Registry and Usage Tracker, all correlated by a single platform-level request ID. Currently, each gear operates with its own request context; there is no standardized correlation ID propagated across inter-gear boundaries. This is a platform-level concern that affects all gears, not just LLM Gateway. The LLM Gateway's response `id` (`cpt-cf-llm-gateway-fr-request-traceability-v1`) provides gear-level traceability, but a platform-wide mechanism is needed for cross-gear correlation.
+- **Cross-gear request traceability** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): The platform needs a mechanism that assigns a request ID at the incoming requests gateway (api-gateway gear) and propagates it through all inter-gear calls via ClientHub/SDK traits. This would enable end-to-end request tracing across gear boundaries — for example, a consumer request arriving at the API gateway, flowing through LLM Gateway, then to Model Registry and Usage Collector, all correlated by a single platform-level request ID. Currently, each gear operates with its own request context; there is no standardized correlation ID propagated across inter-gear boundaries. This is a platform-level concern that affects all gears, not just LLM Gateway. The LLM Gateway's response `id` (`cpt-cf-llm-gateway-fr-request-traceability-v1`) provides gear-level traceability, but a platform-wide mechanism is needed for cross-gear correlation.
 - **OAGW upstream provisioning** (Owner: LLM Gateway team, Resolve by: before P1 implementation begins): Default: OAGW is configured externally and plugins only call `proxy_request`. If Model Registry and plugins become the source of OAGW upstreams and routes, the following must be decided: (1) well-known provider upstreams and routes registered by plugins at init and picked up by OAGW in post-init; provider routes must be part of the provider GTS, since some providers (e.g. Ollama) have no well-known upstream; (2) for models with a user-provided `base_url`, Model Registry registers the upstream and routes in OAGW at model registration — under which identity and in which tenant (root tenant is the likely choice, to avoid upstream overrides in the tenant hierarchy and extra AuthZ rights for the user); (3) registration must be idempotent — existing routes are skipped; (4) when routes are removed from OAGW. Alternative: allowed base URLs are listed in plugin configuration and registered by the plugin at init; only those base URLs are allowed.
 - **Plugin capabilities** (Owner: LLM Gateway team, Resolve by: before P2 implementation begins): Gateway needs a way to know what a provider plugin can do natively and what must be emulated — blocking vs streaming prediction, native async jobs, batches. The current SDK `capabilities()` covers streaming transport and media input mode; the structure must be extended before async and batch work.
 - **Stream cancellation** (Owner: LLM Gateway team, Resolve by: before P1 implementation begins): Mechanism for cancelling the upstream provider request when the consumer drops the connection, across the Gateway core, plugin stream, and OAGW.
