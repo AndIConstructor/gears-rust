@@ -331,7 +331,7 @@ When model info contains a secret reference, the system **MUST** fetch the provi
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-vision-v1`
 
-The system **MUST** accept messages with images and files (documents) as base64 data or external URLs, route them to a model that supports the content type, and return the result with usage metrics. Inputs **MUST** be forwarded to the provider as URLs where the provider accepts them; otherwise the plugin converts them to the format the provider requires. FileStorage URLs are covered by `cpt-cf-llm-gateway-fr-filestorage-media-v1` (P2).
+The system **MUST** accept messages with images and files (documents) as base64 data or external URLs, route them to a model that supports the content type, and return the result with usage metrics. Inputs **MUST** be forwarded to the provider as URLs where the provider accepts them. FileStorage URLs are covered by `cpt-cf-llm-gateway-fr-filestorage-media-v1` (P2).
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
 
@@ -735,7 +735,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Flow**:
 1. Consumer sends create_response with images as base64 data or external URLs
 2. Gateway resolves model info via Model Registry and selects the provider plugin
-3. Plugin forwards image URLs to the provider, or converts them to the format the provider requires
+3. Plugin forwards image URLs to the provider
 4. Plugin sends request via Outbound API Gateway
 5. Provider returns analysis
 6. Gateway returns response with usage
