@@ -245,6 +245,7 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 - Generic generation parameters (max tokens, temperature, top_p, seed, …), generic cache-control parameters, and forwarding of provider-specific parameters
 - Usage in responses: cost in AI credits, generic token usage, provider-specific raw usage
 - AI credit usage tracking with guaranteed at-least-once delivery (cost computed by the provider plugin from model pricing)
+- Per-tenant AI credit quota enforcement via Quota Manager
 
 **P2+**:
 - Media generation (images, audio, video) and video/audio understanding
@@ -252,7 +253,7 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 - Async job execution with durably persisted job state and results
 - Batch processing with durably persisted job ID mappings
 - Provider fallback and timeout enforcement
-- Per-tenant AI credit quota enforcement via Quota Manager, rate limiting
+- Rate limiting
 - Realtime audio
 
 ### 4.2 Out of Scope
@@ -400,6 +401,18 @@ Cross-cutting concern — applies to all operations, no dedicated UC.
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-usage-tracker`, `cpt-cf-llm-gateway-actor-model-registry`
 
+#### Per-Tenant Quota Enforcement
+
+- [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-budget-enforcement-v1`
+
+The system **MUST** check available AI credit quota before execution via Quota Manager and reject requests when the quota is exhausted. After request completion, the system **MUST** report actual AI credit consumption to Usage Tracker.
+
+Note: Gateway may consume more AI credits than the allocated quota because token consumption cannot be predicted before the request completes. This is expected behavior — the pre-request quota check is a best-effort gate, not a hard ceiling.
+
+Cross-cutting concern — applies to all operations, no dedicated UC.
+
+**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-quota-manager`, `cpt-cf-llm-gateway-actor-usage-tracker`
+
 #### Model Capability Check
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-model-capability-check-v1`
@@ -487,18 +500,6 @@ The system **MUST** enforce the following timeout types:
 On timeout the system **MUST** trigger fallback (if configured) or return a timeout error.
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
-
-#### Per-Tenant Quota Enforcement
-
-- [ ] `p2` - **ID**: `cpt-cf-llm-gateway-fr-budget-enforcement-v1`
-
-The system **MUST** check available AI credit quota before execution via Quota Manager and reject requests when the quota is exhausted. After request completion, the system **MUST** report actual AI credit consumption to Usage Tracker.
-
-Note: Gateway may consume more AI credits than the allocated quota because token consumption cannot be predicted before the request completes. This is expected behavior — the pre-request quota check is a best-effort gate, not a hard ceiling.
-
-Cross-cutting concern — applies to all operations, no dedicated UC.
-
-**Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-quota-manager`, `cpt-cf-llm-gateway-actor-usage-tracker`
 
 #### Rate Limiting
 
@@ -1200,7 +1201,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 | Type Registry | Stores provider plugin instances and provider settings schemas; resolves GTS schema references for tool definitions | `p1` |
 | Usage Tracker | Receives AI credit consumption reports | `p1` |
 | FileStorage | Stores and retrieves media files (images, audio, video, documents) | `p2` |
-| Quota Manager | Checks available AI credit quotas before request execution (specific component TBD — see Open Questions) | `p2` |
+| Quota Manager | Checks available AI credit quotas before request execution (specific component TBD — see Open Questions) | `p1` |
 | Audit Gear | Receives compliance audit events | `p4` |
 
 ## 11. Assumptions
@@ -1226,7 +1227,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 ## 13. Open Questions
 
-- **Quota enforcement ownership and component** (Owner: Platform Architecture, Resolve by: before P2 implementation begins): Two related decisions must be made together. (1) *Ownership boundary*: does Gateway own quota *enforcement* (atomic preflight reserve + terminal settle + bounded debit on abort) or only *metering* (report usage, external component enforces)? The current `check_quota()` → proceed → `report_usage()` sequence is non-atomic — under concurrent load, multiple requests pass `check_quota()` before any `report_usage()` completes, allowing a tenant to exceed their limit by N×budget (N = concurrent in-flight requests). If Gateway owns enforcement, the reserve/settle pattern is required, not optional — a best-effort gate is effectively decorative under load. If Gateway does metering only, the external component handles enforcement asynchronously. (2) *Component identity*: the specific component that provides quota management is not yet defined — it may be a dedicated Quota Manager gear, an extension of Usage Tracker, or an external service. Both decisions must be resolved before implementing `cpt-cf-llm-gateway-fr-budget-enforcement-v1`.
+- **Quota enforcement ownership and component** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): Two related decisions must be made together. (1) *Ownership boundary*: does Gateway own quota *enforcement* (atomic preflight reserve + terminal settle + bounded debit on abort) or only *metering* (report usage, external component enforces)? The current `check_quota()` → proceed → `report_usage()` sequence is non-atomic — under concurrent load, multiple requests pass `check_quota()` before any `report_usage()` completes, allowing a tenant to exceed their limit by N×budget (N = concurrent in-flight requests). If Gateway owns enforcement, the reserve/settle pattern is required, not optional — a best-effort gate is effectively decorative under load. If Gateway does metering only, the external component handles enforcement asynchronously. (2) *Component identity*: the specific component that provides quota management is not yet defined — it may be a dedicated Quota Manager gear, an extension of Usage Tracker, or an external service. Both decisions must be resolved before implementing `cpt-cf-llm-gateway-fr-budget-enforcement-v1`.
 - **Budget enforcement edge cases** (Owner: Platform Architecture, Resolve by: with quota enforcement ownership decision above): The following scenarios must be addressed when the ownership boundary is decided: (a) *Provider stream without usage* — if a provider stream closes before delivering usage data (network error, provider error mid-stream, consumer disconnect), usage is reported marked as incomplete (`cpt-cf-llm-gateway-fr-streaming-v1`); policy must specify what is debited in that case: input tokens only, an estimate, or zero; (b) *Fallback billing* — when a primary provider fails after consuming input tokens, policy must define whether partial cost is reported before initiating fallback or only on final completion, with one usage event per committed debit and no double-reporting across fallback attempts; (c) *Background job budgeting* — quota is checked at submission time but the job executes minutes later under a possibly changed quota state, requiring the reserve/settle pattern to span the submission-to-execution gap if Gateway owns enforcement.
 - **Rate limiting mechanism** (Owner: Platform Architecture, Resolve by: before P2 implementation begins): Rate limiting (`cpt-cf-llm-gateway-fr-rate-limiting-v1`) is closely related to quota management. Whether rate limiting and quota enforcement are provided by the same component or separate components is an open question.
 - **Request monitoring and observability** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): The LLM Gateway needs to track how many requests are being processed, including metrics such as request counts, latency, error rates, and token usage per provider/model. However, the platform does not yet have a standardized approach to monitoring and observability across gears. A platform-wide monitoring strategy must be agreed upon before implementing gear-level metrics, to ensure consistency and avoid fragmented solutions.
