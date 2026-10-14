@@ -153,6 +153,9 @@ impl SearchRepo {
     /// pair, whose predicate this is.
     fn value_matches(self, corpus: Corpus, tenant_ids: &[Uuid], pattern: &str) -> Condition {
         Condition::all()
+            // A flagged override is not served — resolution falls through it —
+            // so what it holds is not a match.
+            .add(setting_value::Column::NeedsReview.eq(false))
             .add(setting_value::Column::SecretRef.is_null())
             .add(value_repo::subjectless())
             .add(
@@ -240,18 +243,15 @@ impl SearchRepository for SearchRepo {
         )
         .filter(declaration::Column::Status.eq("active"))
         .filter(matched);
-        // `needs_review eq true`, in the query: only settings with an override
-        // flagged for review at one of the bounded tenants. A page filtered
-        // afterwards would page the unfiltered set, which is the defect a
-        // filter in the query exists to avoid.
+        // `needs_review eq true`, in the query: only settings whose own
+        // override at the target is flagged for review — the same narrowing the
+        // browse applies. A page filtered afterwards would page the unfiltered
+        // set, which is the defect a filter in the query exists to avoid.
         if request.flagged_only {
-            let flagged = ValueEntity::find()
-                .select_only()
-                .column(setting_value::Column::DeclarationId)
-                .filter(setting_value::Column::NeedsReview.eq(true))
-                .filter(setting_value::Column::TenantId.is_in(request.tenant_ids.iter().copied()))
-                .filter(value_repo::subjectless());
-            base = base.filter(declaration::Column::Id.in_subquery(flagged.into_query()));
+            base = base.filter(
+                declaration::Column::Id
+                    .in_subquery(value_repo::flagged_declarations_at(request.target)),
+            );
         }
 
         // Tiebreaker `key`, unique, so a page boundary neither repeats nor
