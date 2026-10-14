@@ -14,7 +14,7 @@
 
 - v2 carries the v1 schema migration (`m0001`) and the v1 → v2 schema migration (`m0002`), so after the switch it starts on the existing v1 database once its stored values have been moved.
 - The migration of stored secret values from v1 to v2 is not committed to `main`; it lives in a temporary branch and is run from there. `m0002` refuses to run, and changes nothing, while the database holds an `active` row (`status = 2`) and the tool has not recorded that copying finished (or `discard_values`), so before the switch the operator runs the tool from that branch (DESIGN §8). A database with no such rows passes.
-- The later migration of existing v1 data (type id remap, `fallback = none` on rows left without a value) is recorded in DESIGN §8, "Data of existing v1 installations"; this file is deleted at the switch.
+- The later migration of existing v1 data (type id remap, `fallback = none` on rows left without a value) is tracked in [#5347](https://github.com/constructorfabric/gears-rust/issues/5347) and recorded in DESIGN §8, "Data of existing v1 installations"; it blocks S1. This file is deleted at the switch.
 
 ## Order of PRs
 
@@ -31,7 +31,7 @@
 
 Before it, diff `main` against the v1 baseline v2 was copied from (`bdf434ebd`) and port or drop every v1 change. Consumers cannot move earlier: the v2 SDK is a different crate, so their client lookup fails while v1 is registered. Afterwards a single version remains:
 
-- **S1:** register v2 under the gear name `credstore`; move oagw, settings-service and keycloak-idp-plugin to the v2 SDK; update `config/*.yaml`, the e2e suites, `docs/api/api.json`, QUICKSTART, the example-server features, the `[workspace.dependencies]` entries and the `test-credstore-pg` lane. v1 stays in the tree, unlinked.
+- **S1:** blocked until the migration of existing v1 data ([#5347](https://github.com/constructorfabric/gears-rust/issues/5347)) is done. Register v2 under the gear name `credstore`; move oagw, settings-service and keycloak-idp-plugin to the v2 SDK; update `config/*.yaml`, the e2e suites, `docs/api/api.json`, QUICKSTART, the example-server features, the `[workspace.dependencies]` entries and the `test-credstore-pg` lane. v1 stays in the tree, unlinked.
 - **S2:** delete v1 (deletions only).
 - **S3:** move v2 to `gears/credstore/{credstore,credstore-sdk,plugins}`; rename the packages to `cf-gears-credstore*` with versions above the published ones; drop `publish = false`; delete `gears/credstore/v2/` and this file.
 - Operators reissue PDP grants before the deploy: the base type `secret.v1~` becomes `credential.v1~`, with six actions (ADR-0010).

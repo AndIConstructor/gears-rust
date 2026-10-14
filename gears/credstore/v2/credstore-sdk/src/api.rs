@@ -21,8 +21,7 @@ use toolkit_security::SecurityContext;
 /// Every fallible method returns [`CanonicalError`]; for typed dispatch,
 /// project it with [`CredStoreError`](crate::CredStoreError)
 /// (`.map_err(CredStoreError::from)`). Reason and field codes are in
-/// [`crate::reason`] and [`crate::field`]; the gear's `DESIGN.md` lists which
-/// operation emits which code. There is no `create`: `put` under
+/// [`crate::reason`] and [`crate::field`]. There is no `create`: `put` under
 /// [`PutPrecondition::CreateOnly`] is create.
 #[async_trait]
 pub trait CredStoreClientV2: Send + Sync {
