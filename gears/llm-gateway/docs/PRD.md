@@ -293,6 +293,19 @@ The system **MUST** support streaming mode for chat completions, delivering resp
 
 The system **MUST** accept one or more text inputs and return vector embeddings in a normalized format with usage metrics.
 
+The system **MUST** accept the following generic embedding parameters and map them to the provider's equivalents:
+
+- `dimensions` — output vector size. Consumers depend on it because it is fixed by their vector store
+- `input_type` — `query` or `document` (e.g. Google `task_type`, Voyage `input_type`); affects retrieval quality
+- `encoding_format` — `float` or `base64`
+
+Provider-specific embedding parameters with no generic equivalent are forwarded as defined in `cpt-cf-llm-gateway-fr-generation-parameters-v1`.
+
+Unsupported parameters are handled per `cpt-cf-llm-gateway-fr-generation-parameters-v1`, with these exceptions:
+
+- `dimensions` **MUST NOT** be dropped, even when `drop_unsupported_params` is set: vectors of the wrong size break the consumer's vector store. If the model cannot produce the requested size, the request is rejected with `unsupported_parameter`. A model with a fixed size accepts `dimensions` equal to that size.
+- `encoding_format` is supported for every model: if the provider does not return the requested format, the system converts the vectors.
+
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-provider`
 
 #### Provider Plugins
@@ -738,15 +751,15 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: Embedding model available for tenant.
 
 **Flow**:
-1. Consumer sends embed(model, input[])
+1. Consumer sends embed(model, input[]) with optional `dimensions`, `input_type`, `encoding_format`, and provider-specific parameters
 2. Gateway resolves model info via Model Registry
 3. Gateway validates that the model supports embeddings
 4. Gateway selects the provider plugin by the model info provider GTS type
 5. Gateway fetches the provider API key from CredStore (if the model has a secret reference)
 6. Gateway calls the plugin with the request, model info, and key
-7. Plugin converts the request to provider format, applies model settings, sets the key in request headers
+7. Plugin converts the request to provider format, maps generic embedding parameters, applies model settings, sets the key in request headers
 8. Plugin calls the provider via OAGW (`proxy_request`)
-9. Plugin converts the provider response to normalized vectors and computes cost in AI credits
+9. Plugin converts the provider response to normalized vectors in the requested `encoding_format` and computes cost in AI credits
 10. Gateway reports usage and returns the vectors with usage
 
 **Postconditions**: Vectors returned, usage reported.
@@ -758,9 +771,14 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - **No plugin for provider**: Gateway returns provider-not-supported error.
 - **Credentials unavailable**: Gateway returns credentials-unavailable error if the key cannot be fetched from CredStore.
 - **Model not capable**: Gateway returns capability_not_supported error if model does not support embeddings.
+- **Unsupported dimensions**: Gateway returns unsupported_parameter error if the model cannot produce the requested `dimensions`, even when `drop_unsupported_params` is set.
+- **Unsupported input_type**: Gateway returns unsupported_parameter error; with `drop_unsupported_params` set, Gateway drops it and lists it in `ignored_parameters`.
 
 **Acceptance criteria**:
 - Vectors returned in normalized format regardless of provider
+- Returned vectors have exactly the requested `dimensions`, or the request is rejected
+- `input_type` mapped to the provider's equivalent (e.g. Google `task_type`, Voyage `input_type`)
+- Both `float` and `base64` encoding formats supported for every model
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 - Provider errors returned with a normalized category, the original provider code and message, and `provider_request_id`
 
