@@ -11,10 +11,12 @@
 //! the write path needs. Later features extend [`Bootstrap::run`] with their
 //! own steps.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use quota_enforcement_sdk::{
-    BootstrapBundle, QuotaEnforcementStoragePluginV1, StorageError, owned_definitions,
+    BootstrapBundle, ProjectionBinding, QuotaEnforcementStoragePluginV1, StorageError,
+    owned_definitions,
 };
 use toolkit_macros::domain_model;
 
@@ -123,6 +125,35 @@ impl Bootstrap {
         }
     }
 
+    /// Flag active Quotas whose metric the registry no longer knows or
+    /// cannot classify; only a registry that does not answer is fatal.
+    async fn flag_bound_metrics(
+        &self,
+        bindings: &HashSet<ProjectionBinding>,
+    ) -> Result<(), DomainError> {
+        let mut seen = HashSet::new();
+        for metric in bindings.iter().map(|b| &b.metric) {
+            if !seen.insert(metric.clone()) {
+                continue;
+            }
+            match self.metric_registry.describe(metric).await {
+                Ok(Some(_)) => {}
+                Ok(None) => tracing::warn!(
+                    target: LOG_TARGET,
+                    metric = %metric,
+                    "active Quotas reference a metric the types registry no longer knows"
+                ),
+                Err(DomainError::MetricClassificationInvalid { .. }) => tracing::warn!(
+                    target: LOG_TARGET,
+                    metric = %metric,
+                    "active Quotas reference a metric with no usable classification"
+                ),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
     /// Run the bootstrap steps, naming the dependency that failed.
     async fn run_steps(&self) -> Result<Bound, (Dependency, DomainError)> {
         // @cpt-begin:cpt-cf-quota-enforcement-flow-gear-bootstrap:p1:inst-boot-start
@@ -176,27 +207,9 @@ impl Bootstrap {
             .map_err(|e| (Dependency::Catalog, e))?;
         // @cpt-end:cpt-cf-quota-enforcement-flow-owner-projection-publication:p1:inst-pub-boot
 
-        // A persisted Quota whose metric was later removed from the registry is
-        // flagged, never deactivated: every distinct bound metric is looked up
-        // once, a registry that does not answer fails readiness.
-        let mut seen = std::collections::HashSet::new();
-        for metric in bindings.iter().map(|b| &b.metric) {
-            if !seen.insert(metric.clone()) {
-                continue;
-            }
-            let described = self
-                .metric_registry
-                .describe(metric)
-                .await
-                .map_err(|e| (Dependency::TypesRegistry, e))?;
-            if described.is_none() {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    metric = %metric,
-                    "active Quotas reference a metric the types registry no longer knows"
-                );
-            }
-        }
+        self.flag_bound_metrics(&bindings)
+            .await
+            .map_err(|e| (Dependency::TypesRegistry, e))?;
 
         // @cpt-begin:cpt-cf-quota-enforcement-flow-gear-bootstrap:p1:inst-boot-cluster-resolve
         // The cluster resolver validates the operator's binding of the
