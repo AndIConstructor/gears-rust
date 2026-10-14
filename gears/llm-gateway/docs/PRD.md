@@ -152,7 +152,7 @@ No dedicated human actors. All interactions with LLM Gateway are mediated throug
 
 **ID**: `cpt-cf-llm-gateway-actor-credstore`
 
-- **Role**: Stores provider API keys. Deployed separately and reached via out-of-process tooling or API.
+- **Role**: Stores provider API keys.
 - **Direction**: outbound
 - **Data exchanged**: Secret lookup by the model's secret reference; receives the provider API key.
 - **Availability**: If CredStore is unavailable and the model requires a key, Gateway returns a credentials-unavailable error. Models without a secret reference (auth handled by OAGW, local provider) do not require CredStore.
@@ -210,7 +210,7 @@ Note: The specific component that provides quota management is an open question.
 
 ### 3.1 Gear-Specific Environment Constraints
 
-- Reference deployment: LLM Gateway, its provider plugins, Model Registry, and Type Registry (optionally the AuthZ resolver) are compiled into one binary. Model Registry owns its database. CredStore is deployed separately and reached via out-of-process tooling or API.
+- Reference deployment: LLM Gateway, its provider plugins, Model Registry, and Type Registry (optionally the AuthZ resolver) are compiled into one binary. Model Registry owns its database.
 - Requires persistent storage for guaranteed usage record delivery; from P2, also for async/batch job state
 - All external provider calls route through Outbound API Gateway (OAGW): provider plugins call the OAGW SDK `proxy_request` function. The OAGW alias and path are built from the model's `base_url` plus the provider API path; if the model has no `base_url`, the provider's default URL is used (when one exists). Gateway never calls providers directly.
 - OAGW upstreams and routes are configured outside the Gateway by default. Provider plugins can declare the routes they use, but deciding which base URLs may be called is the deployment's responsibility. Automatic provisioning of upstreams by Model Registry or plugins is an open question (see § 13). Deployments without a full OAGW can substitute a plain HTTP client behind the same SDK interface.
