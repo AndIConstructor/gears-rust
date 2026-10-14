@@ -225,7 +225,7 @@ Gateway acts as a processor — consumers own request/response data; Gateway own
 | Transient request/response | Prompts, completions, embeddings | Not persisted — in-memory only | Consumer-defined (may contain PII) | Consumer |
 | Provider credentials | Provider API keys fetched from CredStore | Not persisted — in-memory for the duration of the call; never logged | Secret | Tenant / platform (stored in CredStore) |
 | Persisted job records | Async job state, batch job ID mappings, job results | Retention-bound (10 min / 48 h) | Potentially sensitive — treated as PII-capable | Consumer (held by Gateway) |
-| Usage telemetry | AI credit amounts, tenant/user/model attribution | Delivered to Usage Tracker, then removed | Operational — no PII | Gateway |
+| Usage telemetry | AI credit amounts, tenant/user/model attribution | Delivered to Usage Tracker, then removed | Personal data (pseudonymous) — user ID links usage to an individual | Gateway |
 
 ## 4. Scope
 
