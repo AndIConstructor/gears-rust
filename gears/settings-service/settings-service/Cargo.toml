@@ -1,7 +1,7 @@
 # Created: 2026-08-12 by Virtuozzo International GmbH
 [package]
 name = "cf-gears-settings-service"
-version = "0.1.7"
+version = "0.1.8"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -43,6 +43,8 @@ uuid = { workspace = true }
 # Type Validator: structural + `format` assertions, and the regex trait check.
 jsonschema = { workspace = true }
 regex = { workspace = true }
+# The browse cursor binding: FNV-1a, a specified hash stable across releases.
+fnv = { workspace = true }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
