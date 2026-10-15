@@ -102,7 +102,7 @@ LLM Gateway addresses these problems by providing a single integration point tha
 |------|------------|
 | OAGW | Outbound API Gateway — executes external API calls (`proxy_request`) to registered upstreams and routes, applies circuit breaking; may optionally handle upstream authentication |
 | TTFT | Time-to-first-token — latency until first response chunk |
-| GTS | Global Types System — JSON Schema-based type definitions |
+| GTS | Global Type System — JSON Schema-based type definitions |
 | FileStorage | Platform gear for storing and retrieving binary files (images, audio, video, documents) |
 | Model Registry | Platform gear that resolves model identifiers to model info per tenant and validates model settings against the provider settings schema |
 | Model Info | Model Registry record forwarded as-is to the provider plugin: provider GTS type, provider model name, `base_url`, secret reference, generic default settings, and provider-specific settings (including pricing) |
