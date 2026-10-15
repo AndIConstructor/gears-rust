@@ -102,6 +102,7 @@ pub struct FetchOptions {
 /// exhaustive, so a family added here has to be given a delete before the
 /// crate compiles again. `EnumIter` supplies the iteration, so there is no
 /// hand-written list to keep in step with the variants either.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 pub enum Listing {
     Issues,
@@ -367,6 +368,7 @@ pub struct FetchedRepository {
 
 /// The repository a port call is about: `owner/name` for the request path
 /// and GitHub's id for the rows the answer becomes.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepoRef<'a> {
     pub owner: &'a str,
@@ -377,6 +379,7 @@ pub struct RepoRef<'a> {
 /// Where a paged listing picks up: the bound below which entities are too
 /// old to fetch, the validator page one carried last time, and the page to
 /// continue from (`None` starts at page one).
+#[domain_model]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListCursor<'a> {
     pub updated_after: Option<DateTime<Utc>>,

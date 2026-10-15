@@ -288,7 +288,7 @@ shared:                              # used by `make e2e-local` with no SUITE=
 sidecars:                           # named build+env, referenced by name
   file-storage:
     build: [cargo, build, -p, cf-gears-file-storage, --bin, sidecar]
-    env: { FS_SIDECAR_BINARY: target/debug/sidecar }
+    env: { FS_SIDECAR_BINARY: target/debug/sidecar, FS_SIDECAR_INTERNAL_TOKEN: dev-file-storage-internal-secret }
 ```
 
 **Per-suite manifest — `testing/e2e/suites/<suite>/e2e.yaml`:**
@@ -309,6 +309,8 @@ config_gears:                        # (e2e-launcher) gears (crates) whose confi
 # sidecars: [file-storage]           # optional: named sidecars to build
 # env: { FOO: bar }                  # optional: extra env ({binary}/{suite} expand). E2E_BINARY
 #                                    #   is auto-set for launcher: pytest — no need to declare it.
+# clean_home: true                   # optional (e2e-launcher): empty env.APP__SERVER__HOME_DIR, which
+#                                    #   must be under target/, before the server starts
 # pytest_args: [--mode, offline, -vv]  # optional: extra pytest args (both launchers)
 # features_file: config/e2e-features.txt  # optional: reuse the shared feature list
 # extra_features: [tr-authz]         # optional: add a few features on top of features/features_file
