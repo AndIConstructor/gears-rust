@@ -144,10 +144,10 @@ No dedicated human actors. All interactions with LLM Gateway are mediated throug
 
 **ID**: `cpt-cf-llm-gateway-actor-provider-plugin`
 
-- **Role**: In-process extension (toolkit gear) that isolates one provider behind the common provider plugin trait. Translates normalized requests to provider format and back, applies model settings, sets the provider API key on the request, calls the provider via OAGW, and computes call cost in AI credits.
+- **Role**: Extension (toolkit gear) that isolates one provider behind the common provider plugin trait. Translates normalized requests to provider format and back, applies model settings, sets the provider API key on the request, calls the provider via OAGW, and computes call cost in AI credits.
 - **Direction**: bidirectional (invoked by Gateway core; calls OAGW)
 - **Data exchanged**: Inbound: normalized request, model info (as received from Model Registry), optional provider API key. Outbound: normalized response or stream of chunks, generic usage, provider-specific raw usage, cost in AI credits.
-- **Availability**: Plugins are compiled into the same binary and registered at startup. If no plugin is registered for the model's provider type, Gateway returns a provider-not-supported error.
+- **Availability**: Plugins are registered at startup. If no plugin is registered for the model's provider type, Gateway returns a provider-not-supported error.
 
 #### OAGW
 
@@ -227,7 +227,6 @@ Note: Gateway may report more AI credits than the tenant's allocated quota becau
 
 ### 3.1 Gear-Specific Environment Constraints
 
-- Reference deployment: LLM Gateway, its provider plugins, Model Registry, and Type Registry (optionally the AuthZ resolver) are compiled into one binary. Model Registry owns its database.
 - From P2, requires persistent storage for async/batch job state; Gateway does not persist usage records
 - All external provider calls route through Outbound API Gateway (OAGW): provider plugins call the OAGW SDK `proxy_request` function. The OAGW alias and path are built from the model's `base_url` (defined in Model Registry) plus the provider API path. Gateway never calls providers directly.
 - OAGW upstreams and routes are configured outside the Gateway by default. Provider plugins can declare the routes they use, but deciding which base URLs may be called is the deployment's responsibility. Automatic provisioning of upstreams by Model Registry or plugins is an open question (see § 13). Deployments without a full OAGW can substitute a plain HTTP client behind the same SDK interface.
@@ -1091,7 +1090,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-provider-plugin-registration-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-provider-plugin`
 
-**Preconditions**: Plugin compiled into the Gateway binary; Type Registry available.
+**Preconditions**: Plugin is part of the Gateway deployment; Type Registry available.
 
 **Flow**:
 1. On init, the plugin resolves the OAGW client
