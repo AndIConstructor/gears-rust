@@ -844,23 +844,14 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: Image generation model available for tenant.
 
 **Flow**:
-1. Consumer sends generation request with prompt
-2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin converts the request to provider format and calls the provider via OAGW (`proxy_request`)
-4. Plugin returns the generated image and computes cost in AI credits
-5. Gateway stores the image in FileStorage
-6. Gateway reports usage and returns the image URL with usage
+1. Consumer sends an image generation request with a prompt
+2. Gateway processes it as in UC-001 and stores the generated image in FileStorage
+3. Gateway returns the image URL with usage
 
 **Postconditions**: Image stored, URL returned, usage reported.
 
-**Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
-- **FileStorage upload failure**: Gateway returns storage error; generated image is lost.
-
 **Acceptance criteria**:
 - Generated image accessible via returned URL
-- Response in normalized format
-- Usage included: cost in AI credits, generic token usage, provider raw usage
 
 #### UC-006: Speech-to-Text
 
@@ -870,22 +861,14 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: STT model available for tenant.
 
 **Flow**:
-1. Consumer sends message with audio URL
-2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, and fetches the provider API key (as in UC-001, steps 2–6)
-3. Gateway fetches audio from FileStorage and calls the plugin
-4. Plugin converts the request to provider format and calls the provider via OAGW (`proxy_request`)
-5. Plugin converts the transcription to the normalized format and computes cost in AI credits
-6. Gateway reports usage and returns the text response with usage
+1. Consumer sends a message with an audio URL
+2. Gateway processes it as in UC-001
+3. Gateway returns the transcription with usage
 
 **Postconditions**: Transcription returned, usage reported.
 
-**Alternative Flows**:
-- **Media resolution failure**: Gateway returns media-not-found error if audio URL is invalid or inaccessible.
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
-
 **Acceptance criteria**:
-- Transcription in normalized format
-- Usage included: cost in AI credits, generic token usage, provider raw usage
+- Transcription returned in normalized format
 
 #### UC-007: Text-to-Speech
 
@@ -895,48 +878,31 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: TTS model available for tenant.
 
 **Flow**:
-1. Consumer sends TTS request with text
-2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin converts the request to provider format and calls the provider via OAGW (`proxy_request`)
-4. Plugin returns the generated audio and computes cost in AI credits
-5. Gateway stores the audio in FileStorage
-6. Gateway reports usage and returns the audio URL with usage
+1. Consumer sends a TTS request with text
+2. Gateway processes it as in UC-001 and stores the generated audio in FileStorage
+3. Gateway returns the audio URL with usage
 
 **Postconditions**: Audio stored, URL returned, usage reported.
 
-**Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
-- **FileStorage upload failure**: Gateway returns storage error; generated audio is lost.
-
 **Acceptance criteria**:
 - Generated audio accessible via returned URL
-- Streaming mode supported (audio chunks returned directly)
-- Usage included: cost in AI credits, generic token usage, provider raw usage
 
 #### UC-008: Video Understanding
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-video-understanding-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
 
-**Preconditions**: Model available for tenant, model supports required content type.
+**Preconditions**: Model available for tenant, model supports video input.
 
 **Flow**:
-1. Consumer sends message with video URL
-2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, and fetches the provider API key (as in UC-001, steps 2–6)
-3. Gateway fetches video from FileStorage and calls the plugin
-4. Plugin converts the request to provider format and calls the provider via OAGW (`proxy_request`)
-5. Plugin converts the provider response to the normalized format and computes cost in AI credits
-6. Gateway reports usage and returns the normalized response with usage
+1. Consumer sends a message with a video URL
+2. Gateway processes it as in UC-001
+3. Gateway returns the analysis with usage
 
 **Postconditions**: Response returned, usage reported.
 
-**Alternative Flows**:
-- **Media resolution failure**: Gateway returns media-not-found error if video URL is invalid or inaccessible.
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
-
 **Acceptance criteria**:
-- Response in normalized format
-- Usage included: cost in AI credits, generic token usage, provider raw usage
+- Response returned in normalized format
 
 #### UC-009: Video Generation
 
@@ -946,23 +912,14 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: Video generation model available for tenant.
 
 **Flow**:
-1. Consumer sends generation request with prompt
-2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin converts the request to provider format and calls the provider via OAGW (`proxy_request`)
-4. Plugin returns the generated video and computes cost in AI credits
-5. Gateway stores the video in FileStorage
-6. Gateway reports usage and returns the video URL with usage
+1. Consumer sends a video generation request with a prompt
+2. Gateway processes it as in UC-001 and stores the generated video in FileStorage
+3. Gateway returns the video URL with usage
 
 **Postconditions**: Video stored, URL returned, usage reported.
 
-**Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
-- **FileStorage upload failure**: Gateway returns storage error; generated video is lost.
-
 **Acceptance criteria**:
 - Generated video accessible via returned URL
-- Async mode supported (typically required due to long processing)
-- Usage included: cost in AI credits, generic token usage, provider raw usage
 
 #### UC-010: Tool/Function Calling
 
@@ -1062,29 +1019,14 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: Model available for tenant.
 
 **Flow**:
-1. Consumer sends request with async=true
-2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, and fetches the provider API key (as in UC-001, steps 2–6)
-3. Gateway creates the job, persists its state, and returns job_id
-4. Plugin submits the request to the provider via OAGW (`proxy_request`) — natively async, or as a regular call that Gateway runs in the background
-5. On completion, the plugin converts the result to the normalized format and computes cost in AI credits; Gateway stores the result and reports usage
-6. Consumer polls get_job(job_id)
-7. Gateway returns status/result
-8. (Optional) Consumer cancels job via cancel_job(job_id)
+1. Consumer sends a request with async=true
+2. Gateway returns a job ID
+3. Consumer polls the job and receives the result
 
-**Postconditions**: Job completed, cancelled, or result returned.
-
-**Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
-- **Provider error during execution**: Gateway marks job as failed, stores error details in job result.
-- **Job not found**: Gateway returns job-not-found error if job ID is invalid or expired.
-- **Cancellation of completed job**: Gateway returns job-already-completed status; no-op.
+**Postconditions**: Job result returned.
 
 **Acceptance criteria**:
-- Sync provider + async request: Gateway simulates job
-- Async provider + sync request: Gateway polls internally
-- Job status: pending, running, completed, failed, cancelled
-- Job cancellation supported
-- Usage included: cost in AI credits, generic token usage, provider raw usage
+- Consumer receives a job ID and can poll for the result
 
 #### UC-014: Realtime Audio
 
@@ -1094,24 +1036,14 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: Model available for tenant, model supports realtime audio.
 
 **Flow**:
-1. Consumer establishes persistent bidirectional connection
-2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin opens a bidirectional channel to the provider via OAGW
-4. Bidirectional audio/text streaming, normalized by the plugin
-5. Consumer closes connection
-6. Plugin computes cost in AI credits; Gateway reports usage and returns usage summary
+1. Consumer opens a bidirectional connection
+2. Gateway relays audio/text between consumer and provider
+3. Consumer closes the connection; Gateway reports usage
 
 **Postconditions**: Session closed, usage reported.
 
-**Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
-- **Connection failure**: Gateway returns connection error if realtime channel cannot be established.
-- **Mid-session provider failure**: Gateway closes session with error event and reports partial usage.
-
 **Acceptance criteria**:
-- Bidirectional streaming supported
-- Usage summary on close
-- Usage included: cost in AI credits, generic token usage, provider raw usage
+- Bidirectional audio/text streaming supported
 
 #### UC-015: Timeout Enforcement
 
@@ -1121,24 +1053,14 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: Model available for tenant.
 
 **Flow**:
-1. Consumer sends request
-2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, and fetches the provider API key (as in UC-001, steps 2–6)
-3. Gateway starts timeout tracking (TTFT, total) and calls the plugin
-4. Plugin calls the provider via OAGW (`proxy_request`)
-5. If TTFT timeout: Gateway returns timeout error
-6. If total timeout: Gateway returns timeout error
-7. Otherwise, Gateway reports usage and returns the response with usage
+1. Consumer sends a request
+2. Gateway processes it as in UC-001, enforcing TTFT and total timeouts
+3. Gateway returns the response, or a timeout error on expiry
 
-**Postconditions**: Response returned or timeout error.
-
-**Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
+**Postconditions**: Response or timeout error returned.
 
 **Acceptance criteria**:
-- TTFT (time-to-first-token) timeout enforced
-- Total generation timeout enforced
-- On timeout: timeout error returned
-- Usage included: cost in AI credits, generic token usage, provider raw usage
+- TTFT and total generation timeouts enforced
 
 #### UC-016: Rate Limiting
 
@@ -1148,44 +1070,31 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Preconditions**: Rate limits configured for tenant.
 
 **Flow**:
-1. Consumer sends request
-2. Gateway checks rate limits
-3. If limit exceeded: Gateway returns rate_limited error
-4. If within limits: Gateway processes the request as in UC-001
+1. Consumer sends a request
+2. Gateway checks tenant and user rate limits
+3. Gateway returns rate_limited if a limit is exceeded; otherwise processes the request as in UC-001
 
 **Postconditions**: Request processed or rejected.
 
 **Acceptance criteria**:
-- Rate limits enforced at tenant level
-- Rate limits enforced at user level
-- Exceeded requests return rate_limited error
+- Requests exceeding tenant or user limits return rate_limited
 
 #### UC-017: Batch Processing
 
 - [ ] `p3` - **ID**: `cpt-cf-llm-gateway-usecase-batch-processing-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
 
-**Preconditions**: Model available for tenant. If the resolved provider does not support a native batch API, Gateway rejects the batch request with a batch-not-supported error.
+**Preconditions**: Model available for tenant; provider supports a native batch API.
 
 **Flow**:
-1. Consumer submits batch of requests
-2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, and fetches the provider API key (as in UC-001, steps 2–6)
-3. Plugin submits the batch to the provider batch API via OAGW (`proxy_request`)
-4. Gateway persists the job ID mapping and returns batch_id
-5. Consumer polls for results
-6. Plugin converts each completed result to the normalized format and computes its cost in AI credits; Gateway reports usage per request and returns status and results
-7. (Optional) Consumer cancels batch
+1. Consumer submits a batch of requests
+2. Gateway returns a batch ID
+3. Consumer polls the batch and receives the results
 
-**Postconditions**: Batch completed, results returned.
-
-**Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
+**Postconditions**: Batch results returned.
 
 **Acceptance criteria**:
-- Abstracts OpenAI Batch API, Anthropic Message Batches
-- Partial results available as completed
-- Batch cancellation supported
-- Usage included: cost in AI credits, generic token usage, provider raw usage
+- Consumer receives a batch ID and can poll for the results
 
 #### UC-018: Provider Plugin Registration
 
