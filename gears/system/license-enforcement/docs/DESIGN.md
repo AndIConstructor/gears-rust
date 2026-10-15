@@ -284,6 +284,10 @@ they do not know.
 of derived licensing contracts. Consuming gears register them from the base types of `license-resolver`. Instance
 ids are UUIDs or well-known names.
 
+`license-resolver` defines the base GTS types of the Subject and Resource contracts
+([DESIGN §3.1](../../license-resolver/docs/DESIGN.md#31-domain-model)). It also defines the plugin spec that this
+module implements ([ADR-0002](../../license-resolver/docs/ADR/0002-cpt-cf-license-resolver-adr-plugin-delegation.md)).
+
 The domain has five entities: grant, pack, evidence, audit event, and plugin material. The field lists below name
 what the design needs. They are not complete.
 
@@ -507,7 +511,8 @@ the ids and does not need the registry.
 | `condition_unmet`                                | A condition is false, or its attribute is absent                                                                                                                                                            |
 | `condition_budget_exceeded`                      | Condition evaluation exceeded the per-check budget in evaluation steps                                                                                                                                      |
 
-The recipient projection is a GTS type that this module registers. At `delegate`, the module builds it from the
+The recipient projection is a GTS type that this module registers
+(`gts.cf.core.license_enforcement.recipient.v1~`). At `delegate`, the module builds it from the
 candidate tenant as `tenant-resolver` returns it.
 
 ### 3.2 Component Model
@@ -700,7 +705,7 @@ The plugin is a separate crate that depends only on the SDK. It registers itself
 
 The evaluator is a separate crate that depends only on the SDK. It registers itself at link time.
 
-**Management** — REST under `/v1/license-enforcement`, and the same operations on `LicenseEnforcementClient`:
+**Management** — REST under `/license-enforcement/v1`, and the same operations on `LicenseEnforcementClient`:
 
 | Method | Path                                                                                            | Description                                                                                                                                                                                               | Stability |
 |--------|-------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------|
