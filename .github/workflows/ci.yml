@@ -507,6 +507,10 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: tools/scripts/with_rust_annotations.sh make test-types-registry-db
 
+      - name: Test oagw (pg/mysql conformance + migrations, integration)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: tools/scripts/with_rust_annotations.sh make test-oagw-db
+
       # Published as GitHub Checks by test-report.yml (workflow_run), which has
       # the `checks: write` this job lacks on fork PRs. `!cancelled()` so a
       # failing run still ships its report; a missing report (build failure)
