@@ -569,7 +569,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = [
     "native-tokio",
     "webpki-tokio",
 ] }
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
