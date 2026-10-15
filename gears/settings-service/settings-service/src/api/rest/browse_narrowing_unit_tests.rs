@@ -5,7 +5,7 @@ use settings_service_sdk::EffectiveSource;
 use uuid::Uuid;
 
 use super::{browse_binding, candidate_batch, page_size, value_part_matches};
-use crate::api::rest::setting_dto::{EffectiveValueDto, render};
+use crate::api::rest::setting_dto::{EffectiveValueDto, Reader, render};
 use crate::domain::resolution::EffectiveValue;
 use crate::domain::resolution::cache::tests_entry;
 use crate::domain::search::Needle;
@@ -28,6 +28,8 @@ fn rendered(classification: &str, value: Value, fallback: Value, pii: bool) -> E
             ..tests_entry("k", Uuid::new_v4())
         },
         pii,
+        Reader::Platform,
+        &[],
     )
 }
 
