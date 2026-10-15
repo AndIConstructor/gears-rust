@@ -557,13 +557,7 @@ The system **MUST** accept messages with a video reference (FileStorage URL or e
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-fr-async-jobs-v1`
 
-The system **MUST** support async execution for long-running operations, returning a job ID that the consumer polls for results. The system **MUST** durably persist job state and store job results until the retention period expires.
-
-The system **MUST** provide a uniform async experience regardless of whether the provider supports async natively:
-- Consumer always receives a job ID and polls for results
-- For providers without native async support, the job is simulated by running the regular provider call in the background
-- For providers with native async support, the provider plugin exposes job submission and job result retrieval
-- The system **MUST** guarantee result availability for the retention period after completion
+The system **MUST** support async execution of long-running operations: the consumer receives a job ID and polls for the result.
 
 **Actors**: `cpt-cf-llm-gateway-actor-consumer`, `cpt-cf-llm-gateway-actor-provider`
 
