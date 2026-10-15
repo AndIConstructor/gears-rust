@@ -1,8 +1,4 @@
-//! `TypesRegistryClient` trait definition.
-//!
-//! This trait defines the public API for the `types-registry` gear.
-//! GTS type-schemas and instances are global resources, so no security context
-//! is required.
+//! Legacy registry client for global GTS entities; calls require no security context.
 
 use std::collections::HashMap;
 
@@ -10,77 +6,43 @@ use async_trait::async_trait;
 use toolkit_canonical_errors::CanonicalError;
 use uuid::Uuid;
 
-use crate::models::{GtsInstance, GtsTypeSchema, InstanceQuery, RegisterResult, TypeSchemaQuery};
+use super::models::{GtsInstance, GtsTypeSchema, InstanceQuery, RegisterResult, TypeSchemaQuery};
 
-/// Public API trait for the `types-registry` gear.
+/// Legacy registry client, resolved through `ClientHub` as `dyn TypesRegistryClient`.
 ///
-/// This trait can be consumed by other gears via `ClientHub`:
-/// ```ignore
-/// let client = hub.get::<dyn TypesRegistryClient>()?;
-/// let schema = client.get_type_schema(gts_id!("acme.core.events.user.v1~")).await?;
-/// ```
-///
-/// GTS type-schemas and instances are global resources (not tenant-scoped),
-/// so no security context is required for these operations.
-///
-/// # Error envelope
-///
-/// Per [ADR 0005][adr] every fallible method returns
-/// `Result<_, CanonicalError>`, and every per-item `Result` returned inside a
-/// map or [`RegisterResult`] carries `CanonicalError` too. The single
-/// authoritative AIP-193 ladder (`From<DomainError> for CanonicalError`) lives
-/// in the impl crate's `api::rest::error`; this trait surfaces that envelope
-/// unchanged. Consumers may propagate it, or opt into the typed
-/// [`TypesRegistryError`](crate::TypesRegistryError) projection
-/// (`From<CanonicalError>`) for flat dispatch — see its gear docs for the
-/// dispatch table and the three integration patterns.
-///
-/// [adr]: https://github.com/constructorfabric/gears-rust/blob/main/docs/arch/errors/ADR/0005-cpt-cf-adr-sdk-canonical-projection.md
+/// Calls require no security context. Method and item failures carry [`CanonicalError`];
+/// convert to [`crate::TypesRegistryError`] for typed matching.
 #[async_trait]
 pub trait TypesRegistryClient: Send + Sync {
-    // ------------------------------------------------------------------
     // Generic batch register (kind detected from gts_id suffix per item).
-    // ------------------------------------------------------------------
 
     /// Register GTS entities (type-schemas or instances) in batch.
     ///
-    /// Each JSON value must contain a valid GTS identifier in one of the
-    /// configured ID fields (`$id`, `gtsId`, `id`). The batch is sorted
-    /// lexicographically by GTS id before processing so parents are
-    /// registered before their children within the same batch.
+    /// Each item needs a valid GTS identifier in a configured ID field
+    /// (`$id`, `gtsId`, `id`). Include dependencies in the batch or register them first.
     ///
-    /// Per-item failures are reported via [`RegisterResult::Err`]; success
-    /// carries only the canonical [`gts_id`](RegisterResult::Ok). To inspect
-    /// the typed view of a registered entity, follow up with
-    /// [`Self::get_type_schema`] / [`Self::get_instance`].
+    /// Per-item failures use [`RegisterResult::Err`]; success carries the canonical ID.
+    /// Read the entity with [`Self::get_type_schema`] or [`Self::get_instance`].
     ///
     /// # Errors
     ///
-    /// Returns `Err` only for catastrophic failures (e.g., backend unavailable).
+    /// Call-level errors; individual failures are returned per item.
     async fn register(
         &self,
         entities: Vec<serde_json::Value>,
     ) -> Result<Vec<RegisterResult>, CanonicalError>;
 
-    // ------------------------------------------------------------------
-    // Type-schema operations (internal — no tenant scoping).
-    // ------------------------------------------------------------------
+    // Type Schema operations.
 
     /// Register GTS type-schemas in batch.
     ///
-    /// Each input value must have a GTS id ending with `~`. Inputs whose
-    /// identifier does not match the type-schema kind are returned as
-    /// per-item `RegisterResult::Err` carrying an `InvalidArgument`
-    /// canonical error (project to
-    /// [`TypesRegistryError::Validation`](crate::TypesRegistryError::Validation)).
-    /// In ready phase, items whose chain parent is not yet registered fail with
-    /// a `FailedPrecondition` (project to
-    /// [`TypesRegistryError::ParentNotRegistered`](crate::TypesRegistryError::ParentNotRegistered)
-    /// — callers may register the parent then retry the failed item).
+    /// Wrong-kind identifiers return per-item `InvalidArgument` errors. A missing
+    /// parent may return [`ParentNotRegistered`](crate::TypesRegistryError::ParentNotRegistered);
+    /// register the parent before retrying.
     ///
     /// # Errors
     ///
-    /// Returns `Err` only for catastrophic failures.
+    /// Call-level errors; individual failures are returned per item.
     async fn register_type_schemas(
         &self,
         type_schemas: Vec<serde_json::Value>,
@@ -134,23 +96,16 @@ pub trait TypesRegistryClient: Send + Sync {
         query: TypeSchemaQuery,
     ) -> Result<Vec<GtsTypeSchema>, CanonicalError>;
 
-    // ------------------------------------------------------------------
-    // Instance operations (internal — no tenant scoping).
-    // ------------------------------------------------------------------
+    // Instance operations.
 
     /// Register GTS instances in batch.
     ///
-    /// Each input value must have a GTS id that does NOT end with `~`. Inputs
-    /// whose identifier does not match the instance kind are returned as
-    /// per-item `RegisterResult::Err` carrying an `InvalidArgument` canonical
-    /// error (reason `INVALID_GTS_ID`). In ready phase, items whose declaring
-    /// type-schema is not yet registered fail with a `FailedPrecondition`
-    /// (project to
-    /// [`TypesRegistryError::ParentNotRegistered`](crate::TypesRegistryError::ParentNotRegistered)).
+    /// Wrong-kind identifiers return per-item `InvalidArgument` errors. An unregistered
+    /// Type Schema may return [`ParentNotRegistered`](crate::TypesRegistryError::ParentNotRegistered).
     ///
     /// # Errors
     ///
-    /// Returns `Err` only for catastrophic failures.
+    /// Call-level errors; individual failures are returned per item.
     async fn register_instances(
         &self,
         instances: Vec<serde_json::Value>,
