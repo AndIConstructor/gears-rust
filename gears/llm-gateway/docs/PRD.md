@@ -81,8 +81,7 @@ LLM Gateway addresses these problems by providing a single integration point tha
 
 **Capacity Planning Inputs**:
 - Expected async/batch job volume: up to 10 000 jobs/day per tenant at steady state
-- DB row growth: up to 50 000 rows/day across all tenants (job records, from P2); bounded by retention cleanup
-- Storage per async result: up to 1 MB (text responses); up to 100 MB (media generation results stored in FileStorage, not DB)
+- Storage per async result: up to 1 MB (text responses); up to 100 MB (media generation results, stored in FileStorage)
 
 **Capabilities** (P1):
 - Text generation (chat completion), synchronous and streaming
@@ -100,18 +99,18 @@ LLM Gateway addresses these problems by providing a single integration point tha
 
 | Term | Definition |
 |------|------------|
-| OAGW | Outbound API Gateway — executes external API calls (`proxy_request`) to registered upstreams and routes, applies circuit breaking; may optionally handle upstream authentication |
+| OAGW | Outbound API Gateway — platform gear that executes outbound calls to external services and applies circuit breaking; may optionally handle upstream authentication |
 | TTFT | Time-to-first-token — latency until first response chunk |
 | GTS | Global Type System — JSON Schema-based type definitions |
 | FileStorage | Platform gear for storing and retrieving binary files (images, audio, video, documents) |
 | Model Registry | Platform gear that resolves model identifiers to model info per tenant and validates model settings against the provider settings schema |
 | Model Info | Model Registry record forwarded as-is to the provider plugin: provider GTS type, provider model name, `base_url`, secret reference, generic default settings, and provider-specific settings (including pricing) |
-| Provider Plugin | Toolkit gear implementing the provider plugin trait for one provider (or one provider API family, e.g. OpenAI-compatible). Owns request/response translation, transport via OAGW, and cost calculation |
+| Provider Plugin | Plugin that implements provider-specific logic for one provider (or one provider API family, e.g. OpenAI-compatible): request/response translation, calls via OAGW, and cost calculation |
 | Provider Settings Schema | GTS schema, registered by a provider plugin, that defines the format of provider-specific model settings, including pricing |
 | CredStore | Platform service storing provider API keys; Gateway fetches the key referenced by the model's secret reference |
 | Type Registry | Platform gear storing GTS schemas and instances: provider plugin instances, provider settings schemas, tool schemas |
 | AI credits | Platform billing unit. Provider plugins convert provider usage into AI credits using the model's pricing |
-| Open Responses | Responses-style request/response contract used by the Gateway SDK (`CreateResponseBody`, `ResponseResource`, streaming events) |
+| Open Responses | Responses-style request/response contract used by the Gateway API (requests, responses, streaming events) |
 
 ## 2. Actors
 
@@ -137,14 +136,14 @@ No dedicated human actors. All interactions with LLM Gateway are mediated throug
 
 - **Role**: External AI service that processes requests. Accessed by provider plugins via Outbound API Gateway. Includes cloud providers (OpenAI, Anthropic, Google, …) and self-hosted or OpenAI-compatible endpoints (Ollama, vLLM, …) reached through a model-specific `base_url`.
 - **Direction**: outbound
-- **Data exchanged**: Provider-formatted requests (prompts, parameters, tool schemas, API key in request headers); receives completions, embeddings, generated media, tool calls, reasoning output, web search results, usage metrics.
+- **Data exchanged**: Provider-formatted requests (prompts, parameters, tool schemas, API key); receives completions, embeddings, generated media, tool calls, reasoning output, web search results, usage metrics.
 - **Availability**: Provider unavailability returns a provider-unavailable error to the consumer. OAGW circuit breaking protects against cascading failures.
 
 #### Provider Plugin
 
 **ID**: `cpt-cf-llm-gateway-actor-provider-plugin`
 
-- **Role**: Extension (toolkit gear) that isolates one provider behind the common provider plugin trait. Translates normalized requests to provider format and back, applies model settings, sets the provider API key on the request, calls the provider via OAGW, and computes call cost in AI credits.
+- **Role**: Isolates one provider behind a common plugin interface. Translates normalized requests to provider format and back, calls the provider via OAGW, and computes call cost in AI credits.
 - **Direction**: bidirectional (invoked by Gateway core; calls OAGW)
 - **Data exchanged**: Inbound: normalized request, model info (as received from Model Registry), optional provider API key. Outbound: normalized response or stream of chunks, generic usage, provider-specific raw usage, cost in AI credits.
 - **Availability**: Plugins are registered at startup. If no plugin is registered for the model's provider type, Gateway returns a provider-not-supported error.
@@ -153,9 +152,9 @@ No dedicated human actors. All interactions with LLM Gateway are mediated throug
 
 **ID**: `cpt-cf-llm-gateway-actor-oagw`
 
-- **Role**: Outbound API Gateway — the only path from provider plugins to providers. Executes provider HTTP calls (`proxy_request`) to registered upstreams and routes and applies circuit breaking; may handle upstream authentication for models without a secret reference.
+- **Role**: Outbound API Gateway — the only path from provider plugins to providers. Executes provider calls and applies circuit breaking; may handle upstream authentication for models without a secret reference.
 - **Direction**: outbound (called by provider plugins)
-- **Data exchanged**: Provider-formatted HTTP requests (OAGW alias and path built from the model's `base_url` and the provider API path); receives provider HTTP responses and streams.
+- **Data exchanged**: Provider-formatted requests to the model's `base_url`; receives provider responses and streams.
 - **Availability**: If OAGW is unavailable, the provider cannot be reached and Gateway returns a provider-unavailable error. An open circuit for a provider is reported the same way.
 
 #### CredStore
@@ -228,8 +227,8 @@ Note: Gateway may report more AI credits than the tenant's allocated quota becau
 ### 3.1 Gear-Specific Environment Constraints
 
 - From P2, requires persistent storage for async/batch job state; Gateway does not persist usage records
-- All external provider calls route through Outbound API Gateway (OAGW): provider plugins call the OAGW SDK `proxy_request` function. The OAGW alias and path are built from the model's `base_url` (defined in Model Registry) plus the provider API path. Gateway never calls providers directly.
-- OAGW upstreams and routes are configured outside the Gateway by default. Provider plugins can declare the routes they use, but deciding which base URLs may be called is the deployment's responsibility. Automatic provisioning of upstreams by Model Registry or plugins is an open question (see § 13). Deployments without a full OAGW can substitute a plain HTTP client behind the same SDK interface.
+- All provider calls go through OAGW to the model's `base_url` (defined in Model Registry). Gateway never calls providers directly.
+- OAGW upstreams and routes are configured outside the Gateway by default. Provider plugins can declare the routes they use, but deciding which base URLs may be called is the deployment's responsibility. Automatic provisioning of upstreams by Model Registry or plugins is an open question (see § 13). Deployments without a full OAGW can substitute a plain HTTP client.
 - P1: image and file inputs are accepted as base64 data or external URLs and forwarded to the provider. From P2: media files are stored and retrieved via the FileStorage gear.
 
 ### 3.2 Data Ownership & Classification
@@ -324,15 +323,15 @@ Unsupported parameters are handled per `cpt-cf-llm-gateway-fr-generation-paramet
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-provider-plugins-v1`
 
-The system **MUST** isolate provider-specific logic in provider plugins implemented with the ModKit/toolkit plugin system. Each plugin **MUST**:
-- on init, register its plugin GTS instance and its provider settings schema in Type Registry;
-- implement the provider plugin trait: create response (sync), create response (streaming), and create embedding;
-- convert normalized requests into provider HTTP requests and provider responses into the normalized format, without third-party provider SDK libraries;
+The system **MUST** isolate provider-specific logic in provider plugins, one per provider (or provider API family). Each plugin **MUST**:
+- publish its provider settings schema (including pricing), so that Model Registry can validate provider-specific model settings;
+- support sync and streaming responses and embeddings;
+- translate between the normalized format and the provider API without third-party provider SDK libraries;
 - apply generic and provider-specific settings from model info;
-- send all HTTP requests through OAGW (`proxy_request`);
+- call providers only through OAGW;
 - compute the call cost in AI credits from the pricing in the model's provider settings.
 
-The Gateway **MUST** select the plugin by the provider GTS type in the resolved model info and forward model info to the plugin as received from Model Registry. Model Registry **MUST** be able to validate provider-specific model settings against the plugin's settings schema.
+The Gateway **MUST** route each request to the plugin matching the model's provider type.
 
 **Actors**: `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-type-registry`, `cpt-cf-llm-gateway-actor-model-registry`, `cpt-cf-llm-gateway-actor-oagw`
 
@@ -340,7 +339,7 @@ The Gateway **MUST** select the plugin by the provider GTS type in the resolved 
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-custom-endpoints-v1`
 
-The system **MUST** support models with a custom `base_url` (self-hosted or OpenAI-compatible endpoints such as Ollama or vLLM). The model's `base_url` is defined in Model Registry and comes with the model info. The provider plugin **MUST** build the OAGW alias and path from that `base_url` and the provider API path.
+The system **MUST** support models with a custom `base_url` (self-hosted or OpenAI-compatible endpoints such as Ollama or vLLM). The model's `base_url` is defined in Model Registry and comes with the model info. The provider plugin **MUST** call that `base_url` through OAGW.
 
 **Actors**: `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-model-registry`, `cpt-cf-llm-gateway-actor-oagw`
 
@@ -348,7 +347,7 @@ The system **MUST** support models with a custom `base_url` (self-hosted or Open
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-fr-provider-credentials-v1`
 
-When model info contains a secret reference, the system **MUST** fetch the provider API key from CredStore and pass it to the provider plugin, which sets it in the provider request headers. The key is optional: models without a secret reference (auth handled by OAGW, local provider) **MUST** be callable without a key. The system **MUST NOT** persist or log provider API keys.
+When model info contains a secret reference, the system **MUST** fetch the provider API key from CredStore and pass it to the provider plugin for the provider call. The key is optional: models without a secret reference (auth handled by OAGW, local provider) **MUST** be callable without a key. The system **MUST NOT** persist or log provider API keys.
 
 **Actors**: `cpt-cf-llm-gateway-actor-credstore`, `cpt-cf-llm-gateway-actor-provider-plugin`
 
@@ -646,7 +645,7 @@ Job records apply from P2 (async) and P3 (batch). Async job records (ID mappings
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-nfr-compatibility-v1`
 
-Gateway API **MUST** maintain backward compatibility within the same major version. Breaking changes require a new API version prefix. Co-existence with other platform gears is guaranteed — Gateway communicates exclusively through SDK traits and ClientHub, with no shared mutable state. The API contract is aligned with Open Responses (see § 7); protocol details are documented in DESIGN.md.
+Gateway API **MUST** maintain backward compatibility within the same major version. Breaking changes require a new API version prefix. Co-existence with other platform gears is guaranteed — Gateway communicates with other gears only through their public interfaces, with no shared mutable state. The API contract is aligned with Open Responses (see § 7); protocol details are documented in DESIGN.md.
 
 Existing consumers of llm-connectors use an OpenAI Chat Completions–compatible API. Whether a Chat Completions compatibility layer is required for migration is an open question (see § 13).
 
@@ -676,27 +675,25 @@ Batch job metadata (ID mappings, status) survives restarts. Individual batch req
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-nfr-observability-v1`
 
-The system **MUST** emit OpenTelemetry-compatible operational metrics covering the request lifecycle. Metrics **MUST** include:
+The system **MUST** emit operational metrics covering the request lifecycle. Metrics **MUST** include:
 
 - Request counters with model, provider, and status dimensions
 - Streaming: streams started and streams aborted (by reason: client disconnect, timeout, error)
 - Usage records reported as incomplete (interrupted streams)
 - Time-to-first-token latency histogram with model and provider dimensions
-- Quota operations: checks (allowed / rejected); reservation and settlement metrics if the reserve/settle model is adopted (see § 13)
+- Quota checks (allowed / rejected)
 - Schema validation failures for structured output with model and provider dimensions
 - Async job cache misses (job not found on poll)
 
-All metrics **MUST** be emittable via the platform's OpenTelemetry metrics infrastructure. Metric names **MUST** use the `llm_gateway_` prefix. Label cardinality **MUST** remain bounded — labels are limited to enumerable dimensions (model, provider, status, reason); unbounded values (tenant ID, request ID) **MUST NOT** be used as metric labels.
+All metrics **MUST** be emitted via the platform's metrics infrastructure.
 
 ## 7. Public Library Interfaces
 
-LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sdk` crate:
+LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sdk` library:
 
-- **`LlmGatewayClientV1`** — consumer trait registered in ClientHub: `create_response` (sync), `create_response_stream` (streaming events), `create_embedding`. Request and response models follow the Open Responses contract.
-- **`LlmGatewayProviderPluginClientV1`** — provider plugin trait: `capabilities`, `create_response`, `create_response_stream`, `create_embedding`. Each call receives the per-call context (model info as received from Model Registry, request id) and, per `cpt-cf-llm-gateway-fr-provider-credentials-v1`, an optional provider API key.
-- **`LlmGatewayProviderPluginSpecV1`** — GTS type for provider plugin instances; `provider_type` matches the model info provider GTS type and drives plugin selection.
-
-Note: the current SDK `ProviderCallCtx` states that plugins never read provider credentials. It needs to be updated to carry the optional API key as required by this PRD.
+- **`LlmGatewayClientV1`** — consumer interface: responses (sync and streaming) and embeddings, following the Open Responses contract.
+- **`LlmGatewayProviderPluginClientV1`** — interface implemented by provider plugins.
+- **`LlmGatewayProviderPluginSpecV1`** — type of provider plugin instances; its provider type drives plugin selection.
 
 ## 8. Use Cases
 
@@ -715,10 +712,9 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 5. Gateway selects the provider plugin by the model info provider GTS type
 6. Gateway fetches the provider API key from CredStore (if the model has a secret reference)
 7. Gateway calls the plugin with the request, model info, and key
-8. Plugin converts the request to provider format, applies model settings, sets the key in request headers
-9. Plugin calls the provider via OAGW (`proxy_request`)
-10. Plugin converts the provider response to the normalized format and computes cost in AI credits
-11. Gateway reports usage and returns the normalized response with usage
+8. Plugin converts the request to provider format and calls the provider via OAGW
+9. Plugin converts the provider response to the normalized format and computes cost in AI credits
+10. Gateway reports usage and returns the normalized response with usage
 
 **Postconditions**: Response returned, usage reported.
 
@@ -780,7 +776,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Flow**:
 1. Consumer sends embed(model, input[]) with optional `dimensions`, `input_type`, `encoding_format`, and provider-specific parameters
 2. Gateway resolves model info via Model Registry, validates capabilities (including embeddings support), checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin converts the request to provider format, maps generic embedding parameters, and calls the provider via OAGW (`proxy_request`) (as in UC-001, steps 8–9)
+3. Plugin converts the request to provider format, maps generic embedding parameters, and calls the provider via OAGW (as in UC-001, step 8)
 4. Plugin converts the provider response to normalized vectors in the requested `encoding_format` and computes cost in AI credits
 5. Gateway reports usage and returns the vectors with usage
 
@@ -809,7 +805,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Flow**:
 1. Consumer sends create_response with images as base64 data or external URLs
 2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin converts the request to provider format, passing images as base64 data or URLs, and calls the provider via OAGW (`proxy_request`)
+3. Plugin converts the request to provider format, passing images as base64 data or URLs, and calls the provider via OAGW
 4. Plugin converts the provider response to the normalized format and computes cost in AI credits
 5. Gateway reports usage and returns the normalized response with usage
 
@@ -921,7 +917,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 1. Consumer sends create_response with tool definitions and, optionally, `tool_choice` and `parallel_tool_calls`
 2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, and fetches the provider API key (as in UC-001, steps 2–6)
 3. Gateway resolves tool schemas via Type Registry (for reference and inline GTS formats) and calls the plugin
-4. Plugin converts tools and tool selection controls to provider format and calls the provider via OAGW (`proxy_request`)
+4. Plugin converts tools and tool selection controls to provider format and calls the provider via OAGW
 5. Plugin converts the provider's tool calls to the unified format and computes cost in AI credits
 6. Gateway reports usage and returns the tool calls in unified format with usage
 7. Consumer executes the tools and sends a new create_response with the full context and the tool results
@@ -955,7 +951,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Flow**:
 1. Consumer sends create_response with a JSON schema output format
 2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin adapts the schema to the JSON Schema subset the provider accepts, maps it to the provider's native structured output, and calls the provider via OAGW (`proxy_request`)
+3. Plugin adapts the schema to the JSON Schema subset the provider accepts, maps it to the provider's native structured output, and calls the provider via OAGW
 4. Plugin converts the provider response to the normalized format and computes cost in AI credits
 5. Gateway validates the response against the original schema
 6. Gateway reports usage and returns the validated response with usage (or validation_error if invalid)
@@ -985,7 +981,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Flow**:
 1. Consumer sends message with a document as base64 data or external URL
 2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin converts the request to provider format, passing the document as base64 data or URL, and calls the provider via OAGW (`proxy_request`)
+3. Plugin converts the request to provider format, passing the document as base64 data or URL, and calls the provider via OAGW
 4. Plugin converts the provider response to the normalized format and computes cost in AI credits
 5. Gateway reports usage and returns the normalized response with usage
 
@@ -1090,14 +1086,12 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-provider-plugin-registration-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-provider-plugin`
 
-**Preconditions**: Plugin is part of the Gateway deployment; Type Registry available.
+**Preconditions**: Plugin is part of the Gateway deployment.
 
 **Flow**:
-1. On init, the plugin resolves the OAGW client
-2. Plugin registers its plugin GTS instance in Type Registry
-3. Plugin registers its provider settings schema in Type Registry
-4. A model is registered in Model Registry with provider-specific settings; Model Registry fetches the settings schema from Type Registry and validates the settings
-5. On a request for that model, Gateway selects the plugin whose provider type matches the model info provider GTS type
+1. On startup, the plugin publishes its provider settings schema
+2. An administrator registers a model in Model Registry with provider-specific settings; Model Registry validates them against the schema
+3. Gateway routes requests for that model to the plugin
 
 **Postconditions**: Model Registry can validate settings for the provider; Gateway can route requests to the plugin.
 
@@ -1105,8 +1099,8 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - **Invalid settings**: Model Registry rejects the model with a validation error.
 
 **Acceptance criteria**:
-- Plugin instance and settings schema are discoverable in Type Registry after startup
-- Settings that do not match the schema are rejected by Model Registry
+- Settings that do not match the plugin's schema are rejected by Model Registry
+- Requests for a registered model are routed to the matching plugin
 
 #### UC-019: Reasoning
 
@@ -1118,7 +1112,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Flow**:
 1. Consumer sends create_response with a reasoning configuration (effort and/or token budget)
 2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7); the capability check covers the requested reasoning options
-3. Plugin maps the configuration to the provider's native reasoning parameters and calls the provider via OAGW (`proxy_request`)
+3. Plugin maps the configuration to the provider's native reasoning parameters and calls the provider via OAGW
 4. Plugin converts the answer and reasoning output to the normalized format and computes cost in AI credits
 5. Gateway reports usage and returns the reasoning output, reasoning token usage, and opaque continuation artifacts (signatures, encrypted reasoning content)
 6. In the next turn, the consumer sends the previous output items back; the plugin forwards the reasoning artifacts to the provider
@@ -1144,7 +1138,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 **Flow**:
 1. Consumer sends create_response with `cf:web_search` and/or a provider-specific tool (e.g. `openai:shell`)
 2. Gateway resolves model info via Model Registry, validates capabilities, checks the quota, selects the provider plugin, fetches the provider API key, and calls the plugin (as in UC-001, steps 2–7)
-3. Plugin maps `cf:web_search` to the provider's native web search tool, forwards provider-specific tools as-is, and calls the provider via OAGW (`proxy_request`)
+3. Plugin maps `cf:web_search` to the provider's native web search tool, forwards provider-specific tools as-is, and calls the provider via OAGW
 4. Provider executes the tools and returns the answer
 5. Plugin converts the answer, citations, web search results, and provider tool call outputs to the normalized format and computes cost in AI credits
 6. Gateway reports usage and returns the answer with normalized citations, web search results, and provider tool call outputs
@@ -1178,7 +1172,7 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 
 | Dependency | Description | Criticality |
 |------------|-------------|-------------|
-| Outbound API Gateway (OAGW) | Executes all external provider calls via SDK `proxy_request`, provides circuit breaking; may optionally handle upstream auth. Can be substituted with a plain HTTP client in minimal deployments | `p1` |
+| Outbound API Gateway (OAGW) | Executes all external provider calls, provides circuit breaking; may optionally handle upstream auth. Can be substituted with a plain HTTP client in minimal deployments | `p1` |
 | Model Registry | Resolves model identifiers to model info (provider type, model name, `base_url`, secret reference, settings, pricing); validates provider settings against plugin schemas | `p1` |
 | CredStore | Provides provider API keys to Gateway by the model's secret reference | `p1` |
 | Type Registry | Stores provider plugin instances and provider settings schemas; resolves GTS schema references for tool definitions | `p1` |
@@ -1193,7 +1187,6 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 - Provider API keys are stored in CredStore and referenced from model info
 - Model Registry maintains an up-to-date catalog of available models and their capabilities per tenant
 - FileStorage is available for media operations from P2
-- From P2, a database is available and shared across all Gateway instances for job state
 
 ## 12. Risks
 
@@ -1206,17 +1199,17 @@ Note: the current SDK `ProviderCallCtx` states that plugins never read provider 
 | Provider rate limit exhaustion | Requests rejected by provider | Gateway-level rate limiting |
 | Database growth from batch jobs | Storage pressure, degraded query performance | Automated retention cleanup, monitoring on table sizes |
 | Provider outage during batch processing | Batch jobs stuck in pending state | Timeout-based job expiration, consumer-visible status updates |
-| Usage record delivery lag | Budget enforcement decisions based on stale data | Guaranteed delivery mechanism with short polling interval |
+| Usage record delivery lag | Budget enforcement decisions based on stale data | At-least-once usage delivery to Usage Collector |
 
 ## 13. Open Questions
 
-- **Quota enforcement ownership** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): *Ownership boundary*: does Gateway own quota *enforcement* (atomic preflight reserve + terminal settle + bounded debit on abort) or only *metering* (report usage, external component enforces)? The current `check_quota()` → proceed → `report_usage()` sequence is non-atomic — under concurrent load, multiple requests pass `check_quota()` before any `report_usage()` completes, allowing a tenant to exceed their limit by N×budget (N = concurrent in-flight requests). If Gateway owns enforcement, the reserve/settle pattern is required, not optional — a best-effort gate is effectively decorative under load. If Gateway does metering only, the external component handles enforcement asynchronously. The decision must be made before implementing `cpt-cf-llm-gateway-fr-budget-enforcement-v1`.
+- **Quota enforcement ownership** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): *Ownership boundary*: does Gateway own quota *enforcement* (atomic preflight reserve + terminal settle + bounded debit on abort) or only *metering* (report usage, external component enforces)? Checking the quota before the call and reporting usage after it is not atomic — under concurrent load, multiple requests pass the check before any usage is reported, allowing a tenant to exceed their limit by N×budget (N = concurrent in-flight requests). If Gateway owns enforcement, the reserve/settle pattern is required, not optional — a best-effort gate is effectively decorative under load. If Gateway does metering only, the external component handles enforcement asynchronously. The decision must be made before implementing `cpt-cf-llm-gateway-fr-budget-enforcement-v1`.
 - **Budget enforcement edge cases** (Owner: Platform Architecture, Resolve by: with quota enforcement ownership decision above): The following scenarios must be addressed when the ownership boundary is decided: (a) *Provider stream without usage* — if a provider stream closes before delivering usage data (network error, provider error mid-stream, consumer disconnect), usage is reported marked as incomplete (`cpt-cf-llm-gateway-fr-streaming-v1`); policy must specify what is debited in that case: input tokens only, an estimate, or zero; (b) *Background job budgeting* — quota is checked at submission time but the job executes minutes later under a possibly changed quota state, requiring the reserve/settle pattern to span the submission-to-execution gap if Gateway owns enforcement.
 - **Rate limiting mechanism** (Owner: Platform Architecture, Resolve by: before P2 implementation begins): Rate limiting (`cpt-cf-llm-gateway-fr-rate-limiting-v1`) is closely related to quota management. Whether rate limiting and quota enforcement are provided by the same component or separate components is an open question.
 - **Request monitoring and observability** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): The LLM Gateway needs to track how many requests are being processed, including metrics such as request counts, latency, error rates, and token usage per provider/model. However, the platform does not yet have a standardized approach to monitoring and observability across gears. A platform-wide monitoring strategy must be agreed upon before implementing gear-level metrics, to ensure consistency and avoid fragmented solutions.
-- **Cross-gear request traceability** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): The platform needs a mechanism that assigns a request ID at the incoming requests gateway (api-gateway gear) and propagates it through all inter-gear calls via ClientHub/SDK traits. This would enable end-to-end request tracing across gear boundaries — for example, a consumer request arriving at the API gateway, flowing through LLM Gateway, then to Model Registry and Usage Collector, all correlated by a single platform-level request ID. Currently, each gear operates with its own request context; there is no standardized correlation ID propagated across inter-gear boundaries. This is a platform-level concern that affects all gears, not just LLM Gateway. The LLM Gateway's response `id` (`cpt-cf-llm-gateway-fr-request-traceability-v1`) provides gear-level traceability, but a platform-wide mechanism is needed for cross-gear correlation.
-- **OAGW upstream provisioning** (Owner: LLM Gateway team, Resolve by: before P1 implementation begins): Default: OAGW is configured externally and plugins only call `proxy_request`. If Model Registry and plugins become the source of OAGW upstreams and routes, the following must be decided: (1) well-known provider upstreams and routes registered by plugins at init and picked up by OAGW in post-init; provider routes must be part of the provider GTS, since some providers (e.g. Ollama) have no well-known upstream; (2) for models with a user-provided `base_url`, Model Registry registers the upstream and routes in OAGW at model registration — under which identity and in which tenant (root tenant is the likely choice, to avoid upstream overrides in the tenant hierarchy and extra AuthZ rights for the user); (3) registration must be idempotent — existing routes are skipped; (4) when routes are removed from OAGW. Alternative: allowed base URLs are listed in plugin configuration and registered by the plugin at init; only those base URLs are allowed.
-- **Plugin capabilities** (Owner: LLM Gateway team, Resolve by: before P2 implementation begins): Gateway needs a way to know what a provider plugin can do natively and what must be emulated — blocking vs streaming prediction, native async jobs, batches. The current SDK `capabilities()` covers streaming transport and media input mode; the structure must be extended before async and batch work.
+- **Cross-gear request traceability** (Owner: Platform Architecture, Resolve by: before P1 implementation begins): The platform needs a mechanism that assigns a request ID at the incoming requests gateway (api-gateway gear) and propagates it through all inter-gear calls. This would enable end-to-end request tracing across gear boundaries — for example, a consumer request arriving at the API gateway, flowing through LLM Gateway, then to Model Registry and Usage Collector, all correlated by a single platform-level request ID. Currently, each gear operates with its own request context; there is no standardized correlation ID propagated across inter-gear boundaries. This is a platform-level concern that affects all gears, not just LLM Gateway. The LLM Gateway's response `id` (`cpt-cf-llm-gateway-fr-request-traceability-v1`) provides gear-level traceability, but a platform-wide mechanism is needed for cross-gear correlation.
+- **OAGW upstream provisioning** (Owner: LLM Gateway team, Resolve by: before P1 implementation begins): Default: OAGW is configured externally and plugins only call it. If Model Registry and plugins become the source of OAGW upstreams and routes, the following must be decided: (1) well-known provider upstreams and routes declared by plugins and picked up by OAGW; provider routes must be part of the provider GTS, since some providers (e.g. Ollama) have no well-known upstream; (2) for models with a user-provided `base_url`, Model Registry registers the upstream and routes in OAGW at model registration — under which identity and in which tenant (root tenant is the likely choice, to avoid upstream overrides in the tenant hierarchy and extra AuthZ rights for the user); (3) registration must be idempotent — existing routes are skipped; (4) when routes are removed from OAGW. Alternative: allowed base URLs are listed in plugin configuration and registered by the plugin on startup; only those base URLs are allowed.
+- **Plugin capabilities** (Owner: LLM Gateway team, Resolve by: before P2 implementation begins): Gateway needs a way to know what a provider plugin can do natively and what must be emulated — blocking vs streaming prediction, native async jobs, batches. The plugin capability model must be extended before async and batch work.
 - **Stream cancellation** (Owner: LLM Gateway team, Resolve by: before P1 implementation begins): Mechanism for cancelling the upstream provider request when the consumer drops the connection, across the Gateway core, plugin stream, and OAGW.
 - **GTS identifiers** (Owner: LLM Gateway team, Resolve by: before P1 implementation begins): Specific GTS names for provider plugin instances, provider settings schemas, and provider route declarations.
 - **Migration from llm-connectors** (Owner: LLM Gateway team, Resolve by: before migration planning): (1) Whether a Chat Completions–compatible API layer is needed for existing llm-connectors consumers. (2) Which providers are required at migration. llm-connectors currently supports chat models from OpenAI (Chat Completions and Responses), Anthropic, Google, Groq, Mistral, xAI, Perplexity (including Perplexity Agent), Together AI, vLLM, and Ollama, and embeddings from OpenAI, Google, Ollama, and VoyageAI. (3) How user-supplied provider keys and private models (currently billed at a flat rate) map to CredStore and Model Registry.
