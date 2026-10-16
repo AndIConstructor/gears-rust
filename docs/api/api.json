@@ -7339,6 +7339,120 @@
         ],
         "type": "object"
       },
+      "LicenseCheckContext": {
+        "description": "The request's tenant context — the isolation scope of a check.\n\nBuilt from the caller's `SecurityContext` with\n[`from_security_context`](Self::from_security_context). Minimal today\n(tenant scope only); the extension point for future contextual evaluation\nsemantics. Every resolution is scoped to this tenant.\n\nUnknown fields are ignored, so a contextual input can be added without\nbreaking callers or older readers — but only one that satisfies **absence\nmust not grant more than presence**. An input that cannot is a new version of\nthe licensing contract, not an optional field (see \"Envelope evolution\" in\nthe module's DESIGN doc).",
+        "properties": {
+          "tenant_id": {
+            "description": "The tenant the check is scoped to. No cross-tenant resolution.",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenant_id"
+        ],
+        "type": "object"
+      },
+      "LicenseCheckRequest": {
+        "description": "The single input to a check — the contract's growth surface.\n\nNew inputs are added as fields here, never as new method parameters. Because\nthat growth is expected, the type is `#[non_exhaustive]` and is built through\n[`new`](Self::new), so adding an input stays additive instead of breaking\nevery caller's struct literal. Contextual inputs belong on\n[`LicenseCheckContext`].\n\nUnknown fields are **ignored** here too, under the same rule as\n[`LicenseCheckContext`].",
+        "properties": {
+          "context": {
+            "$ref": "#/components/schemas/LicenseCheckContext",
+            "description": "The tenant isolation scope (caller-derived from its `SecurityContext`)."
+          },
+          "resource": {
+            "$ref": "#/components/schemas/LicenseResource",
+            "description": "The licensable thing being checked."
+          },
+          "subject": {
+            "$ref": "#/components/schemas/LicenseSubject",
+            "description": "Whom the license is checked for."
+          }
+        },
+        "required": [
+          "subject",
+          "resource",
+          "context"
+        ],
+        "type": "object"
+      },
+      "LicenseDecision": {
+        "description": "The result of a check.\n\nA negative answer is **not** an error — it is `LicenseDecision { granted:\nfalse, .. }`. [`diagnostics`](Self::diagnostics) is non-authoritative debug\ninfo about how the decision was reached (e.g. backend id, matched grant,\ndenial cause) and MUST NOT be required to interpret the boolean.\n\nUnknown fields are **ignored**; adding one is non-breaking in both directions\nbecause [`granted`](Self::granted) is authoritative on its own.",
+        "properties": {
+          "diagnostics": {
+            "additionalProperties": {},
+            "description": "Advisory, string-keyed debug information. Never authoritative.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "granted": {
+            "description": "Whether the resource is licensed to the subject at the time of the call.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "granted"
+        ],
+        "type": "object"
+      },
+      "LicenseResource": {
+        "additionalProperties": false,
+        "description": "The resource of a check — the licensable thing.\n\nAn instance of a derived Resource contract type (base\n`gts.cf.core.lic.res.v1~`). Without [`id`](Self::id) the check targets the\nwhole resource type (e.g. gating a `POST`); with it, a specific instance. Its\nwire shape is pinned by [`LicenseResourceV1`](crate::gts::LicenseResourceV1).",
+        "properties": {
+          "id": {
+            "description": "Optional instance id — a well-known name or a UUID (natural key);\nnon-empty, at most 255 characters per the base schema.\nAbsent = whole-type check; how that is answered is the backend's policy.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "description": "Licensing-relevant properties conforming to the derived contract's\nmetadata schema. Semantically opaque to the resolver; shape-validated\nthen forwarded to the plugin unchanged.\n\nRequired on the wire, so an omitted `metadata` is non-conforming and\n**must not** be defaulted to `{}` here. Pass an empty map when the\ncontract declares no metadata.",
+            "type": "object"
+          },
+          "type": {
+            "description": "The derived Resource contract type this object instantiates (e.g.\n`gts.cf.core.lic.res.v1~cf.genai.llm_gateway.model_usage.v1~`). Wire key\n`type`; the resolver resolves its schema to validate `metadata` and read\n`admitted_subjects`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "metadata"
+        ],
+        "type": "object"
+      },
+      "LicenseSubject": {
+        "additionalProperties": false,
+        "description": "The subject of a check — whom the license is checked for.\n\nAn instance of a derived Subject contract type (base\n`gts.cf.core.lic.subj.v1~`). Polymorphic: a tenant, a user, or any future\nsubject type — the resolver never assumes the subject is a tenant. Its wire\nshape is pinned by [`LicenseSubjectV1`](crate::gts::LicenseSubjectV1).",
+        "properties": {
+          "id": {
+            "description": "Optional instance id — a well-known name or a UUID (natural key);\nnon-empty, at most 255 characters per the base schema.\nAbsent for a type-level subject.",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "description": "Licensing-relevant properties conforming to the derived contract's\nmetadata schema. Semantically opaque to the resolver; shape-validated\nthen forwarded to the plugin unchanged.\n\nRequired on the wire, so an omitted `metadata` is non-conforming and\n**must not** be defaulted to `{}` here. Pass an empty map when the\ncontract declares no metadata.",
+            "type": "object"
+          },
+          "type": {
+            "description": "The derived Subject contract type this object instantiates (e.g.\n`gts.cf.core.lic.subj.v1~cf.genai.llm_gateway.user.v1~`). Wire key\n`type`; the resolver resolves its schema to validate `metadata`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "metadata"
+        ],
+        "type": "object"
+      },
       "LifecycleNextDto": {
         "description": "A lifecycle change that takes effect on `from` (P-D-249).",
         "properties": {
@@ -53152,6 +53266,109 @@
         "summary": "Re-run repositories still marked in_progress",
         "tags": [
           "GitHub Mirror"
+        ]
+      }
+    },
+    "/license-resolver/v1/is-licensed": {
+      "post": {
+        "operationId": "license_resolver_api_rest_is_licensed",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LicenseCheckRequest"
+              }
+            }
+          },
+          "description": "",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LicenseDecision"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        },
+        "security": [
+          {
+            "internalToken": []
+          }
         ]
       }
     },
