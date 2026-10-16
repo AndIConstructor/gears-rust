@@ -600,7 +600,8 @@ mod tests {
     #[test]
     fn the_report_always_has_its_five_sections() {
         let report = sections("dtolnay/itoa", None, None, None, json!({"cache_bytes": 0})).unwrap();
-        let keys: Vec<&String> = report.as_object().unwrap().keys().collect();
+        let mut keys: Vec<&String> = report.as_object().unwrap().keys().collect();
+        keys.sort_unstable();
         assert_eq!(keys, ["api", "objects", "repository", "run", "storage"]);
         assert_eq!(report["repository"]["repository"], "dtolnay/itoa");
         assert_eq!(report["run"], json!({}));

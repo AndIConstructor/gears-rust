@@ -26,6 +26,7 @@
   - [Consistency Model](#consistency-model)
   - [Security](#security)
   - [Operations](#operations)
+  - [CLI](#cli)
   - [Future Work](#future-work)
 - [5. Traceability](#5-traceability)
 
