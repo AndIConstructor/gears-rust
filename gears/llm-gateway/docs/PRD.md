@@ -182,7 +182,7 @@ No dedicated human actors. All interactions with LLM Gateway are mediated throug
 - **Role**: Separate platform service (`gears/system/usage-collector`) that receives AI credit consumption reports.
 - **Direction**: outbound
 - **Data exchanged**: AI credit consumption records (credit amount, attribution: tenant, user, model; completeness flag for interrupted streams). The provider plugin converts provider usage into AI credits using the pricing in the model's provider settings (obtained from Model Registry). Gateway does not report raw token counts or cost estimates to Usage Collector — only AI credit amounts.
-- **Availability**: Usage record delivery is guaranteed at-least-once. Usage Collector unavailability does not block request processing.
+- **Availability**: Usage record delivery is guaranteed at-least-once. Each usage record carries the response `id` as its idempotency key, so repeated deliveries of the same record have no additional AI credit effect. Usage Collector unavailability does not block request processing.
 
 Note: Gateway may report more AI credits than the tenant's allocated quota because token consumption cannot be predicted before the request completes. This is expected behavior — the quota check is a best-effort gate, not a hard limit.
 
