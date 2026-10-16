@@ -81,7 +81,12 @@ async fn a_backoff_set_while_a_request_waits_for_its_permit_holds_that_request_b
         retry_after_secs: Some(1),
         ..RateLimitHeaders::default()
     };
-    client.controller.observe(&limited, 429, 1).await;
+    client
+        .pool
+        .first()
+        .controller
+        .observe(&limited, 429, 1)
+        .await;
     let released = Instant::now();
     drop(held);
 

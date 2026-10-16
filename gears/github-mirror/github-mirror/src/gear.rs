@@ -158,12 +158,8 @@ impl Gear for GithubMirrorGear {
             tokens.extend(github_token(ctx, secret).await?);
         }
         let github: Arc<dyn GithubPort> = Arc::new(
-            GithubClient::with_cache(
-                cfg.api_base_url.clone(),
-                tokens.into_iter().next(),
-                http_cache,
-            )?
-            .with_max_concurrent_requests(cfg.max_concurrent_requests),
+            GithubClient::with_tokens(cfg.api_base_url.clone(), tokens, http_cache)?
+                .with_max_concurrent_requests(cfg.max_concurrent_requests),
         );
 
         let authz = ctx
