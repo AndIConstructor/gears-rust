@@ -132,9 +132,8 @@ fn limits() -> EvaluationLimits {
 fn evaluator(gate: Option<Arc<Barrier>>) -> Arc<TransactionEvaluator> {
     Arc::new(move |context: &EvaluationContext<'_>| {
         if let Some(gate) = &gate {
-            // A blocking wait on a Tokio worker: the suite runs multi-threaded
-            // with more workers than parties, so this cannot starve.
-            gate.wait();
+            // Off the worker, so the other writer's wake-ups are not stuck behind it.
+            tokio::task::block_in_place(|| gate.wait());
         }
         let exceeded: Vec<QuotaId> = context
             .quotas
