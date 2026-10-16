@@ -351,6 +351,8 @@ When model info contains a secret reference, the system **MUST** fetch the provi
 
 A provider API key **MUST** only be sent to an approved destination. Before fetching the key, the system **MUST** verify that the model's `base_url` is an OAGW destination approved for the tenant; if it is not, the system **MUST** reject the request with an `unapproved_destination` error, without fetching or sending the key. The check applies equally when a plain HTTP client replaces the OAGW implementation (§ 3.1); approved destinations then come from deployment configuration.
 
+Requests carrying a provider API key **MUST** use HTTPS. If the model has a secret reference and its `base_url` does not use HTTPS, the system **MUST** reject the request with an `unapproved_destination` error before fetching the key. This applies to OAGW and to a plain HTTP client substitute alike. Models without a secret reference are not affected.
+
 **Actors**: `cpt-cf-llm-gateway-actor-credstore`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-oagw`
 
 #### Image and File Input
@@ -726,7 +728,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - **Invalid model**: Gateway returns model-not-found error if model is unavailable for tenant.
 - **No plugin for provider**: Gateway returns provider-not-supported error.
 - **Credentials unavailable**: Gateway returns credentials-unavailable error if the key cannot be fetched from CredStore.
-- **Unapproved destination**: Gateway returns unapproved_destination error if the model has a secret reference and its `base_url` is not an approved destination for the tenant; the key is not fetched (`cpt-cf-llm-gateway-fr-provider-credentials-v1`).
+- **Unapproved destination**: Gateway returns unapproved_destination error if the model has a secret reference and its `base_url` is not an approved destination for the tenant or does not use HTTPS; the key is not fetched (`cpt-cf-llm-gateway-fr-provider-credentials-v1`).
 - **Quota exhausted**: Gateway returns quota-exceeded error without calling the provider.
 - **Quota check unavailable**: Gateway returns quota-check-unavailable error if Quota Enforcement is unavailable; the quota check is never bypassed.
 - **Model not capable**: Gateway returns capability_not_supported error if model does not support a capability required by the request (e.g., tool calling, image input, web search, reasoning, structured output).
