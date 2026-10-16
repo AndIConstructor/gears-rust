@@ -701,7 +701,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 
 ## 8. Use Cases
 
-#### UC-001: Chat Completion
+### UC-001: Chat Completion
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-chat-completion-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -742,7 +742,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - Response `status` and `incomplete_details.reason` normalized from the provider stop reason (`cpt-cf-llm-gateway-fr-completion-status-v1`); original stop reason included
 - Generic parameters the model does not support are rejected by default, or dropped and listed in `ignored_parameters` when `drop_unsupported_params` is set; unsupported cache-control hints are always dropped and listed
 
-#### UC-002: Streaming Chat Completion
+### UC-002: Streaming Chat Completion
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-streaming-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -771,7 +771,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - Terminal event includes the normalized status, `incomplete_details.reason` when incomplete, and usage metrics
 - Connection errors propagated to consumer as `response.failed`
 
-#### UC-003: Embeddings Generation
+### UC-003: Embeddings Generation
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-embeddings-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -800,7 +800,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - Both `float` and `base64` encoding formats supported for every model
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 
-#### UC-004: Vision (Image Analysis)
+### UC-004: Vision (Image Analysis)
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-vision-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -826,7 +826,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - Response in normalized format
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 
-#### UC-005: Image Generation
+### UC-005: Image Generation
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-image-generation-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -843,7 +843,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Generated image accessible via returned URL
 
-#### UC-006: Speech-to-Text
+### UC-006: Speech-to-Text
 
 - [ ] `p3` - **ID**: `cpt-cf-llm-gateway-usecase-speech-to-text-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -860,7 +860,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Transcription returned in normalized format
 
-#### UC-007: Text-to-Speech
+### UC-007: Text-to-Speech
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-text-to-speech-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -877,7 +877,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Generated audio accessible via returned URL
 
-#### UC-008: Video Understanding
+### UC-008: Video Understanding
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-video-understanding-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -894,7 +894,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Response returned in normalized format
 
-#### UC-009: Video Generation
+### UC-009: Video Generation
 
 - [ ] `p3` - **ID**: `cpt-cf-llm-gateway-usecase-video-generation-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -911,7 +911,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Generated video accessible via returned URL
 
-#### UC-010: Tool/Function Calling
+### UC-010: Tool/Function Calling
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-tool-calling-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -946,7 +946,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - Response in normalized format
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 
-#### UC-011: Structured Output
+### UC-011: Structured Output
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-structured-output-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -976,7 +976,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - Response in normalized format
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 
-#### UC-012: Document Understanding
+### UC-012: Document Understanding
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-document-understanding-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1001,7 +1001,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - Response in normalized format
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 
-#### UC-013: Async Jobs
+### UC-013: Async Jobs
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-async-jobs-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1018,7 +1018,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Consumer receives a job ID and can poll for the result
 
-#### UC-014: Realtime Audio
+### UC-014: Realtime Audio
 
 - [ ] `p3` - **ID**: `cpt-cf-llm-gateway-usecase-realtime-audio-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1035,7 +1035,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Bidirectional audio/text streaming supported
 
-#### UC-015: Timeout Enforcement
+### UC-015: Timeout Enforcement
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-timeout-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1052,7 +1052,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - TTFT and total generation timeouts enforced
 
-#### UC-016: Rate Limiting
+### UC-016: Rate Limiting
 
 - [ ] `p2` - **ID**: `cpt-cf-llm-gateway-usecase-rate-limiting-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1069,7 +1069,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Requests exceeding tenant or user limits return rate_limited
 
-#### UC-017: Batch Processing
+### UC-017: Batch Processing
 
 - [ ] `p3` - **ID**: `cpt-cf-llm-gateway-usecase-batch-processing-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1086,7 +1086,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Acceptance criteria**:
 - Consumer receives a batch ID and can poll for the results
 
-#### UC-018: Provider Plugin Registration
+### UC-018: Provider Plugin Registration
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-provider-plugin-registration-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-provider-plugin`
@@ -1107,7 +1107,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - Settings that do not match the plugin's schema are rejected by Model Registry
 - Requests for a registered model are routed to the matching plugin
 
-#### UC-019: Reasoning
+### UC-019: Reasoning
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-reasoning-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
@@ -1133,7 +1133,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - Reasoning tokens reported in generic usage
 - Usage included: cost in AI credits, generic token usage, provider raw usage
 
-#### UC-020: Web Search and Provider-Specific Tools
+### UC-020: Web Search and Provider-Specific Tools
 
 - [ ] `p1` - **ID**: `cpt-cf-llm-gateway-usecase-web-search-v1`
 **Actor**: `cpt-cf-llm-gateway-actor-consumer`
