@@ -2621,6 +2621,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-credstore-v2"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cf-gears-credstore-v2-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-db",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-security",
+ "sea-orm",
+ "sea-orm-migration",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "cf-gears-credstore-v2-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cf-gears-tenant-resolver-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-odata",
+ "cf-gears-toolkit-security",
+ "gts",
+ "gts-macros",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "cf-gears-event-broker"
 version = "0.2.8"
 dependencies = [
@@ -3361,6 +3402,7 @@ dependencies = [
  "arc-swap",
  "async-stream",
  "async-trait",
+ "aws-lc-rs",
  "axum",
  "bytes",
  "cf-gears-authz-resolver",
@@ -3371,13 +3413,17 @@ dependencies = [
  "cf-gears-oagw-sdk",
  "cf-gears-tenant-resolver",
  "cf-gears-tenant-resolver-sdk",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-auth",
  "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-db",
+ "cf-gears-toolkit-db-macros",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-http",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
+ "cf-gears-toolkit-utils",
  "cf-gears-types-registry",
  "cf-gears-types-registry-sdk",
  "dashmap",
@@ -3405,14 +3451,20 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "sea-orm",
+ "sea-orm-migration",
  "serde",
  "serde_json",
+ "testcontainers",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-retry",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tracing",
+ "tracing-test",
  "url",
  "utoipa",
  "uuid",
@@ -3489,6 +3541,7 @@ name = "cf-gears-quota-enforcement"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "axum",
  "cf-gears-authz-resolver",
@@ -3499,6 +3552,7 @@ dependencies = [
  "cf-gears-standalone-cluster-plugin",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-contract",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
  "cf-gears-types-registry",
@@ -3511,9 +3565,12 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 
@@ -3522,6 +3579,7 @@ name = "cf-gears-quota-enforcement-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-security",
  "gts",
@@ -3542,17 +3600,22 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "cf-gears-quota-enforcement-sdk",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-db",
  "cf-gears-toolkit-db-macros",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
+ "gts",
  "inventory",
  "sea-orm",
  "sea-orm-migration",
  "serde",
  "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 2.0.20",
  "time",
  "tokio",
@@ -4236,6 +4299,7 @@ dependencies = [
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-contract-macros",
  "cf-gears-toolkit-http",
+ "cf-gears-toolkit-http-middleware",
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-transport-grpc",
  "cf-gears-toolkit-utils",
@@ -4382,6 +4446,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "tracing-test",
  "utoipa",
 ]
 
@@ -4467,6 +4532,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4723,6 +4789,7 @@ dependencies = [
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-odata",
+ "cf-gears-toolkit-security",
  "cf-gears-toolkit-utils",
  "cf-gears-types-registry-sdk",
  "chrono",
@@ -4755,11 +4822,23 @@ name = "cf-gears-types-registry-sdk"
 version = "0.3.9"
 dependencies = [
  "async-trait",
+ "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-contract",
  "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-security",
  "gts",
+ "parking_lot",
+ "proptest",
+ "rand 0.10.1",
+ "semver",
  "serde_json",
  "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -11021,9 +11100,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
