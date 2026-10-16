@@ -349,7 +349,9 @@ The system **MUST** support models with a custom `base_url` (self-hosted or Open
 
 When model info contains a secret reference, the system **MUST** fetch the provider API key from CredStore and pass it to the provider plugin for the provider call. The key is optional: models without a secret reference (auth handled by OAGW, local provider) **MUST** be callable without a key. The system **MUST NOT** persist or log provider API keys.
 
-**Actors**: `cpt-cf-llm-gateway-actor-credstore`, `cpt-cf-llm-gateway-actor-provider-plugin`
+A provider API key **MUST** only be sent to an approved destination. Before fetching the key, the system **MUST** verify that the model's `base_url` is an OAGW destination approved for the tenant; if it is not, the system **MUST** reject the request with an `unapproved_destination` error, without fetching or sending the key. The check applies equally when a plain HTTP client replaces the OAGW implementation (§ 3.1); approved destinations then come from deployment configuration.
+
+**Actors**: `cpt-cf-llm-gateway-actor-credstore`, `cpt-cf-llm-gateway-actor-provider-plugin`, `cpt-cf-llm-gateway-actor-oagw`
 
 #### Image and File Input
 
@@ -724,6 +726,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - **Invalid model**: Gateway returns model-not-found error if model is unavailable for tenant.
 - **No plugin for provider**: Gateway returns provider-not-supported error.
 - **Credentials unavailable**: Gateway returns credentials-unavailable error if the key cannot be fetched from CredStore.
+- **Unapproved destination**: Gateway returns unapproved_destination error if the model has a secret reference and its `base_url` is not an approved destination for the tenant; the key is not fetched (`cpt-cf-llm-gateway-fr-provider-credentials-v1`).
 - **Quota exhausted**: Gateway returns quota-exceeded error without calling the provider.
 - **Quota check unavailable**: Gateway returns quota-check-unavailable error if Quota Enforcement is unavailable; the quota check is never bypassed.
 - **Model not capable**: Gateway returns capability_not_supported error if model does not support a capability required by the request (e.g., tool calling, image input, web search, reasoning, structured output).
@@ -755,7 +758,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Postconditions**: Stream completed, usage reported.
 
 **Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
+- **Common failures**: invalid model, no plugin for provider, credentials unavailable, unapproved destination, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
 - **Mid-stream provider failure**: Gateway ends the stream with a `response.failed` terminal event carrying the normalized error category and reports usage marked as incomplete.
 - **Consumer disconnects**: Gateway cancels the upstream provider request and reports usage marked as incomplete (optionally with a labeled estimate).
 - **Model not capable**: Gateway returns capability_not_supported error if model does not support streaming.
@@ -783,7 +786,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Postconditions**: Vectors returned, usage reported.
 
 **Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable (including no embeddings support), and provider error are handled as in UC-001.
+- **Common failures**: invalid model, no plugin for provider, credentials unavailable, unapproved destination, quota exhausted or unavailable, model not capable (including no embeddings support), and provider error are handled as in UC-001.
 - **Invalid input**: Gateway returns validation error if input is empty or exceeds provider limits.
 - **Unsupported dimensions**: Gateway returns unsupported_parameter error if the model cannot produce the requested `dimensions`, even when `drop_unsupported_params` is set.
 - **Unsupported input_type**: Gateway returns unsupported_parameter error; with `drop_unsupported_params` set, Gateway drops it and lists it in `ignored_parameters`.
@@ -814,7 +817,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Alternative Flows**:
 - **Media resolution failure**: Gateway returns media-not-found error if an image cannot be retrieved or decoded.
 - **FileStorage URL** (P2): Gateway resolves the media via FileStorage before dispatch.
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
+- **Common failures**: invalid model, no plugin for provider, credentials unavailable, unapproved destination, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
 
 **Acceptance criteria**:
 - Multiple images supported per request
@@ -928,7 +931,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 
 **Alternative Flows**:
 - **Schema resolution failure**: Gateway returns schema-not-found error if GTS reference is unresolvable.
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
+- **Common failures**: invalid model, no plugin for provider, credentials unavailable, unapproved destination, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
 - **Partial tool execution**: Consumer sends partial tool results; Gateway forwards to provider for continued generation.
 - **Unknown function in tool_choice**: Gateway returns validation error if `tool_choice` names a function not defined in the request.
 - **Unsupported tool selection control**: Gateway returns unsupported_parameter error if the model does not support the requested `tool_choice` value or `parallel_tool_calls` setting; with `drop_unsupported_params` set, Gateway drops it and lists it in `ignored_parameters`.
@@ -962,7 +965,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - **Schema validation failure**: Gateway returns validation_error with details if response does not match schema.
 - **Unsupported schema**: Gateway returns unsupported_schema error naming the construct if the schema cannot be expressed in the provider's JSON Schema subset; the provider is not called.
 - **Model not capable**: Gateway returns capability_not_supported error if the model does not support schema-constrained output.
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
+- **Common failures**: invalid model, no plugin for provider, credentials unavailable, unapproved destination, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
 
 **Acceptance criteria**:
 - Response validated against the original schema, including constraints removed during schema adaptation
@@ -990,7 +993,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Alternative Flows**:
 - **Media resolution failure**: Gateway returns media-not-found error if the document cannot be retrieved or decoded.
 - **FileStorage URL** (P2): Gateway resolves the document via FileStorage before dispatch.
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
+- **Common failures**: invalid model, no plugin for provider, credentials unavailable, unapproved destination, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
 
 **Acceptance criteria**:
 - Response in normalized format
@@ -1120,7 +1123,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Postconditions**: Response with reasoning returned, usage reported.
 
 **Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
+- **Common failures**: invalid model, no plugin for provider, credentials unavailable, unapproved destination, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
 - **Unsupported option** (e.g. budget on an effort-only provider): Gateway returns capability_not_supported.
 
 **Acceptance criteria**:
@@ -1146,7 +1149,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 **Postconditions**: Response returned, usage reported.
 
 **Alternative Flows**:
-- **Common failures**: invalid model, no plugin for provider, credentials unavailable, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
+- **Common failures**: invalid model, no plugin for provider, credentials unavailable, unapproved destination, quota exhausted or unavailable, model not capable, and provider error are handled as in UC-001.
 - **Provider has no native web search**: Gateway returns capability_not_supported.
 - **Tool prefix does not match the model's provider**: Gateway returns a validation error.
 
@@ -1186,6 +1189,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 - LLM providers are accessible via OAGW; OAGW upstreams and routes for provider endpoints are configured by the deployment (unless automatic provisioning is adopted — see § 13)
 - Provider API keys are stored in CredStore and referenced from model info
 - Model Registry maintains an up-to-date catalog of available models and their capabilities per tenant
+- Only authorized administrators can register or update models in Model Registry, including their `base_url` and secret reference
 - FileStorage is available for media operations from P2
 
 ## 12. Risks
