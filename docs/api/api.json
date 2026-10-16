@@ -53364,7 +53364,12 @@
             },
             "description": "Internal Server Error"
           }
-        }
+        },
+        "security": [
+          {
+            "internalToken": []
+          }
+        ]
       }
     },
     "/mini-chat/v1/chats": {
