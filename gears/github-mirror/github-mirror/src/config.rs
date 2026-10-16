@@ -13,11 +13,12 @@ use crate::infra::github::compression::Compression;
 pub struct GithubMirrorConfig {
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
-    /// Where the GitHub token lives in the credential store; it is read once
-    /// at init. Without it the gear syncs unauthenticated, which works for
-    /// public repositories at a much lower rate limit.
-    #[serde(default)]
-    pub github_token_secret: Option<GithubTokenSecret>,
+    /// Where the GitHub tokens live in the credential store: one secret, or a
+    /// list of them; all are read once at init. Without any the gear syncs
+    /// unauthenticated, which works for public repositories at a much lower
+    /// rate limit.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub github_token_secret: Vec<GithubTokenSecret>,
     /// What a sync collects when the request does not say (PRD §5.4): the
     /// type's default, which leaves timeline events off until a deployment or
     /// a request turns them on (PRD §5.2).
@@ -106,6 +107,23 @@ pub struct GithubTokenSecret {
     pub key: String,
 }
 
+fn one_or_many<'de, D>(deserializer: D) -> Result<Vec<GithubTokenSecret>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(GithubTokenSecret),
+        Many(Vec<GithubTokenSecret>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(OneOrMany::One(secret)) => vec![secret],
+        Some(OneOrMany::Many(secrets)) => secrets,
+    })
+}
+
 impl GithubMirrorConfig {
     /// The configured GitHub API base URL, validated.
     ///
@@ -153,7 +171,9 @@ impl GithubMirrorConfig {
         }
         // A token would travel in cleartext over plain `http`. Loopback is
         // allowed so a local mock server still works without TLS.
-        if parsed.scheme() == "http" && self.github_token_secret.is_some() && !is_loopback(&parsed)
+        if parsed.scheme() == "http"
+            && !self.github_token_secret.is_empty()
+            && !is_loopback(&parsed)
         {
             return Err(crate::domain::error::DomainError::Validation {
                 field: "api_base_url".to_owned(),
@@ -185,7 +205,7 @@ impl Default for GithubMirrorConfig {
     fn default() -> Self {
         Self {
             api_base_url: default_api_base_url(),
-            github_token_secret: None,
+            github_token_secret: Vec::new(),
             scope: ScopeConfig::default(),
             cache_compression: Compression::default(),
             max_concurrent_syncs: default_max_concurrent_syncs(),

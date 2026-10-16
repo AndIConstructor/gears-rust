@@ -44,7 +44,7 @@ struct CliTable {
 
 pub fn load(
     path: &Path,
-    github_token: Option<&str>,
+    github_tokens: &[SecretString],
     storage: StorageFlags<'_>,
 ) -> Result<CliConfig> {
     let mut merged: Value =
@@ -70,9 +70,10 @@ pub fn load(
             .unwrap_or(DatabasePlacement::PerRepo),
         storage.repo,
     )?;
-    match github_token {
-        Some(token) => add_github_token(&mut merged, token)?,
-        None => drop_github_token(&mut merged),
+    if github_tokens.is_empty() {
+        drop_github_token(&mut merged);
+    } else {
+        add_github_tokens(&mut merged, github_tokens)?;
     }
     expand_home_dir(&mut merged)?;
 
@@ -107,6 +108,23 @@ pub fn sqlite_file(app: &AppConfig) -> Option<PathBuf> {
     } else {
         app.server.home_dir.join("github-mirror").join(path)
     })
+}
+
+pub fn resolve_tokens(given: &[SecretString], file_name: &str) -> Vec<SecretString> {
+    let given: Vec<SecretString> = given.iter().filter_map(trimmed).collect();
+    if !given.is_empty() {
+        return given;
+    }
+    let Ok(home) = user_home() else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(home.join(".github-mirror").join(file_name))
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| trimmed(&SecretString::new(line)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn resolve_token(given: Option<&SecretString>, file_name: &str) -> Option<SecretString> {
@@ -183,21 +201,39 @@ fn place_database(
     Ok(())
 }
 
-fn add_github_token(config: &mut Value, token: &str) -> Result<()> {
-    let secret = config
+fn add_github_tokens(config: &mut Value, tokens: &[SecretString]) -> Result<()> {
+    let configured = config
         .pointer("/gears/github-mirror/config/github_token_secret")
         .cloned()
         .ok_or_else(|| anyhow!("gears.github-mirror.config.github_token_secret is missing"))?;
-    let entry = json!({
-        "tenant_id": secret.get("tenant_id"),
-        "key": secret.get("key"),
-        "value": token,
-    });
-    config
+    let first = match configured {
+        Value::Array(secrets) => secrets.into_iter().next().ok_or_else(|| {
+            anyhow!("gears.github-mirror.config.github_token_secret is an empty list")
+        })?,
+        secret => secret,
+    };
+    let key = first
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("gears.github-mirror.config.github_token_secret has no key"))?;
+    let secrets: Vec<Value> = (1..=tokens.len())
+        .map(|n| {
+            json!({
+                "tenant_id": first.get("tenant_id"),
+                "key": if n == 1 { key.to_owned() } else { format!("{key}-{n}") },
+            })
+        })
+        .collect();
+    let store = config
         .pointer_mut("/gears/static-credstore-plugin/config/secrets")
         .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("gears.static-credstore-plugin.config.secrets must be a list"))?
-        .push(entry);
+        .ok_or_else(|| anyhow!("gears.static-credstore-plugin.config.secrets must be a list"))?;
+    for (secret, token) in secrets.iter().zip(tokens) {
+        let mut entry = secret.clone();
+        entry["value"] = Value::String(token.expose().to_owned());
+        store.push(entry);
+    }
+    config["gears"]["github-mirror"]["config"]["github_token_secret"] = Value::Array(secrets);
     Ok(())
 }
 
@@ -269,7 +305,7 @@ mod tests {
     ) -> Option<PathBuf> {
         let loaded = load(
             Path::new("does-not-exist.toml"),
-            None,
+            &[],
             flags(dir, placement, repo),
         )
         .unwrap();
@@ -320,7 +356,7 @@ mod tests {
         let dir = scratch_dir();
         let postgres = load(
             Path::new("does-not-exist.toml"),
-            None,
+            &[],
             StorageFlags {
                 storage_dir: Some(dir.clone()),
                 database_url: Some("postgres://u:p@db.local/mirror".to_owned()),
@@ -334,7 +370,7 @@ mod tests {
         let by_url = dir.join("by-url.db");
         let sqlite = load(
             Path::new("does-not-exist.toml"),
-            None,
+            &[],
             StorageFlags {
                 storage_dir: Some(dir.clone()),
                 database_url: Some(format!("sqlite://{}?mode=rwc", by_url.display())),
@@ -354,14 +390,14 @@ mod tests {
         let toml = dir.join("github-mirror.toml");
         std::fs::write(&toml, "[cli]\ndatabase_placement = \"shared\"\n").unwrap();
 
-        let from_toml = load(&toml, None, flags(&dir, None, Some("dtolnay/itoa"))).unwrap();
+        let from_toml = load(&toml, &[], flags(&dir, None, Some("dtolnay/itoa"))).unwrap();
         assert_eq!(
             sqlite_file(&from_toml.app),
             Some(dir.join("github-mirror").join("github_mirror.db"))
         );
         let from_flag = load(
             &toml,
-            None,
+            &[],
             flags(&dir, Some(DatabasePlacement::PerRepo), Some("dtolnay/itoa")),
         )
         .unwrap();
@@ -378,7 +414,7 @@ mod tests {
         assert!(
             load(
                 Path::new("does-not-exist.toml"),
-                None,
+                &[],
                 flags(&dir, None, Some("../x"))
             )
             .is_err()

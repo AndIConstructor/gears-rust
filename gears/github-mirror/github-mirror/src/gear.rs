@@ -48,11 +48,8 @@ const SERVICE_SUBJECT_TYPE: &str = "gts.cf.core.security.subject_service.v1~";
 
 async fn github_token(
     ctx: &GearCtx,
-    secret: Option<&GithubTokenSecret>,
+    secret: &GithubTokenSecret,
 ) -> anyhow::Result<Option<SecretString>> {
-    let Some(secret) = secret else {
-        return Ok(None);
-    };
     let credstore = ctx
         .client_hub()
         .get::<dyn CredStoreClientV1>()
@@ -156,10 +153,17 @@ impl Gear for GithubMirrorGear {
             Some(dir) => Arc::new(FilesystemHttpCache::new(dir, cfg.cache_compression)),
             None => Arc::new(SeaOrmHttpCache::new(Arc::clone(&db), cfg.cache_compression)),
         };
-        let token = github_token(ctx, cfg.github_token_secret.as_ref()).await?;
+        let mut tokens = Vec::new();
+        for secret in &cfg.github_token_secret {
+            tokens.extend(github_token(ctx, secret).await?);
+        }
         let github: Arc<dyn GithubPort> = Arc::new(
-            GithubClient::with_cache(cfg.api_base_url.clone(), token, http_cache)?
-                .with_max_concurrent_requests(cfg.max_concurrent_requests),
+            GithubClient::with_cache(
+                cfg.api_base_url.clone(),
+                tokens.into_iter().next(),
+                http_cache,
+            )?
+            .with_max_concurrent_requests(cfg.max_concurrent_requests),
         );
 
         let authz = ctx

@@ -48,10 +48,11 @@ struct Cli {
         global = true,
         env = "GITHUB_TOKEN",
         hide_env_values = true,
+        value_delimiter = ',',
         value_parser = |raw: &str| Ok::<_, std::convert::Infallible>(SecretString::new(raw)),
-        help = "GitHub token; falls back to GITHUB_TOKEN, then ~/.github-mirror/gh_token.txt"
+        help = "GitHub token, repeat for several; falls back to GITHUB_TOKEN (comma-separated), then ~/.github-mirror/gh_token.txt (one per line)"
     )]
-    token: Option<SecretString>,
+    token: Vec<SecretString>,
 
     #[arg(
         long,
@@ -278,10 +279,10 @@ async fn run(cli: Cli) -> Result<()> {
             "no platform token: pass --platform-token, set CF_PLATFORM_TOKEN or write ~/.github-mirror/platform_token.txt"
         )
     })?;
-    let github_token = config::resolve_token(cli.token.as_ref(), "gh_token.txt");
+    let github_tokens = config::resolve_tokens(&cli.token, "gh_token.txt");
     let loaded = config::load(
         &cli.config,
-        github_token.as_ref().map(SecretString::expose),
+        &github_tokens,
         StorageFlags {
             storage_dir: cli.storage_dir,
             database_url: cli.database_url,
