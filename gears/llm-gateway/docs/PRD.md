@@ -228,7 +228,7 @@ Note: Gateway may report more AI credits than the tenant's allocated quota becau
 
 - From P2, requires persistent storage for async/batch job state; Gateway does not persist usage records
 - All provider calls go through OAGW to the model's `base_url` (defined in Model Registry). Gateway never calls providers directly.
-- OAGW upstreams and routes are configured outside the Gateway by default. Provider plugins can declare the routes they use, but deciding which base URLs may be called is the deployment's responsibility. Automatic provisioning of upstreams by Model Registry or plugins is an open question (see § 13). Deployments without a full OAGW can substitute a plain HTTP client.
+- OAGW upstreams and routes are configured outside the Gateway by default. Provider plugins can declare the routes they use, but deciding which base URLs may be called is the deployment's responsibility. Automatic provisioning of upstreams by Model Registry or plugins is an open question (see § 13). Deployments without a full OAGW can replace the OAGW implementation with a plain HTTP client behind the same interface; plugins still call providers only through that interface, so this is not a bypass, but such deployments lose OAGW circuit breaking and control over which external URLs may be called.
 - P1: image and file inputs are accepted as base64 data or external URLs and forwarded to the provider. From P2: media files are stored and retrieved via the FileStorage gear.
 
 ### 3.2 Data Ownership & Classification
@@ -1172,7 +1172,7 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 
 | Dependency | Description | Criticality |
 |------------|-------------|-------------|
-| Outbound API Gateway (OAGW) | Executes all external provider calls, provides circuit breaking; may optionally handle upstream auth. Can be substituted with a plain HTTP client in minimal deployments | `p1` |
+| Outbound API Gateway (OAGW) | Executes all external provider calls, provides circuit breaking; may optionally handle upstream auth. Its implementation can be replaced with a plain HTTP client behind the same interface in minimal deployments (§ 3.1) | `p1` |
 | Model Registry | Resolves model identifiers to model info (provider type, model name, `base_url`, secret reference, settings, pricing); validates provider settings against plugin schemas | `p1` |
 | CredStore | Provides provider API keys to Gateway by the model's secret reference | `p1` |
 | Type Registry | Stores provider plugin instances and provider settings schemas; resolves GTS schema references for tool definitions | `p1` |
