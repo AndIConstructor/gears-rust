@@ -68,7 +68,9 @@ magika = ["file_parser/magika"]
 bss-products = ["dep:bss_products"]
 bss-pricing = ["dep:bss_pricing", "bss-products"]
 bss-approvals = ["dep:bss_approvals"]
-admission-control = ["dep:admission-control"]
+# The admission gate links its default engine plugin, policy-engine.
+admission-control = ["dep:admission-control", "policy-engine"]
+policy-engine = ["dep:policy-engine"]
 
 [dependencies]
 mimalloc = { workspace = true }
@@ -151,6 +153,9 @@ bss_approvals = { package = "cf-gears-bss-approvals", path = "../../gears/bss/ap
 
 # Optional Admission Control gear
 admission-control = { package = "cf-gears-admission-control", path = "../../gears/system/admission-control/admission-control", optional = true }
+
+# Optional Policy Engine gear (an admission-control engine plugin)
+policy-engine = { package = "cf-gears-policy-engine", path = "../../gears/system/policy-engine/policy-engine", optional = true }
 
 # Optional example module
 users-info = { path = "../../examples/toolkit/users-info/users-info", optional = true }
