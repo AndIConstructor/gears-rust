@@ -133,7 +133,7 @@ impl PolicyService {
         &self,
         ctx: &SecurityContext,
         limit: Option<u64>,
-        cursor: Option<&str>,
+        cursor: Option<toolkit_odata::CursorV1>,
     ) -> Result<toolkit_odata::Page<StoredRetentionRule>, DomainError> {
         let scope = self
             .authorizer

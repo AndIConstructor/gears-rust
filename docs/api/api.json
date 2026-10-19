@@ -9752,6 +9752,24 @@
         ],
         "type": "object"
       },
+      "Page_StorageDto": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/StorageDto"
+            },
+            "type": "array"
+          },
+          "page_info": {
+            "$ref": "#/components/schemas/PageInfo"
+          }
+        },
+        "required": [
+          "items",
+          "page_info"
+        ],
+        "type": "object"
+      },
       "Page_SyncSessionDto": {
         "properties": {
           "items": {
@@ -20080,13 +20098,6 @@
         ],
         "type": "object"
       },
-      "StorageDtoList": {
-        "description": "List of configured storage backends (`GET /storages`).",
-        "items": {
-          "$ref": "#/components/schemas/StorageDto"
-        },
-        "type": "array"
-      },
       "StreamMessageRequest": {
         "description": "Request body for `POST /v1/chats/{id}/messages:stream`.",
         "properties": {
@@ -27114,7 +27125,7 @@
     },
     "/api/file-storage/v1/files": {
       "get": {
-        "description": "Keyset pagination in either direction: `limit` (default 25, max 200) and the opaque `cursor` from the previous page's `page_info.next_cursor` or `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is `created_at desc, file_id desc` -- see docs/api.md.",
+        "description": "Keyset pagination in either direction: `limit` (default 25, max 200) and the opaque `cursor` from the previous page's `page_info.next_cursor` or `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is `created_at desc, file_id desc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are rejected with 400.",
         "operationId": "file_storage.list_files",
         "parameters": [
           {
@@ -27136,7 +27147,7 @@
             }
           },
           {
-            "description": "Page size (default 25, max 200)",
+            "description": "Page size (default 25, max 200); alias `$top`",
             "in": "query",
             "name": "limit",
             "required": false,
@@ -27145,7 +27156,7 @@
             }
           },
           {
-            "description": "Opaque continuation token from the previous page",
+            "description": "Opaque continuation token from the previous page; alias `$skiptoken`",
             "in": "query",
             "name": "cursor",
             "required": false,
@@ -28515,7 +28526,7 @@
     },
     "/api/file-storage/v1/files/{id}/versions": {
       "get": {
-        "description": "Keyset pagination in either direction: `limit` (default 25, max 200) and the opaque `cursor` from the previous page's `page_info.next_cursor` or `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is `created_at desc, version_id desc` -- see docs/api.md.",
+        "description": "Keyset pagination in either direction: `limit` (default 25, max 200) and the opaque `cursor` from the previous page's `page_info.next_cursor` or `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is `created_at desc, version_id desc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are rejected with 400.",
         "operationId": "file_storage.list_versions",
         "parameters": [
           {
@@ -28528,7 +28539,7 @@
             }
           },
           {
-            "description": "Page size (default 25, max 200)",
+            "description": "Page size (default 25, max 200); alias `$top`",
             "in": "query",
             "name": "limit",
             "required": false,
@@ -28537,7 +28548,7 @@
             }
           },
           {
-            "description": "Opaque continuation token from the previous page",
+            "description": "Opaque continuation token from the previous page; alias `$skiptoken`",
             "in": "query",
             "name": "cursor",
             "required": false,
@@ -29030,11 +29041,11 @@
     },
     "/api/file-storage/v1/retention-rules": {
       "get": {
-        "description": "Keyset pagination in either direction: `limit` (default 25, max 200) and the opaque `cursor` from the previous page's `page_info.next_cursor` or `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is `created_at desc, rule_id desc` -- see docs/api.md.",
+        "description": "Keyset pagination in either direction: `limit` (default 25, max 200) and the opaque `cursor` from the previous page's `page_info.next_cursor` or `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is `created_at desc, rule_id desc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are rejected with 400.",
         "operationId": "file_storage.list_retention_rules",
         "parameters": [
           {
-            "description": "Page size (default 25, max 200)",
+            "description": "Page size (default 25, max 200); alias `$top`",
             "in": "query",
             "name": "limit",
             "required": false,
@@ -29043,7 +29054,7 @@
             }
           },
           {
-            "description": "Opaque continuation token from the previous page",
+            "description": "Opaque continuation token from the previous page; alias `$skiptoken`",
             "in": "query",
             "name": "cursor",
             "required": false,
@@ -29269,17 +29280,48 @@
     },
     "/api/file-storage/v1/storages": {
       "get": {
+        "description": "Keyset pagination in either direction: `limit` (default 25, max 200) and the opaque `cursor` from the previous page's `page_info.next_cursor` or `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Order is `id asc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are rejected with 400.",
         "operationId": "file_storage.list_storages",
+        "parameters": [
+          {
+            "description": "Page size (default 25, max 200); alias `$top`",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque continuation token from the previous page; alias `$skiptoken`",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StorageDtoList"
+                  "$ref": "#/components/schemas/Page_StorageDto"
                 }
               }
             },
             "description": "Backends"
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
           },
           "401": {
             "content": {
@@ -29317,7 +29359,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "List configured storage backends and capabilities",
+        "summary": "List configured storage backends and capabilities (cursor pagination)",
         "tags": [
           "File Storage"
         ]

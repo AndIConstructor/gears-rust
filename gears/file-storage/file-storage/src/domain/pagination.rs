@@ -1,12 +1,12 @@
 //! Cursor codec shared by the three keyset listings (`GET /files`,
-//! `GET /files/{id}/versions`, `GET /retention-rules`).
+//! `GET /files/{id}/versions`, `GET /retention-rules`), plus the in-memory `GET /storages` page.
 //!
 //! Order is `created_at DESC` then an id tie-breaker, also `DESC`; `items` always come back in
-//! this canonical order, even for backward navigation. The repo layer only sees a decoded
-//! `Seek`, never the wire token.
+//! this canonical order, even for backward navigation. The repo layer only sees a `Seek`, never
+//! the wire token or the parsed cursor.
 //!
 //! The direction (`"fwd"`/`"bwd"`) travels inside the cursor (`CursorV1::d`): `next_cursor`
-//! seeks older rows, `prev_cursor` newer ones. Cursors are not signed; `decode` only checks
+//! seeks older rows, `prev_cursor` newer ones. Cursors are not signed; `seek` only checks
 //! the order and binding.
 
 use time::OffsetDateTime;
@@ -25,6 +25,9 @@ pub const FILES_ID_FIELD: &str = "file_id";
 pub const VERSIONS_ID_FIELD: &str = "version_id";
 /// `GET /retention-rules`'s id tie-breaker column.
 pub const RETENTION_RULES_ID_FIELD: &str = "rule_id";
+
+/// `GET /storages`'s id key (the backend id).
+pub const STORAGES_ID_FIELD: &str = "id";
 
 /// Wire value for [`Direction::Forward`].
 const FORWARD: &str = "fwd";
@@ -94,28 +97,25 @@ pub struct Seek {
     pub direction: Direction,
 }
 
-/// Decode and validate a cursor token against one listing's canonical order and binding.
+/// Validate a parsed cursor against one listing's canonical order and binding and turn it into
+/// a [`Seek`]. The toolkit `OData` extractor has already decoded the wire token.
 ///
 /// # Errors
-/// `ODataError::InvalidCursor`/`CursorInvalid*` for an unreadable token or bad direction;
-/// `OrderMismatch` for a different canonical order; `FilterMismatch` for a different binding.
-pub fn decode(
-    token: &str,
+/// `OrderMismatch` for a different canonical order (checked first, so a cursor of another
+/// listing is never reported as a binding mismatch); `FilterMismatch` for a different binding;
+/// `InvalidCursor` for an unrecognized direction; `CursorInvalidKeys`/`CursorInvalidFields` for
+/// a malformed position.
+pub fn seek(
+    cursor: CursorV1,
     id_field: &'static str,
     binding: Option<&str>,
 ) -> Result<Seek, ODataError> {
-    let cursor = CursorV1::decode(token)?;
-    // `CursorV1::decode` already rejects any `d` other than `"fwd"`/`"bwd"`.
-    let direction = if cursor.d == BACKWARD {
-        Direction::Backward
-    } else {
-        Direction::Forward
-    };
     let order = canonical_order(id_field);
+    toolkit_odata::validate_cursor_against(&cursor, &order, binding)?;
     if cursor.f.is_some() != binding.is_some() {
         return Err(ODataError::FilterMismatch);
     }
-    toolkit_odata::validate_cursor_against(&cursor, &order, binding)?;
+    let direction = direction_of(&cursor)?;
     let [created_at_s, id_s] = <[String; 2]>::try_from(cursor.k).map_err(|k| {
         tracing::debug!(
             key_count = k.len(),
@@ -136,6 +136,15 @@ pub fn decode(
         id,
         direction,
     })
+}
+
+/// Direction carried by a parsed cursor; the cursor may not come from `CursorV1::decode`.
+fn direction_of(cursor: &CursorV1) -> Result<Direction, ODataError> {
+    match cursor.d.as_str() {
+        FORWARD => Ok(Direction::Forward),
+        BACKWARD => Ok(Direction::Backward),
+        _ => Err(ODataError::InvalidCursor),
+    }
 }
 
 /// Resolve `?limit`: `None` gives `default`, values above `max` are clamped to `max`, and
@@ -237,6 +246,127 @@ pub fn finish_page<T>(
                         Direction::Backward,
                     )
                 })
+                .transpose()?;
+            (next, prev)
+        }
+        _ => (None, None),
+    };
+
+    Ok(toolkit_odata::Page::new(
+        rows,
+        toolkit_odata::PageInfo {
+            next_cursor,
+            prev_cursor,
+            limit,
+        },
+    ))
+}
+
+/// `GET /storages` order: the backend id ascending, no tie-breaker (ids are unique).
+fn storages_order() -> ODataOrderBy {
+    ODataOrderBy(vec![OrderKey {
+        field: STORAGES_ID_FIELD.to_owned(),
+        dir: SortDir::Asc,
+    }])
+}
+
+/// Validate a `GET /storages` cursor and return the backend id it resumes after, plus the seek
+/// direction. The listing has no binding, so a cursor carrying one is rejected.
+///
+/// # Errors
+/// `OrderMismatch` for a cursor of another listing; `FilterMismatch` for a bound cursor;
+/// `CursorInvalidKeys` unless the cursor names exactly one key; `InvalidCursor` for an
+/// unrecognized direction.
+pub fn storage_seek(cursor: CursorV1) -> Result<(String, Direction), ODataError> {
+    toolkit_odata::validate_cursor_against(&cursor, &storages_order(), None)?;
+    if cursor.f.is_some() {
+        return Err(ODataError::FilterMismatch);
+    }
+    let direction = direction_of(&cursor)?;
+    let [id] = <[String; 1]>::try_from(cursor.k).map_err(|k| {
+        tracing::debug!(
+            key_count = k.len(),
+            "file-storage: cursor key count mismatch"
+        );
+        ODataError::CursorInvalidKeys
+    })?;
+    Ok((id, direction))
+}
+
+/// Encode a `GET /storages` cursor seeking from backend `id` in `direction`.
+fn encode_storage_cursor(id: &str, direction: Direction) -> Result<String, ODataError> {
+    CursorV1 {
+        k: vec![id.to_owned()],
+        o: SortDir::Asc,
+        s: storages_order().to_signed_tokens(),
+        f: None,
+        d: direction.as_wire().to_owned(),
+    }
+    .encode()
+    .map_err(|_| ODataError::InvalidCursor)
+}
+
+/// Page an in-memory list by id ascending (the backend registry is small and has no repo).
+///
+/// Forward resumes strictly after the cursor's id and keeps the first `limit` items; backward
+/// resumes strictly before it and keeps the `limit` items nearest to it. Items come back in
+/// ascending order either way. Cursor semantics match [`finish_page`]: over-fetching proves a
+/// further page on the far side, a supplied cursor proves one on the near side, and an empty
+/// page builds neither cursor.
+///
+/// # Errors
+/// `ODataError::InvalidCursor` if a cursor token fails to serialize.
+pub fn page_by_id<T>(
+    mut items: Vec<T>,
+    limit: u64,
+    after: Option<(String, Direction)>,
+    id_of: impl Fn(&T) -> &str,
+) -> Result<toolkit_odata::Page<T>, ODataError> {
+    items.sort_by(|a, b| id_of(a).cmp(id_of(b)));
+    let limit_len = usize::try_from(limit).unwrap_or(usize::MAX);
+    let (cursor_id, direction) = match after {
+        Some((id, direction)) => (Some(id), direction),
+        None => (None, Direction::Forward),
+    };
+    let has_cursor = cursor_id.is_some();
+
+    let mut overfetched = false;
+    let rows: Vec<T> = if let (Some(id), Direction::Backward) = (&cursor_id, direction) {
+        let mut before: Vec<T> = items
+            .into_iter()
+            .filter(|item| id_of(item) < id.as_str())
+            .collect();
+        if before.len() > limit_len {
+            overfetched = true;
+            before.drain(..before.len() - limit_len);
+        }
+        before
+    } else {
+        let mut rest: Vec<T> = match &cursor_id {
+            Some(id) => items
+                .into_iter()
+                .filter(|item| id_of(item) > id.as_str())
+                .collect(),
+            None => items,
+        };
+        if rest.len() > limit_len {
+            overfetched = true;
+            rest.truncate(limit_len);
+        }
+        rest
+    };
+
+    let (next_cursor, prev_cursor) = match (rows.first(), rows.last()) {
+        (Some(first), Some(last)) => {
+            let (further_forward, further_backward) = match direction {
+                Direction::Forward => (overfetched, has_cursor),
+                Direction::Backward => (has_cursor, overfetched),
+            };
+            let next = further_forward
+                .then(|| encode_storage_cursor(id_of(last), Direction::Forward))
+                .transpose()?;
+            let prev = further_backward
+                .then(|| encode_storage_cursor(id_of(first), Direction::Backward))
                 .transpose()?;
             (next, prev)
         }

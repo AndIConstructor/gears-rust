@@ -91,12 +91,12 @@ impl Store {
         scope: &AccessScope,
         tenant_id: Uuid,
         limit: u64,
-        cursor: Option<&str>,
+        cursor: Option<toolkit_odata::CursorV1>,
     ) -> Result<toolkit_odata::Page<StoredRetentionRule>, DomainError> {
         use crate::domain::pagination;
 
         let after = cursor
-            .map(|token| pagination::decode(token, pagination::RETENTION_RULES_ID_FIELD, None))
+            .map(|cursor| pagination::seek(cursor, pagination::RETENTION_RULES_ID_FIELD, None))
             .transpose()?;
 
         let conn = self.db.conn().map_err(DomainError::from)?;

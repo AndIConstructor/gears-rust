@@ -45,7 +45,7 @@ impl FileService {
         ctx: &SecurityContext,
         owner: OwnerFilter,
         limit: Option<u64>,
-        cursor: Option<&str>,
+        cursor: Option<toolkit_odata::CursorV1>,
     ) -> Result<toolkit_odata::Page<File>, DomainError> {
         // Authorize, then always tenant-scope the query regardless of the PDP's constraints.
         self.authorizer
@@ -135,7 +135,7 @@ impl FileService {
         ctx: &SecurityContext,
         file_id: Uuid,
         limit: Option<u64>,
-        cursor: Option<&str>,
+        cursor: Option<toolkit_odata::CursorV1>,
     ) -> Result<toolkit_odata::Page<FileVersion>, DomainError> {
         let prefetch = Self::tenant_scope(ctx);
         let file = self.store.require_file(&prefetch, file_id).await?;

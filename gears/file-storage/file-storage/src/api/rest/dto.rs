@@ -208,13 +208,6 @@ impl StorageDto {
     }
 }
 
-/// List of configured storage backends (`GET /storages`).
-#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
-#[serde(transparent)]
-pub struct StorageDtoList(pub Vec<StorageDto>);
-
-impl toolkit::api::api_dto::ResponseApiDto for StorageDtoList {}
-
 /// Per-mime-type size limit override in a policy request/response.
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(request, response)]

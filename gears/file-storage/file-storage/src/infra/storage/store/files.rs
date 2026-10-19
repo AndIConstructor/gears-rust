@@ -33,7 +33,7 @@ impl Store {
     }
 
     /// List files for an owner filter, newest-first, keyset-paginated in either direction.
-    /// `limit` is the caller's already-clamped page size; `cursor` is decoded and validated
+    /// `limit` is the caller's already-clamped page size; `cursor` is validated
     /// against `files_binding`, so a cursor from a different owner pair is rejected with `400`.
     ///
     /// Fetches `limit + 1` rows to detect a further page (no `COUNT`); `finish_page` trims,
@@ -43,13 +43,13 @@ impl Store {
         scope: &AccessScope,
         owner: OwnerFilter,
         limit: u64,
-        cursor: Option<&str>,
+        cursor: Option<toolkit_odata::CursorV1>,
     ) -> Result<toolkit_odata::Page<File>, DomainError> {
         use crate::domain::pagination;
 
         let binding = pagination::files_binding(&owner);
         let after = cursor
-            .map(|token| pagination::decode(token, pagination::FILES_ID_FIELD, binding.as_deref()))
+            .map(|cursor| pagination::seek(cursor, pagination::FILES_ID_FIELD, binding.as_deref()))
             .transpose()?;
 
         let conn = self.db.conn().map_err(DomainError::from)?;

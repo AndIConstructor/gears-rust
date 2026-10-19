@@ -165,15 +165,22 @@ pub(crate) fn register_routes(
             "Keyset pagination in either direction: `limit` (default 25, max 200) and the \
              opaque `cursor` from the previous page's `page_info.next_cursor` or \
              `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is \
-             `created_at desc, version_id desc` -- see docs/api.md.",
+             `created_at desc, version_id desc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of \
+             `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are \
+             rejected with 400.",
         )
         .tag(API_TAG)
         .path_param("id", "File UUID")
-        .query_param_typed("limit", false, "Page size (default 25, max 200)", "integer")
+        .query_param_typed(
+            "limit",
+            false,
+            "Page size (default 25, max 200); alias `$top`",
+            "integer",
+        )
         .query_param(
             "cursor",
             false,
-            "Opaque continuation token from the previous page",
+            "Opaque continuation token from the previous page; alias `$skiptoken`",
         )
         .handler(handlers::list_versions)
         .json_response_with_schema::<toolkit_odata::Page<dto::VersionDto>>(
@@ -181,7 +188,7 @@ pub(crate) fn register_routes(
             StatusCode::OK,
             "Versions",
         )
-        // 400: bad cursor, unsupported query parameter, or `limit=0`.
+        // 400: bad cursor, unsupported query parameter or option, or `limit=0`.
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -272,16 +279,23 @@ pub(crate) fn register_routes(
             "Keyset pagination in either direction: `limit` (default 25, max 200) and the \
              opaque `cursor` from the previous page's `page_info.next_cursor` or \
              `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is \
-             `created_at desc, file_id desc` -- see docs/api.md.",
+             `created_at desc, file_id desc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of \
+             `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are \
+             rejected with 400.",
         )
         .tag(API_TAG)
         .query_param("owner_kind", true, "'user' or 'app'")
         .query_param("owner_id", true, "Owner UUID")
-        .query_param_typed("limit", false, "Page size (default 25, max 200)", "integer")
+        .query_param_typed(
+            "limit",
+            false,
+            "Page size (default 25, max 200); alias `$top`",
+            "integer",
+        )
         .query_param(
             "cursor",
             false,
-            "Opaque continuation token from the previous page",
+            "Opaque continuation token from the previous page; alias `$skiptoken`",
         )
         .handler(handlers::list_files)
         .json_response_with_schema::<toolkit_odata::Page<dto::FileDto>>(
@@ -289,7 +303,7 @@ pub(crate) fn register_routes(
             StatusCode::OK,
             "Files",
         )
-        // 400: bad cursor, unsupported query parameter, `limit=0`, or invalid `owner_kind`.
+        // 400: bad cursor, unsupported query parameter or option, `limit=0`, or invalid `owner_kind`.
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
@@ -300,10 +314,35 @@ pub(crate) fn register_routes(
         .operation_id("file_storage.list_storages")
         .authenticated()
         .require_license_features::<License>([])
-        .summary("List configured storage backends and capabilities")
+        .summary("List configured storage backends and capabilities (cursor pagination)")
+        .description(
+            "Keyset pagination in either direction: `limit` (default 25, max 200) and the \
+             opaque `cursor` from the previous page's `page_info.next_cursor` or \
+             `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Order is \
+             `id asc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of `limit` and \
+             `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are \
+             rejected with 400.",
+        )
         .tag(API_TAG)
+        .query_param_typed(
+            "limit",
+            false,
+            "Page size (default 25, max 200); alias `$top`",
+            "integer",
+        )
+        .query_param(
+            "cursor",
+            false,
+            "Opaque continuation token from the previous page; alias `$skiptoken`",
+        )
         .handler(handlers::list_storages)
-        .json_response_with_schema::<dto::StorageDtoList>(openapi, StatusCode::OK, "Backends")
+        .json_response_with_schema::<toolkit_odata::Page<dto::StorageDto>>(
+            openapi,
+            StatusCode::OK,
+            "Backends",
+        )
+        // 400: bad cursor, unsupported query parameter or option, or `limit=0`.
+        .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)
         .error_500(openapi)
@@ -394,14 +433,21 @@ pub(crate) fn register_routes(
             "Keyset pagination in either direction: `limit` (default 25, max 200) and the \
              opaque `cursor` from the previous page's `page_info.next_cursor` or \
              `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is \
-             `created_at desc, rule_id desc` -- see docs/api.md.",
+             `created_at desc, rule_id desc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of \
+             `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are \
+             rejected with 400.",
         )
         .tag(API_TAG)
-        .query_param_typed("limit", false, "Page size (default 25, max 200)", "integer")
+        .query_param_typed(
+            "limit",
+            false,
+            "Page size (default 25, max 200); alias `$top`",
+            "integer",
+        )
         .query_param(
             "cursor",
             false,
-            "Opaque continuation token from the previous page",
+            "Opaque continuation token from the previous page; alias `$skiptoken`",
         )
         .handler(handlers::list_retention_rules)
         .json_response_with_schema::<toolkit_odata::Page<dto::RetentionRuleDto>>(
@@ -409,7 +455,7 @@ pub(crate) fn register_routes(
             StatusCode::OK,
             "Retention rules",
         )
-        // 400: bad cursor, unsupported query parameter, or `limit=0`.
+        // 400: bad cursor, unsupported query parameter or option, or `limit=0`.
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)

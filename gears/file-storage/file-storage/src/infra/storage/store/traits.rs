@@ -339,7 +339,7 @@ impl crate::domain::ports::PolicyStore for Store {
         scope: &toolkit_security::AccessScope,
         tenant_id: Uuid,
         limit: u64,
-        cursor: Option<&str>,
+        cursor: Option<toolkit_odata::CursorV1>,
     ) -> Result<toolkit_odata::Page<crate::domain::policy::StoredRetentionRule>, DomainError> {
         Store::list_retention_rules_page(self, scope, tenant_id, limit, cursor).await
     }

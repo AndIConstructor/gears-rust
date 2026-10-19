@@ -1,4 +1,5 @@
-//! Cursor-pagination contract for `/files`, `/files/{id}/versions` and `/retention-rules`:
+//! Cursor-pagination contract for `/files`, `/files/{id}/versions`, `/retention-rules` and
+//! `/storages`:
 //! full walks in both directions (including `created_at` ties) and cursor errors.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::doc_markdown)]
@@ -66,6 +67,11 @@ fn base_config() -> ServiceConfig {
         max_page_size: 200,
         idempotency_ttl_secs: 86400,
     }
+}
+
+/// Parse a wire token the way the `OData` extractor does before the services see it.
+fn cur(token: &str) -> toolkit_odata::CursorV1 {
+    toolkit_odata::CursorV1::decode(token).expect("decode cursor")
 }
 
 fn ctx(tenant: Uuid, subject: Uuid) -> SecurityContext {
@@ -210,7 +216,7 @@ async fn files_cursor_walk_covers_all_items_exactly_once_including_created_at_ti
     let mut cursor: Option<String> = None;
     loop {
         let page = svc
-            .list_files(&ctx, owner_filter, Some(2), cursor.as_deref())
+            .list_files(&ctx, owner_filter, Some(2), cursor.as_deref().map(cur))
             .await
             .expect("list_files page");
         prev_cursors.push(page.page_info.prev_cursor.clone());
@@ -243,7 +249,7 @@ async fn files_cursor_walk_covers_all_items_exactly_once_including_created_at_ti
         .expect("the last page must have a predecessor");
     loop {
         let page = svc
-            .list_files(&ctx, owner_filter, Some(2), Some(&back_cursor))
+            .list_files(&ctx, owner_filter, Some(2), Some(cur(&back_cursor)))
             .await
             .expect("list_files backward page");
         back_pages.push(page.items.iter().map(|f| f.file_id).collect());
@@ -303,7 +309,7 @@ async fn files_cursor_rejects_a_different_owner() {
     };
     let ctx_b = ctx(tenant, owner_b);
     let err = svc
-        .list_files(&ctx_b, filter_for_b, Some(1), Some(&cursor))
+        .list_files(&ctx_b, filter_for_b, Some(1), Some(cur(&cursor)))
         .await
         .expect_err("a cursor issued for a different owner must be rejected");
     assert!(
@@ -348,7 +354,7 @@ async fn files_backward_cursor_rejects_a_different_owner() {
         .expect("page 1");
     let next = page1.page_info.next_cursor.expect("more pages remain");
     let page2 = svc
-        .list_files(&ctx_a, filter_for_a, Some(1), Some(&next))
+        .list_files(&ctx_a, filter_for_a, Some(1), Some(cur(&next)))
         .await
         .expect("page 2");
     let prev = page2
@@ -362,7 +368,7 @@ async fn files_backward_cursor_rejects_a_different_owner() {
     };
     let ctx_b = ctx(tenant, owner_b);
     let err = svc
-        .list_files(&ctx_b, filter_for_b, Some(1), Some(&prev))
+        .list_files(&ctx_b, filter_for_b, Some(1), Some(cur(&prev)))
         .await
         .expect_err("a backward cursor issued for a different owner must be rejected");
     assert!(
@@ -413,43 +419,36 @@ async fn files_garbage_cursor_is_rejected_as_400() {
         .await
         .expect("dispatch");
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(
+        body.to_string().contains("INVALID_CURSOR"),
+        "an undecodable cursor must be INVALID_CURSOR: {body}"
+    );
 }
 
 #[tokio::test]
 async fn files_offset_query_param_is_rejected_as_400() {
     let (svc, subject, owner) = build_files_harness().await;
     let router = files_router(subject, svc);
-    let resp = router
-        .oneshot(get_req(format!(
-            "{BASE}/files?owner_kind=user&owner_id={owner}&offset=0"
-        )))
-        .await
-        .expect("dispatch");
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "the old offset param must be rejected, not silently ignored"
-    );
-    let body = body_json(resp).await;
-    assert!(
-        body["context"]["field_violations"]
-            .as_array()
-            .is_some_and(|v| !v.is_empty()),
-        "must carry a canonical field_violations payload, got {body}"
-    );
+    // The old offset param must be rejected, not silently ignored.
+    assert_rejected(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&offset=0"),
+        &[("offset", "UNSUPPORTED_QUERY_PARAM")],
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn files_limit_zero_is_rejected_as_400() {
     let (svc, subject, owner) = build_files_harness().await;
     let router = files_router(subject, svc);
-    let resp = router
-        .oneshot(get_req(format!(
-            "{BASE}/files?owner_kind=user&owner_id={owner}&limit=0"
-        )))
-        .await
-        .expect("dispatch");
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_rejected(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&limit=0"),
+        &[("$top", "INVALID_LIMIT")],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -568,7 +567,7 @@ async fn versions_cursor_walk_covers_all_items_exactly_once_including_created_at
     let mut cursor: Option<String> = None;
     loop {
         let page = svc
-            .list_versions(&ctx, file_id, Some(2), cursor.as_deref())
+            .list_versions(&ctx, file_id, Some(2), cursor.as_deref().map(cur))
             .await
             .expect("list_versions page");
         prev_cursors.push(page.page_info.prev_cursor.clone());
@@ -600,7 +599,7 @@ async fn versions_cursor_walk_covers_all_items_exactly_once_including_created_at
         .expect("the last page must have a predecessor");
     loop {
         let page = svc
-            .list_versions(&ctx, file_id, Some(2), Some(&back_cursor))
+            .list_versions(&ctx, file_id, Some(2), Some(cur(&back_cursor)))
             .await
             .expect("list_versions backward page");
         back_pages.push(page.items.iter().map(|v| v.version_id).collect());
@@ -650,7 +649,7 @@ async fn versions_cursor_rejects_a_different_file() {
     let cursor = page.page_info.next_cursor.expect("more pages remain");
 
     let err = svc
-        .list_versions(&ctx, file_b, Some(1), Some(&cursor))
+        .list_versions(&ctx, file_b, Some(1), Some(cur(&cursor)))
         .await
         .expect_err("a cursor issued for a different file must be rejected");
     assert!(
@@ -690,7 +689,7 @@ async fn versions_backward_cursor_rejects_a_different_file() {
         .expect("page 1");
     let next = page1.page_info.next_cursor.expect("more pages remain");
     let page2 = svc
-        .list_versions(&ctx, file_a, Some(1), Some(&next))
+        .list_versions(&ctx, file_a, Some(1), Some(cur(&next)))
         .await
         .expect("page 2");
     let prev = page2
@@ -699,7 +698,7 @@ async fn versions_backward_cursor_rejects_a_different_file() {
         .expect("page 2 must have a predecessor");
 
     let err = svc
-        .list_versions(&ctx, file_b, Some(1), Some(&prev))
+        .list_versions(&ctx, file_b, Some(1), Some(cur(&prev)))
         .await
         .expect_err("a backward cursor issued for a different file must be rejected");
     assert!(
@@ -832,7 +831,7 @@ async fn retention_rules_cursor_walk_covers_every_rule_in_tenant() {
     let mut cursor: Option<String> = None;
     loop {
         let page = policy_svc
-            .list_retention_rules(&ctx_subject, Some(2), cursor.as_deref())
+            .list_retention_rules(&ctx_subject, Some(2), cursor.as_deref().map(cur))
             .await
             .expect("list_retention_rules page");
         prev_cursors.push(page.page_info.prev_cursor.clone());
@@ -866,7 +865,7 @@ async fn retention_rules_cursor_walk_covers_every_rule_in_tenant() {
         .expect("the last page must have a predecessor");
     loop {
         let page = policy_svc
-            .list_retention_rules(&ctx_subject, Some(2), Some(&back_cursor))
+            .list_retention_rules(&ctx_subject, Some(2), Some(cur(&back_cursor)))
             .await
             .expect("list_retention_rules backward page");
         back_pages.push(page.items.iter().map(|r| r.rule_id).collect());
@@ -942,7 +941,7 @@ async fn retention_rules_cursor_with_wrong_order_field_is_rejected() {
     )
     .expect("encode");
     let err = policy_svc
-        .list_retention_rules(&ctx(tenant, subject), Some(2), Some(&bogus))
+        .list_retention_rules(&ctx(tenant, subject), Some(2), Some(cur(&bogus)))
         .await
         .expect_err("a cursor built for a different listing's order must be rejected");
     assert!(matches!(err, DomainError::Cursor(_)));
@@ -961,8 +960,381 @@ async fn retention_rules_backward_cursor_with_wrong_order_field_is_rejected() {
     )
     .expect("encode");
     let err = policy_svc
-        .list_retention_rules(&ctx(tenant, subject), Some(2), Some(&bogus))
+        .list_retention_rules(&ctx(tenant, subject), Some(2), Some(cur(&bogus)))
         .await
         .expect_err("a backward cursor built for a different listing's order must be rejected");
     assert!(matches!(err, DomainError::Cursor(_)));
+}
+
+// --- REST query-string contract: `$top`/`$skiptoken` synonyms and rejected options ---
+
+/// `(field, reason)` of every violation of a canonical 400 body, in order.
+fn violations(body: &Value) -> Vec<(String, String)> {
+    body["context"]["field_violations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no field_violations in {body}"))
+        .iter()
+        .map(|v| {
+            (
+                v["field"].as_str().expect("field").to_owned(),
+                v["reason"].as_str().expect("reason").to_owned(),
+            )
+        })
+        .collect()
+}
+
+async fn assert_rejected(router: &Router, uri: String, expected: &[(&str, &str)]) -> Value {
+    let resp = router
+        .clone()
+        .oneshot(get_req(uri.clone()))
+        .await
+        .expect("dispatch");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{uri}");
+    let body = body_json(resp).await;
+    let got = violations(&body);
+    let expected: Vec<(String, String)> = expected
+        .iter()
+        .map(|(f, r)| ((*f).to_owned(), (*r).to_owned()))
+        .collect();
+    assert_eq!(got, expected, "{uri}: {body}");
+    body
+}
+
+async fn get_ok(router: &Router, uri: String) -> Value {
+    let resp = router
+        .clone()
+        .oneshot(get_req(uri.clone()))
+        .await
+        .expect("dispatch");
+    assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+    body_json(resp).await
+}
+
+#[tokio::test]
+async fn files_top_is_a_synonym_of_limit() {
+    let (svc, subject, owner) = build_files_harness().await;
+    let router = files_router(subject, svc);
+    let body = get_ok(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&$top=1"),
+    )
+    .await;
+    assert_eq!(body["page_info"]["limit"], 1);
+}
+
+#[tokio::test]
+async fn files_skiptoken_is_a_synonym_of_cursor() {
+    let (svc, subject, owner) = build_files_harness().await;
+    svc.create_file(&subject, new_file(owner), None)
+        .await
+        .expect("seed a second file");
+    let router = files_router(subject, svc);
+    let first = get_ok(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&$top=1"),
+    )
+    .await;
+    let next = first["page_info"]["next_cursor"]
+        .as_str()
+        .expect("a second file exists");
+    let second = get_ok(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&$skiptoken={next}"),
+    )
+    .await;
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        second["items"][0]["file_id"], first["items"][0]["file_id"],
+        "the continuation page must hold the other file"
+    );
+}
+
+#[tokio::test]
+async fn files_both_spellings_of_one_parameter_are_rejected() {
+    let (svc, subject, owner) = build_files_harness().await;
+    let router = files_router(subject, svc);
+    let both_limits = assert_rejected(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&limit=1&$top=1"),
+        &[("query", "INVALID_QUERY_PARAMS")],
+    )
+    .await;
+    assert_eq!(both_limits["status"], 400);
+    assert_rejected(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&cursor=X&$skiptoken=X"),
+        &[("query", "INVALID_QUERY_PARAMS")],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn files_skip_is_rejected_with_a_skiptoken_hint() {
+    let (svc, subject, owner) = build_files_harness().await;
+    let router = files_router(subject, svc);
+    let body = assert_rejected(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&$skip=1"),
+        &[("$skip", "UNSUPPORTED_QUERY_PARAM")],
+    )
+    .await;
+    let description = body["context"]["field_violations"][0]["description"]
+        .as_str()
+        .expect("description");
+    assert!(description.contains("$skiptoken"), "{description}");
+}
+
+#[tokio::test]
+async fn files_filter_orderby_and_select_are_each_rejected() {
+    let (svc, subject, owner) = build_files_harness().await;
+    let router = files_router(subject, svc);
+    let prefix = format!("{BASE}/files?owner_kind=user&owner_id={owner}");
+    for (query, field) in [
+        ("$filter=name%20eq%20'a'", "$filter"),
+        ("$orderby=created_at%20desc", "$orderby"),
+        ("$select=file_id", "$select"),
+    ] {
+        assert_rejected(
+            &router,
+            format!("{prefix}&{query}"),
+            &[(field, "UNSUPPORTED_QUERY_PARAM")],
+        )
+        .await;
+    }
+    // All offences of one request come back together.
+    assert_rejected(
+        &router,
+        format!("{prefix}&$filter=name%20eq%20'a'&$select=file_id"),
+        &[
+            ("$filter", "UNSUPPORTED_QUERY_PARAM"),
+            ("$select", "UNSUPPORTED_QUERY_PARAM"),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn files_unknown_plain_keys_are_all_reported() {
+    let (svc, subject, owner) = build_files_harness().await;
+    let router = files_router(subject, svc);
+    let body = assert_rejected(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&offset=0&foo=1&offset=2"),
+        &[
+            ("offset", "UNSUPPORTED_QUERY_PARAM"),
+            ("foo", "UNSUPPORTED_QUERY_PARAM"),
+        ],
+    )
+    .await;
+    let description = body["context"]["field_violations"][0]["description"]
+        .as_str()
+        .expect("description");
+    assert!(
+        description.contains("owner_kind") && description.contains("$top"),
+        "the error must list what the listing accepts: {description}"
+    );
+}
+
+#[tokio::test]
+async fn files_zero_limit_is_invalid_limit_in_either_spelling() {
+    let (svc, subject, owner) = build_files_harness().await;
+    let router = files_router(subject, svc);
+    for spelling in ["$top", "limit"] {
+        assert_rejected(
+            &router,
+            format!("{BASE}/files?owner_kind=user&owner_id={owner}&{spelling}=0"),
+            &[("$top", "INVALID_LIMIT")],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn files_miscased_system_option_is_rejected() {
+    let (svc, subject, owner) = build_files_harness().await;
+    let router = files_router(subject, svc);
+    assert_rejected(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&$Top=1"),
+        &[("$Top", "UNSUPPORTED_QUERY_PARAM")],
+    )
+    .await;
+}
+
+/// The three listings that take no owner pair share one query contract.
+async fn assert_plain_listing_contract(router: &Router, path: &str) {
+    let body = get_ok(router, format!("{BASE}{path}?$top=1")).await;
+    assert_eq!(body["page_info"]["limit"], 1, "{path}");
+    assert_rejected(
+        router,
+        format!("{BASE}{path}?$skip=1"),
+        &[("$skip", "UNSUPPORTED_QUERY_PARAM")],
+    )
+    .await;
+    assert_rejected(
+        router,
+        format!("{BASE}{path}?foo=1"),
+        &[("foo", "UNSUPPORTED_QUERY_PARAM")],
+    )
+    .await;
+    assert_rejected(
+        router,
+        format!("{BASE}{path}?$filter=x%20eq%201&$orderby=id"),
+        &[
+            ("$filter", "UNSUPPORTED_QUERY_PARAM"),
+            ("$orderby", "UNSUPPORTED_QUERY_PARAM"),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn versions_query_contract() {
+    let db = build_db().await;
+    let store = Store::new(Arc::clone(&db));
+    let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new("mem"));
+    let backends = BackendRegistry::new(vec![backend], "mem").expect("registry");
+    let svc = Arc::new(FileService::new(
+        store,
+        backends,
+        Arc::new(Issuer::generate(3600).expect("issuer")),
+        Arc::new(TenantOnlyAuthorizer),
+        base_config(),
+        None,
+        None,
+    ));
+    let tenant = Uuid::now_v7();
+    let owner = Uuid::now_v7();
+    let (file_id, _) = seed_file_and_versions(
+        &db,
+        tenant,
+        owner,
+        &[OffsetDateTime::now_utc(), OffsetDateTime::now_utc()],
+    )
+    .await;
+    let router = versions_router(ctx(tenant, owner), svc);
+    assert_plain_listing_contract(&router, &format!("/files/{file_id}/versions")).await;
+}
+
+#[tokio::test]
+async fn retention_rules_query_contract() {
+    let (_svc, policy_svc, tenant, subject) = build_retention_harness().await;
+    let router = retention_rules_router(ctx(tenant, subject), policy_svc);
+    assert_plain_listing_contract(&router, "/retention-rules").await;
+}
+
+fn storages_router(ctx: SecurityContext, svc: Arc<FileService>) -> Router {
+    Router::new()
+        .route(&format!("{BASE}/files"), get(handlers::list_files))
+        .route(&format!("{BASE}/storages"), get(handlers::list_storages))
+        .layer(axum::Extension(ctx))
+        .layer(axum::Extension(svc))
+}
+
+/// Three backends registered out of id order, plus two files for cursors of another listing.
+async fn build_storages_harness() -> (Router, Uuid) {
+    let db = build_db().await;
+    let store = Store::new(Arc::clone(&db));
+    let backends = ["mem-b", "mem-c", "mem-a"]
+        .into_iter()
+        .map(|id| Arc::new(InMemoryBackend::new(id)) as Arc<dyn StorageBackend>)
+        .collect();
+    let backends = BackendRegistry::new(backends, "mem-a").expect("registry");
+    let svc = Arc::new(FileService::new(
+        store,
+        backends,
+        Arc::new(Issuer::generate(3600).expect("issuer")),
+        Arc::new(TenantOnlyAuthorizer),
+        base_config(),
+        None,
+        None,
+    ));
+    let tenant = Uuid::now_v7();
+    let owner = Uuid::now_v7();
+    for _ in 0..2 {
+        svc.create_file(&ctx(tenant, owner), new_file(owner), None)
+            .await
+            .expect("seed file");
+    }
+    (storages_router(ctx(tenant, owner), svc), owner)
+}
+
+fn storage_ids(body: &Value) -> Vec<&str> {
+    body["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|s| s["id"].as_str().expect("id"))
+        .collect()
+}
+
+#[tokio::test]
+async fn storages_are_paged_by_id_in_both_directions() {
+    let (router, _owner) = build_storages_harness().await;
+
+    let all = get_ok(&router, format!("{BASE}/storages")).await;
+    assert_eq!(storage_ids(&all), ["mem-a", "mem-b", "mem-c"]);
+    assert!(all["page_info"]["next_cursor"].is_null());
+    assert!(all["page_info"]["prev_cursor"].is_null());
+
+    let first = get_ok(&router, format!("{BASE}/storages?limit=1")).await;
+    assert_eq!(storage_ids(&first), ["mem-a"]);
+    assert_eq!(first["page_info"]["limit"], 1);
+    assert!(first["page_info"]["prev_cursor"].is_null());
+    let next = first["page_info"]["next_cursor"]
+        .as_str()
+        .expect("more storages follow");
+
+    let second = get_ok(
+        &router,
+        format!("{BASE}/storages?limit=1&$skiptoken={next}"),
+    )
+    .await;
+    assert_eq!(storage_ids(&second), ["mem-b"]);
+    let prev = second["page_info"]["prev_cursor"]
+        .as_str()
+        .expect("a page precedes");
+    assert!(second["page_info"]["next_cursor"].is_string());
+
+    let back = get_ok(&router, format!("{BASE}/storages?limit=1&cursor={prev}")).await;
+    assert_eq!(storage_ids(&back), ["mem-a"]);
+    assert!(back["page_info"]["prev_cursor"].is_null());
+    assert!(back["page_info"]["next_cursor"].is_string());
+}
+
+#[tokio::test]
+async fn storages_reject_unsupported_options_and_foreign_cursors() {
+    let (router, owner) = build_storages_harness().await;
+    assert_rejected(
+        &router,
+        format!("{BASE}/storages?$skip=1"),
+        &[("$skip", "UNSUPPORTED_QUERY_PARAM")],
+    )
+    .await;
+    assert_rejected(
+        &router,
+        format!("{BASE}/storages?foo=1"),
+        &[("foo", "UNSUPPORTED_QUERY_PARAM")],
+    )
+    .await;
+
+    let files = get_ok(
+        &router,
+        format!("{BASE}/files?owner_kind=user&owner_id={owner}&limit=1"),
+    )
+    .await;
+    let files_cursor = files["page_info"]["next_cursor"]
+        .as_str()
+        .expect("a second file exists");
+    let resp = router
+        .clone()
+        .oneshot(get_req(format!("{BASE}/storages?cursor={files_cursor}")))
+        .await
+        .expect("dispatch");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(
+        body.to_string().contains("ORDER_MISMATCH"),
+        "a /files cursor must be an order mismatch on /storages: {body}"
+    );
 }

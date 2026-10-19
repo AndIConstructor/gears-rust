@@ -75,7 +75,7 @@ impl Store {
 
     /// List a page of a file's versions, newest first, keyset-paginated in either direction
     /// (backs `GET /files/{id}/versions`). `limit` is already clamped by the caller; `cursor`
-    /// is decoded against `versions_binding`, so a cursor from a different file is rejected
+    /// is validated against `versions_binding`, so a cursor from a different file is rejected
     /// with `400`.
     ///
     /// Fetches `limit + 1` rows to detect a further page (no `COUNT`); `finish_page` trims,
@@ -84,14 +84,14 @@ impl Store {
         &self,
         file_id: Uuid,
         limit: u64,
-        cursor: Option<&str>,
+        cursor: Option<toolkit_odata::CursorV1>,
     ) -> Result<toolkit_odata::Page<FileVersion>, DomainError> {
         use crate::domain::pagination;
 
         let binding = pagination::versions_binding(file_id);
         let after = cursor
-            .map(|token| {
-                pagination::decode(token, pagination::VERSIONS_ID_FIELD, binding.as_deref())
+            .map(|cursor| {
+                pagination::seek(cursor, pagination::VERSIONS_ID_FIELD, binding.as_deref())
             })
             .transpose()?;
 
