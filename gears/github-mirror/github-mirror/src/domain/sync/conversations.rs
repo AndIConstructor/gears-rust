@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
 use chrono::{DateTime, Utc};
+use toolkit_macros::domain_model;
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -30,6 +31,7 @@ pub const TOPLEVEL: &str = "toplevel";
 const PULL_REQUEST: &str = "pull_request";
 const ISSUE: &str = "issue";
 
+#[domain_model]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ConversationStats {
     pub inline: u64,

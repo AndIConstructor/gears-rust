@@ -513,3 +513,173 @@ fn database(config: &AppConfig) -> Result<DbOptions> {
     let manager = DbManager::from_figment(figment, config.server.home_dir.clone())?;
     Ok(DbOptions::Manager(Arc::new(manager)))
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a panic in these tests is the failure report"
+)]
+mod tests {
+    use httpmock::MockServer;
+    use serde_json::json;
+
+    use super::*;
+
+    const REPO: &str = "dtolnay/itoa";
+
+    fn command(args: &[&str]) -> Command {
+        Cli::try_parse_from(std::iter::once("github-mirror").chain(args.iter().copied()))
+            .unwrap()
+            .command
+            .unwrap()
+    }
+
+    async fn github() -> MockServer {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method("GET").path("/repos/dtolnay/itoa");
+                then.status(200).json_body(json!({
+                    "id": 42,
+                    "name": "itoa",
+                    "full_name": "dtolnay/itoa",
+                    "owner": { "login": "dtolnay" },
+                    "default_branch": "master",
+                    "private": false,
+                    "pushed_at": "2026-10-01T00:00:00Z",
+                    "stargazers_count": 1,
+                    "forks_count": 0,
+                    "clone_url": "https://github.com/dtolnay/itoa.git",
+                    "description": "fast integer printing"
+                }));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method("GET").path_prefix("/repos/dtolnay/itoa/");
+                then.status(200).json_body(json!([]));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method("GET").path("/rate_limit");
+                then.status(200).json_body(json!({
+                    "resources": {
+                        "core": { "limit": 5000, "used": 1, "remaining": 4999, "reset": 4_102_444_800_i64 }
+                    }
+                }));
+            })
+            .await;
+        server
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_command_runs_against_a_mirror_of_a_mocked_repository() {
+        let github = github().await;
+        let home = tempfile::tempdir().unwrap();
+        let mut loaded = config::load(
+            Path::new("does-not-exist.toml"),
+            &[],
+            StorageFlags {
+                storage_dir: Some(home.path().to_path_buf()),
+                database_url: None,
+                database_placement: None,
+                repo: Some(REPO),
+            },
+        )
+        .unwrap();
+        loaded.app.gears.get_mut("github-mirror").unwrap()["config"]["api_base_url"] =
+            json!(github.base_url());
+        let database_file = config::sqlite_file(&loaded.app);
+        let database = database_file.as_deref();
+        let runtime = Runtime::start(loaded.app).unwrap();
+        let token = SecretString::new("platform");
+        let run = |args: &'static [&'static str]| {
+            execute(&runtime, command(args), &token, None, database)
+        };
+
+        let synced = run(&[
+            "sync",
+            REPO,
+            "--include",
+            "issues",
+            "--exclude",
+            "commits",
+            "--since",
+            "30d",
+            "--actions-scope",
+            "none",
+            "--reactions-scope",
+            "open",
+            "--timeline-scope",
+            "none",
+            "--inline-comment-snippet-before",
+            "2",
+            "--inline-comment-snippet-after",
+            "2",
+        ])
+        .await
+        .unwrap();
+        assert_eq!(synced["repository"]["repository"], REPO);
+        assert_eq!(synced["repository"]["status"], "complete");
+
+        let status = run(&["status", REPO]).await.unwrap();
+        assert_eq!(
+            status["repository"]["session_id"],
+            synced["repository"]["session_id"]
+        );
+        assert!(status["storage"]["database_bytes"].as_u64().unwrap() > 0);
+
+        let repos = run(&["query", "repos", REPO]).await.unwrap();
+        assert_eq!(repos[0]["full_name"], REPO);
+        for args in [
+            &["query", "issues", REPO][..],
+            &["query", "prs", REPO],
+            &["query", "commits", REPO],
+            &["query", "contributors", REPO],
+            &["query", "conversations", REPO],
+            &["query", "branches", REPO],
+            &["query", "labels", REPO],
+            &["query", "milestones", REPO],
+            &["query", "releases", REPO],
+            &["query", "workflow_runs", REPO],
+            &["query", "comments", REPO, "--number", "1"],
+            &["query", "review-threads", REPO, "--number", "1"],
+            &["query", "reviews", REPO, "--number", "1"],
+            &[
+                "query",
+                "review-comments",
+                REPO,
+                "--number",
+                "1",
+                "--subject-type",
+                "line",
+            ],
+            &["query", "reactions", REPO, "--number", "1"],
+            &["query", "timeline", REPO, "--number", "1"],
+        ] {
+            assert_eq!(run(args).await.unwrap(), json!([]), "{args:?}");
+        }
+        assert!(
+            run(&["query", "issues", REPO, "--subject-type", "line"])
+                .await
+                .is_err()
+        );
+        assert!(
+            run(&["query", "repos", REPO, "--since", "7d"])
+                .await
+                .is_err()
+        );
+        assert!(run(&["query", "comments", REPO]).await.is_err());
+
+        let quotas = run(&["check-rate-limit"]).await.unwrap();
+        assert_eq!(quotas[0]["resource"], "core");
+        assert_eq!(quotas[0]["remaining"], 4999);
+
+        let cleared = run(&["clear-cache", REPO]).await.unwrap();
+        assert!(cleared["rows_removed"].as_u64().unwrap() > 0);
+
+        runtime.stop().await.unwrap();
+    }
+}
