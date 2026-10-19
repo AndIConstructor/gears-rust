@@ -24,9 +24,11 @@ keep their own drifting copies of:
   `inject_request_id` — the `x-request-id` carrier: inbound middleware scopes
   the edge-minted id as a task-local, and `toolkit-http` re-attaches it to
   outbound requests (caller-set header wins; nothing is minted outside a
-  request scope). Unlike `traceparent` this works with or without `otel` —
-  `x-request-id` is chain-scoped (the external request's id) while
-  `trace_id`/`span_id` are per-hop.
+  request scope). As a task-local it is not inherited across `tokio::spawn` /
+  `spawn_blocking` or streamed bodies (re-install it there to stay correlated).
+  Unlike `traceparent` this works with or without `otel` — `x-request-id` is
+  chain-scoped (the external request's id) while `trace_id`/`span_id` are
+  per-hop.
 
 Keeping one authoritative implementation means the gateway and the gears cannot
 drift on what counts as a valid `traceparent`, on which ids a request span

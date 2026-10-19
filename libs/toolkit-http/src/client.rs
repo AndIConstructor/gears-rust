@@ -702,7 +702,9 @@ mod tests {
     async fn test_request_id_absent_outside_scope() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
-            when.method(Method::GET).path("/test");
+            when.method(Method::GET)
+                .path("/test")
+                .header_missing("x-request-id");
             then.status(200);
         });
 

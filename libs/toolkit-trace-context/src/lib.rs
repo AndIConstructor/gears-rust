@@ -269,6 +269,9 @@ pub fn extract_request_id(headers: &HeaderMap) -> Option<String> {
 }
 
 /// The `x-request-id` installed by [`with_request_id`], if any.
+///
+/// Returns `None` outside the task that `with_request_id` wraps — see its
+/// docs for the `tokio::spawn` / `spawn_blocking` / streamed-body limitation.
 #[must_use]
 pub fn current_request_id() -> Option<String> {
     REQUEST_ID.try_with(Clone::clone).ok().flatten()
@@ -277,6 +280,11 @@ pub fn current_request_id() -> Option<String> {
 /// Run `f` with `id` installed as [`current_request_id`], so `toolkit-http`
 /// requests made while serving this request carry the same `x-request-id`
 /// downstream. `None` installs an empty scope: nothing propagates.
+///
+/// `id` is a tokio task-local, so it is not inherited across `tokio::spawn` /
+/// `spawn_blocking` or into a streamed body polled after `f` resolves — such
+/// work is uncorrelated unless it captures `current_request_id` and re-installs
+/// it via `with_request_id` (as `tracing::Span` needs `.in_current_span()`).
 pub async fn with_request_id<F: Future>(id: Option<String>, f: F) -> F::Output {
     REQUEST_ID.scope(id, f).await
 }

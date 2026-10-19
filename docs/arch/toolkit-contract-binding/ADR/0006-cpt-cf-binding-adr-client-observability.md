@@ -73,7 +73,9 @@ id, used by the access log, audit records, and response headers) is a *distinct*
 *also* forwarded: inbound middleware installs it as a task-local
 (`toolkit_trace_context::with_request_id`) and `toolkit-http` re-attaches it on egress
 (`inject_request_id`). So a contract hop joins both the span tree (via `traceparent`) and the
-edge request id — the latter even when `otel` is off.
+edge request id — the latter even when `otel` is off. As a task-local it is forwarded only on calls
+made inline in the serving task; `tokio::spawn` / `spawn_blocking` and streamed bodies are
+uncorrelated unless the id is re-installed (see the `with_request_id` docs).
 
 The span path is routed through a `#[doc(hidden)] pub use tracing as __tracing;` re-export in
 `toolkit-contract`, so SDK crates need no direct `tracing` dependency.

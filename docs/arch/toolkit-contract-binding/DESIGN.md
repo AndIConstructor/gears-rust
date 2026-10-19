@@ -814,13 +814,16 @@ falling back to the inbound W3C `traceparent` (`toolkit::api::extract_trace_id`,
 `libs/toolkit-trace-context/src/lib.rs`).
 
 Separately, the platform's `x-request-id` — the gateway's per-request id, used by the access log,
-audit records, and response headers — is **forwarded** on every outbound `toolkit-http` request
-when the caller is serving a request that carried one: inbound middleware installs it as a
-task-local (`toolkit_trace_context::with_request_id`) and the transport re-attaches it
+audit records, and response headers — is **forwarded** on outbound `toolkit-http` requests
+made inline while the caller is serving a request that carried one: inbound middleware installs it
+as a task-local (`toolkit_trace_context::with_request_id`) and the transport re-attaches it
 (`inject_request_id`). The two identifiers stay distinct — `trace_id` tracks the span tree,
 `x-request-id` the external request — but a gear-to-gear hop now joins both: the same
 `request_id` appears in every gear's request span, and unlike `traceparent` injection this works
-with or without the `otel` feature. Gears never mint the id themselves.
+with or without the `otel` feature. Gears never mint the id themselves. Being a task-local, the id
+is forwarded only on calls made inline in the serving task; `tokio::spawn` / `spawn_blocking` and
+streamed bodies polled after the handler returns are uncorrelated unless the id is re-installed
+there (see the `with_request_id` docs).
 
 **Metrics.** RED metrics (`http.client.request.duration`, labeled by `client_type` = the projection
 trait name) are **feature-gated on `otel`**. The `toolkit-contract` `otel` feature forwards

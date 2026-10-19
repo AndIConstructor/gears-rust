@@ -37,3 +37,44 @@ pub async fn push_req_id_to_extensions(mut req: Request<Body>, next: Next) -> Re
 
     next.run(req).await
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::http::StatusCode;
+    use axum::middleware::from_fn;
+    use axum::routing::get;
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt as _;
+
+    /// Mounted on its own (no `SetRequestIdLayer`), a missing header leaves the
+    /// carrier empty. Unreachable in the full router, which always mints an id.
+    #[tokio::test]
+    async fn leaves_carrier_empty_without_header() {
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_handler = Arc::clone(&captured);
+
+        let app = Router::new()
+            .route(
+                "/x",
+                get(move || {
+                    let captured_handler = Arc::clone(&captured_handler);
+                    async move {
+                        *captured_handler.lock().unwrap() = toolkit::api::current_request_id();
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .layer(from_fn(push_req_id_to_extensions));
+
+        let resp = app
+            .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(captured.lock().unwrap().is_none());
+    }
+}
