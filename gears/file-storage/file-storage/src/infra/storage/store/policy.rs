@@ -86,7 +86,7 @@ impl Store {
     /// Fetches `limit + 1` rows to detect a further page (no `COUNT`); `finish_page` trims,
     /// restores canonical order and builds both cursors. The cursor carries no binding
     /// fingerprint (`f: None`) because the listing has no client filter.
-    pub async fn list_retention_rules_page(
+    pub(crate) async fn list_retention_rules_page(
         &self,
         scope: &AccessScope,
         tenant_id: Uuid,

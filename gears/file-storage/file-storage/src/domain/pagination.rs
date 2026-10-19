@@ -22,12 +22,12 @@ use file_storage_sdk::OwnerFilter;
 /// `GET /files`'s id tie-breaker column.
 pub const FILES_ID_FIELD: &str = "file_id";
 /// `GET /files/{id}/versions`'s id tie-breaker column.
-pub const VERSIONS_ID_FIELD: &str = "version_id";
+pub(crate) const VERSIONS_ID_FIELD: &str = "version_id";
 /// `GET /retention-rules`'s id tie-breaker column.
-pub const RETENTION_RULES_ID_FIELD: &str = "rule_id";
+pub(crate) const RETENTION_RULES_ID_FIELD: &str = "rule_id";
 
 /// `GET /storages`'s id key (the backend id).
-pub const STORAGES_ID_FIELD: &str = "id";
+pub(crate) const STORAGES_ID_FIELD: &str = "id";
 
 /// Wire value for [`Direction::Forward`].
 const FORWARD: &str = "fwd";
@@ -78,20 +78,20 @@ fn binding_hash(raw: &str) -> Option<String> {
 
 /// `/files` binding: a cursor cannot resume a listing of a different owner pair.
 #[must_use]
-pub fn files_binding(owner: &OwnerFilter) -> Option<String> {
+pub(crate) fn files_binding(owner: &OwnerFilter) -> Option<String> {
     binding_hash(&format!("{}:{}", owner.owner_kind.as_str(), owner.owner_id))
 }
 
 /// `/files/{id}/versions` binding: a cursor cannot resume a listing of another file.
 #[must_use]
-pub fn versions_binding(file_id: Uuid) -> Option<String> {
+pub(crate) fn versions_binding(file_id: Uuid) -> Option<String> {
     binding_hash(&file_id.to_string())
 }
 
 /// Decoded position of the last (backward: first) row of the previous page, plus seek direction.
 #[domain_model]
 #[derive(Debug, Clone, Copy)]
-pub struct Seek {
+pub(crate) struct Seek {
     pub created_at: OffsetDateTime,
     pub id: Uuid,
     pub direction: Direction,
@@ -105,7 +105,7 @@ pub struct Seek {
 /// listing is never reported as a binding mismatch); `FilterMismatch` for a different binding;
 /// `InvalidCursor` for an unrecognized direction; `CursorInvalidKeys`/`CursorInvalidFields` for
 /// a malformed position.
-pub fn seek(
+pub(crate) fn seek(
     cursor: CursorV1,
     id_field: &'static str,
     binding: Option<&str>,
@@ -152,7 +152,7 @@ fn direction_of(cursor: &CursorV1) -> Result<Direction, ODataError> {
 ///
 /// # Errors
 /// `ODataError::InvalidLimit` for `limit == Some(0)`.
-pub fn clamp_limit(limit: Option<u64>, default: u64, max: u64) -> Result<u64, ODataError> {
+pub(crate) fn clamp_limit(limit: Option<u64>, default: u64, max: u64) -> Result<u64, ODataError> {
     match limit {
         Some(0) => Err(ODataError::InvalidLimit),
         Some(requested) => Ok(requested.min(max)),
@@ -199,7 +199,7 @@ pub fn encode(
 ///
 /// # Errors
 /// Whatever [`encode`] returns for a token that fails to serialize.
-pub fn finish_page<T>(
+pub(crate) fn finish_page<T>(
     mut rows: Vec<T>,
     limit: u64,
     after: Option<Seek>,
@@ -277,7 +277,7 @@ fn storages_order() -> ODataOrderBy {
 /// `OrderMismatch` for a cursor of another listing; `FilterMismatch` for a bound cursor;
 /// `CursorInvalidKeys` unless the cursor names exactly one key; `InvalidCursor` for an
 /// unrecognized direction.
-pub fn storage_seek(cursor: CursorV1) -> Result<(String, Direction), ODataError> {
+pub(crate) fn storage_seek(cursor: CursorV1) -> Result<(String, Direction), ODataError> {
     toolkit_odata::validate_cursor_against(&cursor, &storages_order(), None)?;
     if cursor.f.is_some() {
         return Err(ODataError::FilterMismatch);
@@ -314,9 +314,14 @@ fn encode_storage_cursor(id: &str, direction: Direction) -> Result<String, OData
 /// further page on the far side, a supplied cursor proves one on the near side, and an empty
 /// page builds neither cursor.
 ///
+///
+/// Only for small in-memory lists whose size is bounded by configuration (today the sole caller
+/// is the backend registry behind `GET /storages`, built once at startup); never for data read
+/// from the database, which must page with keyset predicates instead.
+///
 /// # Errors
 /// `ODataError::InvalidCursor` if a cursor token fails to serialize.
-pub fn page_by_id<T>(
+pub(crate) fn page_by_id<T>(
     mut items: Vec<T>,
     limit: u64,
     after: Option<(String, Direction)>,

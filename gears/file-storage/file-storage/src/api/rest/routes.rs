@@ -6,7 +6,9 @@ use std::sync::Arc;
 use axum::Router;
 use http::StatusCode;
 use toolkit::api::OpenApiRegistry;
-use toolkit::api::operation_builder::{LicenseFeature, OperationBuilder};
+use toolkit::api::operation_builder::{
+    AuthState, HandlerSlot, LicenseFeature, LicenseState, OperationBuilder,
+};
 use toolkit_gts::gts_id;
 
 use super::dto;
@@ -28,6 +30,45 @@ impl AsRef<str> for License {
 }
 
 impl LicenseFeature for License {}
+
+/// Description of a cursor-paginated listing; `order` is its canonical order.
+fn listing_description(order: &str) -> String {
+    format!(
+        "Keyset pagination in either direction: `limit` (default 25, max 200) and the \
+         opaque `cursor` from the previous page's `page_info.next_cursor` or \
+         `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is \
+         `{order}` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of \
+         `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are \
+         rejected with 400."
+    )
+}
+
+/// The page parameters every listing declares; the `OData` extractor also binds their
+/// `$top`/`$skiptoken` spellings.
+trait PageParams {
+    fn page_params(self) -> Self;
+}
+
+impl<H, R, S, A, L> PageParams for OperationBuilder<H, R, S, A, L>
+where
+    H: HandlerSlot<S>,
+    A: AuthState,
+    L: LicenseState,
+{
+    fn page_params(self) -> Self {
+        self.query_param_typed(
+            "limit",
+            false,
+            "Page size (default 25, max 200); alias `$top`",
+            "integer",
+        )
+        .query_param(
+            "cursor",
+            false,
+            "Opaque continuation token from the previous page; alias `$skiptoken`",
+        )
+    }
+}
 
 /// Register all file-storage control-plane routes and attach the services.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
@@ -161,27 +202,10 @@ pub(crate) fn register_routes(
         .authenticated()
         .require_license_features::<License>([])
         .summary("List a file's versions, newest first (cursor pagination)")
-        .description(
-            "Keyset pagination in either direction: `limit` (default 25, max 200) and the \
-             opaque `cursor` from the previous page's `page_info.next_cursor` or \
-             `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is \
-             `created_at desc, version_id desc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of \
-             `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are \
-             rejected with 400.",
-        )
+        .description(listing_description("created_at desc, version_id desc"))
         .tag(API_TAG)
         .path_param("id", "File UUID")
-        .query_param_typed(
-            "limit",
-            false,
-            "Page size (default 25, max 200); alias `$top`",
-            "integer",
-        )
-        .query_param(
-            "cursor",
-            false,
-            "Opaque continuation token from the previous page; alias `$skiptoken`",
-        )
+        .page_params()
         .handler(handlers::list_versions)
         .json_response_with_schema::<toolkit_odata::Page<dto::VersionDto>>(
             openapi,
@@ -275,28 +299,11 @@ pub(crate) fn register_routes(
         .authenticated()
         .require_license_features::<License>([])
         .summary("List files for an owner (owner_kind + owner_id required, cursor pagination)")
-        .description(
-            "Keyset pagination in either direction: `limit` (default 25, max 200) and the \
-             opaque `cursor` from the previous page's `page_info.next_cursor` or \
-             `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is \
-             `created_at desc, file_id desc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of \
-             `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are \
-             rejected with 400.",
-        )
+        .description(listing_description("created_at desc, file_id desc"))
         .tag(API_TAG)
         .query_param("owner_kind", true, "'user' or 'app'")
         .query_param("owner_id", true, "Owner UUID")
-        .query_param_typed(
-            "limit",
-            false,
-            "Page size (default 25, max 200); alias `$top`",
-            "integer",
-        )
-        .query_param(
-            "cursor",
-            false,
-            "Opaque continuation token from the previous page; alias `$skiptoken`",
-        )
+        .page_params()
         .handler(handlers::list_files)
         .json_response_with_schema::<toolkit_odata::Page<dto::FileDto>>(
             openapi,
@@ -315,26 +322,9 @@ pub(crate) fn register_routes(
         .authenticated()
         .require_license_features::<License>([])
         .summary("List configured storage backends and capabilities (cursor pagination)")
-        .description(
-            "Keyset pagination in either direction: `limit` (default 25, max 200) and the \
-             opaque `cursor` from the previous page's `page_info.next_cursor` or \
-             `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Order is \
-             `id asc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of `limit` and \
-             `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are \
-             rejected with 400.",
-        )
+        .description(listing_description("id asc"))
         .tag(API_TAG)
-        .query_param_typed(
-            "limit",
-            false,
-            "Page size (default 25, max 200); alias `$top`",
-            "integer",
-        )
-        .query_param(
-            "cursor",
-            false,
-            "Opaque continuation token from the previous page; alias `$skiptoken`",
-        )
+        .page_params()
         .handler(handlers::list_storages)
         .json_response_with_schema::<toolkit_odata::Page<dto::StorageDto>>(
             openapi,
@@ -429,26 +419,9 @@ pub(crate) fn register_routes(
         .authenticated()
         .require_license_features::<License>([])
         .summary("List retention rules for the caller's tenant")
-        .description(
-            "Keyset pagination in either direction: `limit` (default 25, max 200) and the \
-             opaque `cursor` from the previous page's `page_info.next_cursor` or \
-             `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is \
-             `created_at desc, rule_id desc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of \
-             `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are \
-             rejected with 400.",
-        )
+        .description(listing_description("created_at desc, rule_id desc"))
         .tag(API_TAG)
-        .query_param_typed(
-            "limit",
-            false,
-            "Page size (default 25, max 200); alias `$top`",
-            "integer",
-        )
-        .query_param(
-            "cursor",
-            false,
-            "Opaque continuation token from the previous page; alias `$skiptoken`",
-        )
+        .page_params()
         .handler(handlers::list_retention_rules)
         .json_response_with_schema::<toolkit_odata::Page<dto::RetentionRuleDto>>(
             openapi,

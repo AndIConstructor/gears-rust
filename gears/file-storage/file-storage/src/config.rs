@@ -9,7 +9,7 @@ use toolkit_utils::SecretString;
 
 /// Absolute ceiling accepted for `max_page_size` (the platform-wide cursor-pagination cap);
 /// `validate()` rejects anything above it.
-pub const MAX_PAGE_SIZE_CEILING: u64 = 200;
+pub(crate) const MAX_PAGE_SIZE_CEILING: u64 = 200;
 
 /// Configuration for the `file-storage` gear.
 ///

@@ -81,7 +81,7 @@ impl FileRepo {
     ///
     /// Callers fetch `limit + 1` rows to detect a further page; this method runs whatever
     /// `limit` it gets.
-    pub async fn list_page<C: DBRunner>(
+    pub(crate) async fn list_page<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,

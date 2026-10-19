@@ -43,7 +43,7 @@ impl RetentionRuleRepo {
     ///
     /// Ordered `(created_at, rule_id)` descending; `params.after` seeks as in
     /// `FileRepo::list_page`, mirrored on `rule_id`.
-    pub async fn list_page<C: DBRunner>(
+    pub(crate) async fn list_page<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,

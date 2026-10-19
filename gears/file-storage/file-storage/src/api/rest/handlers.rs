@@ -102,13 +102,13 @@ fn reject_unknown_plain_keys(
 /// fixed, nothing is filterable and items have no field projection.
 fn reject_unsupported_options(query: &ODataQuery) -> Result<(), CanonicalError> {
     let mut unsupported: Vec<(&str, &str)> = Vec::new();
-    if query.filter.is_some() {
+    if query.has_filter() {
         unsupported.push(("$filter", "filtering is not supported by this listing"));
     }
-    if !query.order.0.is_empty() {
+    if !query.order.is_empty() {
         unsupported.push(("$orderby", "the order of this listing is fixed"));
     }
-    if query.select.is_some() {
+    if query.has_select() {
         unsupported.push(("$select", "this listing has no field projection"));
     }
 

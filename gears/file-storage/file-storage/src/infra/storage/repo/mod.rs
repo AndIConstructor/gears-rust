@@ -80,7 +80,7 @@ pub struct InsertRetentionRule<'a> {
 }
 
 /// Parameters for `RetentionRuleRepo::list_page`.
-pub struct RetentionRuleListParams {
+pub(crate) struct RetentionRuleListParams {
     pub tenant_id: uuid::Uuid,
     /// Already `limit + 1`; this method does not know the `Page` `has_more` convention.
     pub limit: u64,

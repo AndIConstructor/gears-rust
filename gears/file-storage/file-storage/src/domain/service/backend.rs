@@ -161,7 +161,7 @@ impl FileService {
     ///
     /// # Errors
     /// `DomainError::Cursor` for `limit == Some(0)` or a cursor of another listing.
-    pub fn list_backends(
+    pub(crate) fn list_backends(
         &self,
         limit: Option<u64>,
         cursor: Option<CursorV1>,

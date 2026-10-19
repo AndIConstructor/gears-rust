@@ -29280,7 +29280,7 @@
     },
     "/api/file-storage/v1/storages": {
       "get": {
-        "description": "Keyset pagination in either direction: `limit` (default 25, max 200) and the opaque `cursor` from the previous page's `page_info.next_cursor` or `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Order is `id asc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are rejected with 400.",
+        "description": "Keyset pagination in either direction: `limit` (default 25, max 200) and the opaque `cursor` from the previous page's `page_info.next_cursor` or `page_info.prev_cursor`. The response carries `next_cursor` and `prev_cursor`. Canonical order is `id asc` -- see docs/api.md. `$top` and `$skiptoken` are synonyms of `limit` and `cursor`; `$filter`, `$orderby`, `$select` and every other `$` parameter are rejected with 400.",
         "operationId": "file_storage.list_storages",
         "parameters": [
           {

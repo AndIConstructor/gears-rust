@@ -110,7 +110,7 @@ impl VersionRepo {
     /// (backs `GET /files/{id}/versions`). Same canonical order as `list_by_file`; see
     /// `FileRepo::list_page` for the forward/backward predicates, mirrored on `version_id`.
     /// Callers fetch `limit + 1` rows to detect a further page.
-    pub async fn list_by_file_page<C: DBRunner>(
+    pub(crate) async fn list_by_file_page<C: DBRunner>(
         &self,
         conn: &C,
         scope: &AccessScope,
