@@ -13,7 +13,7 @@
 #   include .gears-dna/gears.mk
 #
 # All settings below use ?=, so values from <project>.mk win. Run `make help`
-# for the targets and their parameters. Guide: docs/GEARS_MK.md in the source.
+# for the targets and their parameters. Guide: .gears-dna/docs/GEARS_MK.md in the source.
 
 ifndef GEARS_MK_VERSION
 GEARS_MK_VERSION := 1.0.0

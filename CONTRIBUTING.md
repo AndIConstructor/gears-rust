@@ -152,7 +152,7 @@ Always include unit tests when introducing new code.
 
 The `Makefile` is a driver: it includes `gears-rust.mk` (the targets of this
 repository) and `.gears-dna/gears.mk` (shared rules that other gear projects reuse). See
-[the gears.mk guide](docs/GEARS_MK.md) when adding or changing make targets.
+[the gears.mk guide](.gears-dna/docs/GEARS_MK.md) when adding or changing make targets.
 
 Build and run all the quality checks:
 

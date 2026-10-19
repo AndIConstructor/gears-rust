@@ -1,6 +1,6 @@
 # gears-rust.mk: settings for gears.mk and the make targets of gears-rust.
 # The driver Makefile includes this file first, then .gears-dna/gears.mk (shared rules).
-# See docs/GEARS_MK.md.
+# See .gears-dna/docs/GEARS_MK.md.
 
 # -------- Settings for gears.mk --------
 
