@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use toolkit_macros::domain_model;
 use toolkit_security::SecurityContext;
+use uuid::Uuid;
 
 use super::catalog::PropertyCatalog;
 use super::draft::PlanDraft;
-use super::prompt::{UnusableRecord, instructions, record_input};
+use super::prompt::{UnusableRecord, instructions, message_input, record_input};
 use crate::domain::model_client::{
     AnswerKind, Message, ModelClient, ModelError, ModelOutput, ModelRequest,
 };
@@ -26,6 +27,17 @@ const BYTES_PER_TOKEN: u64 = 4;
 pub struct PlannerCaps {
     pub max_rounds: NonZeroU32,
     pub max_tokens: NonZeroU64,
+}
+
+/// What the subject told an agent, with the agent's recent conversation, for the planner to decide on.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMessage {
+    pub tenant_id: Uuid,
+    pub subject_id: Uuid,
+    pub agent: Uuid,
+    pub message: String,
+    pub conversation: String,
 }
 
 /// Runs the model over a record and a profile until it answers without tool calls, within the caps.
@@ -134,6 +146,40 @@ impl Planner {
         }
     }
 
+    /// The plan for what the subject told an agent, over `profile`. A failure answers its drop reason and sends no
+    /// drop event: there is no record to name, so the caller reports it.
+    ///
+    /// # Errors
+    ///
+    /// The drop reason when a cap is hit or a model call fails.
+    pub async fn plan_message(
+        &self,
+        ctx: &SecurityContext,
+        message: &AgentMessage,
+        profile: Profile,
+    ) -> Result<Plan, DropReason> {
+        let draft = PlanDraft::new(&self.catalog, profile);
+        let input = message_input(message, &draft.numbered_profile());
+        match self.converse(ctx, draft, input).await {
+            Ok(draft) => Ok(draft.finish(
+                message.tenant_id,
+                message.subject_id,
+                Origin::Agent {
+                    agent: message.agent,
+                },
+            )),
+            Err(failure) => {
+                tracing::warn!(
+                    event = "planner_dropped_message",
+                    tenant_id = %message.tenant_id,
+                    kind = failure.kind(),
+                    "planner dropped what a subject told an agent"
+                );
+                Err(failure.reason())
+            }
+        }
+    }
+
     async fn run(
         &self,
         ctx: &SecurityContext,
@@ -141,8 +187,29 @@ impl Planner {
         profile: Profile,
     ) -> Result<Plan, Failure> {
         let subject_id = record.envelope.subject_id.ok_or(Failure::NoSubject)?;
-        let mut draft = PlanDraft::new(&self.catalog, profile);
+        let draft = PlanDraft::new(&self.catalog, profile);
         let input = record_input(record, &draft.numbered_profile()).map_err(Failure::Unusable)?;
+        let mut plan = self.converse(ctx, draft, input).await?.finish(
+            record.tenant_id,
+            subject_id,
+            origin(record),
+        );
+        if let Some(cap) = confidence_cap(record) {
+            for step in &mut plan.steps {
+                step.confidence = step.confidence.map(|confidence| confidence.min(cap));
+            }
+        }
+        Ok(plan)
+    }
+
+    /// Talks to the model over `input` in rounds until it answers without tool calls, and gives back the draft its
+    /// tool calls built.
+    async fn converse<'a>(
+        &self,
+        ctx: &SecurityContext,
+        mut draft: PlanDraft<'a>,
+        input: String,
+    ) -> Result<PlanDraft<'a>, Failure> {
         let input_bytes = u64::try_from(input.len()).unwrap_or(u64::MAX);
         if input_bytes > self.caps.max_tokens.get().saturating_mul(BYTES_PER_TOKEN) {
             return Err(Failure::TokenCap);
@@ -176,15 +243,7 @@ impl Planner {
                 return Err(Failure::TokenCap);
             }
             let calls = match response.output {
-                ModelOutput::Text(_) => {
-                    let mut plan = draft.finish(record.tenant_id, subject_id, origin(record));
-                    if let Some(cap) = confidence_cap(record) {
-                        for step in &mut plan.steps {
-                            step.confidence = step.confidence.map(|confidence| confidence.min(cap));
-                        }
-                    }
-                    return Ok(plan);
-                }
+                ModelOutput::Text(_) => return Ok(draft),
                 ModelOutput::Structured(_) => {
                     return Err(Failure::Model("model_structured_answer"));
                 }

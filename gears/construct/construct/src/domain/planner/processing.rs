@@ -6,10 +6,12 @@ use toolkit_macros::domain_model;
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
-use super::agent::Planner;
+use tokio::time::{Instant, timeout_at};
+
+use super::agent::{AgentMessage, Planner};
 use crate::domain::admission::{Admission, AdmissionOutcome};
 use crate::domain::error::DomainError;
-use crate::domain::plan::Plan;
+use crate::domain::plan::{Change, Plan};
 use crate::domain::profile::Profile;
 use crate::domain::record_intake::{
     DropEvent, DropReason, DropStage, IntakeEvents, ReceivedRecord,
@@ -126,6 +128,74 @@ impl Failure {
     }
 }
 
+/// What a manage-facts call stored, counted by the steps of the written plan: the writer stores a plan whole or not
+/// at all.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Changes {
+    pub added: usize,
+    pub replaced: usize,
+    pub removed: usize,
+}
+
+impl Changes {
+    fn of(plan: &Plan) -> Self {
+        plan.steps
+            .iter()
+            .fold(Self::default(), |changes, step| match step.change {
+                Change::AddEntity { .. } | Change::AddProperty { .. } => Self {
+                    added: changes.added + 1,
+                    ..changes
+                },
+                Change::ReplaceEntity { .. } | Change::ReplaceProperty { .. } => Self {
+                    replaced: changes.replaced + 1,
+                    ..changes
+                },
+                Change::RemoveEntity { .. } | Change::RemoveProperty { .. } => Self {
+                    removed: changes.removed + 1,
+                    ..changes
+                },
+            })
+    }
+}
+
+/// Why a manage-facts call stored nothing. No reason names a blocked or redacted value.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NothingStored {
+    /// The message held nothing to store, or every value it held was blocked.
+    NoChange,
+    /// The deadline passed before the write started.
+    Timeout,
+    Dropped(DropReason),
+}
+
+impl NothingStored {
+    /// The reason's name in the answer and in logs.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NoChange => "no_change",
+            Self::Timeout => "timeout",
+            Self::Dropped(reason) => reason.name(),
+        }
+    }
+}
+
+/// What a manage-facts call did.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Managed {
+    Stored(Changes),
+    NothingStored(NothingStored),
+}
+
+/// A plan ready to write, or why there is none.
+enum Prepared {
+    Write(Plan),
+    Nothing(NothingStored),
+}
+
 /// How one run of the chain ended without a failure of its own.
 enum Run {
     /// Stored, nothing to store, or dropped by a stage that sent its own drop event.
@@ -239,6 +309,90 @@ impl Processing {
             Written::Conflict => Ok(Run::Conflict),
         }
     }
+
+    /// Takes what a subject told an agent through the planner, the checks, Admission and the writer, under the
+    /// caller's own context and scope. The deadline cuts off only the steps before the write: a write that started is
+    /// awaited, so the answer never says nothing changed while the write lands. A conflict plans again on a new read
+    /// while time is left, at most `max_reruns` times.
+    ///
+    /// # Errors
+    ///
+    /// When the profile, the subject's settings, the tenant's rules or the write cannot be reached.
+    ///
+    /// @cpt-dod:cpt-cf-construct-dod-planner-manage:p1
+    pub async fn manage(
+        &self,
+        ctx: &SecurityContext,
+        scope: &AccessScope,
+        message: &AgentMessage,
+        deadline: Instant,
+    ) -> Result<Managed, DomainError> {
+        for _ in 0..=self.max_reruns {
+            let Ok(prepared) = timeout_at(deadline, self.prepare(ctx, scope, message)).await else {
+                return Ok(nothing_stored(message, NothingStored::Timeout));
+            };
+            let plan = match prepared? {
+                Prepared::Write(plan) => plan,
+                Prepared::Nothing(nothing) => return Ok(nothing_stored(message, nothing)),
+            };
+            match self.ports.writer.write(ctx, &plan).await? {
+                Written::Stored => return Ok(Managed::Stored(Changes::of(&plan))),
+                Written::Conflict => {}
+            }
+        }
+        Ok(nothing_stored(
+            message,
+            NothingStored::Dropped(DropReason::RerunLimit),
+        ))
+    }
+
+    async fn prepare(
+        &self,
+        ctx: &SecurityContext,
+        scope: &AccessScope,
+        message: &AgentMessage,
+    ) -> Result<Prepared, DomainError> {
+        let profile = self
+            .ports
+            .profiles
+            .read(ctx, message.tenant_id, message.subject_id)
+            .await?;
+        let plan = match self.planner.plan_message(ctx, message, profile).await {
+            Ok(plan) => plan,
+            Err(reason) => return Ok(Prepared::Nothing(NothingStored::Dropped(reason))),
+        };
+        if plan.steps.is_empty() {
+            return Ok(Prepared::Nothing(NothingStored::NoChange));
+        }
+        let Checked::Verdicts(verdicts) = self.checks.run(&plan).await else {
+            return Ok(Prepared::Nothing(NothingStored::Dropped(
+                DropReason::CheckFailed,
+            )));
+        };
+        let admitted = match self.admission.admit(ctx, scope, plan, &verdicts).await? {
+            AdmissionOutcome::Admitted(admitted) => admitted.plan,
+            AdmissionOutcome::Dropped(reason) => {
+                return Ok(Prepared::Nothing(NothingStored::Dropped(reason)));
+            }
+        };
+        if admitted.steps.is_empty() {
+            return Ok(Prepared::Nothing(NothingStored::NoChange));
+        }
+        Ok(Prepared::Write(admitted))
+    }
+}
+
+/// Logs a manage-facts call that stored nothing, without what the subject said: the caller's audit event, as a plan
+/// without a record has no drop event.
+fn nothing_stored(message: &AgentMessage, nothing: NothingStored) -> Managed {
+    tracing::info!(
+        event = "manage_facts_stored_nothing",
+        tenant_id = %message.tenant_id,
+        agent = %message.agent,
+        reason = nothing.name(),
+        "a manage-facts call stored nothing"
+    );
+    Managed::NothingStored(nothing)
 }
 
 /// Whether a chat message is the subject's own. An assistant message states no fact about the subject, so it never

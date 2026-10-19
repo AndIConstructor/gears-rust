@@ -2,8 +2,9 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use uuid::Uuid;
 
-use super::agent::{Planner, PlannerCaps};
+use super::agent::{AgentMessage, Planner, PlannerCaps};
 use super::test_data::{
     Answer, SUBJECT, ScriptedModel, TENANT, caps, catalog, done, origin, profile, tool_calls, usage,
 };
@@ -394,4 +395,57 @@ async fn a_drop_is_logged_by_its_kind_without_the_prompt_or_the_answer() {
     assert!(logs_contain("kind=\"model_bad_answer\""));
     assert!(logs_contain(&format!("tenant_id={TENANT}")));
     assert!(!logs_contain("contradict"));
+}
+
+fn agent_message() -> AgentMessage {
+    AgentMessage {
+        tenant_id: TENANT,
+        subject_id: SUBJECT,
+        agent: Uuid::from_u128(0x5a),
+        message: "I also know Go.".to_owned(),
+        conversation: "agent: Which languages do you code in?".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn what_a_subject_told_an_agent_becomes_a_plan_with_the_agent_as_origin() {
+    let model = ScriptedModel::answering(vec![Ok(tool_calls(&[add_go()], 900)), Ok(done(950))]);
+    let events = Arc::new(RecordingEvents::default());
+    let planner = Planner::new(model.clone(), Arc::new(catalog()), events.clone(), caps());
+
+    let plan = planner
+        .plan_message(&context_in(TENANT), &agent_message(), profile())
+        .await
+        .expect("a plan");
+
+    assert_eq!((plan.tenant_id, plan.subject_id), (TENANT, SUBJECT));
+    assert_eq!(
+        plan.origin,
+        Origin::Agent {
+            agent: Uuid::from_u128(0x5a)
+        }
+    );
+    assert_eq!(plan.steps.len(), 1);
+    let Message::User(input) = &model.requests()[0].messages[1] else {
+        panic!("the input as the user message");
+    };
+    assert!(
+        input.contains("The person said: \"I also know Go.\""),
+        "{input}"
+    );
+    assert!(events.taken().is_empty());
+}
+
+#[tokio::test]
+async fn a_message_the_planner_drops_answers_its_reason_and_sends_no_drop_event() {
+    let model = ScriptedModel::answering(vec![Err(ModelError::Timeout)]);
+    let events = Arc::new(RecordingEvents::default());
+    let planner = Planner::new(model, Arc::new(catalog()), events.clone(), caps());
+
+    let dropped = planner
+        .plan_message(&context_in(TENANT), &agent_message(), profile())
+        .await;
+
+    assert_eq!(dropped, Err(DropReason::ModelFailed));
+    assert!(events.taken().is_empty());
 }

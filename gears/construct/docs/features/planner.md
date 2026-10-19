@@ -18,6 +18,7 @@
   - [Build the Prompt](#build-the-prompt)
   - [Queue a Received Record](#queue-a-received-record)
   - [Process a Record](#process-a-record)
+  - [Manage What a Subject Told an Agent](#manage-what-a-subject-told-an-agent)
 - [4. States (CDSL)](#4-states-cdsl)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [Numbered Profile](#numbered-profile)
@@ -27,6 +28,8 @@
   - [Prompt](#prompt)
   - [Record Queue](#record-queue)
   - [Processing](#processing)
+  - [Managing Facts](#managing-facts)
+  - [Manage-Facts Route](#manage-facts-route)
 - [6. Acceptance Criteria](#6-acceptance-criteria)
 - [7. Non-Functional Considerations](#7-non-functional-considerations)
 
@@ -148,6 +151,8 @@ which waits for those three and for the admission rules from the deployment conf
 
 1. [ ] - `p1` - A record without a subject is dropped with `processing_failed` before any model call. The plan's
    origin is the record's connector, provenance, version, type and observation time - `inst-loop-record`
+   What a subject told an agent runs through the same loop. The plan's origin is the agent; a failure answers its drop
+   reason to the caller and sends no drop event, as there is no record to name - `inst-loop-message`
 2. [ ] - `p1` - The first request holds the instructions and the record input of the prompt, with the record and the
    profile marked as data, and offers the three tools - `inst-loop-input`
 3. [ ] - `p1` - Each round sends the conversation so far, and asks for an answer no longer than the tokens still left
@@ -195,6 +200,10 @@ which waits for those three and for the admission rules from the deployment conf
 8. [ ] - `p1` - The data holds no `<` or `>`: each is written as its JSON escape, `\u003c` or `\u003e`, which means the
    same character inside a JSON string. A value cannot close the record or the profile block or open another -
    `inst-prompt-data`
+9. [ ] - `p1` - What a subject told an agent comes in its own block, the message and the agent's recent conversation as
+   JSON strings, or "(none)" for no conversation. The instructions treat the message as a user chat message, and the
+   conversation only as what the message refers to: no fact is taken from the conversation alone -
+   `inst-prompt-message`
 7. [ ] - `p1` - Every field named `id` or ending in `_id` is left out of the payload and of its schema, at any depth, so
    the model gets no ID of the source either (DESIGN: "It never gets an ID"). The rule is the same for every record
    type, so a new connector needs no Construct code - `inst-prompt-no-ids`
@@ -235,6 +244,25 @@ which waits for those three and for the admission rules from the deployment conf
 7. [ ] - `p1` - A failed context, profile read, rules read or write drops the record with `processing_failed` at its
    stage. The planner, the checks and Admission send their own drop events, so a record is dropped once -
    `inst-process-drop`
+
+### Manage What a Subject Told an Agent
+
+- [ ] `p1` - **ID**: `cpt-cf-construct-algo-planner-manage`
+
+1. [ ] - `p1` - What a subject told an agent runs through the same chain as a record, under the caller's own security
+   context and scope, and answers at once - `inst-manage-chain`
+2. [ ] - `p1` - A deadline bounds the steps before the write: the profile read, the agent loop, the checks and
+   Admission. Past it, nothing is stored and the answer is `timeout`. A write that started is awaited, so the answer
+   never says nothing was stored while the write lands - `inst-manage-deadline`
+3. [ ] - `p1` - A write conflict plans again on a new read while time is left, up to the rerun limit, then answers
+   `rerun_limit` - `inst-manage-rerun`
+4. [ ] - `p1` - A stored plan answers what it changed, counted by its steps: added, replaced and removed. The writer
+   stores a plan whole or not at all - `inst-manage-changes`
+5. [ ] - `p1` - A call that stores nothing answers why: `no_change` when the message held nothing or every value was
+   blocked, `timeout`, or the drop reason of the planner, the checks or Admission. No reason names a blocked or
+   redacted value, so an agent cannot rephrase until a value gets through. No record drop event is sent; the call is
+   logged without what the subject said - `inst-manage-nothing`
+6. [ ] - `p1` - A failed profile read, settings or rules read, or write is an error to the caller - `inst-manage-error`
 
 ## 4. States (CDSL)
 
@@ -321,7 +349,8 @@ record input with the payload, its schema and the numbered profile, without an I
 **Verified by**: `the_instructions_list_every_property_with_its_cardinality_and_form`,
 `each_record_type_reaches_the_model_with_its_payload_and_schema`, `an_empty_profile_is_said_to_be_empty`,
 `a_record_cannot_close_its_block_or_forge_a_profile`, `a_record_the_model_cannot_be_shown_is_refused`,
-`an_id_nested_in_a_list_of_objects_is_not_shown`, `each_example_in_the_instructions_gets_the_answer_it_shows` and
+`an_id_nested_in_a_list_of_objects_is_not_shown`, `each_example_in_the_instructions_gets_the_answer_it_shows`,
+`what_a_subject_told_an_agent_reaches_the_model_as_data`, `a_message_without_a_conversation_says_so` and
 `the_model_gets_the_record_and_the_profile_as_data_but_no_id`.
 
 ### Record Queue
@@ -358,6 +387,50 @@ record that fails with one content-free event.
 - Code: `domain::planner::processing`, `domain::record_intake::DropReason`
 
 **Verified by**: `domain::planner::processing_test`.
+
+### Managing Facts
+
+- [x] `p1` - **ID**: `cpt-cf-construct-dod-planner-manage`
+
+The system **MUST** take what a subject told an agent through the planner, the checks, Admission and the writer under
+the caller's context, **MUST** answer what it stored or why it stored nothing, and **MUST** cut off only the steps
+before the write at the deadline.
+
+**Implements**:
+- `cpt-cf-construct-algo-planner-manage`
+
+**Touches**:
+- Code: `domain::planner::processing::{Processing::manage, Managed, Changes, NothingStored}`
+
+**Verified by**: `what_a_subject_told_an_agent_is_written_and_counted`, `a_conflict_plans_the_message_again_on_a_new_read`,
+`a_call_that_stores_nothing_answers_why_and_sends_no_record_drop_event`,
+`the_deadline_cuts_off_the_steps_before_the_write`, `a_write_that_started_is_awaited_past_the_deadline` and
+`an_unreachable_profile_is_an_error`.
+
+### Manage-Facts Route
+
+- [x] `p1` - **ID**: `cpt-cf-construct-dod-planner-manage-route`
+
+The system **MUST** offer `POST /api/construct/v1/subjects/{subject_id}/facts/manage`, which takes `message` and
+`conversation` and answers `200` with `outcome` (`stored` or `nothing_changed`), `reason`, and the counts `added`,
+`replaced` and `removed`. It **MUST** answer `404`, as for a subject that does not exist, when the caller may not act
+for the subject: another subject, or no "manage facts" permission from the AuthZ resolver. It **MUST** answer `400`
+naming the field, without a model call, for a `message` longer than 4 000 characters or a `conversation` longer than
+16 000. A blank message stores nothing without a model call. A failed dependency answers `503`. The agent in the plan's origin is the caller the
+platform authenticated, and the steps before the write have a deadline inside the gateway's request timeout.
+
+**Implements**:
+- `cpt-cf-construct-algo-planner-manage`
+
+**Touches**:
+- Code: `domain::planner::manage::ManageFacts`, `api::rest::routes::register_manage_route`,
+  `api::rest::dto::{ManageFactsRequest, ManageFactsResponse}`, `api::rest::error::{for_facts, too_long}`
+
+**Verified by**: `the_subject_gets_what_was_stored`,
+`a_subject_the_caller_may_not_act_for_answers_as_one_that_does_not_exist`,
+`a_text_past_its_limit_is_refused_before_a_model_call`,
+`a_blank_message_stores_nothing_without_a_model_call`, `a_call_with_personalization_off_says_so` and
+`an_unreachable_profile_answers_unavailable`.
 
 ## 6. Acceptance Criteria
 
