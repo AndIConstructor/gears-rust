@@ -66,8 +66,8 @@ Breaking changes to the four list endpoints — `GET /files`, `GET /files/{id}/v
   array.
 - The `cursor` query parameter (taken from `page_info.next_cursor` or `page_info.prev_cursor`) replaces `offset`.
   `offset`, and any other unrecognized query parameter, is rejected with `400`.
-- `limit=0` is rejected with `400`. The default page size is 25 and the maximum is 200; a larger `limit` is
-  clamped down to 200.
+- `limit=0` is rejected with `400`. The default page size is 25; a `limit` above the configured
+  `max_page_size` (200 by default, never more than 200) is clamped down to it.
 - `GET /retention-rules` is now paginated.
 - `GET /storages` now returns `{"items": [{id, capabilities}], "page_info": ...}` instead of a bare JSON array and
   is paginated by cursor.
@@ -215,8 +215,8 @@ PLID-52.06):
   - Both spellings of one parameter in the same request (`limit` with `$top`, or `cursor` with `$skiptoken`) are a
     `400` with reason `INVALID_QUERY_PARAMS`.
   - `limit=0` (or `$top=0`) is a `400` with reason `INVALID_LIMIT`, reported on the field `$top` for either
-    spelling. A value above 200 is not an error — it is silently clamped down to the configured maximum
-    (`max_page_size`, 200 by default).
+    spelling. A value above the configured maximum (`max_page_size`, 200 by default, never more than 200) is
+    not an error — it is silently clamped down to that maximum.
   - Plain (non-`$`) keys accepted: `owner_kind` and `owner_id` (both required), `limit`, `cursor` on `GET /files`;
     `limit` and `cursor` on `GET /files/{id}/versions`, `GET /retention-rules` and `GET /storages`. Any other plain
     key (including the pre-redesign `offset`) is a `400` with reason `UNSUPPORTED_QUERY_PARAM`; the error names the
