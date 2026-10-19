@@ -5,11 +5,13 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 use super::queue::TaskCounts;
 use crate::domain::ports::telemetry_sink::TelemetrySink;
 
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GithubApi {
@@ -17,6 +19,7 @@ pub enum GithubApi {
     Graphql,
 }
 
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestOutcome {
@@ -26,6 +29,7 @@ pub enum RequestOutcome {
     Failed,
 }
 
+#[domain_model]
 #[derive(Debug, Clone, Serialize)]
 pub struct TelemetryEntry {
     pub api: GithubApi,
@@ -43,6 +47,7 @@ pub struct TelemetryEntry {
     pub requested_at: DateTime<Utc>,
 }
 
+#[domain_model]
 #[derive(Debug, Serialize)]
 pub struct TelemetryLine<'a> {
     pub session_id: Uuid,
@@ -61,6 +66,7 @@ struct SessionLog {
     failed: AtomicBool,
 }
 
+#[domain_model]
 #[derive(Debug, Default)]
 pub struct SessionTelemetry {
     rest_calls: AtomicU64,
@@ -209,6 +215,7 @@ impl SessionTelemetry {
     }
 }
 
+#[domain_model]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelemetrySnapshot {

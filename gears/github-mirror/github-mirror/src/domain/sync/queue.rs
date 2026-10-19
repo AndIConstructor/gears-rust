@@ -90,6 +90,7 @@ struct Inner {
     failed: HashMap<Uuid, u64>,
 }
 
+#[domain_model]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TaskCounts {
     pub pending: u64,

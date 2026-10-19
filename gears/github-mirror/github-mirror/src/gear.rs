@@ -44,7 +44,7 @@ use crate::infra::telemetry_sink::JsonlTelemetrySink;
 type ConcreteService = Service;
 
 const GEAR_ACTOR_ID: Uuid = uuid::uuid!("00000000-0000-cf01-0000-676d73797374");
-const SERVICE_SUBJECT_TYPE: &str = "gts.cf.core.security.subject_service.v1~";
+const SERVICE_SUBJECT_TYPE: &str = toolkit_gts::gts_id!("cf.core.security.subject_service.v1~");
 
 async fn github_token(
     ctx: &GearCtx,

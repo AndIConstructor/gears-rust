@@ -60,6 +60,7 @@ const MAX_FILTER_VALUE: usize = 64;
 pub struct SyncQuery {
     /// Bypass the HTTP cache and re-read the whole repository from GitHub.
     pub force: Option<bool>,
+    /// Walk every listing and refine every entity, keeping the HTTP cache.
     pub force_full: Option<bool>,
     /// Comma-separated object types to collect, e.g.
     /// `issues,pull_requests,commits`. Omit to collect the configured set.
@@ -138,6 +139,7 @@ pub struct ResumeQuery {
     pub repo: Option<String>,
     /// Run each resumed sync in force mode.
     pub force: Option<bool>,
+    /// Run each resumed sync in force-full mode.
     pub force_full: Option<bool>,
 }
 

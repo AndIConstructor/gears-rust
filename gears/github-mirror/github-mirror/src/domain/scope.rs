@@ -258,6 +258,7 @@ impl Default for CollectionScope {
 /// Code lines cut from a review comment's `diff_hunk` around the commented
 /// line (PRD §5.19's `--inline-comment-snippet-before/after`): a count per
 /// side, `-1` for the whole side, `0` for none.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InlineCommentSnippets {
