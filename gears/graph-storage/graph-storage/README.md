@@ -17,10 +17,8 @@ plugin contracts (`GraphStoreV1`, `GraphEngineV1`, `EmbeddingProviderV1`).
 
 PostgreSQL 16 or later with the `vector` extension; 18 is what CI runs. No
 other extension and no SQL/PGQ: every traversal hop is two scoped statements.
-The SQL/PGQ hop is retired, because PostgreSQL 19 GA ships without SQL/PGQ
-(reverted in 19 beta 4) and on the reference graph it measured slower than the
-two-query hop (#5267). A database created on a 19 beta by an earlier release
-loses its property graph `kb` to migration `m0010`.
+A database created on a 19 beta by an earlier release loses its property graph
+`kb` to migration `m0010` (#5267).
 
 ## Configuration
 
@@ -30,8 +28,7 @@ graph-storage:
     server: "pg_graph"          # a PostgreSQL 16+ server with pgvector
     dbname: "graph_storage"
   config:
-    traversal_hop: auto         # auto (default) | two_query -- both the two-query
-                                # hop; `pgq` is retired and refused at startup
+    traversal_hop: auto         # auto (default) | two_query; `pgq` is refused
     embedding_dimension: 384    # fixed at migration time
     embedding_provider: onnx    # fake | onnx | remote
     # onnx (feature `onnx`)
@@ -224,10 +221,9 @@ independently developed implementation can reach the service yet; #4873).
 - *Traversal takes explicit seed keys only*, not search hits. Retention under
   a neighborhood budget *is* degree-ordered, and a traversal *does* echo the
   seeds it admitted.
-- *Traversal has one hop backend*, the two-query hop. The SQL/PGQ pattern hop
-  is retired (#5267), and the iterative-CTE hop of ADR-0001 was built on the
-  development stand and is not shipped: measured there on the reference graph,
-  it pays off only at a database round trip of 2 ms or more.
+- *Traversal has one hop backend*, the two-query hop. A single-statement CTE
+  hop paid off on the development stand only at a database round trip of 2 ms
+  or more, and is not shipped.
 - *Four specified tables are not created*: `chunk`, `label`, `label_assignment`
   and `ingest_audit` (chunking, labels and the audit record are deferred).
 - *Hybrid search fails, rather than degrading to its lexical arm,* when the
