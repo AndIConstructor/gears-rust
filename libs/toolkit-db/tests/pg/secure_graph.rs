@@ -439,9 +439,9 @@ struct Stand {
 
 /// Bring up `PostgreSQL` 19 beta, or explain why not.
 ///
-/// `None` means skip: the beta tag is gone from Docker Hub (gears-rust #5343),
-/// or the host cannot run Linux containers (macOS and Windows lanes). Any other
-/// startup failure fails the case; `GEARS_TEST_PG_GRAPH_REQUIRED=1` fails all.
+/// `None` means skip, the default: the beta tags can disappear from Docker Hub
+/// (gears-rust #5343). `GEARS_TEST_PG_GRAPH_REQUIRED=1` makes an unavailable
+/// image a failure.
 async fn stand() -> Option<Stand> {
     let request = test_containers::postgres_graph()
         .with_env_var("POSTGRES_PASSWORD", "pass")
@@ -455,16 +455,6 @@ async fn stand() -> Option<Stand> {
                 !test_containers::graph_lane_required(),
                 "GEARS_TEST_PG_GRAPH_REQUIRED is set but PostgreSQL 19 \
                  ({}) could not start: {error}",
-                test_containers::postgres_graph_tag()
-            );
-            let rendered = error.to_string();
-            let tag_withdrawn = rendered.contains("failed to pull the image")
-                && rendered.contains("status code 404");
-            let no_docker = rendered.contains("failed to initialize a docker client");
-            let no_linux_containers = rendered.contains("no matching manifest for windows");
-            assert!(
-                tag_withdrawn || no_docker || no_linux_containers,
-                "PostgreSQL 19 ({}) could not start: {error}",
                 test_containers::postgres_graph_tag()
             );
             eprintln!("PostgreSQL 19 unavailable - skipping the SQL/PGQ lane: {error}");

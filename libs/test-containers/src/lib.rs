@@ -265,13 +265,12 @@ pub fn clickhouse() -> GenericImage {
     GenericImage::new(CLICKHOUSE_IMAGE.to_owned(), clickhouse_tag())
 }
 
-/// Whether an unavailable `PostgreSQL` 19 image must fail the run rather than
-/// skip it.
+/// Whether an unavailable `PostgreSQL` 19 beta image must fail the run rather
+/// than skip it.
 ///
-/// Defaults to `false` while the image is pre-`GA`: the tag can disappear from
-/// Docker Hub at `GA`, and no lane should go red for that. `CI` sets
-/// `GEARS_TEST_PG_GRAPH_REQUIRED=1` once the lane is meant to be mandatory —
-/// the same shape as `RG_PG_REQUIRE_DOCKER` in resource-group's smoke test.
+/// Off by default: the beta tags can disappear from Docker Hub, and `CI` does
+/// not set it (gears-rust #5343). Set `GEARS_TEST_PG_GRAPH_REQUIRED=1` for a
+/// run that must exercise the `SQL/PGQ` suite.
 #[must_use]
 pub fn graph_lane_required() -> bool {
     flag_from(env_override(ENV_GRAPH_LANE_REQUIRED))
