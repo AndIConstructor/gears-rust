@@ -2790,6 +2790,7 @@ dependencies = [
  "cf-gears-mini-chat",
  "cf-gears-nodes-registry",
  "cf-gears-oagw",
+ "cf-gears-policy-engine",
  "cf-gears-quota-enforcement",
  "cf-gears-quota-enforcement-storage-plugin",
  "cf-gears-resource-group",
@@ -3192,11 +3193,14 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "cf-gears-license-resolver-sdk",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-contract",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-security",
  "cf-gears-types-registry",
  "cf-gears-types-registry-sdk",
  "gts",
@@ -3219,14 +3223,20 @@ name = "cf-gears-license-resolver-sdk"
 version = "0.1.4"
 dependencies = [
  "async-trait",
+ "axum",
+ "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-contract",
  "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-http",
  "cf-gears-toolkit-security",
  "gts",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
+ "utoipa",
  "uuid",
 ]
 
@@ -3537,6 +3547,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-policy-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "cf-gears-admission-control-sdk",
+ "cf-gears-authz-resolver",
+ "cf-gears-authz-resolver-sdk",
+ "cf-gears-policy-engine-sdk",
+ "cf-gears-tenant-resolver",
+ "cf-gears-tenant-resolver-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-db",
+ "cf-gears-toolkit-db-macros",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-odata",
+ "cf-gears-toolkit-policy-evaluation",
+ "cf-gears-toolkit-security",
+ "cf-gears-toolkit-utils",
+ "cf-gears-types-registry",
+ "cf-gears-types-registry-sdk",
+ "gts",
+ "http",
+ "inventory",
+ "lru 0.18.4",
+ "opentelemetry",
+ "parking_lot",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde-saphyr 1.3.0",
+ "serde_json",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "cf-gears-policy-engine-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-contract",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-odata",
+ "cf-gears-toolkit-odata-macros",
+ "cf-gears-toolkit-security",
+ "gts",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "time",
+ "uuid",
+]
+
+[[package]]
 name = "cf-gears-quota-enforcement"
 version = "0.1.0"
 dependencies = [
@@ -3771,7 +3846,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-settings-service"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3818,7 +3893,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-settings-service-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cf-gears-toolkit-canonical-errors",
