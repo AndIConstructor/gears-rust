@@ -122,5 +122,9 @@ use bss_pricing as _;
 
 #[cfg(feature = "admission-control")]
 use admission_control as _;
+
+#[cfg(feature = "policy-engine")]
+use policy_engine as _;
+
 #[cfg(feature = "bss-approvals")]
 use bss_approvals as _;
