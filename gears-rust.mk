@@ -371,9 +371,8 @@ test-graph-storage: install-tools
 
 ## Run the graph-storage gear's PostgreSQL lane (Docker required)
 ## The same conformance suite against the built-in store, plus the cases only a real
-## server can answer. It needs PostgreSQL 16+ **with pgvector**, which
-## `test_containers::postgres_graph()` does not carry, so point
-## GEARS_TEST_PG_GRAPH_IMAGE at one — CI uses pgvector/pgvector:0.8.7-pg18. GEARS_TEST_PG_GRAPH_REQUIRED=1
+## server can answer. It needs PostgreSQL 16+ with pgvector: point
+## GEARS_TEST_PG_GRAPH_IMAGE at one (CI uses pgvector/pgvector:0.8.7-pg18). GEARS_TEST_PG_GRAPH_REQUIRED=1
 ## turns "no such image, skipping" into a failure, so CI cannot go green by
 ## running nothing; that is the default here, because a target whose whole
 ## purpose is the database has no business passing without one.

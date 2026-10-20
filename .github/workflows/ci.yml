@@ -648,10 +648,9 @@ jobs:
   # The gear's whole suite against a real PostgreSQL with pgvector, and its
   # own coverage floor, in one pass.
   #
-  # Two things make this job exist. The lane needs a server with pgvector,
-  # which the platform's `postgres_graph()` pin does not carry, so it runs on
-  # the published pgvector image at a pinned version (PostgreSQL 18: the gear
-  # no longer uses SQL/PGQ, gears-rust #5267). And `nfr-code-coverage` asks for 85% line coverage "enforced in CI": the
+  # Two things make this job exist. The lane needs a server with pgvector, so
+  # it runs on the published pgvector image. And `nfr-code-coverage` asks for
+  # 85% line coverage "enforced in CI": the
   # workspace coverage job reports to Codecov and gates on nothing per crate,
   # while the shared script's project-wide threshold is 80. Without the
   # PostgreSQL lane the figure is ~55%, because the built-in store is the half
@@ -743,9 +742,6 @@ jobs:
           # both directories are.
           CARGO_LLVM_COV_TARGET_DIR: llvm-cov-target
           CARGO_LLVM_COV_BUILD_DIR: llvm-cov-build
-          # The published pgvector image, on the official PostgreSQL base, so the
-          # stock entrypoint testcontainers drives is intact. A versioned tag,
-          # so the lane's server does not move underneath it.
           GEARS_TEST_PG_GRAPH_IMAGE: "pgvector/pgvector:0.8.7-pg18"
           GEARS_TEST_PG_GRAPH_REQUIRED: "1"
         run: |
