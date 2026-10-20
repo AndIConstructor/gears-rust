@@ -29,6 +29,7 @@ updates:
       # RustCrypto crates share trait versions (digest/signature): bumping one
       # alone does not compile (#5350: sha2 0.11 against rsa's digest 0.10).
       # Listed first so these never fall into the patch group below.
+      # pkcs8/sec1 are direct deps locked to rsa's generation (rustls-corecrypto-provider).
       rustcrypto:
         patterns:
           - "aes*"
@@ -44,7 +45,9 @@ updates:
           - "p256"
           - "p384"
           - "pbkdf2"
+          - "pkcs8"
           - "rsa"
+          - "sec1"
           - "sha1"
           - "sha2"
           - "sha3"
