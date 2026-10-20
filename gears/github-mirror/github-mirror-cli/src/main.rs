@@ -579,7 +579,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut loaded = config::load(
             Path::new("does-not-exist.toml"),
-            &[],
+            None,
             StorageFlags {
                 storage_dir: Some(home.path().to_path_buf()),
                 database_url: None,
