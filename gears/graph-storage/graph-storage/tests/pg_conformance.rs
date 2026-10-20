@@ -7,7 +7,7 @@
 //! The lane needs `PostgreSQL` 16 or later **with pgvector**, which the
 //! platform's `postgres_graph()` pin does not carry. Set
 //! `GEARS_TEST_PG_GRAPH_IMAGE` to such an image — CI uses
-//! `pgvector/pgvector:pg18` — to run this lane; otherwise it skips, unless
+//! `pgvector/pgvector:0.8.7-pg18` — to run this lane; otherwise it skips, unless
 //! `GEARS_TEST_PG_GRAPH_REQUIRED` is set, which turns a missing server into a
 //! failure so CI cannot go green by silently running nothing.
 //!
@@ -1782,73 +1782,71 @@ async fn asking_for_degrees_does_not_double_the_hop_edge_budget() {
 /// backend that fell back in silence.
 #[tokio::test]
 async fn a_hop_that_hits_its_edge_budget_reports_it() {
-    {
-        let Some(stand) = stand().await else {
-            return;
-        };
-        let tenant = tenant_on(&stand).await;
-        let scope = AccessScope::for_tenant(tenant);
-        let ctx = conformance::ctx(tenant, &scope, None);
+    let Some(stand) = stand().await else {
+        return;
+    };
+    let tenant = tenant_on(&stand).await;
+    let scope = AccessScope::for_tenant(tenant);
+    let ctx = conformance::ctx(tenant, &scope, None);
 
-        stand
-            .store
-            .register_types(&ctx, conformance::ontology_batch())
-            .await
-            .expect("ontology registers");
+    stand
+        .store
+        .register_types(&ctx, conformance::ontology_batch())
+        .await
+        .expect("ontology registers");
 
-        // A hub with six edges, so a budget of three is inside it.
-        let mut nodes = vec![conformance::node("hub", "hub")];
-        let mut edges = Vec::new();
-        for index in 0..6 {
-            let key = format!("spoke-{index}");
-            nodes.push(conformance::node(&key, &key));
-            edges.push(conformance::edge("hub", &key));
-        }
-        conformance::ingest_batch(stand.store.as_ref(), &ctx, conformance::batch(nodes, edges))
-            .await
-            .expect("the hub commits");
-
-        let ids = stand
-            .store
-            .resolve_node_ids(&ctx, &["hub".to_owned()])
-            .await
-            .expect("the hub resolves");
-        let frontier: Vec<_> = ids.into_iter().map(|(_, id)| id).collect();
-
-        let request = |max_edges_scanned| ExpandRequest {
-            frontier: frontier.clone(),
-            direction: Direction::Either,
-            edge_types: None,
-            labels: None,
-            budget: HopBudget {
-                max_frontier: 1_000,
-                max_edges_scanned,
-            },
-            with_degrees: false,
-        };
-
-        let cut = stand
-            .engine
-            .expand(&ctx, request(3))
-            .await
-            .expect("the hop runs");
-        assert_eq!(
-            cut.truncated,
-            Some(TruncationReason::EdgeScanCap),
-            "a scan stopped by the edge budget must say so"
-        );
-        assert_eq!(cut.edges.len(), 3, "the budget still bounds the work");
-
-        // The same hop inside its budget is not truncated, otherwise the
-        // assertion above would pass on a hop that reports the cap always.
-        let whole = stand
-            .engine
-            .expand(&ctx, request(100))
-            .await
-            .expect("the hop runs");
-        assert_eq!(whole.truncated, None, "an unbounded hop is whole");
-        assert_eq!(whole.edges.len(), 6, "every edge of the hub");
+    // A hub with six edges, so a budget of three is inside it.
+    let mut nodes = vec![conformance::node("hub", "hub")];
+    let mut edges = Vec::new();
+    for index in 0..6 {
+        let key = format!("spoke-{index}");
+        nodes.push(conformance::node(&key, &key));
+        edges.push(conformance::edge("hub", &key));
     }
+    conformance::ingest_batch(stand.store.as_ref(), &ctx, conformance::batch(nodes, edges))
+        .await
+        .expect("the hub commits");
+
+    let ids = stand
+        .store
+        .resolve_node_ids(&ctx, &["hub".to_owned()])
+        .await
+        .expect("the hub resolves");
+    let frontier: Vec<_> = ids.into_iter().map(|(_, id)| id).collect();
+
+    let request = |max_edges_scanned| ExpandRequest {
+        frontier: frontier.clone(),
+        direction: Direction::Either,
+        edge_types: None,
+        labels: None,
+        budget: HopBudget {
+            max_frontier: 1_000,
+            max_edges_scanned,
+        },
+        with_degrees: false,
+    };
+
+    let cut = stand
+        .engine
+        .expand(&ctx, request(3))
+        .await
+        .expect("the hop runs");
+    assert_eq!(
+        cut.truncated,
+        Some(TruncationReason::EdgeScanCap),
+        "a scan stopped by the edge budget must say so"
+    );
+    assert_eq!(cut.edges.len(), 3, "the budget still bounds the work");
+
+    // The same hop inside its budget is not truncated, otherwise the
+    // assertion above would pass on a hop that reports the cap always.
+    let whole = stand
+        .engine
+        .expand(&ctx, request(100))
+        .await
+        .expect("the hop runs");
+    assert_eq!(whole.truncated, None, "an unbounded hop is whole");
+    assert_eq!(whole.edges.len(), 6, "every edge of the hub");
 }
 
 /// The degree a neighborhood ranks by is the neighbour's own connectivity in

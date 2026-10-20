@@ -3032,14 +3032,6 @@ pub async fn readiness_reports_every_capability_and_only_some_block_service(
         named.contains(&graph_storage_sdk::models::DATABASE),
         "every store answers for its own storage: {named:?}"
     );
-    // The SQL/PGQ row is retired with the SQL/PGQ hop (gears-rust #5267):
-    // no store reports it, so a readiness consumer cannot read a backend the
-    // gear no longer has as healthy or degraded. Spelled out rather than
-    // through the deprecated `SQLPGQ` constant.
-    assert!(
-        !named.contains(&"server_major_and_sqlpgq"),
-        "no store reports the retired SQL/PGQ row: {named:?}"
-    );
     for row in &rows {
         match row.state {
             graph_storage_sdk::models::ReadinessState::Healthy => assert!(

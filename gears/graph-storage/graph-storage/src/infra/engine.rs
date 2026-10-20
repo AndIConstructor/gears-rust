@@ -1,11 +1,7 @@
 //! The built-in traversal engine: a directed one-hop primitive over two
 //! scoped statements, the incident edges and then the authorized endpoints.
 //!
-//! It needs no server capability beyond the schema, so it runs on every
-//! PostgreSQL the gear supports. The SQL/PGQ (`GRAPH_TABLE`) hop that used to
-//! sit beside it is retired: PostgreSQL 19 GA ships without SQL/PGQ (reverted
-//! in 19 beta 4), and on the reference graph that hop measured slower than
-//! this one (gears-rust #5267).
+//! It needs no server capability beyond the schema.
 //!
 //! Both directions are collected as one union rather than two membership
 //! tests under a disjunction — `id IN (out) OR id IN (inc)` cannot drive an

@@ -17,7 +17,7 @@
 //! else's number as this gear's.
 //!
 //! ```text
-//! GEARS_GRAPH_PERF=1 GEARS_TEST_PG_GRAPH_IMAGE=pgvector/pgvector:pg18 \
+//! GEARS_GRAPH_PERF=1 GEARS_TEST_PG_GRAPH_IMAGE=pgvector/pgvector:0.8.7-pg18 \
 //!   cargo test --release -p cf-gears-graph-storage --test perf -- --nocapture
 //! ```
 //!

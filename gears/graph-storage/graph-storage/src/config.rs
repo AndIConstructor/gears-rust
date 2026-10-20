@@ -30,13 +30,8 @@ pub enum EmbeddingProviderKind {
 
 /// Which backend serves one-hop expansion.
 ///
-/// There is one: the two-query hop, which runs on every `PostgreSQL` the gear
-/// supports. The key stays so existing configurations keep loading. `pgq`
-/// named the SQL/PGQ (`GRAPH_TABLE`) hop, which is retired: `PostgreSQL` 19
-/// GA ships without SQL/PGQ (reverted in 19 beta 4), and on the reference
-/// graph that hop measured slower than this one (gears-rust #5267). A
-/// configuration that still names it is refused at startup rather than
-/// quietly served by the two-query hop, because it was a demand.
+/// Only the two-query hop exists. The key stays so existing configurations
+/// keep loading; `pgq` is refused at startup (gears-rust #5267).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HopStrategy {
