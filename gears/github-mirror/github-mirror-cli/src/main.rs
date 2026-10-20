@@ -1,3 +1,4 @@
+/// The command implementations, configuration loading and output formatting.
 mod app;
 mod registered_gears;
 
@@ -28,6 +29,7 @@ use crate::app::commands::{self, Entity};
 use crate::app::config::{self, DatabasePlacement, StorageFlags};
 use crate::app::output::{self, OutputFormat};
 
+/// Mirror GitHub repositories into a local database and query them.
 #[derive(Parser)]
 #[command(
     name = "github-mirror",
@@ -118,6 +120,7 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// The command to run.
 #[derive(Subcommand)]
 enum Command {
     #[command(about = "Synchronize a repository")]
@@ -428,6 +431,7 @@ fn init_logging(cli: &Cli) {
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_EVERY: Duration = Duration::from_millis(50);
 
+/// The gear runtime started in this process for one command.
 struct Runtime {
     hub: Arc<ClientHub>,
     cancel: CancellationToken,

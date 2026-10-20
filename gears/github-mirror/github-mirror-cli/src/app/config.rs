@@ -10,28 +10,41 @@ use toolkit::bootstrap::AppConfig;
 use toolkit_utils::SecretString;
 use uuid::Uuid;
 
+/// The built-in configuration that `--print-config` prints.
 pub const DEFAULT_TEMPLATE: &str = include_str!("../default_config.toml");
 
+/// The runtime configuration plus the CLI's own settings.
 pub struct CliConfig {
+    /// The settings the gear runtime starts with.
     pub app: AppConfig,
+    /// The tenant the platform token must belong to, when set.
     pub tenant_id: Option<Uuid>,
 }
 
+/// Where the SQLite database file lives.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DatabasePlacement {
+    /// One file per repository.
     #[value(name = "per_repo")]
     PerRepo,
+    /// One file per organization.
     #[value(name = "per_org")]
     PerOrg,
+    /// One file for every repository.
     #[value(name = "shared")]
     Shared,
 }
 
+/// The storage flags that override the configuration.
 pub struct StorageFlags<'a> {
+    /// The folder for the database and the HTTP cache.
     pub storage_dir: Option<PathBuf>,
+    /// A database URL to use instead of a SQLite file.
     pub database_url: Option<String>,
+    /// Where the SQLite file goes.
     pub database_placement: Option<DatabasePlacement>,
+    /// The repository the command works on, for per-repository placement.
     pub repo: Option<&'a str>,
 }
 
@@ -42,6 +55,7 @@ struct CliTable {
     database_placement: Option<DatabasePlacement>,
 }
 
+/// Merge the configuration file and the flags over the built-in template.
 pub fn load(
     path: &Path,
     github_token: Option<&str>,
@@ -87,6 +101,7 @@ pub fn load(
     })
 }
 
+/// The SQLite database file the configuration points to, if any.
 pub fn sqlite_file(app: &AppConfig) -> Option<PathBuf> {
     let database = app.gears.get("github-mirror")?.get("database")?;
     if let Some(dsn) = database.get("dsn").and_then(Value::as_str) {
@@ -109,6 +124,7 @@ pub fn sqlite_file(app: &AppConfig) -> Option<PathBuf> {
     })
 }
 
+/// The token from the flag or the environment, else from `~/.github-mirror/<file_name>`.
 pub fn resolve_token(given: Option<&SecretString>, file_name: &str) -> Option<SecretString> {
     if let Some(token) = given.and_then(trimmed) {
         return Some(token);
