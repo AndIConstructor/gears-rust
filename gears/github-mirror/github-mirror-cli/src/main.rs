@@ -10,8 +10,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use authn_resolver_sdk::AuthNResolverClient;
 use clap::{Parser, Subcommand};
+use credstore_sdk::{
+    CredStoreClientV1, CredStoreError, SecretRef, SecretValue, SharingMode, WritePrecondition,
+};
 use figment::Figment;
 use figment::providers::Serialized;
+use github_mirror::config::GithubTokenSecret;
 use github_mirror::domain::ports::github::ForceMode;
 use github_mirror::domain::service::{Service, SyncRequest};
 use serde_json::Value;
@@ -284,7 +288,7 @@ async fn run(cli: Cli) -> Result<()> {
     let github_token = config::resolve_token(cli.token.as_ref(), "gh_token.txt");
     let loaded = config::load(
         &cli.config,
-        github_token.as_ref().map(SecretString::expose),
+        github_token.is_some(),
         StorageFlags {
             storage_dir: cli.storage_dir,
             database_url: cli.database_url,
@@ -308,6 +312,10 @@ async fn run(cli: Cli) -> Result<()> {
         command,
         &platform_token,
         loaded.tenant_id,
+        loaded
+            .github_token_secret
+            .as_ref()
+            .zip(github_token.as_ref()),
         database_file.as_deref(),
     )
     .await;
@@ -324,6 +332,7 @@ async fn execute(
     command: Command,
     platform_token: &SecretString,
     tenant_id: Option<Uuid>,
+    github_token: Option<(&GithubTokenSecret, &SecretString)>,
     database_file: Option<&Path>,
 ) -> Result<Value> {
     let service = runtime.service().await?;
@@ -335,6 +344,9 @@ async fn execute(
             "cli.tenant_id is {expected}, but the platform token belongs to tenant {}",
             ctx.subject_tenant_id()
         );
+    }
+    if let Some((secret, token)) = github_token {
+        runtime.save_github_token(&ctx, secret, token).await?;
     }
     match command {
         Command::Sync {
@@ -477,6 +489,41 @@ impl Runtime {
             .await
     }
 
+    async fn save_github_token(
+        &self,
+        ctx: &SecurityContext,
+        secret: &GithubTokenSecret,
+        token: &SecretString,
+    ) -> Result<()> {
+        let credstore = self
+            .wait_for(ClientHub::try_get::<dyn CredStoreClientV1>)
+            .await?;
+        let key = SecretRef::new(secret.key.clone())?;
+        let saved = match credstore
+            .create(
+                ctx,
+                &key,
+                SecretValue::from(token.expose()),
+                SharingMode::Tenant,
+            )
+            .await
+        {
+            Err(CredStoreError::Conflict) => {
+                credstore
+                    .put(
+                        ctx,
+                        &key,
+                        SecretValue::from(token.expose()),
+                        SharingMode::Tenant,
+                        WritePrecondition::Exists,
+                    )
+                    .await
+            }
+            other => other,
+        };
+        saved.map_err(|e| anyhow!("could not save the GitHub token in the credential store: {e}"))
+    }
+
     async fn stop(self) -> Result<()> {
         self.cancel.cancel();
         self.phases
@@ -583,7 +630,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut loaded = config::load(
             Path::new("does-not-exist.toml"),
-            None,
+            false,
             StorageFlags {
                 storage_dir: Some(home.path().to_path_buf()),
                 database_url: None,
@@ -599,7 +646,7 @@ mod tests {
         let runtime = Runtime::start(loaded.app).unwrap();
         let token = SecretString::new("platform");
         let run = |args: &'static [&'static str]| {
-            execute(&runtime, command(args), &token, None, database)
+            execute(&runtime, command(args), &token, None, None, database)
         };
 
         let synced = run(&[

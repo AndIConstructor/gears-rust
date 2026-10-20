@@ -3017,6 +3017,7 @@ dependencies = [
  "cf-gears-authn-resolver-sdk",
  "cf-gears-authz-resolver",
  "cf-gears-credstore",
+ "cf-gears-credstore-sdk",
  "cf-gears-github-mirror",
  "cf-gears-oidc-authn-plugin",
  "cf-gears-single-tenant-tr-plugin",

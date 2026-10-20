@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use toolkit_security::AccessScope;
@@ -285,7 +285,7 @@ impl Drop for Admission<'_> {
 struct RateLimitProbe {
     http: reqwest::Client,
     url: String,
-    token: Option<SecretString>,
+    token: Arc<Token>,
 }
 
 impl std::fmt::Debug for RateLimitProbe {
@@ -304,7 +304,7 @@ impl QuotaProbe for RateLimitProbe {
             .get(&self.url)
             .header("Accept", ACCEPT_JSON)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
-        if let Some(token) = &self.token {
+        if let Some(token) = self.token.get().await.ok()? {
             request = request.bearer_auth(token.expose());
         }
         let body: serde_json::Value = request
@@ -391,6 +391,42 @@ fn cache_partition(options: &FetchOptions) -> (AccessScope, uuid::Uuid) {
     }
 }
 
+#[async_trait]
+pub(crate) trait TokenSource: Send + Sync {
+    async fn token(&self) -> Result<Option<SecretString>, DomainError>;
+}
+
+struct Token {
+    value: tokio::sync::OnceCell<Option<SecretString>>,
+    source: OnceLock<Arc<dyn TokenSource>>,
+}
+
+impl Token {
+    async fn get(&self) -> Result<Option<&SecretString>, DomainError> {
+        let value = self
+            .value
+            .get_or_try_init(|| async {
+                match self.source.get() {
+                    Some(source) => source.token().await,
+                    None => Ok(None),
+                }
+            })
+            .await?;
+        Ok(value.as_ref())
+    }
+}
+
+fn refuse_cleartext(api_base_url: &str, parsed: &url::Url) -> Result<(), DomainError> {
+    if parsed.scheme() == "http" && !is_loopback(parsed) {
+        return Err(DomainError::internal(format!(
+            "the GitHub API base URL {} uses http, which would send the token in cleartext; \
+             use https, or a loopback host for local testing",
+            redacted_word(api_base_url)
+        )));
+    }
+    Ok(())
+}
+
 /// GitHub REST client for the mirror (gears-rust#4630).
 ///
 /// Conditional requests, `Link`-header pagination and per-token rate-limit
@@ -400,7 +436,7 @@ pub struct GithubClient {
     http: reqwest::Client,
     api_base_url: String,
     api_origin: url::Origin,
-    token: Option<SecretString>,
+    token: Arc<Token>,
     cache: Arc<dyn HttpCache>,
     /// Ceiling on requests in flight, shared by every sync using this client.
     /// GitHub's secondary rate limit reacts to concurrency, so the ceiling is
@@ -455,12 +491,8 @@ impl GithubClient {
             }))
             .build()
             .map_err(|e| DomainError::internal(format!("failed to build HTTP client: {e}")))?;
-        if parsed.scheme() == "http" && token.is_some() && !is_loopback(&parsed) {
-            return Err(DomainError::internal(format!(
-                "the GitHub API base URL {} uses http, which would send the token in cleartext; \
-                 use https, or a loopback host for local testing",
-                redacted_word(&api_base_url)
-            )));
+        if token.is_some() {
+            refuse_cleartext(&api_base_url, &parsed)?;
         }
         let api_origin = parsed.origin();
         if matches!(api_origin, url::Origin::Opaque(_)) {
@@ -469,11 +501,15 @@ impl GithubClient {
                 redacted_word(&api_base_url)
             )));
         }
+        let token = Arc::new(Token {
+            value: tokio::sync::OnceCell::new_with(token.map(Some)),
+            source: OnceLock::new(),
+        });
         let controller = Arc::new(RateLimitController::new());
         controller.set_quota_probe(Arc::new(RateLimitProbe {
             http: http.clone(),
             url: format!("{}/rate_limit", api_base_url.trim_end_matches('/')),
-            token: token.clone(),
+            token: Arc::clone(&token),
         }));
         Ok(Self {
             http,
@@ -488,6 +524,16 @@ impl GithubClient {
             upstream_backoff: UPSTREAM_BACKOFF,
             max_retry_sleep: MAX_RETRY_SLEEP,
         })
+    }
+
+    pub(crate) fn set_token_source(&self, source: Arc<dyn TokenSource>) -> Result<(), DomainError> {
+        let parsed = url::Url::parse(&self.api_base_url)
+            .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?;
+        refuse_cleartext(&self.api_base_url, &parsed)?;
+        self.token
+            .source
+            .set(source)
+            .map_err(|_| DomainError::internal("the GitHub client already has a token source"))
     }
 
     #[must_use]
@@ -685,13 +731,14 @@ impl GithubClient {
         &self,
         url: &str,
         cached: Option<&CachedResponse>,
+        token: Option<&SecretString>,
     ) -> reqwest::RequestBuilder {
         let mut request = self
             .http
             .get(url)
             .header("Accept", ACCEPT_JSON)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
-        if let Some(token) = &self.token {
+        if let Some(token) = token {
             request = request.bearer_auth(token.expose());
         }
         match cached {
@@ -769,6 +816,7 @@ impl GithubClient {
         self.check_origin(url)?;
         let key = CacheKey::compute("GET", url, ACCEPT_JSON);
         let cached = self.cached_entry(options, url, &key).await;
+        let token = self.token.get().await?;
         let sent = Sent {
             api: GithubApi::Rest,
             url,
@@ -785,7 +833,7 @@ impl GithubClient {
             let (admission, permit) = self.admit(&options.telemetry, &options.cancel).await?;
             let (outcome, took) = self
                 .send(
-                    self.conditional_request(url, cached.as_ref()),
+                    self.conditional_request(url, cached.as_ref(), token),
                     &sent,
                     &options.telemetry,
                     &options.cancel,
@@ -1108,6 +1156,7 @@ impl GithubClient {
             url: &url,
             etag_used: false,
         };
+        let token = self.token.get().await?;
 
         let mut attempt: u32 = 0;
         let mut upstream_attempt: u32 = 0;
@@ -1123,7 +1172,7 @@ impl GithubClient {
                 .http
                 .post(&url)
                 .json(&serde_json::json!({ "query": query, "variables": variables }));
-            if let Some(token) = &self.token {
+            if let Some(token) = token {
                 request = request.bearer_auth(token.expose());
             }
             let (outcome, took) = self.send(request, &sent, telemetry, cancel).await?;
@@ -3467,7 +3516,7 @@ impl GithubPort for GithubClient {
             .get(&url)
             .header("Accept", ACCEPT_JSON)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
-        if let Some(token) = &self.token {
+        if let Some(token) = self.token.get().await? {
             request = request.bearer_auth(token.expose());
         }
         let body: serde_json::Value = request
