@@ -974,7 +974,7 @@ Depth-limited expansion is the graph-native query shape; it needs dedicated, ben
 
 ##### Responsibility scope
 
-Owns the `GraphQueryPort` — the gear's graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`). Engines behind the port declare capabilities (neighborhood, bounded traversal, shortest path, pattern queries, in-engine analytics) and answer undeclared operations with a typed not-implemented error. The default plugin is the built-in PostgreSQL engine, and it is bound to the built-in store rather than to any `GraphStoreV1`: it walks by issuing SQL against that store's own node and edge tables — the property graph is defined over them, and a hop joins them in one statement, which is what ADR-0001's single store buys — so it cannot serve a store whose rows live elsewhere. A store plugin that keeps its rows elsewhere brings its own engine, or declares traversal unsupported; the two ports are separate so that either can be replaced, not so that any engine composes with any store. It has three execution paths, selected by configuration, of which the shipped gear carries two (`traversal_hop: auto | pgq | two_query`; the iterative-CTE hop was built on the development stand, ADR-0001, and is not in this gear): SQL/PGQ (`CREATE PROPERTY GRAPH` over node/edge tables, direction-explicit `GRAPH_TABLE` hop patterns; serves fixed-depth shapes from the first release), iterative CTE (depth-bounded expansion over the indexed edge table, one scoped statement per hop with the frontier deduplicated between hops; serves bounded variable-depth shapes until PG20-class quantifiers), and the two-query scoped hop that needs no platform capability beyond entity queries. The paths return identical results for the same seeds and scope, which is what makes the selection a configuration detail; when the configured path cannot serve a request — a `GRAPH_TABLE` pattern must be bounded to an enumerable set of tenants, and `allow_all` and tenant-subtree scopes are not — the port serves it on the two-query hop and logs the reason rather than substituting quietly. Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status. The port accepts the caller's compiled `AccessScope` as a mandatory input and expands only the caller-authorized induced subgraph — seeds authorized before expansion, unauthorized nodes never entering frontiers or visited sets, budgets and truncation computed on authorized rows, hydration under the same scope and snapshot (Authorization Model, Read Consistency Contract); unsupported scope properties fail closed rather than degrading to tenant-only filtering.
+Owns the `GraphQueryPort` — the gear's graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`). Engines behind the port declare capabilities (neighborhood, bounded traversal, shortest path, pattern queries, in-engine analytics) and answer undeclared operations with a typed not-implemented error. The default plugin is the built-in PostgreSQL engine, and it is bound to the built-in store rather than to any `GraphStoreV1`: it walks by issuing SQL against that store's own node and edge tables — a hop reads them with two scoped statements, which is what ADR-0001's single store buys — so it cannot serve a store whose rows live elsewhere. A store plugin that keeps its rows elsewhere brings its own engine, or declares traversal unsupported; the two ports are separate so that either can be replaced, not so that any engine composes with any store. It has one execution path, the two-query scoped hop, which needs no platform capability beyond entity queries: `traversal_hop` takes `auto` or `two_query`, both this hop, and `pgq` is refused at startup since the SQL/PGQ hop was retired (2026-10-14, gears-rust #5267); the iterative-CTE hop was built on the development stand (ADR-0001) and is not in this gear. Seed resolution (explicit keys and/or hybrid hits); breadth-first expansion treating edges as undirected; per-hop edge-type restriction; output node-type filtering; node/edge budgets with seeds-survive-truncation semantics; hydrated subgraph responses with truncation status. The port accepts the caller's compiled `AccessScope` as a mandatory input and expands only the caller-authorized induced subgraph — seeds authorized before expansion, unauthorized nodes never entering frontiers or visited sets, budgets and truncation computed on authorized rows, hydration under the same scope and snapshot (Authorization Model, Read Consistency Contract); unsupported scope properties fail closed rather than degrading to tenant-only filtering.
 
 ##### Responsibility boundaries
 
@@ -1820,13 +1820,10 @@ replacement can only delete rows the caller could have written.
   way and used by traversal.
 
 **5. Traversal path.** Not exercised by ingest — recorded here because the
-question was asked against this example. A read that does traverse picks its
-path by configuration, and when the configured path cannot serve the request the
-port serves it on the two-query hop and logs the reason rather than substituting
-quietly: a `GRAPH_TABLE` pattern has to be bounded to an enumerable set of
-tenants, which `allow_all` and tenant-subtree scopes are not. All three paths
-return identical results for the same seeds and scope, which is what makes the
-choice a configuration detail rather than a semantic one.
+question was asked against this example. A read that does traverse takes the
+two-query hop, the only path since the SQL/PGQ hop was retired (2026-10-14,
+gears-rust #5267), so the path no longer depends on configuration or on the
+caller's scope.
 
 **6. The response.** Success, with `report_per_item` unset (this is the wire
 shape; an earlier draft of this example sketched nested `nodes`/`edges` count
@@ -2818,7 +2815,7 @@ Every attempted logical mutation writes a payload-free audit record, linked dura
 
 ### Traversal Backend Sketch
 
-**Retired, 2026-10-14 (ADR-0001 addendum, gears-rust #5267):** the built-in engine has one backend, the two-query hop. PostgreSQL 19 GA ships without SQL/PGQ, and on the reference graph (100k nodes / 500k edges, release build) the pattern hop measured slower than the two-query hop — typed depth-3 traversal p50 ~305 ms against ~113 ms — and returned a different region on a budget-cut hop (#5332). The SQL/PGQ material below is the record of what was built and measured on the 19 betas, kept for a PostgreSQL 20 revisit; the rules for the two-query hop (one union over the endpoint columns, narrow projections, scope on every statement) still bind.
+**Retired, 2026-10-14 (ADR-0001 addendum, gears-rust #5267):** the built-in engine has one backend, the two-query hop. PostgreSQL 19 GA ships without SQL/PGQ, and on the reference graph on the development stand (100k nodes / 500k edges, release build) the pattern hop measured slower than the two-query hop — typed depth-3 traversal p50 ~305 ms against ~113 ms — and returned a different region on a budget-cut hop (#5332). The SQL/PGQ material below is the record of what was built and measured on the 19 betas, kept for a PostgreSQL 20 revisit; the rules for the two-query hop (one union over the endpoint columns, narrow projections, scope on every statement) still bind.
 
 The `GraphQueryPort` is the graph-engine plugin surface (`cpt-cf-graph-storage-contract-graph-engine-plugin`): engines declare capabilities and answer undeclared operations with a typed not-implemented error. The built-in PostgreSQL engine is the default plugin; its execution paths implement the same port contract (seeds, bounded expansion, per-hop filters, budgets, truncation semantics).
 
@@ -2916,14 +2913,15 @@ apart:
 | Answer | `Unsupported` from the affected method, capability absent from readiness | The request is **declined**, not failed |
 | Gateway behavior | An explicitly configured selector that matches nothing **never** silently substitutes — deterministic selection error and a readiness failure | Route to another implementation that can serve it, or to the built-in store; log the declining implementation and the reason |
 
-The request-level case is not hypothetical, and it is why capability could not be
-a startup-only property. A `GRAPH_TABLE` pattern accepts no subquery, so a scope
+The request-level case was not hypothetical while the SQL/PGQ hop shipped (retired
+2026-10-14, gears-rust #5267), and it is why capability is not a startup-only
+property. A `GRAPH_TABLE` pattern accepted no subquery, so a scope
 carrying `InGroupSubtree` compiles to a correlated sibling `FROM` item — and two
 OR-ed constraints that each need one cannot be comma-joined without zeroing or
-multiplying the result, so that shape is refused. A CTE body cannot express a
+multiplying the result, so that shape was refused. A CTE body cannot express a
 scope whose filters reach beyond tenant at all. Both are properties of *the
 caller's `AccessScope`*, unknowable at startup: the same deployment, the same
-configuration, serves one caller through `GRAPH_TABLE` and the next through the
+configuration, served one caller through `GRAPH_TABLE` and the next through the
 two-query hop.
 
 A decline is therefore a first-class outcome, distinct from an error:

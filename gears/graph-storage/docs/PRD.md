@@ -180,7 +180,7 @@ Several platform initiatives need to persist and query relationships between het
 
 ### 3.1 Gear-Specific Environment Constraints
 
-- Requires PostgreSQL 16 or later with the `pgvector` extension and permission to create extensions in the gear's database; no other PostgreSQL extension is required, and no SQL/PGQ: every traversal hop is the two-query hop on every server. *Amended 2026-10-14:* the SQL/PGQ backend this constraint once described as a PostgreSQL 19 capability is retired, because PostgreSQL 19 GA ships without SQL/PGQ (reverted in 19 beta 4) and the pattern hop measured slower than the two-query hop (ADR-0001 addendum, gears-rust #5267)
+- Requires PostgreSQL 16 or later with the `pgvector` extension and permission to create extensions in the gear's database; no other PostgreSQL extension is required, and SQL/PGQ is not required: every traversal hop is the two-query hop on every server. *Amended 2026-10-14:* the SQL/PGQ backend this constraint once described as a PostgreSQL 19 capability is retired, because PostgreSQL 19 GA ships without SQL/PGQ (reverted in 19 beta 4) and the pattern hop measured slower than the two-query hop (ADR-0001 addendum, gears-rust #5267)
 - Requires an embedding provider: either an in-process ONNX model runtime bundled with the gear or network access to a remote embedding inference endpoint, per deployment configuration
 - Whole-graph analytics is a separate deployment unit (`graph-analytics`, graph-analytics ADR-0002) that reads this gear's schema over a read-only role; a deployment that installs it must budget memory for that gear's topology ceiling, and one that does not gets projections without metric annotations
 - Depends on the file-storage gear when heavy-content offloading is enabled; the graph gear itself never stores blobs
@@ -1053,7 +1053,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Types Registry gear | Platform registration of the gear's GTS base types and permission instances | p1 |
 | Embedding provider | In-process ONNX runtime or remote inference endpoint producing fixed-dimension vectors | p1 |
 | File Storage gear | Blob storage for heavy content referenced from node payloads | p2 |
-| ToolKit `toolkit-db` safe-CTE API | Not a dependency of the shipped gear: every hop is the two-query hop, two scoped statements through the secure ORM. A scoped single-statement path (the CTE half merged as `toolkit-db` PR #4584) is a future option for tail latency at a database round trip of 2 ms or more, measured 2026-10-13; the SQL/PGQ half (PR #4639, `SecureGraphSelect`) is no longer used by the gear (gears-rust #5267) | — |
+| ToolKit `toolkit-db` safe-CTE API | Not a dependency of the shipped gear: every hop is the two-query hop, two scoped statements through the secure ORM. A scoped single-statement path (the CTE half merged as `toolkit-db` PR #4584) is a future option for tail latency at a database round trip of 2 ms or more, measured on the development stand 2026-10-13; the SQL/PGQ half (PR #4639, `SecureGraphSelect`) is no longer used by the gear (gears-rust #5267) | — |
 
 ## 11. Assumptions
 
@@ -1076,7 +1076,7 @@ The gear **MUST** maintain at least 85% line coverage across its library crates.
 | Shared ontologies evolve incompatibly across producers | Ingest failures or semantic drift between producers | Conflict-rejecting registration by default; an in-place update only for a change proved backward compatible, which is the property that actually keeps older derived types valid (ADR-0006); family patterns; a new major for anything else |
 | PostgreSQL 19 GA slips, or a PG19 beta regression hits the pinned stack | The gear ships on a beta database longer than planned | **Realized, differently:** 19 beta 4 reverted SQL/PGQ and GA ships without it. Mitigated by retiring the SQL/PGQ hop: the gear runs on stock PostgreSQL 16+ with pgvector, and its lane on 18 (ADR-0001 addendum, gears-rust #5267) |
 | ~~SQL/PGQ variable-length paths arrive later than PG20~~ | Retired with the SQL/PGQ hop (gears-rust #5267): every hop, at every depth, is the two-query hop | — |
-| The `toolkit-db` scoped single-statement API is not delivered | Single-statement traversal and hybrid composition stay unavailable; each hop costs extra database round trips | Not a risk to viability: the shipped gear serves every hop with two scoped statements, inside the traversal NFR at the reference scale (depth-3 neighborhood p95 under 200 ms at +2 ms database RTT, measured 2026-10-13). A single-statement hop measured worth having only at a round trip of 2 ms or more |
+| The `toolkit-db` scoped single-statement API is not delivered | Single-statement traversal and hybrid composition stay unavailable; each hop costs extra database round trips | Not a risk to viability: the shipped gear serves every hop with two scoped statements. Its latency at the reference scale stays unclaimed until a full-scale run is recorded in this repository. A single-statement hop is a later option where the database round trip makes it worth having |
 
 ## 13. Open Questions
 

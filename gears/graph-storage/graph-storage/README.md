@@ -226,8 +226,8 @@ independently developed implementation can reach the service yet; #4873).
   seeds it admitted.
 - *Traversal has one hop backend*, the two-query hop. The SQL/PGQ pattern hop
   is retired (#5267), and the iterative-CTE hop of ADR-0001 was built on the
-  development stand and is not shipped: measured on the reference graph it
-  pays off only at a database round trip of 2 ms or more.
+  development stand and is not shipped: measured there on the reference graph,
+  it pays off only at a database round trip of 2 ms or more.
 - *Four specified tables are not created*: `chunk`, `label`, `label_assignment`
   and `ingest_audit` (chunking, labels and the audit record are deferred).
 - *Hybrid search fails, rather than degrading to its lexical arm,* when the
