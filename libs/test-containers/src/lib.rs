@@ -67,16 +67,8 @@ use testcontainers_modules::{mysql::Mysql, postgres::Postgres};
 /// Tag of the official `postgres` image. The workspace floor.
 pub const POSTGRES_TAG: &str = "18-alpine";
 
-/// Tag of the `postgres` image for `toolkit-db`'s `SQL/PGQ` (`GRAPH_TABLE`)
-/// integration suite.
-///
-/// **Beta-only, and it stays a beta.** `PostgreSQL` reverted `SQL/PGQ` in 19
-/// beta 4, so 19 GA ships without it and moving this to `19-alpine` would make
-/// every property-graph statement a syntax error; 19 beta 1–3 are the only
-/// servers that run that suite (gears-rust #5343, secure-orm ADR-0002). Beta
-/// tags are routinely withdrawn from Docker Hub after `GA`, which is why
-/// [`graph_lane_required()`] defaults to `false` and the CI step that runs the
-/// suite does not require it either.
+/// Tag of the `postgres` image for `toolkit-db`'s `SQL/PGQ` suite. A beta on
+/// purpose: 19 GA ships without `SQL/PGQ` (gears-rust #5343).
 pub const POSTGRES_GRAPH_TAG: &str = "19beta3-alpine";
 
 /// Tag of the official `mysql` image.
@@ -238,9 +230,7 @@ pub fn postgres_tagged(fallback: &str) -> ContainerRequest<Postgres> {
     ContainerRequest::from(Postgres::default()).with_tag(tag)
 }
 
-/// A `PostgreSQL` 19 beta container request, for the `SQL/PGQ` suites; see
-/// [`POSTGRES_GRAPH_TAG`]. The graph-storage gear's lane overrides the image
-/// with one that carries pgvector.
+/// A `PostgreSQL` 19 beta container request; see [`POSTGRES_GRAPH_TAG`].
 pub fn postgres_graph() -> ContainerRequest<Postgres> {
     ContainerRequest::from(Postgres::default()).with_tag(postgres_graph_tag())
 }

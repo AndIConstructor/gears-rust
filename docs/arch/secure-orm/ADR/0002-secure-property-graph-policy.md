@@ -8,7 +8,7 @@ decision-makers: Constructor Fabric steering committee
 
 **ID**: `cpt-cf-adr-secure-property-graph-policy`
 
-> **Deferred until PostgreSQL 20, 2026-10-14** (gears-rust #5343). PostgreSQL reverted SQL/PGQ in 19 beta 4 (2026-09-24); 19 GA ships without `CREATE PROPERTY GRAPH` / `GRAPH_TABLE`, and PostgreSQL 20 is the earliest it can return. The re-validation this ADR requires "at GA" therefore cannot happen at 19 and moves to the PostgreSQL 20 betas. The policy and the `pgq` feature stay as written — the graph builder, its unit suites and trybuild guards keep running in CI, and the integration suite runs while a 19 beta 1–3 image is pullable, without being required. The one consumer, the graph-storage gear, has retired its SQL/PGQ hop (gears-rust #5267, #5337). Whether the feature is kept for a future consumer (the infrastructure-resource-manager graph named below) or removed at the PostgreSQL 20 betas is the owners' decision recorded in #5343.
+> **Deferred until PostgreSQL 20, 2026-10-14** (gears-rust #5343). PostgreSQL 19 GA ships without SQL/PGQ (reverted in 19 beta 4), so the re-validation "at GA" moves to the PostgreSQL 20 betas; until then the integration suite runs only while a 19 beta image is pullable.
 
 ## Context and Problem Statement
 
