@@ -237,7 +237,12 @@ jobs:
           tool: cargo-hack, nextest, cargo-llvm-cov
 
       - name: Install sccache
+        # Without `version` the action queries the GitHub releases API on every job,
+        # which exhausted the installation rate limit during a Dependabot burst
+        # (2026-10-14). The pin must be bumped by hand.
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.18.0"
 
       - name: Probe sccache & set RUSTC_WRAPPER
         shell: bash
