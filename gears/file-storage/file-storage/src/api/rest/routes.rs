@@ -622,3 +622,7 @@ pub(crate) fn register_routes(
         .layer(axum::Extension(multipart_service))
         .layer(axum::Extension(service))
 }
+
+#[cfg(test)]
+#[path = "routes_tests.rs"]
+mod routes_tests;
