@@ -134,11 +134,14 @@ ensure-submodules:
 		echo "ERROR: Uninitialized git submodules detected. Run 'git submodule update --init --recursive'." && exit 1; \
 	fi
 
-# Run markdown checks with 'lychee'
+# Run markdown checks with 'lychee'.
+# Mirrors the pre-commit hook's scope: every tracked .md outside docs/web-docs (that tree has
+# Starlight route-relative links, see web-docs-check). git ls-files does not descend into the
+# guidelines/DNA submodule, so it is passed explicitly.
 lychee: ensure-submodules
 	$(call print_target_banner)
 	$(call check_tool,lychee)
-	lychee --exclude-path 'docs/web-docs' docs examples guidelines gears/system/event-broker/docs studio-kit-gears
+	git ls-files -z '*.md' ':!:docs/web-docs/**' | xargs -0 lychee --offline --no-progress --config lychee.toml guidelines/DNA
 
 ## Validate internal links in web-docs.
 # The web-docs pages use Starlight route-relative links (e.g. ../foo/) that only

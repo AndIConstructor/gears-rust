@@ -1242,8 +1242,8 @@ LLM Gateway exposes a REST API (documented in DESIGN.md) and the `llm-gateway-sd
 
 ## 14. Traceability
 
-- **Design**: [DESIGN.md](./DESIGN.md) — not yet created
-- **ADRs**: [ADR/](./ADR/) — not yet created
+- **Design**: `DESIGN.md` — not yet created
+- **ADRs**: `ADR/` — not yet created
 - **Design inputs**: provider plugins proposal (plugin trait, settings schemas, P1 scope); LLM Gateway integration diagrams (deployment, OAGW integration, eval flow)
 - **SDK**: `llm-gateway-sdk` (`LlmGatewayClientV1`, `LlmGatewayProviderPluginClientV1`, `LlmGatewayProviderPluginSpecV1`)
 - **Decomposition**: Not yet created — planned for feature-level breakdown

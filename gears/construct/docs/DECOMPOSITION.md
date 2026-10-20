@@ -139,7 +139,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - None. `construct__foundation_notes` is a placeholder without a DESIGN id and is not counted as Data.
 
-### 2.2 [Model Client](features/model-client.md) - HIGH
+### 2.2 Model Client - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-model-client`
 
@@ -191,7 +191,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - None.
 
-### 2.3 [Subject Settings](features/subject-settings.md) - HIGH
+### 2.3 Subject Settings - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-subject-settings`
 
@@ -248,7 +248,7 @@ The DESIGN's largest component, subject control, is split across four features. 
   - [ ] `p1` - `cpt-cf-construct-dbtable-subject-settings`
   - [ ] `p1` - `cpt-cf-construct-entity-subject-settings`
 
-### 2.4 [Record Intake](features/record-intake.md) - HIGH
+### 2.4 Record Intake - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-record-intake`
 
@@ -308,7 +308,7 @@ The DESIGN's largest component, subject control, is split across four features. 
   - [ ] `p1` - `cpt-cf-construct-dbtable-record-ids`
   - [ ] `p1` - `cpt-cf-construct-entity-record`
 
-### 2.5 [Planner](features/planner.md) - HIGH
+### 2.5 Planner - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-planner`
 
@@ -364,7 +364,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - [ ] `p1` - `cpt-cf-construct-entity-plan`
 
-### 2.6 [Sensitive-Data Checks](features/sensitive-data-checks.md) - HIGH
+### 2.6 Sensitive-Data Checks - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-sensitive-data-checks`
 
@@ -417,7 +417,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - [ ] `p1` - `cpt-cf-construct-entity-sensitive-data-verdict`
 
-### 2.7 [Admission](features/admission.md) - HIGH
+### 2.7 Admission - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-admission`
 
@@ -471,7 +471,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - None. Admission only reads the subject settings table, which belongs to `cpt-cf-construct-feature-subject-settings`.
 
-### 2.8 [Profile Writer](features/profile-writer.md) - HIGH
+### 2.8 Profile Writer - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-profile-writer`
 
@@ -531,7 +531,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - [ ] `p1` - `cpt-cf-construct-entity-profile`
 
-### 2.9 [Profile Reader](features/profile-reader.md) - HIGH
+### 2.9 Profile Reader - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-profile-reader`
 
@@ -587,7 +587,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - None. The reader only reads graph storage and the subject settings table.
 
-### 2.10 [Subject Control](features/subject-control.md) - HIGH
+### 2.10 Subject Control - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-subject-control`
 
@@ -647,7 +647,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - None. The view reads the settings table and graph storage.
 
-### 2.11 [Review Queue](features/review-queue.md) - HIGH
+### 2.11 Review Queue - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-review-queue`
 
@@ -717,7 +717,7 @@ The DESIGN's largest component, subject control, is split across four features. 
   - [ ] `p1` - `cpt-cf-construct-dbtable-review-requests`
   - [ ] `p1` - `cpt-cf-construct-entity-review-request`
 
-### 2.12 [Administrator Fact Management](features/admin-facts.md) - MEDIUM
+### 2.12 Administrator Fact Management - MEDIUM
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-feature-admin-facts`
 
@@ -781,7 +781,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - None.
 
-### 2.13 [Agent Access over MCP](features/mcp-tools.md) - MEDIUM
+### 2.13 Agent Access over MCP - MEDIUM
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-feature-mcp-tools`
 
@@ -839,7 +839,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - None.
 
-### 2.14 [Erasure](features/erasure.md) - HIGH
+### 2.14 Erasure - HIGH
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-feature-erasure`
 
@@ -899,7 +899,7 @@ The DESIGN's largest component, subject control, is split across four features. 
 
   - None. Erasure removes rows from tables that other features own.
 
-### 2.15 [Retention and Tenant Exit](features/retention.md) - MEDIUM
+### 2.15 Retention and Tenant Exit - MEDIUM
 
 - [ ] `p2` - **ID**: `cpt-cf-construct-feature-retention`
 
