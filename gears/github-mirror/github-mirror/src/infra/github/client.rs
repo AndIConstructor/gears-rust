@@ -391,6 +391,7 @@ fn cache_partition(options: &FetchOptions) -> (AccessScope, uuid::Uuid) {
     }
 }
 
+/// Where the client gets its GitHub token the first time it needs one.
 #[async_trait]
 pub(crate) trait TokenSource: Send + Sync {
     async fn token(&self) -> Result<Option<SecretString>, DomainError>;
@@ -526,6 +527,7 @@ impl GithubClient {
         })
     }
 
+    /// Read the token from `source` on the first GitHub request instead of a fixed one.
     pub(crate) fn set_token_source(&self, source: Arc<dyn TokenSource>) -> Result<(), DomainError> {
         let parsed = url::Url::parse(&self.api_base_url)
             .map_err(|e| DomainError::internal(format!("invalid GitHub API base URL: {e}")))?;
