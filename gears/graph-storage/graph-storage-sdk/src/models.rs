@@ -263,8 +263,7 @@ impl ComponentReadiness {
 /// Matrix row names, spelled once so the endpoint and the documentation cannot
 /// drift apart.
 pub const DATABASE: &str = "database_and_migrations";
-/// The SQL/PGQ row, which the gear no longer reports: the SQL/PGQ hop is
-/// retired (gears-rust #5267).
+/// The retired SQL/PGQ row; readiness has no such row.
 #[deprecated(note = "the SQL/PGQ hop is retired (gears-rust #5267); readiness has no such row")]
 pub const SQLPGQ: &str = "server_major_and_sqlpgq";
 pub const EMBEDDING_PROVIDER: &str = "embedding_provider";

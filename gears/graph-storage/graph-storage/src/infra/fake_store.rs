@@ -1510,7 +1510,6 @@ impl graph_storage_sdk::plugin_api::GraphEngineV1 for FakeGraphEngine {
             degrees,
             edges: out_edges,
             truncated: None,
-            // The fake walks in memory; it has no pattern backend to decline.
             served_by: graph_storage_sdk::plugin_api::HopBackend::TwoQuery,
         })
     }

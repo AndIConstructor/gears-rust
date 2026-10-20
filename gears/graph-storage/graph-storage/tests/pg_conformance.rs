@@ -164,7 +164,7 @@ async fn stand() -> Option<Stand> {
     if graph_image().is_none() && !test_containers::graph_lane_required() {
         eprintln!(
             "GEARS_TEST_PG_GRAPH_IMAGE is unset and the platform pin ({}) has no pgvector - \
-             skipping the SQL/PGQ lane",
+             skipping the PostgreSQL lane",
             test_containers::postgres_graph_tag()
         );
         return None;
@@ -520,7 +520,7 @@ pg_case!(
 );
 
 /// Readiness against a real server: the database row is healthy because the
-/// migrations ran, and the SQL/PGQ row reports what this server could provide.
+/// migrations ran.
 #[tokio::test]
 async fn readiness_reports_every_capability_and_only_some_block_service() {
     let Some(stand) = stand().await else {
@@ -1150,14 +1150,9 @@ async fn the_hop_and_the_filtered_listing_have_an_index_to_use() {
     );
 }
 
-/// `m0010` drops the SQL/PGQ property graph an earlier release created, and
-/// does nothing on a server that never had one (gears-rust #5267).
-///
-/// The graph can exist only on `PostgreSQL` 19 beta 1–3, where `m0002` used to
-/// create it. Here it is re-created by operator surgery with the DDL that
-/// release emitted; a server that refuses the statement has no SQL/PGQ, and on
-/// it the case shows that the migration is a no-op, which is every server CI
-/// runs. Against a beta 1–3 image it shows the drop.
+/// `m0010` drops a property graph `m0002` left behind, and does nothing on a
+/// server without SQL/PGQ, which is every server CI runs. Against a 19 beta
+/// 1–3 image the case re-creates the graph and shows the drop.
 #[tokio::test]
 async fn m0010_drops_the_retired_property_graph_where_one_exists() {
     use sea_orm::ConnectionTrait as _;
