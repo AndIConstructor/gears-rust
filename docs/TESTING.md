@@ -16,7 +16,7 @@ build whenever feasible.
 
 | Layer | Scope | Tooling | Feature gate | Runs in CI |
 |-------|-------|---------|--------------|------------|
-| **Unit** | Single function / struct / gear in isolation | `cargo test --workspace` | none (always compiled) | Every PR (`ci.yml` — `test` job, all OS) |
+| **Unit** | Single function / struct / gear in isolation | `cargo test --workspace` | none (always compiled) | Every PR on Ubuntu (`ci.yml` — `test` job); macOS and Windows nightly (`macos-windows-tests.yml`) |
 | **Integration** | Cross-crate or DB-backed logic (SQLite, Postgres, MySQL) | `cargo test -p <pkg> --features integration` | `#[cfg(feature = "integration")]` | Every PR (`ci.yml` — `integration` job, Ubuntu) |
 | **E2E** | Full HTTP request → response through a running server | pytest + httpx against `cf-gears-example-server` | n/a (Python tests) | PRs to `main`, nightly schedule (`e2e.yml`) |
 | **Fuzz** | Parser / validator robustness against arbitrary input | `cargo-fuzz` (libFuzzer) | nightly toolchain | PRs + nightly (`clusterfuzzlite.yml`) |
@@ -456,7 +456,9 @@ Gear runtime settings are YAML-driven under `gears:<gear_name>:` with a `config`
 ```
 PR opened / updated
   ├── ci.yml
-  │     ├── test          — fmt + clippy + unit tests (Ubuntu, macOS, Windows)
+  │     ├── clippy        — clippy
+  │     ├── repo-checks   — repo file checks (gear names, release config)
+  │     ├── test          — unit tests (Ubuntu)
   │     ├── integration   — DB integration tests (Ubuntu)
   │     ├── test-fips     — FIPS verification / platform-specific FIPS test lanes
   │     ├── security      — cargo-deny
@@ -477,6 +479,7 @@ Additional quality workflows
   └── pr-reviewer-check.yml — reviewer assignment hygiene
 
 Nightly (schedule)
+  ├── macos-windows-tests.yml — unit tests on macOS and Windows (auto-creates issue on failure)
   ├── e2e.yml              — full E2E + specialized E2E lanes (auto-creates issue on failure)
   ├── clusterfuzzlite      — fuzz testing
   ├── codeql.yml           — scheduled code scanning
