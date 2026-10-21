@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
-use super::{GithubClient, MAX_BODY_BYTES, RateLimitHeaders, graphql_url, read_capped};
+use super::{GithubApi, GithubClient, MAX_BODY_BYTES, RateLimitHeaders, graphql_url, read_capped};
 use crate::domain::error::DomainError;
 use crate::domain::sync::SessionTelemetry;
 
@@ -68,7 +68,7 @@ async fn a_backoff_set_while_a_request_waits_for_its_permit_holds_that_request_b
     let cancel = CancellationToken::new();
     let held = client.permits.acquire().await.unwrap();
 
-    let admitted = client.admit(&telemetry, &cancel);
+    let admitted = client.admit(GithubApi::Rest, &telemetry, &cancel);
     tokio::pin!(admitted);
     assert!(
         tokio::time::timeout(Duration::from_millis(50), &mut admitted)

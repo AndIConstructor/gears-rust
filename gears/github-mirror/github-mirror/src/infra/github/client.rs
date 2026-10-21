@@ -33,8 +33,8 @@ use crate::infra::github::compression::MAX_BODY_BYTES;
 use crate::infra::github::metrics::{GithubRequestMetrics, Outcome};
 use crate::infra::github::pagination::parse_link_next;
 use crate::infra::github::rate_limit::{
-    AuthoritativeQuota, ControllerRegistry, QuotaProbe, RateLimitController, RateLimitHeaders,
-    TokenPool,
+    AuthoritativeQuota, ControllerRegistry, PooledToken, QuotaProbe, RateLimitController,
+    RateLimitHeaders, TokenPool,
 };
 use crate::redact::redacted_word;
 
@@ -272,12 +272,12 @@ fn fallback_delay(attempt: u32) -> std::time::Duration {
 /// Releases the token's in-flight slot when dropped, so an admitted request
 /// counts against its controller exactly as long as it is in flight.
 struct Admission<'a> {
-    controller: &'a RateLimitController,
+    pooled: &'a PooledToken,
 }
 
 impl Drop for Admission<'_> {
     fn drop(&mut self) {
-        self.controller.release();
+        self.pooled.controller.release();
     }
 }
 
@@ -572,14 +572,16 @@ impl GithubClient {
     /// cancelled run gives up the wait instead of holding the shutdown.
     async fn admit(
         &self,
+        api: GithubApi,
         telemetry: &SessionTelemetry,
         cancel: &CancellationToken,
     ) -> Result<(Admission<'_>, SemaphorePermit<'_>), DomainError> {
         let pool = self.pool().await?;
         loop {
+            let pooled = pool.pick(api == GithubApi::Graphql).await;
             let asked = Instant::now();
             tokio::select! {
-                admitted = pool.first().controller.admit() => {
+                admitted = pooled.controller.admit() => {
                     let parked = admitted
                         .map_err(|e| DomainError::internal(format!("GitHub rate limit: {e}")))?;
                     if parked {
@@ -588,15 +590,13 @@ impl GithubClient {
                 }
                 () = cancel.cancelled() => return Err(DomainError::Cancelled),
             }
-            let admission = Admission {
-                controller: &pool.first().controller,
-            };
+            let admission = Admission { pooled };
             let permit = tokio::select! {
                 permit = self.permits.acquire() => permit
                     .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?,
                 () = cancel.cancelled() => return Err(DomainError::Cancelled),
             };
-            if !pool.first().controller.backing_off().await {
+            if !pooled.controller.backing_off().await {
                 return Ok((admission, permit));
             }
         }
@@ -668,6 +668,7 @@ impl GithubClient {
     /// Feed a response's rate-limit headers to the token's controller.
     async fn observe(
         &self,
+        controller: &RateLimitController,
         headers: &reqwest::header::HeaderMap,
         status: reqwest::StatusCode,
     ) -> RateLimitHeaders {
@@ -677,12 +678,9 @@ impl GithubClient {
                 .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
         );
         seen.is_secondary_rate_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
-        if let Some(pool) = self.pool.get() {
-            pool.first()
-                .controller
-                .observe(&seen, status.as_u16(), self.max_cap)
-                .await;
-        }
+        controller
+            .observe(&seen, status.as_u16(), self.max_cap)
+            .await;
         seen
     }
 
@@ -829,7 +827,6 @@ impl GithubClient {
         self.check_origin(url)?;
         let key = CacheKey::compute("GET", url, ACCEPT_JSON);
         let cached = self.cached_entry(options, url, &key).await;
-        let token = self.pool().await?.first().token.as_ref();
         let sent = Sent {
             api: GithubApi::Rest,
             url,
@@ -843,10 +840,12 @@ impl GithubClient {
         // A retry gives them up first: a request asleep on a backoff is not
         // in flight.
         let (body, etag, last_modified, next_page, _admission, _permit, mut line) = loop {
-            let (admission, permit) = self.admit(&options.telemetry, &options.cancel).await?;
+            let (admission, permit) = self
+                .admit(GithubApi::Rest, &options.telemetry, &options.cancel)
+                .await?;
             let (outcome, took) = self
                 .send(
-                    self.conditional_request(url, cached.as_ref(), token),
+                    self.conditional_request(url, cached.as_ref(), admission.pooled.token.as_ref()),
                     &sent,
                     &options.telemetry,
                     &options.cancel,
@@ -868,7 +867,9 @@ impl GithubClient {
             };
 
             let status = response.status();
-            let seen = self.observe(response.headers(), status).await;
+            let seen = self
+                .observe(&admission.pooled.controller, response.headers(), status)
+                .await;
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
                 self.count(
                     &options.telemetry,
@@ -1169,23 +1170,24 @@ impl GithubClient {
             url: &url,
             etag_used: false,
         };
-        let pool = self.pool().await?;
 
         let mut attempt: u32 = 0;
         let mut upstream_attempt: u32 = 0;
         // GraphQL shares the REST ceilings: both spend the same token's
         // budget, though the controller only reads the core budget headers.
         let (body, _admission, _permit, mut line) = loop {
-            if let Some(wait) = pool.first().controller.graphql_wait().await {
+            let (admission, permit) = self.admit(GithubApi::Graphql, telemetry, cancel).await?;
+            if let Some(wait) = admission.pooled.controller.graphql_wait().await {
+                drop(permit);
+                drop(admission);
                 self.pause(wait, telemetry, cancel).await?;
                 continue;
             }
-            let (admission, permit) = self.admit(telemetry, cancel).await?;
             let mut request = self
                 .http
                 .post(&url)
                 .json(&serde_json::json!({ "query": query, "variables": variables }));
-            if let Some(token) = &pool.first().token {
+            if let Some(token) = &admission.pooled.token {
                 request = request.bearer_auth(token.expose());
             }
             let (outcome, took) = self.send(request, &sent, telemetry, cancel).await?;
@@ -1207,7 +1209,9 @@ impl GithubClient {
             };
 
             let status = response.status();
-            let seen = self.observe(response.headers(), status).await;
+            let seen = self
+                .observe(&admission.pooled.controller, response.headers(), status)
+                .await;
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
                 self.count(
                     telemetry,
@@ -1269,9 +1273,10 @@ impl GithubClient {
                 GraphqlRead::Unread(e) => return Err(ReadFailure::Transport(e).into_error()),
                 GraphqlRead::RateLimited { delay, .. } if attempt < RATE_LIMIT_RETRIES => {
                     report_graphql_budget(attempt, delay);
+                    let pooled = admission.pooled;
                     drop(permit);
                     drop(admission);
-                    pool.first().controller.hold_graphql(delay).await;
+                    pooled.controller.hold_graphql(delay).await;
                     attempt += 1;
                 }
                 GraphqlRead::RateLimited { body, bytes, .. }

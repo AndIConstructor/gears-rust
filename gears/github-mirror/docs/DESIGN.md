@@ -158,7 +158,7 @@ The gear is started and stopped by the framework. `stop()` cancels the pool and 
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-one-token`
 
-`github_token_secret` names the GitHub token's secret in the credential store, or a list of secrets for several tokens; all are read on the gear's first request to GitHub and kept until a restart, and until the token pool lands ([#5367](https://github.com/constructorfabric/gears-rust/issues/5367)) every request uses the first. All tenants' syncs share its rate limit, so a backoff pauses every request made with it. A token per tenant is future work. Unknown keys in the gear's config are refused at start-up, so the `github_token` key of earlier builds fails loudly instead of leaving the gear unauthenticated.
+`github_token_secret` names the GitHub token's secret in the credential store, or a list of secrets for several tokens; all are read on the gear's first request to GitHub and kept until a restart. Each request goes to the token with the most calls left above its reserve that is not backing off; when none is ready, it waits for the one ready soonest ([#5367](https://github.com/constructorfabric/gears-rust/issues/5367)). All tenants' syncs share these tokens' rate limits, so a backoff on one token moves requests to the others. A token per tenant is future work. Unknown keys in the gear's config are refused at start-up, so the `github_token` key of earlier builds fails loudly instead of leaving the gear unauthenticated.
 
 #### Tenant Isolation in Storage
 
