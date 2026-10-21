@@ -1,5 +1,5 @@
 ---
-description: "Use Open Responses as the single public protocol of the LLM Gateway gear for REST and SDK, with Gateway extensions in a reserved namespace."
+description: "Use Open Responses as the single public protocol of the LLM Gateway gear for REST and SDK, with Gateway-owned types under the `cf_gears:` prefix."
 status: accepted
 date: 2026-10-19
 ---
@@ -33,7 +33,7 @@ The LLM Gateway gives platform gears one API over many LLM providers. It needs o
 
 ## Decision Drivers
 
-* Backward compatibility within a major version (`cpt-cf-llm-gateway-nfr-compatibility-v1`).
+* Backward compatibility within a major version (`cpt-cf-llm-gateway-nfr-compatibility-v1`, a p2 requirement).
 * One contract for REST and SDK, so the REST layer is a projection of the SDK models (`cpt-cf-llm-gateway-principle-sdk-first-v1`).
 * Provider-specific items, tools, and parameters must pass through without loss (`cpt-cf-llm-gateway-principle-normalize-and-preserve-v1`).
 * The Gateway is stateless and does not rely on provider-side conversation state, so the protocol must work with the full input sent on each request.
@@ -56,14 +56,14 @@ Chosen option: "Open Responses as the single public contract, with Gateway exten
 
 This ADR decides:
 
-* Open Responses is the wire contract of the Gateway for create response (sync and streaming) and embeddings, on REST and in the SDK.
-* Gateway-owned types, tools, and fields live in a reserved Gateway namespace, so they cannot collide with Open Responses or provider names.
-* Extension types that the Gateway does not know are preserved verbatim, never dropped or rewritten.
+* Open Responses is the wire contract of the Gateway for create response (sync and streaming), on REST and in the SDK.
+* Embeddings use a Gateway-defined request and response (the SDK `EmbeddingRequest` and `EmbeddingResponse`) on `/llm-gateway/v1/embeddings`, outside the Open Responses specification, and follow the same versioning and `cf_gears:` extension rules.
+* The reserved Gateway namespace is the `cf_gears:` prefix: Gateway-owned types, tools, items, and stream events use it (for example `cf_gears:web_search` and `cf_gears:response.data.done`), so they cannot collide with Open Responses or provider names. Gateway extension fields on Open Responses objects (such as `ignored_parameters`) are additive optional fields defined in the SDK models.
+* Input items, output items, tools, and stream events of types the Gateway does not know are carried as `Other` (`Extension`) values in the SDK models and relayed unchanged, never dropped or rewritten. Provider-specific request parameters travel in `extra_fields`, subject to the model's `allow_extra_params`.
 * The contract evolves by additive changes inside a version; breaking changes need a new version.
 
 This ADR does not decide:
 
-* The concrete namespace prefix. The product documents and the SDK use different prefixes today. Choosing one is a separate decision (see `cpt-cf-llm-gateway-principle-sdk-first-v1` and DESIGN § 4.10).
 * The error envelope. RFC 9457 Problem with the Open Responses `code` is a separate ADR.
 * Whether a Chat Completions compatibility layer is built, and when.
 * The Open Responses specification revision to pin.
@@ -72,19 +72,18 @@ This ADR does not decide:
 
 * REST paths are versioned (`/llm-gateway/v1/...`) and SDK traits carry the `V1` suffix. A breaking change creates a new version beside the old one.
 * Within a version, changes are additive only: new optional fields, new event types, new extension types. Consumers must ignore fields and event types they do not know.
-* Gateway-specific behavior is expressed as extensions in the reserved namespace. No Gateway feature adds a new top-level concept outside Open Responses.
-* Extension items, tools, and parameters that the Gateway does not recognize are carried through request, plugin, and response paths unchanged, in line with normalize-and-preserve.
-* The SDK is the code form of this contract and the REST layer projects it, as stated by `cpt-cf-llm-gateway-principle-sdk-first-v1`. This ADR does not settle which document wins when SDK and DESIGN differ.
+* Gateway-specific behavior is expressed as additive fields and `cf_gears:` types inside the Open Responses model. Embeddings are the only Gateway-defined operation outside Open Responses, and they follow the same versioning and `cf_gears:` extension rules.
+* Items, tools, and stream events of unknown types are carried as `Other` values through request, plugin, and response paths unchanged, in line with normalize-and-preserve. Unknown top-level request fields are not part of the contract and are ignored on deserialization.
+* The SDK models are the normative form of this contract and the REST layer projects them (`cpt-cf-llm-gateway-principle-sdk-first-v1`).
 * The Gateway tracks one Open Responses specification revision. The revision to pin cannot be decided from the current sources and is a follow-up. Until it is pinned, fixtures and conformance checks have no fixed reference.
-* The Open Responses name for the async flag is `background`. PRD UC-013 says `async=true`. The PRD wording must be aligned to `background`; the DESIGN already uses `background`.
-* Stateless operation follows from the protocol use: the Gateway rejects `previous_response_id`, `store=true`, and `item_reference`, although the specification defines them.
-* The SDK changes in DESIGN § 4.10 that follow from this decision are: `CreateResponseBody` gains `stream` and `background` and rejects the stateful fields; `ResponseResource` and `Usage` gain the Gateway fields (ignored parameters, provider details, cost, completeness flags) as extensions; provider-specific parameters use the existing extra-field mechanism.
-* The namespace prefix decision must be taken before any Gateway-owned type is published, because the prefix becomes part of the wire contract.
-* Existing consumers of llm-connectors use an OpenAI Chat Completions style API and need a client change to call the Gateway. The size of that change, and whether a compatibility layer is needed, is an open question in PRD § 13 and DESIGN § 4.11.
+* Async (background) responses are P2 and outside the P1 DESIGN. Open Responses names the flag `background`, and the PRD and DESIGN use that name when async jobs are designed; PRD UC-013 currently says `async=true`, and aligning it is a P2 follow-up.
+* Stateless operation follows from the protocol use: `previous_response_id` and `store` are not part of the Gateway request model, and the SDK input item `item_reference` (a reference to a stored item) is rejected with `capability_not_supported`, because the Gateway keeps no state.
+* Gateway additions to Open Responses objects (ignored parameters, provider details, AI credit cost, completeness flags) are additive optional fields in the SDK models; provider-specific parameters use the SDK `extra_fields` mechanism.
+* Existing consumers of llm-connectors use an OpenAI Chat Completions style API and need a client change to call the Gateway. The size of that change, and whether a compatibility layer is needed, is an open question in PRD § 13 and DESIGN § 4.10.
 * Performance: relaying typed events adds no buffering of whole responses; no measurable cost is expected beyond mapping at the plugin boundary.
 * Security: the typed contract gives one place to validate input; the verbatim preservation rule means unknown content is relayed, so it must not be interpreted or logged in full by the Gateway.
 * Reliability: additive-only evolution lets old and new instances serve the same clients during rolling upgrades.
-* Data: no new persistent data; stored job records, where present, hold Open Responses shaped results.
+* Data: P1 adds no persistent data. From P2, async and batch job records persisted by the Gateway on behalf of consumers hold Open Responses shaped results.
 * Integration: provider plugins map each provider API to and from this contract; the mapping effort is paid once in the plugin, not by every consumer.
 * Operations: contract changes are reviewed as API changes and released with a version policy.
 * Testing: conformance can be tested with recorded fixtures, see Confirmation.
@@ -92,10 +91,9 @@ This ADR does not decide:
 
 ### Confirmation
 
-* Contract tests run the Gateway against recorded Open Responses fixtures for create response, streaming events, and embeddings, as stated in the DESIGN verification row for `cpt-cf-llm-gateway-nfr-compatibility-v1`.
-* An OpenAPI diff check in CI rejects breaking changes inside a version.
-* Tests confirm that unknown extension types and unknown fields survive a request and response round trip unchanged.
-* Design review checks that new Gateway features use the reserved namespace.
+* SDK tests serialize the request, response, and streaming event models to, and deserialize them from, recorded Open Responses payloads for create response, sync and streaming.
+* Code review of the SDK models confirms that every Gateway-owned tool, item, and stream event type uses the `cf_gears:` prefix.
+* REST paths are registered under `/llm-gateway/v1`, and the OpenAPI document is generated from the SDK models.
 
 ### Review and Supersession
 
@@ -105,7 +103,7 @@ Review this ADR when a new Open Responses revision breaks compatibility with the
 
 ### Open Responses as the single public contract, with Gateway extensions in a reserved namespace
 
-One protocol on REST and in the SDK; Gateway additions live in a reserved namespace.
+One protocol on REST and in the SDK; Gateway-owned types live in the reserved `cf_gears:` namespace.
 
 * Good, because typed items and typed streaming events cover text, tool calls, and reasoning in one model.
 * Good, because the specification defines extension points, so Gateway features do not need a private protocol.
@@ -146,8 +144,8 @@ Open Responses is the contract, and the Gateway also serves a Chat Completions e
 
 ## More Information
 
-* Related pending decisions: the reserved namespace prefix, the Open Responses revision to pin, the error envelope (RFC 9457 Problem with the Open Responses `code`), and the Chat Completions compatibility layer.
-* Related decisions in the Key ADRs table of the DESIGN: normalize and preserve provider-specific content, and stateless processing.
+* Related pending decisions: the Open Responses revision to pin, the error envelope (RFC 9457 Problem with the Open Responses `code`), and the Chat Completions compatibility layer.
+* Related DESIGN principles: `cpt-cf-llm-gateway-principle-normalize-and-preserve-v1` and `cpt-cf-llm-gateway-principle-stateless-processing-v1`.
 
 ## Traceability
 
@@ -156,12 +154,13 @@ Open Responses is the contract, and the Gateway also serves a Chat Completions e
 
 This decision directly addresses the following requirements or design elements:
 
-* `cpt-cf-llm-gateway-nfr-compatibility-v1` — versioned paths, additive-only evolution, and Open Responses alignment follow from this decision.
+* `cpt-cf-llm-gateway-nfr-compatibility-v1` (p2) — versioned paths, additive-only evolution, and Open Responses alignment follow from this decision.
 * `cpt-cf-llm-gateway-fr-chat-completion-v1` — request and response formats follow the Open Responses contract.
 * `cpt-cf-llm-gateway-fr-streaming-v1` — streaming uses Open Responses events.
-* `cpt-cf-llm-gateway-fr-embeddings-v1` — embeddings are part of the single public protocol.
+* `cpt-cf-llm-gateway-fr-embeddings-v1` — embeddings use a Gateway-defined request and response outside Open Responses, under the same versioning and `cf_gears:` extension rules.
 * `cpt-cf-llm-gateway-interface-rest-api-v1` — the REST API is a projection of the Open Responses based SDK models.
 * `cpt-cf-llm-gateway-interface-client-sdk-v1` — the SDK carries the Open Responses models as the code form of the contract.
 * `cpt-cf-llm-gateway-principle-sdk-first-v1` — this decision defines the protocol of the SDK-first contract.
-* `cpt-cf-llm-gateway-principle-normalize-and-preserve-v1` — unknown extension types are preserved verbatim.
+* `cpt-cf-llm-gateway-principle-normalize-and-preserve-v1` — items, tools, and stream events of unknown types are carried as `Other` values and relayed unchanged.
+* `cpt-cf-llm-gateway-principle-stateless-processing-v1` — the request model carries no provider-side state fields, and `item_reference` input items are rejected.
 * `cpt-cf-llm-gateway-design-llm-gateway-v1` — the public protocol of the overall design.
