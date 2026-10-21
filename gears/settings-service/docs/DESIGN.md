@@ -1,5 +1,5 @@
 Created:  2026-07-28 by Virtuozzo International GmbH
-Updated:  2026-09-23 by Virtuozzo International GmbH
+Updated:  2026-10-08 by Virtuozzo International GmbH
 
 # Technical Design — Settings Service
 
@@ -117,7 +117,7 @@ The service is delivered as a **Constructor Fabric Gear** — the platform's uni
 | `cpt-cf-settings-service-fr-file-valued-settings` | §3 *Files*: a `file-reference`-trait value is an inline reference (`value`, §4.1) to a file in the `file-storage` gear, never the bytes. **Validated for shape only** — the two-field object `{ file_id, version_id }`, both required — with existence, content type, size and caller entitlement deliberately unchecked, so this service takes no dependency on `file-storage`. The reference is always pinned to a version, so a `bind` under it changes nothing until the setting is repointed; content is never indexed (§4.2 *Search*); `secret` + `file-reference` is rejected (`422`) while `pii` is carried. |
 | `cpt-cf-settings-service-fr-audit-mutations` | Audit Emitter writes synchronously inside the mutation transaction, fail-closed; canonical `resource` id makes history an exact-match query |
 | `cpt-cf-settings-service-fr-feature-license-gating` | `licence_feature` checked through the License Resolver on administrative read paths only; the in-process reader is not gated |
-| `cpt-cf-settings-service-fr-standard-advanced-mode` | `mode` on the declaration, carried on every declaration and browse item as a tag; no server-side filtering — a client groups locally; the preference lives with the console (§4.3) |
+| `cpt-cf-settings-service-fr-standard-advanced-mode` | `mode` on the declaration, carried on every declaration and browse item as a tag; no server-side filtering — a client groups locally; the preference lives with the console; every category carries its `advanced_count`, so the settings a client folds away are counted, not omitted (§4.3) |
 | `cpt-cf-settings-service-fr-search-discoverability` | Trigram GIN indexes over key/description/category/value with classification split into the index predicates |
 | `cpt-cf-settings-service-fr-defaults-revert` | `default_value` column is authoritative and immutable; `revert` returns the resolved fallback, and `validate` reports it beforehand |
 | `cpt-cf-settings-service-fr-domain-affinity-filtering` | Optional `domain_affinity` on category and declaration; hub filters by the admin's current domain |
@@ -264,7 +264,7 @@ C4Container
 - **Effective-value resolution** with inheritance walk and source trace; hot-path **cache** with invalidation on change — local in-process. Cross-instance cache coherence is driven by the [Settings Activation](./DESIGN-activation.md) (separate design).
 - **Validate, then set**: a read-only check before writing, a step-up-verified write that validates inline and refuses a stale value, and per-change result reporting. On a write the service **commits the value** and publishes the signals — a filtered **`change_notification`** per subscriber (consumer activation) and a **`cache_invalidate`** broadcast (replica cache); consumers read the new value **on demand** (pull) and activate it themselves. Proactive notification is owned by the [Settings Activation](./DESIGN-activation.md) (separate design).
 - **Multi-tenant overrides**: set/clone/remove tenant overrides; server-side scope enforcement; visibility-gated reads; non-blocking cascading-impact warning.
-- **Standard / Advanced mode** — a per-declaration tag, `standard` or `advanced`, carried on every read so a client groups locally; this service filters nothing on it (§4.1, §4.3).
+- **Standard / Advanced mode** — a per-declaration tag, `standard` or `advanced`, carried on every read so a client groups locally; this service filters nothing on it, and counts it per category so nothing folded away goes uncounted (§4.1, §4.3).
 - **Optimistic-concurrency conflict handling** — `If-Match`/ETag on every mutating call, so a concurrent edit fails loudly (`412`) instead of overwriting.
 - **Events** — value-change, declaration, and secret-use events published through the platform Event Broker; the **`change_notification`** consumer signal and the **`cache_invalidate`** cross-instance cache broadcast are owned by the Settings Activation (separate design); `tenant_deleted` consumed for cleanup (§4.4).
 - **Search** (cross-field), **Defaults & Revert**, **Domain Affinity filtering**.
@@ -390,7 +390,7 @@ Declarations, categories and values are stored in PostgreSQL via `toolkit-db`, r
 
 **In the single-node/edge shape**, then: everything the gear is *for* is portable — effective-value resolution, the ancestor-id cascade, scope isolation, the write path, activation and audit. **Value search is what degrades**, from an indexed substring match to a scan or to nothing. That is a `p2` capability, which is why running this gear on SQLite is a viable reduced configuration rather than a broken one.
 
-**What is not yet decided is the migration shape.** `file-storage` and `chat-engine` both write per-backend DDL, branching on `get_database_backend()` and documenting where the backends diverge; this design's §4.7 states Postgres DDL only, and §7 names real PostgreSQL for every tier above unit, while the platform's CI runs a SQLite integration tier on every PR (`make test-sqlite`, `docs/TESTING.md` §4). Either this gear writes the per-backend DDL and keeps that tier, or it records that its integration tests are Postgres-only. This is a **DESIGN follow-up**; it changes no contract either way.
+**What is not yet decided is the migration shape.** `file-storage` and `chat-engine` both write per-backend DDL, branching on `get_database_backend()` and documenting where the backends diverge; this design's §4.7 states Postgres DDL only, and §7 names real PostgreSQL for every tier above unit, while the platform's CI runs a SQLite integration tier on every PR (`make test-integration LANE=toolkit-db-sqlite`, `docs/TESTING.md` §4). Either this gear writes the per-backend DDL and keeps that tier, or it records that its integration tests are Postgres-only. This is a **DESIGN follow-up**; it changes no contract either way.
 
 #### Constructor Fabric Gear
 
@@ -468,7 +468,7 @@ The AuthZ Resolver gates read/mutate against `gts.cf.core.settings.*` resources.
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-constraint-licence-entitlement-fail-closed`
 
-Visibility gating by `licence_feature` uses the the License Resolver via `LicenseResolverClient` (in-process ClientHub): given the caller `Context` and a `licence_feature`, it returns allow/deny, **fail-closed** (deny on error). Applied on REST read/browse/search paths only — not the in-process Settings Reader hot path.
+Visibility gating by `licence_feature` uses the the License Resolver via `LicenseResolverApi` (in-process ClientHub): given the caller `Context` and a `licence_feature`, it returns allow/deny, **fail-closed** (deny on error). Applied on REST read/browse/search paths only — not the in-process Settings Reader hot path.
 
 #### Audit & events
 
@@ -546,7 +546,7 @@ The *definition* of a setting — distinct from its runtime value(s). Authored b
 | `data_classification` | `DataClassification` | Yes | Sensitivity class of the setting's **value**: `public` / `pii` / `secret`. `secret` is *derived* from the value type's `secret` trait (it always accompanies `has_secret_trait = true`); `pii` is *declared* by the author, because a PII-bearing value — an alerting contact address, an operator name — need not carry the `secret` trait yet must not reach a caller unauthorized for unmasked PII. Default `public`. Drives masking (§4.2 *Secret Manager*) and the search corpus (§4.2 *Search*). |
 | `source` | `DeclarationSource` | Yes | `admin_authored` or `module_contributed`. |
 | `owner_module` | string | No | Owning module namespace; required when `source = module_contributed`. |
-| `licence_feature` | string | No | Feature/licence flag gating visibility; enforced server-side on the REST read paths via the License Resolver (`LicenseResolverClient`; see §4.2 *Category Management* / *Declaration Management*/§4.2 *Search* and §4.8). |
+| `licence_feature` | string | No | Feature/licence flag gating visibility; enforced server-side on the REST read paths via the License Resolver (`LicenseResolverApi`; see §4.2 *Category Management* / *Declaration Management*/§4.2 *Search* and §4.8). |
 | `status` | `DeclarationStatus` | Yes | `active` or `retired`. |
 | `description` | string (0..4096) | No | Human-readable description. |
 | `last_change_at` | `timestamptz` | Yes | When the **declaration's definition** last changed: the Schema Default, the value type, the status, and the metadata that changes what a reader is served — `data_classification`, `requires_step_up`, `anonymous_exposable`, `licence_feature`, `domain_affinity`. A `description` or `mode` edit moves `updated_at` (the tag) and **not** this column — **definition only, NOT a max over its values** (a value-aggregating field would leak cross-tenant activity). This is the *declaration arm* of the effective-value recency `max` computed on the admin read (§4.3); the *value arm* is `SettingValue.last_change_at`. |
@@ -786,7 +786,7 @@ graph TD
 
 - [ ] `p1` - **ID**: `cpt-cf-settings-service-component-category-management`
 
-**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverClient` (License Resolver — feature/licence entitlement), Audit Emitter
+**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverApi` (License Resolver — feature/licence entitlement), Audit Emitter
 
 **Operations:**
 
@@ -795,7 +795,7 @@ graph TD
 | `create_category` | `CreateCategoryRequest`, `Context` | `Category` | Authorize `create` on `gts.cf.core.settings.category.v1~` (category governance is per-resource-type CRUD — create/read/update/delete — per §4.8). Reject duplicate `key`/`name` (`409`). Insert; audit. (`cpt-cf-settings-service-fr-settings-category-model`) |
 | `update_category` | `id`, `UpdateCategoryRequest`, `Context` | `Category` | Authorize `update` on `gts.cf.core.settings.category.v1~`. Partial update (`name`, `description`, `domain_affinity`, `sort_order`, `icon`). Requires `If-Match` (optimistic concurrency, §4.3). |
 | `delete_category` | `id`, `Context` | — | Authorize `delete` on `gts.cf.core.settings.category.v1~`. Reject (`409 CategoryNotEmpty`) if any declaration row references it — **including `retired` ones** (a retired declaration still occupies the category and its values are retained, §4.2 *Declaration Management*; no-orphan, `cpt-cf-settings-service-fr-settings-category-model`). Hard-delete only when no declaration row remains. Authoritative guard is the declaration→category FK `ON DELETE RESTRICT` (§4.7), which blocks regardless of `status`. |
-| `get_category` / `list_categories` | filter, `Context` | `Category` / `Category[]` | Domain-filtered, visibility-gated, paginated. |
+| `get_category` / `list_categories` | filter, `Context` | `Category` / `Category[]` | Domain-filtered, visibility-gated, paginated, with `total_count`. Each category carries the caller's `setting_count` / `advanced_count` / `retired_count`, counted under the browse's own predicate by the Value Resolver's declaration listing and gated by the value `read` (§4.3 *Category Counts*). |
 
 #### Component: Declaration Management
 
@@ -803,7 +803,7 @@ graph TD
 
 Manages **admin-authored** declarations and serves reads for both authored and contributed declarations. Contributed declarations are written only via the Reconciler (§4.2 *Contribution Reconciler*).
 
-**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Category Management, PostgreSQL, `LicenseResolverClient` (License Resolver — feature/licence entitlement), Audit Emitter
+**Dependencies:** `TypeValidator`, `ScopeClassEngine`, Category Management, PostgreSQL, `LicenseResolverApi` (License Resolver — feature/licence entitlement), Audit Emitter
 
 **Operations:**
 
@@ -1089,7 +1089,7 @@ What isolates tenants, then, is two checks: the entry's tenant, which the store 
 
 - [x] `p1` - **ID**: `cpt-cf-settings-service-component-search`
 
-**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverClient` (License Resolver — feature/licence entitlement)
+**Dependencies:** PostgreSQL, `AuthZResolverClient` (with `PolicyEnforcer` built over it), `LicenseResolverApi` (License Resolver — feature/licence entitlement)
 
 **Operations:**
 
@@ -1214,7 +1214,7 @@ Two things in that shape are load-bearing rather than stylistic. The typestate f
 
 **Paths carry the gear name.** `/settings-service/v1/…`, never a bare `/v1/…`: the platform's versioned-path shape is `/{gear}/v1/{resource}` — `/types-registry/v1/types`, `/bss-pricing/v1/plans`, `/oagw/v1/routes` — and it holds for every gear in the workspace without exception.
 
-All REST APIs follow the shared DNA REST contract: `snake_case` JSON; UUIDv7 IDs; ISO-8601 UTC timestamps with milliseconds; cursor pagination (`cursor`, `limit`) returning `{ "items": [...], "page_info": {...} }` (no `total_count`); errors use RFC 9457 `application/problem+json` (§4.3). **Collection `GET` endpoints** (`/settings-service/v1/declarations`, `/settings-service/v1/categories`, settings-browse) adopt the platform **OData** surface — `$filter` / `$orderby` / `$select` (guideline §4.4) parsed via the shared `toolkit_odata` (`ODataQuery`/`Page`), the same as the AM gear — with allowed fields declared per endpoint via `x-odata-filter`/`-orderby`/`-select`; `tenant`/`scope` are **resolution context**, not filters (they stay named), and `GET /settings-service/v1/search` (§4.3, `cpt-cf-settings-service-fr-search-discoverability`) is a **purpose-built value-search** on `q` that takes the same `$filter` as settings-browse — `category_id eq`, `key eq`, `key in (...)`, `needs_review eq true`, joined by `and`, read by the same code and applied in the page query so the cursor pages the filtered set — and refuses `$orderby` and `$select`: hits come back ordered by key, and nothing is selected out of a hit. **`PATCH` bodies are JSON Merge Patch (RFC 7396)** (guideline §4.2). Mutating `PATCH`/`DELETE` on categories and declarations carry an optimistic-concurrency precondition: `GET` returns an `ETag` (derived from the normalized UTC `updated_at`) and the mutation requires `If-Match` — missing → `428`, stale → `412`.
+All REST APIs follow the shared DNA REST contract: `snake_case` JSON; UUIDv7 IDs; ISO-8601 UTC timestamps with milliseconds; cursor pagination (`cursor`, `limit`) returning `{ "items": [...], "page_info": {...} }`; this gear's `page_info` carries, beside the shared cursors and `limit`, a **`total_count`** — how many rows the whole walk holds, counted under the page's own predicate (the caller's scope, the visibility rules, the `hidden` exclusion, the `$filter`) and never under the cursor, so every page of one walk reports the same total and the number discloses nothing the page does not; the one listing that pages one set and lists another, the needs-review browse, reports none rather than a wrong one. The shared DNA envelope has no total; this is a superset of it, the same shape plus one field (`cpt-cf-settings-service-nfr-scope-isolation`); errors use RFC 9457 `application/problem+json` (§4.3). **Collection `GET` endpoints** (`/settings-service/v1/declarations`, `/settings-service/v1/categories`, settings-browse) adopt the platform **OData** surface — `$filter` / `$orderby` / `$select` (guideline §4.4) parsed via the shared `toolkit_odata` (`ODataQuery`/`Page`), the same as the AM gear — with allowed fields declared per endpoint via `x-odata-filter`/`-orderby`/`-select`; `tenant`/`scope` are **resolution context**, not filters (they stay named), and `GET /settings-service/v1/search` (§4.3, `cpt-cf-settings-service-fr-search-discoverability`) is a **purpose-built value-search** on `q` that takes the same `$filter` as settings-browse — `category_id eq`, `key eq`, `key in (...)`, `needs_review eq true`, joined by `and`, read by the same code and applied in the page query so the cursor pages the filtered set — and refuses `$orderby` and `$select`: hits come back ordered by key, and nothing is selected out of a hit. **`PATCH` bodies are JSON Merge Patch (RFC 7396)** (guideline §4.2). Mutating `PATCH`/`DELETE` on categories and declarations carry an optimistic-concurrency precondition: `GET` returns an `ETag` (derived from the normalized UTC `updated_at`) and the mutation requires `If-Match` — missing → `428`, stale → `412`.
 
 **Create idempotency.** Resource-creating `POST`s (`/settings-service/v1/categories`, `/settings-service/v1/declarations`) use the guideline §4.8 idempotency strategy for **critical operations** — a **permanent DB unique constraint → `409`** (`uq_declaration_key`, category-key uniqueness), a *permanent* uniqueness guarantee, not a time-windowed cache. Because of that, a client's **lost-response retry** also lands on `409`; a client **MUST disambiguate** its own retry from a genuine conflict by **re-reading** (`GET` by key / list) — the service keeps **no `Idempotency-Key` store**. `POST` (not a key-addressed `PUT`-create) is required: the `key` is **server-composed** from the category slug plus the admin's `vendor` and `name` (§4.2 *Declaration Management*), so the client does not hold it before the call, while identity is the server-assigned UUIDv7 (§4.3 /). (The write path has its own retry story — `If-Match`-guarded, §4.2 *Value Writer*.)
 
@@ -1231,10 +1231,14 @@ All REST APIs follow the shared DNA REST contract: `snake_case` JSON; UUIDv7 IDs
 | Method | Endpoint | Description | Idempotency |
 |--------|----------|-------------|-------------|
 | `POST` | `/settings-service/v1/categories` | Create a category | No — unique key → `409`; lost-response retry disambiguated by re-read (§4.3 DNA) |
-| `GET` | `/settings-service/v1/categories` | List categories (domain/visibility filtered, paginated) | Yes |
-| `GET` | `/settings-service/v1/categories/{id}` | Get a category | Yes |
+| `GET` | `/settings-service/v1/categories` | List categories (domain/visibility filtered, paginated); each item carries `setting_count` / `advanced_count` / `retired_count` for the caller (*Category counts* below) | Yes |
+| `GET` | `/settings-service/v1/categories/{id}` | Get a category, with the same counts the listing carries | Yes |
 | `PATCH` | `/settings-service/v1/categories/{id}` | Update category metadata | Yes |
 | `DELETE` | `/settings-service/v1/categories/{id}` | Delete category (empty only) | Yes |
+
+##### `GET /settings-service/v1/categories` — Category Counts
+
+Each category on the page, and the single read of one, carries three counts for the caller: **`setting_count`**, every declaration the caller's browse of the category (`GET /settings-service/v1/settings?$filter=category_id eq …`) would list, whatever its status; **`advanced_count`**, those of them tagged `advanced`; **`retired_count`**, those `retired`. They are counted in one grouped statement per page under exactly the browse's predicate — one `read` decision on the value resource whose constraints become the scope of the count, the caller's administrative-domain visibility, and the `hidden` exclusion on the caller's own root-to-self chain (§4.8 *Listing under a narrowed grant*) — so a category's number agrees with the table under it, and a setting the caller may not see is in neither (`cpt-cf-settings-service-nfr-scope-isolation`). The counts are an aggregate over settings and are gated as settings are: a caller that holds the category `read` but not the value `read` receives the categories without the three fields, never counts of what it could not open. A category with nothing to count carries zeros. This is what lets a console draw its category rail — one row per category with its count — from one request rather than from every page of every category, and what answers the PRD's demand that the Advanced settings a client folds away be counted rather than silently omitted (`cpt-cf-settings-service-fr-standard-advanced-mode`, *Mode is a tag, not a filter* below).
 
 ##### `DELETE /settings-service/v1/categories/{id}` — Deletion Rules
 
@@ -1416,10 +1420,10 @@ A `set` request mints a **`change_set_id`**, and consumer activation is tracked 
 
 | Method | Endpoint | Description | Idempotency |
 |--------|----------|-------------|-------------|
-| `GET` | `/settings-service/v1/search?q={query}&tenant={tenant_id}` | Cross-field search (flat list, breadcrumbs, matched-field); every hit carries its declaration's `mode` | Yes |
+| `GET` | `/settings-service/v1/search?q={query}&tenant={tenant_id}` | Cross-field search (flat list, breadcrumbs, matched-field); every hit carries its declaration's `mode`; `page_info.total_count` is the matching settings | Yes |
 | `GET` | `/settings-service/v1/settings/{key}/history?scope={path}` | Per-(setting, scope) audit history — served from the gear's own `audit_records` store (see below) | Yes |
 
-**Mode is a tag, not a filter.** Every declaration carries `mode` (`standard` or `advanced`, §4.1), and so does every item `GET /settings-service/v1/settings` returns and every search hit, so a client that reads a category whole groups the Advanced settings itself and counts them itself. No listing accepts a `mode` parameter and nothing is excluded on the server: a filter here would have to know the caller's preference, and that preference is the console's — held with its theme and language in `simple-user-settings`, read by the console, never by this service. A category has no mode of its own: whether it is "Advanced-only" is derived, true exactly when every setting in it is `advanced`, so there is no category flag to author and nothing to drift out of step with the settings inside it (`cpt-cf-settings-service-fr-standard-advanced-mode`). The PRD's mode-filtered read remains a recorded requirement; whether the mode concept survives at all is an open question there (§13), and until it is answered the tag is the whole of what this service does with it.
+**Mode is a tag, not a filter.** Every declaration carries `mode` (`standard` or `advanced`, §4.1), and so does every item `GET /settings-service/v1/settings` returns and every search hit, so a client that reads a category groups the Advanced settings itself; it need not read a category whole to count them, since every category the listing returns carries its `advanced_count` beside its `setting_count` (*Category Counts* above). No listing accepts a `mode` parameter and nothing is excluded on the server: a filter here would have to know the caller's preference, and that preference is the console's — held with its theme and language in `simple-user-settings`, read by the console, never by this service. A category has no mode of its own: whether it is "Advanced-only" is derived, true exactly when every setting in it is `advanced`, so there is no category flag to author and nothing to drift out of step with the settings inside it (`cpt-cf-settings-service-fr-standard-advanced-mode`). The PRD's mode-filtered read remains a recorded requirement; its demand that the hidden Advanced settings be counted rather than silently omitted is met by the per-category `advanced_count`. Whether the mode concept survives at all is an open question there (§13), and until it is answered the tag and the count are the whole of what this service does with it.
 
 **History reads the gear's own audit store.** `GET /settings-service/v1/settings/{key}/history` resolves the `(key, scope)` to the canonical audit resource id (`cf.settings:{key}@{tenant_id}`, §4.2 *Audit Emitter*) and queries `audit_records` (§4.7) on `(declaration_key, tenant_id)`, paginated and newest first. The **same formatter** produces the id on the write side and resolves it here, so the two cannot drift. Masking is already in the stored record — a `secret`-classified value was never written in plaintext — so the read applies no second masking implementation, and there is no reveal path to open. Tenant scoping is the ordinary row-scoped path, not a forwarded concern.
 
@@ -1955,7 +1959,7 @@ Three rules keep it reviewable:
 | API authorization | `PolicyEnforcer` over the AuthZ Resolver, fail-closed; tenant scope forced server-side. |
 | Tenant subtree isolation | Every read/search/list/mutate is constrained to the caller's own subtree server-side (own tenant or a descendant); a target outside the subtree is rejected; never relies on client-side filtering (`cpt-cf-settings-service-fr-tenant-scope-enforcement`, `cpt-cf-settings-service-nfr-scope-isolation`). |
 | Tenant Access vs Scope Class | Administrative reads require access other than `hidden`; tenant writes require the writer's access to be `overridable`. Scope Class independently determines where values may exist (§4.1 *TenantAccessRestriction*). |
-| Feature/licence gating | Gated settings/categories excluded server-side across all REST read/browse/search paths via License Resolver entitlement checks (`LicenseResolverClient`, fail-closed); the in-process `SettingsReaderClient` hot path is not licence-gated — services receive values regardless of UI entitlement (`cpt-cf-settings-service-fr-feature-license-gating`). |
+| Feature/licence gating | Gated settings/categories excluded server-side across all REST read/browse/search paths via License Resolver entitlement checks (`LicenseResolverApi`, fail-closed); the in-process `SettingsReaderClient` hot path is not licence-gated — services receive values regardless of UI entitlement (`cpt-cf-settings-service-fr-feature-license-gating`). |
 | Audit | Every mutation writes an immutable audit record (`cpt-cf-settings-service-fr-audit-mutations`). |
 | Secret confidentiality | `secret`-trait values are stored by reference in the Credential Store (the credstore backend); masked on every **administrative** read/search/list/audit path, with **no human reveal path**. Plaintext is returned only through the **machine-only** reader path (`resolve_secret`, §4.5), authorized per setting against the calling service and audited as a secret-use event; never cached in plaintext (§4.2 *Secret Manager*, *Cache & Invalidation*). |
 | File confidentiality | A `file-reference` value carries an id, never content, so nothing in this service masks or proxies a file — and nothing here checks it either. Access to the file is enforced entirely by `file-storage` on its own control and data planes, for every reader including the one that wrote the reference (§3 *Files*). |
@@ -2209,7 +2213,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | `MockTenantResolver` | Ancestry/subtree responses | `.with_ancestors(scope, vec![...])`, `.with_subtree(...)` |
 | `MockChangePublisher` | Capture published `change_notification` / `cache_invalidate` signals | assert on captured signals |
 | `MockSimpleUserSettings` | — | not needed: this service neither stores nor reads the mode preference; mode is a tag on each item (§4.3) |
-| `MockLicenseResolverClient` | feature/licence entitlement allow/deny (fail-closed) | `.with_decision(feature, Allow/Deny)`, `.with_error(...)` |
+| `MockLicenseResolverApi` | feature/licence entitlement allow/deny (fail-closed) | `.with_decision(feature, Allow/Deny)`, `.with_error(...)` |
 | `MockSecretManager` | store/mask/resolve secret values | `.with_ref(...)`, `.with_resolve(Ok/Err)` |
 | `MockEventPublisher` | Capture published events | assert on captured events |
 | `MockAuditSink` | Capture audit records | assert on captured records |
@@ -2279,11 +2283,13 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Clone of a secret is refused | `MockGtsValidator` resolves `secret` trait | `clone` on a secret-trait setting → `422 SecretNotCloneable`; nothing stored and no Credential-Store call is made |
 | Clone authorizes the source scope | `MockAuthZ`, `MockTenantResolver` | A clone whose `from` scope the caller may not read is rejected `403` and stores nothing; an authorized clone writes the value at the target (§4.2 *Value Writer*) |
 | Mode is a tag on every browse item | repos | Every `SettingItemDto` carries its declaration's `mode`; nothing is excluded and no `mode` parameter exists (`cpt-cf-settings-service-fr-standard-advanced-mode`) |
+| Category counts follow the caller's view | repos | `GET /settings-service/v1/categories` and the single read carry `setting_count` / `advanced_count` / `retired_count` per category, counted after the `hidden` exclusion and the domain visibility and equal to the browse of the category; zeros for an empty category; absent for a caller without the value `read` (`cpt-cf-settings-service-fr-standard-advanced-mode`, `cpt-cf-settings-service-nfr-scope-isolation`) |
+| Listing totals | repos | Every listing's `page_info.total_count` is the size of the filtered set, the same on every page of one walk and counted after the `hidden` exclusion; the needs-review browse reports none; the permissions listing reports its length |
 | Module contribution — namespaced key required | repos | `422 KeyNotNamespaced` for un-namespaced key (`cpt-cf-settings-service-fr-module-contributed-declarations`) |
 | Module contribution — compatible upgrade preserves values | repos | Declaration updated; admin values preserved (`cpt-cf-settings-service-fr-contributed-lifecycle`) |
 | Module contribution — breaking change flags values | repos | Affected overrides `needs-review`, and a write to one is refused until it is fixed |
 | Cascading impact — descendants listed | resolver subtree, capped (default 5,000 scanned; `limit` default 100/max 500) | Affected descendants with current vs new; bounded + `truncated` flag; non-blocking (`cpt-cf-settings-service-fr-cascading-inheritance`, §4.2 *Value Writer*) |
-| Licence/feature gating — entitled vs not | `MockLicenseResolverClient` (allow/deny/error) | Gated declaration excluded when denied; **fail-closed** on error (hidden); ungated visible (`cpt-cf-settings-service-fr-feature-license-gating`) |
+| Licence/feature gating — entitled vs not | `MockLicenseResolverApi` (allow/deny/error) | Gated declaration excluded when denied; **fail-closed** on error (hidden); ungated visible (`cpt-cf-settings-service-fr-feature-license-gating`) |
 | Domain-affinity filtering | repos | Categories/settings filtered to the current domain; cross-domain hidden; declaration `domain_affinity` overrides category default |
 | Error mapping — domain → API variants | none | Every variant has a `From` impl, 100% coverage |
 
@@ -2316,7 +2322,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Dependency | Mock | Why |
 |---|---|---|
 | `AuthZResolverClient` (under `PolicyEnforcer`) | `MockAuthZClient` (Allow) / `DenyingAuthZClient` | Isolate from AuthZ infra — the enforcer is a struct, so the substitution point is the client beneath it |
-| License Resolver (licence/feature) | `MockLicenseResolverClient` (allow/deny, fail-closed) | Deterministic entitlement gating without the License Resolver |
+| License Resolver (licence/feature) | `MockLicenseResolverApi` (allow/deny, fail-closed) | Deterministic entitlement gating without the License Resolver |
 | Audit sink | `MockAuditSink` | Capture audit records to assert mutations are audited |
 | GTS Registry | `MockGtsValidator` | Deterministic type validation |
 | Tenant Resolver | `MockTenantResolver` | Deterministic ancestry |
@@ -2330,6 +2336,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 |---|---|---|
 | Create category | `POST /settings-service/v1/categories` | `201`, `Location`, body matches schema |
 | Delete non-empty category | `DELETE /settings-service/v1/categories/{id}` | `409 CategoryNotEmpty` |
+| Category counts and listing total | `GET /settings-service/v1/categories`, `GET /settings-service/v1/categories/{id}` | Per-category counts and `page_info.total_count` present and equal to the browse; counts absent and the listing still `200` for a caller without the value `read` |
 | Create declaration — happy/duplicate/invalid default | `POST /settings-service/v1/declarations` | `201` / `409` / `422` |
 | Patch/delete contributed declaration | `PATCH`/`DELETE /settings-service/v1/declarations/{id}` | `409 ContributedDeclarationImmutable` |
 | Retire admin declaration (soft-delete) | `DELETE /settings-service/v1/declarations/{id}` | `200` with retired body (`status=retired`, `updated_at`); values retained; contrast category hard delete → `204` |
@@ -2362,7 +2369,7 @@ The targets above are validated against these order-of-magnitude bounds. They ar
 | Anonymous read — no tenant enumeration | unknown `tenant`, and a known tenant with nothing flagged | Byte-identical `200` with an empty set in both cases; no `404`, no distinguishable error |
 | Anonymous read — no token required, writes absent | request without a bearer; `PUT`/`POST` on the same path | `200` without authentication; every other method `405` |
 | `anonymous_exposable` refused for secret and PII | `PATCH /settings-service/v1/declarations/{id}` setting the flag on a `secret` and on a `pii` declaration | Rejected by the schema `CHECK`, not only the handler (§4.7); un-marking always allowed |
-| Licence/feature gating across read paths | `GET /settings-service/v1/settings/{key}`, `GET /settings-service/v1/search`, `GET /settings-service/v1/categories`, `GET /settings-service/v1/declarations` | Un-entitled caller (`MockLicenseResolverClient` deny) gets gated setting/category excluded on every read/search/list path; fail-closed on decision error (`cpt-cf-settings-service-fr-feature-license-gating`) |
+| Licence/feature gating across read paths | `GET /settings-service/v1/settings/{key}`, `GET /settings-service/v1/search`, `GET /settings-service/v1/categories`, `GET /settings-service/v1/declarations` | Un-entitled caller (`MockLicenseResolverApi` deny) gets gated setting/category excluded on every read/search/list path; fail-closed on decision error (`cpt-cf-settings-service-fr-feature-license-gating`) |
 | Domain-affinity filtering | `GET /settings-service/v1/categories`, `GET /settings-service/v1/declarations` | Results filtered to the admin's current domain; cross-domain hidden; platform-admin "All domains" view returns all |
 | Audit written on every mutation | `POST`/`PATCH`/`PUT`/`DELETE` | Each mutating call writes an audit record (actor, target, pre/post masked, request id) captured via `MockAuditSink` (`cpt-cf-settings-service-fr-audit-mutations`) |
 | Mode never filters | a category holding both `standard` and `advanced` settings | Browse and search return every setting with its `mode`; no request parameter changes the set (`cpt-cf-settings-service-fr-standard-advanced-mode`) |

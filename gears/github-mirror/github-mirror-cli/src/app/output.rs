@@ -4,12 +4,16 @@ use serde_json::{Map, Value};
 const MAX_CELL: usize = 60;
 const SECTION_ORDER: [&str; 5] = ["repository", "run", "objects", "api", "storage"];
 
+/// How results are printed.
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum OutputFormat {
+    /// Aligned columns for reading.
     Table,
+    /// Pretty-printed JSON.
     Json,
 }
 
+/// Print `value` in `format` to standard output.
 pub fn print(value: &Value, format: OutputFormat) -> Result<()> {
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),

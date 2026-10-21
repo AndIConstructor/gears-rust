@@ -92,6 +92,8 @@ members = [
     "libs/system-sdks/sdks/directory",
     "gears/credstore/credstore-sdk",
     "gears/credstore/credstore",
+    "gears/credstore/v2/credstore-sdk",
+    "gears/credstore/v2/credstore",
     "gears/credstore/plugins/static-credstore-plugin",
     "gears/graph-storage/graph-storage-sdk",
     "gears/graph-storage/graph-storage",
@@ -195,6 +197,8 @@ members = [
     "gears/system/event-broker/plugins/sqlite-event-broker-plugin",
     "gears/system/admission-control/admission-control-sdk",
     "gears/system/admission-control/admission-control",
+    "gears/system/policy-engine/policy-engine-sdk",
+    "gears/system/policy-engine/policy-engine",
 ]
 exclude = ["tools/fuzz"]
 resolver = "3"
@@ -456,7 +460,7 @@ aws-lc-rs = "1.17"
 
 # settings-service
 settings-service-sdk = { package = "cf-gears-settings-service-sdk", version = "0.1.0", path = "gears/settings-service/settings-service-sdk" }
-settings-service = { package = "cf-gears-settings-service", version = "0.1.4", path = "gears/settings-service/settings-service" }
+settings-service = { package = "cf-gears-settings-service", version = "0.1.5", path = "gears/settings-service/settings-service" }
 
 # credstore
 credstore-sdk = { package = "cf-gears-credstore-sdk", version = "0.2.17", path = "gears/credstore/credstore-sdk" }
@@ -509,6 +513,7 @@ async-stream = { version = "0.3" }
 # High-performance data structures
 dashmap = "6.1"
 arc-swap = "1.7"
+lru = "0.18.2"
 
 # Security
 zeroize = { version = "1", features = ["derive"] }
@@ -895,9 +900,11 @@ license-resolver-sdk = { package = "cf-gears-license-resolver-sdk", version = "0
 license-resolver = { package = "cf-gears-license-resolver", version = "0.1.5", path = "gears/system/license-resolver/license-resolver" }
 static-license-plugin = { package = "cf-gears-static-license-plugin", version = "0.1.5", path = "gears/system/license-resolver/plugins/static-license-plugin" }
 
-# Admission control
+# Admission control + policy engine
 admission-control-sdk = { package = "cf-gears-admission-control-sdk", version = "0.1.0", path = "gears/system/admission-control/admission-control-sdk" }
 admission-control = { package = "cf-gears-admission-control", version = "0.1.0", path = "gears/system/admission-control/admission-control" }
+policy-engine-sdk = { package = "cf-gears-policy-engine-sdk", version = "0.1.0", path = "gears/system/policy-engine/policy-engine-sdk" }
+policy-engine = { package = "cf-gears-policy-engine", version = "0.1.0", path = "gears/system/policy-engine/policy-engine" }
 # Rego interpreter backing `toolkit-policy-evaluation`. Never enable `mimalloc` /
 # `allocator-memory-limits` (they assign a global allocator), `http`, `uuid`
 # or `opa-runtime`. Pinned exactly: the denylists and structural guards are

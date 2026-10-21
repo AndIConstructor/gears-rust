@@ -23,41 +23,71 @@ use toolkit_security::SecurityContext;
 
 const PAGE_LIMIT: u64 = 100;
 
+/// The mirrored entity type that `query` lists.
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum Entity {
+    /// Issues of the repository.
     Issues,
+    /// Pull requests.
     Prs,
+    /// Commits.
     Commits,
+    /// Contributors derived from the synced data.
     Contributors,
+    /// The repository itself.
     Repos,
+    /// Comments of one issue or pull request.
     Comments,
+    /// Derived conversations with their comments.
     Conversations,
+    /// Review threads of one pull request.
     ReviewThreads,
+    /// Reviews of one pull request.
     Reviews,
+    /// Review comments of one pull request.
     ReviewComments,
+    /// Reactions to one issue.
     Reactions,
+    /// Timeline events of one issue.
     Timeline,
+    /// Branches.
     Branches,
+    /// Labels.
     Labels,
+    /// Milestones.
     Milestones,
+    /// Releases.
     Releases,
+    /// GitHub Actions workflow runs.
     #[value(name = "workflow_runs")]
     WorkflowRuns,
 }
 
+/// The `sync` flags that shape a sync request.
 pub struct SyncFlags<'a> {
+    /// Which force mode the run uses.
     pub force: ForceMode,
+    /// Tasks in flight inside this sync.
     pub max_concurrent: Option<NonZeroUsize>,
+    /// Only entities updated after this cutoff.
     pub since: Option<&'a str>,
+    /// Object types to collect, comma-separated.
     pub include: Option<&'a str>,
+    /// Object types to leave out, comma-separated.
     pub exclude: Option<&'a str>,
+    /// Which workflow runs to collect: open, all or none.
     pub actions_scope: Option<&'a str>,
+    /// Which reactions to collect: open, all or none.
     pub reactions_scope: Option<&'a str>,
+    /// Which timeline events to collect: open, all or none.
     pub timeline_scope: Option<&'a str>,
+    /// Diff lines to keep before an inline comment.
     pub snippet_before: Option<i32>,
+    /// Diff lines to keep after an inline comment.
     pub snippet_after: Option<i32>,
 }
 
+/// Build the sync request, narrowing the default scope only when a scope flag is given.
 pub fn sync_request(service: &Service, flags: &SyncFlags<'_>) -> Result<SyncRequest> {
     let narrows = flags.include.is_some()
         || flags.exclude.is_some()
@@ -136,6 +166,7 @@ fn parse_instant(raw: &str) -> Result<DateTime<Utc>> {
         })
 }
 
+/// Run a sync of `repo` in this process and report its result.
 pub async fn sync(
     service: &Service,
     ctx: &SecurityContext,
@@ -148,12 +179,17 @@ pub async fn sync(
     report(service, ctx, owner, name, Some(&summary), database_file).await
 }
 
+/// The `query` filters.
 pub struct QueryFilters<'a> {
+    /// Only rows updated after this cutoff.
     pub since: Option<&'a str>,
+    /// Only rows the mirror wrote at or after this instant.
     pub extracted_since: Option<&'a str>,
+    /// Only review comments of this subject type.
     pub subject_type: Option<&'a str>,
 }
 
+/// List one entity type of `repo` from the local database.
 pub async fn query(
     service: &Service,
     ctx: &SecurityContext,
@@ -374,6 +410,7 @@ async fn conversations(
         .collect())
 }
 
+/// The token's REST and GraphQL quotas.
 pub async fn check_rate_limit(service: &Service, ctx: &SecurityContext) -> Result<Value> {
     let quotas = service.rate_limit(ctx).await?;
     let now = chrono::Utc::now();
@@ -393,12 +430,14 @@ pub async fn check_rate_limit(service: &Service, ctx: &SecurityContext) -> Resul
     Ok(Value::Array(rows))
 }
 
+/// Remove `repo` and everything mirrored for it.
 pub async fn clear_cache(service: &Service, ctx: &SecurityContext, repo: &str) -> Result<Value> {
     let (owner, name) = split_repo(repo)?;
     let removed = service.delete_repository(ctx, owner, name).await?;
     Ok(json!({ "repository": format!("{owner}/{name}"), "rows_removed": removed }))
 }
 
+/// The report of the last sync of `repo`.
 pub async fn status(
     service: &Service,
     ctx: &SecurityContext,

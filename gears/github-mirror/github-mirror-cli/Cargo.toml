@@ -30,6 +30,7 @@ tenant-resolver = { workspace = true }
 authn-resolver = { workspace = true }
 authz-resolver = { workspace = true }
 credstore = { workspace = true }
+credstore-sdk = { workspace = true }
 static-authz-plugin = { workspace = true }
 static-credstore-plugin = { package = "cf-gears-static-credstore-plugin", path = "../../credstore/plugins/static-credstore-plugin" }
 single-tenant-tr-plugin = { package = "cf-gears-single-tenant-tr-plugin", path = "../../system/tenant-resolver/plugins/single-tenant-tr-plugin" }

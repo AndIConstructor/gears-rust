@@ -18,12 +18,13 @@ use uuid::Uuid;
 
 use crate::api::rest::routes;
 use crate::config::{GithubMirrorConfig, GithubTokenSecret};
+use crate::domain::error::DomainError;
 use crate::domain::local_client::LocalClient;
 use crate::domain::ports::github::GithubPort;
 use crate::domain::service::{ACTIVE_SYNC_TOUCH_EVERY, SWEEP_AGAIN_AFTER, Service, ServiceConfig};
 use crate::domain::sync::SyncPoolRunner;
 use crate::infra::github::cache::HttpCache;
-use crate::infra::github::client::GithubClient;
+use crate::infra::github::client::{GithubClient, TokenSource};
 use crate::infra::storage::fs_cache::FilesystemHttpCache;
 use crate::infra::storage::sea_orm_repo::{
     SeaOrmActiveSyncRepository, SeaOrmBranchRepository, SeaOrmCheckRunRepository,
@@ -46,23 +47,56 @@ type ConcreteService = Service;
 const GEAR_ACTOR_ID: Uuid = uuid::uuid!("00000000-0000-cf01-0000-676d73797374");
 const SERVICE_SUBJECT_TYPE: &str = toolkit_gts::gts_id!("cf.core.security.subject_service.v1~");
 
+struct CredstoreTokens {
+    credstore: Arc<dyn CredStoreClientV1>,
+    secrets: Vec<(GithubTokenSecret, SecretRef)>,
+}
+
+impl CredstoreTokens {
+    fn new(ctx: &GearCtx, secrets: Vec<GithubTokenSecret>) -> anyhow::Result<Self> {
+        let credstore = ctx
+            .client_hub()
+            .get::<dyn CredStoreClientV1>()
+            .map_err(|e| anyhow::anyhow!("failed to get the credential store: {e}"))?;
+        let secrets = secrets
+            .into_iter()
+            .map(|secret| {
+                let key = SecretRef::new(secret.key.clone())
+                    .map_err(|e| anyhow::anyhow!("invalid github_token_secret key: {e}"))?;
+                Ok((secret, key))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        Ok(Self { credstore, secrets })
+    }
+}
+
+#[async_trait]
+impl TokenSource for CredstoreTokens {
+    async fn tokens(&self) -> Result<Vec<SecretString>, DomainError> {
+        let mut tokens = Vec::new();
+        for (secret, key) in &self.secrets {
+            tokens.extend(
+                github_token(self.credstore.as_ref(), secret, key)
+                    .await
+                    .map_err(|e| DomainError::internal(e.to_string()))?,
+            );
+        }
+        Ok(tokens)
+    }
+}
+
 async fn github_token(
-    ctx: &GearCtx,
+    credstore: &dyn CredStoreClientV1,
     secret: &GithubTokenSecret,
+    key: &SecretRef,
 ) -> anyhow::Result<Option<SecretString>> {
-    let credstore = ctx
-        .client_hub()
-        .get::<dyn CredStoreClientV1>()
-        .map_err(|e| anyhow::anyhow!("failed to get the credential store: {e}"))?;
-    let key = SecretRef::new(secret.key.clone())
-        .map_err(|e| anyhow::anyhow!("invalid github_token_secret key: {e}"))?;
     let system_ctx = SecurityContext::builder()
         .subject_id(GEAR_ACTOR_ID)
         .subject_type(SERVICE_SUBJECT_TYPE)
         .subject_tenant_id(secret.tenant_id)
         .build()?;
     let found = credstore
-        .get(&system_ctx, &key)
+        .get(&system_ctx, key)
         .await
         .map_err(|e| {
             anyhow::anyhow!("failed to read the GitHub token from the credential store: {e}")
@@ -153,14 +187,15 @@ impl Gear for GithubMirrorGear {
             Some(dir) => Arc::new(FilesystemHttpCache::new(dir, cfg.cache_compression)),
             None => Arc::new(SeaOrmHttpCache::new(Arc::clone(&db), cfg.cache_compression)),
         };
-        let mut tokens = Vec::new();
-        for secret in &cfg.github_token_secret {
-            tokens.extend(github_token(ctx, secret).await?);
+        let client = GithubClient::with_cache(cfg.api_base_url.clone(), None, http_cache)?
+            .with_max_concurrent_requests(cfg.max_concurrent_requests);
+        if !cfg.github_token_secret.is_empty() {
+            client.set_token_source(Arc::new(CredstoreTokens::new(
+                ctx,
+                cfg.github_token_secret,
+            )?))?;
         }
-        let github: Arc<dyn GithubPort> = Arc::new(
-            GithubClient::with_tokens(cfg.api_base_url.clone(), tokens, http_cache)?
-                .with_max_concurrent_requests(cfg.max_concurrent_requests),
-        );
+        let github: Arc<dyn GithubPort> = Arc::new(client);
 
         let authz = ctx
             .client_hub()
@@ -445,6 +480,6 @@ mod tests {
     fn gear_provides_all_migrations() {
         use toolkit::contracts::DatabaseCapability;
         let gear = GithubMirrorGear::default();
-        assert_eq!(gear.migrations().len(), 48);
+        assert_eq!(gear.migrations().len(), 1);
     }
 }

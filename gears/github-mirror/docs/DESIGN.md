@@ -158,7 +158,7 @@ The gear is started and stopped by the framework. `stop()` cancels the pool and 
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-one-token`
 
-`github_token_secret` names the GitHub token's secret in the credential store, or a list of secrets for several tokens; all are read once at init, and until the token pool lands ([#5367](https://github.com/constructorfabric/gears-rust/issues/5367)) every request uses the first. All tenants' syncs share its rate limit, so a backoff pauses every request made with it. A token per tenant is future work. Unknown keys in the gear's config are refused at start-up, so the `github_token` key of earlier builds fails loudly instead of leaving the gear unauthenticated.
+`github_token_secret` names the GitHub token's secret in the credential store, or a list of secrets for several tokens; all are read on the gear's first request to GitHub and kept until a restart, and until the token pool lands ([#5367](https://github.com/constructorfabric/gears-rust/issues/5367)) every request uses the first. All tenants' syncs share its rate limit, so a backoff pauses every request made with it. A token per tenant is future work. Unknown keys in the gear's config are refused at start-up, so the `github_token` key of earlier builds fails loudly instead of leaving the gear unauthenticated.
 
 #### Tenant Isolation in Storage
 
@@ -170,7 +170,7 @@ Every table has `tenant_id`, and every query is built through the secure ORM wit
 
 - [x] `p1` - **ID**: `cpt-cf-github-mirror-constraint-storage-engines`
 
-SeaORM through toolkit-db, with SQLite, PostgreSQL and MariaDB in the migrations. The migration runner applies migrations in name order; names are `m0001_…` to `m0047_…`, so name order is number order and a new migration takes the next number.
+SeaORM through toolkit-db, with SQLite, PostgreSQL and MariaDB in the migrations. The migration runner applies migrations in name order; names are `m0001_…`, `m0002_…` and so on, so name order is number order and a new migration takes the next number.
 
 ## 3. Technical Architecture
 
@@ -465,7 +465,7 @@ Tasks have no table: the queue is in memory.
 
 #### Migrations
 
-`m0001_initial` to `m0047_mariadb_uuid_columns`, applied in name order by the toolkit migration runner. `m0047` repairs a MariaDB database created before the MySQL schema stored UUIDs as `BINARY(16)`: an empty table still holding a `VARCHAR(36)` UUID column is converted, and a table that holds rows stops the migration with a message to drop the `gm_*` tables, since that schema never stored a usable row; on PostgreSQL and SQLite it does nothing. A change to a table that already holds rows is additive, and every migration has a `down()` (see the PRD's schema-change rule). A new migration takes the next number.
+One migration, `m0001_initial`, creates every `gm_*` table and index; its SQL is in `migrations/m0001_initial/` (`postgres.sql`, `mysql.sql`, `sqlite.sql`), and `down()` drops the tables. The gear was never published, so the 48 migrations of its development were folded into this one; a database created by an earlier build must be dropped and recreated. From here on a change to a table that already holds rows is additive, and every migration has a `down()` (see the PRD's schema-change rule). A new migration takes the next number.
 
 ### 3.8 Core Algorithms
 

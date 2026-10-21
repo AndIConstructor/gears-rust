@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use figment::Figment;
 use figment::providers::Serialized;
+use github_mirror::config::GithubTokenSecret;
 use github_mirror::domain::validate::validate_repo_path;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -10,28 +11,43 @@ use toolkit::bootstrap::AppConfig;
 use toolkit_utils::SecretString;
 use uuid::Uuid;
 
+/// The built-in configuration that `--print-config` prints.
 pub const DEFAULT_TEMPLATE: &str = include_str!("../default_config.toml");
 
+/// The runtime configuration plus the CLI's own settings.
 pub struct CliConfig {
+    /// The settings the gear runtime starts with.
     pub app: AppConfig,
+    /// The tenant the platform token must belong to, when set.
     pub tenant_id: Option<Uuid>,
+    /// The credential-store secrets the GitHub tokens are saved in, one per token.
+    pub github_token_secrets: Vec<GithubTokenSecret>,
 }
 
+/// Where the SQLite database file lives.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DatabasePlacement {
+    /// One file per repository.
     #[value(name = "per_repo")]
     PerRepo,
+    /// One file per organization.
     #[value(name = "per_org")]
     PerOrg,
+    /// One file for every repository.
     #[value(name = "shared")]
     Shared,
 }
 
+/// The storage flags that override the configuration.
 pub struct StorageFlags<'a> {
+    /// The folder for the database and the HTTP cache.
     pub storage_dir: Option<PathBuf>,
+    /// A database URL to use instead of a SQLite file.
     pub database_url: Option<String>,
+    /// Where the SQLite file goes.
     pub database_placement: Option<DatabasePlacement>,
+    /// The repository the command works on, for per-repository placement.
     pub repo: Option<&'a str>,
 }
 
@@ -42,6 +58,7 @@ struct CliTable {
     database_placement: Option<DatabasePlacement>,
 }
 
+/// Merge the configuration file and the flags over the built-in template.
 pub fn load(
     path: &Path,
     github_tokens: &[SecretString],
@@ -70,11 +87,12 @@ pub fn load(
             .unwrap_or(DatabasePlacement::PerRepo),
         storage.repo,
     )?;
-    if github_tokens.is_empty() {
+    let github_token_secrets = if github_tokens.is_empty() {
         drop_github_token(&mut merged);
+        Vec::new()
     } else {
-        add_github_tokens(&mut merged, github_tokens)?;
-    }
+        github_token_secrets(&mut merged, github_tokens.len())?
+    };
     expand_home_dir(&mut merged)?;
 
     let app: AppConfig = Figment::new()
@@ -85,9 +103,11 @@ pub fn load(
     Ok(CliConfig {
         app,
         tenant_id: cli.tenant_id,
+        github_token_secrets,
     })
 }
 
+/// The SQLite database file the configuration points to, if any.
 pub fn sqlite_file(app: &AppConfig) -> Option<PathBuf> {
     let database = app.gears.get("github-mirror")?.get("database")?;
     if let Some(dsn) = database.get("dsn").and_then(Value::as_str) {
@@ -110,6 +130,7 @@ pub fn sqlite_file(app: &AppConfig) -> Option<PathBuf> {
     })
 }
 
+/// The tokens from the flag or the environment, else one per line of `~/.github-mirror/<file_name>`.
 pub fn resolve_tokens(given: &[SecretString], file_name: &str) -> Vec<SecretString> {
     let given: Vec<SecretString> = given.iter().filter_map(trimmed).collect();
     if !given.is_empty() {
@@ -127,6 +148,7 @@ pub fn resolve_tokens(given: &[SecretString], file_name: &str) -> Vec<SecretStri
         .unwrap_or_default()
 }
 
+/// The token from the flag or the environment, else from `~/.github-mirror/<file_name>`.
 pub fn resolve_token(given: Option<&SecretString>, file_name: &str) -> Option<SecretString> {
     if let Some(token) = given.and_then(trimmed) {
         return Some(token);
@@ -201,7 +223,7 @@ fn place_database(
     Ok(())
 }
 
-fn add_github_tokens(config: &mut Value, tokens: &[SecretString]) -> Result<()> {
+fn github_token_secrets(config: &mut Value, count: usize) -> Result<Vec<GithubTokenSecret>> {
     let configured = config
         .pointer("/gears/github-mirror/config/github_token_secret")
         .cloned()
@@ -212,29 +234,23 @@ fn add_github_tokens(config: &mut Value, tokens: &[SecretString]) -> Result<()> 
         })?,
         secret => secret,
     };
-    let key = first
-        .get("key")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("gears.github-mirror.config.github_token_secret has no key"))?;
-    let secrets: Vec<Value> = (1..=tokens.len())
-        .map(|n| {
-            json!({
-                "tenant_id": first.get("tenant_id"),
-                "key": if n == 1 { key.to_owned() } else { format!("{key}-{n}") },
-            })
+    let first: GithubTokenSecret = serde_json::from_value(first)
+        .context("gears.github-mirror.config.github_token_secret is not valid")?;
+    let secrets: Vec<GithubTokenSecret> = (1..=count)
+        .map(|n| GithubTokenSecret {
+            tenant_id: first.tenant_id,
+            key: if n == 1 {
+                first.key.clone()
+            } else {
+                format!("{}-{n}", first.key)
+            },
         })
         .collect();
-    let store = config
-        .pointer_mut("/gears/static-credstore-plugin/config/secrets")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("gears.static-credstore-plugin.config.secrets must be a list"))?;
-    for (secret, token) in secrets.iter().zip(tokens) {
-        let mut entry = secret.clone();
-        entry["value"] = Value::String(token.expose().to_owned());
-        store.push(entry);
-    }
-    config["gears"]["github-mirror"]["config"]["github_token_secret"] = Value::Array(secrets);
-    Ok(())
+    config["gears"]["github-mirror"]["config"]["github_token_secret"] = secrets
+        .iter()
+        .map(|secret| json!({ "tenant_id": secret.tenant_id, "key": secret.key }))
+        .collect();
+    Ok(secrets)
 }
 
 fn drop_github_token(config: &mut Value) {

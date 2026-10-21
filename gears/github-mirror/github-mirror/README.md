@@ -83,9 +83,9 @@ All keys are optional — `api_base_url` falls back to the public GitHub API and
 GitHub's anonymous rate limit).
 
 `github_token_secret` names a secret in the credential store (`credstore` gear), or a
-list of secrets for several tokens: the gear reads them once at init, so a replaced token
-takes effect after a restart. Until the token pool lands (#5367), every request uses the
-first token. It is a
+list of secrets for several tokens: the gear reads them on its first request to GitHub, so
+a replaced token takes effect after a restart. Until the token pool lands (#5367), every
+request uses the first token. It is a
 single gear-wide credential: every tenant's sync authenticates to GitHub with it, so
 don't point one deployment's token at repositories whose visibility should differ per
 tenant.

@@ -18,6 +18,5 @@ coverage:
 # These files run only in the E2E suites, whose coverage is not uploaded.
 ignore:
   - "gears/mini-chat/mini-chat/src/api/rest/routes/**"
-  # Process start-up only (argument parsing, runtime boot, exit code); the
-  # commands it dispatches to live in app/ and are covered there.
-  - "gears/github-mirror/github-mirror-cli/src/main.rs"
+  # A local command-line tool, run only when someone starts the binary.
+  - "gears/github-mirror/github-mirror-cli/src/**"
