@@ -2629,7 +2629,7 @@ dependencies = [
  "hex",
  "http",
  "inventory",
- "jsonschema",
+ "jsonschema 0.40.2",
  "proptest",
  "sea-orm",
  "sea-orm-migration",
@@ -2656,7 +2656,7 @@ dependencies = [
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-macros",
  "cf-gears-toolkit-security",
- "jsonschema",
+ "jsonschema 0.40.2",
  "serde_json",
  "uuid",
 ]
@@ -3805,7 +3805,6 @@ dependencies = [
  "cf-gears-types-registry-sdk",
  "gts",
  "inventory",
- "jsonschema 0.40.2",
  "opentelemetry",
  "opentelemetry_sdk",
  "parking_lot",
@@ -7105,9 +7104,9 @@ dependencies = [
 
 [[package]]
 name = "gts"
-version = "0.15.1"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bee4dc3a62af5c7a5021632ca2c642b8290203616f60dac9b5244b54799bcb82"
+checksum = "b2206c7d8769d3a1a7f68f0ab564244b6978068248d75d4c91d40ca0dd4fde36"
 dependencies = [
  "gts-id",
  "jsonschema 0.58.6",
@@ -7144,9 +7143,9 @@ dependencies = [
 
 [[package]]
 name = "gts-id"
-version = "0.15.1"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d374a347847c360424d725dc8bdd57a21ba3ff6761959c06c7bc94d1e73e3696"
+checksum = "bf3a43761ba970ee755f40e02c7a33f534697b8f31a115a78b8d56890dd4cbb4"
 dependencies = [
  "thiserror 2.0.20",
  "uuid",
@@ -7154,9 +7153,9 @@ dependencies = [
 
 [[package]]
 name = "gts-macros"
-version = "0.15.1"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27cf00d1868de2c41c132dea53cda56c6e2f4920563033c69f4b125c346d4270"
+checksum = "434ab8179a8b5d8c72b36e39a76e8dbc80a5e21d4fb283e8d500166b30113db7"
 dependencies = [
  "gts-id",
  "proc-macro2",

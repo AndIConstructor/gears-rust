@@ -31,7 +31,10 @@ use cluster_sdk::{
     ClusterError, ClusterProfile, ElectionConfig, LeaderElectionBackend, LeaderElectionFeatures,
     LeaderStatus, LeaderWatch,
 };
-use gts::{GTS_ID_URI_PREFIX, GtsId, GtsInstanceId, GtsRefValidation, GtsStore, GtsTypeId};
+use gts::{
+    GTS_ID_URI_PREFIX, GtsId, GtsInstanceId, GtsRefValidation, GtsStore, GtsTypeId,
+    X_GTS_INSTANCE_REF,
+};
 use quota_enforcement_sdk::testing::InMemoryStorage;
 use quota_enforcement_sdk::{
     METRIC_BASE_TYPE, MetricId, MetricKind, OwnedDefinition, QuotaEnforcementStoragePluginSpecV1,
@@ -792,7 +795,7 @@ pub fn mixin_request_document(metric: &str) -> Value {
 }
 
 /// A request contract whose metadata declares a GTS-typed field narrowed by
-/// `x-gts-ref` and a `date-time` field.
+/// `x-gts-instance-ref` and a `date-time` field.
 pub fn typed_request_document(metric: &str) -> Value {
     json!({
         "$id": format!("{GTS_ID_URI_PREFIX}{TYPED_REQUEST}"),
@@ -810,8 +813,7 @@ pub fn typed_request_document(metric: &str) -> Value {
                         "properties": {
                             "model": {
                                 "type": "string",
-                                "format": "gts-instance-id",
-                                "x-gts-ref": TYPED_MODEL_BASE
+                                X_GTS_INSTANCE_REF: TYPED_MODEL_BASE
                             },
                             "when": { "type": "string", "format": "date-time" }
                         },
@@ -916,7 +918,7 @@ pub fn plugin_instance_document(fixture: &PluginFixture) -> Value {
 
 /// Resolves `documents` the way the production adapter does: a local
 /// `GtsStore` holding the QE bases plus every document, then validation with
-/// the registry's pattern-only `x-gts-ref` policy. Instances are skipped.
+/// the registry's pattern-only entity-reference policy. Instances are skipped.
 pub fn resolve_documents(documents: &[Value]) -> Vec<RegisteredType> {
     let mut store = GtsStore::new();
     let mut ids = Vec::new();
@@ -942,12 +944,14 @@ pub fn resolve_documents(documents: &[Value]) -> Vec<RegisteredType> {
                 .map(|c| GtsTypeId::new(&c))
                 .collect();
             ancestors.reverse();
+            let payload = resolved.compile_payload_validator();
             RegisteredType {
                 id: GtsTypeId::new(&id),
                 is_abstract: resolved.is_abstract,
                 ancestors,
                 effective_traits: resolved.effective_traits,
                 schema: resolved.schema,
+                payload,
             }
         })
         .collect()

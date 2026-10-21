@@ -12,6 +12,7 @@
 mod common;
 
 use common::create_service;
+use gts::X_GTS_TYPE_REF;
 use serde_json::json;
 use toolkit_gts::{GTS_ID_PREFIX, GTS_ID_URI_PREFIX, gts_id, gts_uri};
 use types_registry::domain::model::ListQuery;
@@ -38,12 +39,12 @@ fn rg_base_contract() -> serde_json::Value {
                 },
                 "allowed_parent_types": {
                     "type": "array",
-                    "items": { "type": "string", "x-gts-ref": gts_id!("cf.core.rg.type.v1~") },
+                    "items": { "type": "string", X_GTS_TYPE_REF: gts_id!("cf.core.rg.type.v1~") },
                     "default": []
                 },
                 "allowed_membership_types": {
                     "type": "array",
-                    "items": { "type": "string", "x-gts-ref": format!("{GTS_ID_PREFIX}*") },
+                    "items": { "type": "string", X_GTS_TYPE_REF: format!("{GTS_ID_PREFIX}*") },
                     "default": []
                 }
             }

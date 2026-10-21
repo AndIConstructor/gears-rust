@@ -173,7 +173,7 @@ impl GtsRepository for InMemoryGtsRepository {
                 return Err(DomainError::already_exists(&gts_id));
             }
 
-            // `x-gts-ref` checks values without requiring registered targets.
+            // Entity references check values without requiring registered targets.
             let result = persistent.add_entity_with(entity, validate, GtsRefValidation::None);
             if !result.ok {
                 // Debug logging for registration failure

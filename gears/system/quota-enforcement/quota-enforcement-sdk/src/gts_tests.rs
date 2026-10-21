@@ -190,8 +190,8 @@ fn the_inventory_carries_the_same_seven_definitions() {
 
 /// A store holding the QE definitions and the `llm_gateway` examples: the
 /// repository's semantic check of the reviewed schema files. The registry
-/// validates with the same `gts` library and pattern-only `x-gts-ref` policy at
-/// admission time.
+/// validates with the same `gts` library and pattern-only entity-reference policy
+/// at admission time.
 fn store_with_examples() -> GtsStore {
     let mut store = GtsStore::new();
     for def in definitions().iter().filter(|d| d.id.ends_with('~')) {

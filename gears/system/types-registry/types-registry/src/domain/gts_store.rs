@@ -98,7 +98,7 @@ impl std::fmt::Debug for UnitStore {
 }
 
 impl UnitStore {
-    /// Validate with the registry's non-resolving `x-gts-ref` policy
+    /// Validate with the registry's non-resolving entity-reference policy
     /// (`cpt-cf-types-registry-fr-ref-tracking`).
     /// Pattern and value checks still apply; target presence is not a dependency.
     ///

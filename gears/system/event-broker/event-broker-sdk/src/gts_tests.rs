@@ -241,13 +241,20 @@ fn event_identifier_fields_accept_concrete_ids_but_reject_wildcards() {
     let schema = emitted(&EventV1::gts_schema_with_refs_as_string());
     let validator = gts::XGtsRefValidator::new();
     for field in ["type", "subject_type"] {
-        let constraint = &schema["properties"][field];
-        let id = serde_json::json!("gts.cf.core.events.event.v1~fabrikam.shop.orders.placed.v1~");
-        assert!(validator.validate_instance(&id, constraint, "").is_empty());
-        let wildcard = serde_json::json!("gts.cf.core.events.event.v1~fabrikam.shop.orders.*");
+        // Keeps the base's `$id`, which a `/$id` constraint resolves to.
+        let constraint = serde_json::json!({
+            "$id": schema["$id"],
+            "properties": { field: schema["properties"][field] },
+        });
+        let id = serde_json::json!({
+            field: "gts.cf.core.events.event.v1~fabrikam.shop.orders.placed.v1~"
+        });
+        assert!(validator.validate_instance(&id, &constraint, "").is_empty());
+        let wildcard =
+            serde_json::json!({ field: "gts.cf.core.events.event.v1~fabrikam.shop.orders.*" });
         assert!(
             !validator
-                .validate_instance(&wildcard, constraint, "")
+                .validate_instance(&wildcard, &constraint, "")
                 .is_empty(),
             "{field} is an identifier, not a wildcard selector"
         );

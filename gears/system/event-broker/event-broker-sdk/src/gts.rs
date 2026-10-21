@@ -13,7 +13,7 @@
 //! `docs/schemas/` are generated from this module and held to it by
 //! `gts_tests`, so per-field keywords live in the schemars attributes below.
 
-use gts::{GtsInstanceId, GtsTypeId};
+use gts::{GtsInstanceId, GtsTypeId, SELF_ID_REF};
 use schemars::JsonSchema;
 use serde::Serialize;
 use toolkit_gts::{GtsTraitsSchema, gts_id, gts_type_schema};
@@ -54,7 +54,7 @@ pub struct PartitionKeyRef(pub String);
 // registration rather than at its first publish.
 #[derive(Serialize, JsonSchema)]
 #[serde(transparent)]
-#[schemars(transparent, extend("x-gts-ref" = gts_id!("cf.core.events.topic.v1~")))]
+#[schemars(transparent, extend("x-gts-instance-ref" = gts_id!("cf.core.events.topic.v1~")))]
 pub struct TopicRef(pub String);
 
 // Traits for `gts.cf.core.events.event.v1~`, emitted as the base's
@@ -98,7 +98,7 @@ pub struct TopicV1 {
     /// Full GTS topic identifier (e.g., gts.cf.core.events.topic.v1~vendor.users.v1).
     #[schemars(
         with = "String",
-        extend("x-gts-ref" = gts_id!("cf.core.events.topic.v1~"))
+        extend("x-gts-instance-ref" = SELF_ID_REF)
     )]
     pub id: GtsInstanceId,
     /// What the stream carries, for a reader deciding whether to subscribe to it. ASCII only.
@@ -153,13 +153,14 @@ pub struct EventV1 {
     pub id: Uuid,
     /// Full GTS event-type identifier. The event is an instance of that derived type. ASCII only.
     // GTS reference validation enforces identifier syntax and its length limit.
-    // `with = "String"` preserves the event-family constraint: a field typed
+    // `/$id` names the event type being validated, so an event must carry its own
+    // type. `with = "String"` preserves that constraint: a field typed
     // `GtsTypeId` is emitted as a `$ref`, and `gts-macros` then replaces the whole
-    // property with what the type's `JsonSchema` impl says - an unregistered
-    // `format` and a `gts.*` reference that every identifier matches.
+    // property with what the type's `JsonSchema` impl says - an
+    // `x-gts-type-ref: "gts.*"` that every Type identifier matches.
     #[schemars(
         with = "String",
-        extend("x-gts-ref" = gts_id!("cf.core.events.event.v1~"))
+        extend("x-gts-type-ref" = SELF_ID_REF)
     )]
     pub r#type: GtsTypeId,
     /// Tenant the event belongs to. Producer-supplied. Ingest validates the producer's principal is authorized to publish to this tenant via the platform's authz resolver; unauthorized publishes are rejected with 403 TenantIdNotAuthorized.
@@ -171,7 +172,7 @@ pub struct EventV1 {
     #[schemars(regex(pattern = ASCII_PRINTABLE), length(min = 1, max = 1024))]
     pub subject: String,
     /// Full GTS subject-type identifier - the type of the entity the event is about. Required and NOT derivable from `type`: event types may be generic (e.g., `rule_applied`) across multiple subject kinds, and events may have no `data` body to introspect. ASCII only.
-    #[schemars(extend("x-gts-ref" = gts_id!("*")))]
+    #[schemars(extend("x-gts-type-ref" = gts_id!("*")))]
     pub subject_type: String,
     /// When the event occurred (producer-stamped). ISO 8601 / RFC 3339 timestamp.
     #[schemars(extend("format" = "date-time"))]
