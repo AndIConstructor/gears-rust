@@ -79,7 +79,7 @@ async fn bound_service() -> Arc<Service> {
         .expect("catalogue");
     service
         .bind(Bound {
-            engines: Arc::new(crate::domain::engines::builtin_registry().expect("engines")),
+            engines: Arc::new(crate::domain::engines::linked_registry().expect("engines")),
             artifacts: Arc::new(crate::domain::engines::PolicyArtifactCache::new(
                 std::num::NonZeroUsize::new(256).expect("capacity"),
                 std::num::NonZeroUsize::new(2).expect("permits"),

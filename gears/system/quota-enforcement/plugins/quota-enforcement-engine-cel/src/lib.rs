@@ -89,6 +89,8 @@ const PARSER_STACK_BYTES: usize = 64 << 20;
 #[derive(Debug, Default)]
 pub struct CelEngine;
 
+quota_enforcement_sdk::register_engine!(|| Arc::new(CelEngine));
+
 /// The immutable compiled artifact: the expanded AST and the metrics whose
 /// environments it was checked against. Persisted policies keep the source and
 /// schemas, never this struct; a cache miss rebuilds it through

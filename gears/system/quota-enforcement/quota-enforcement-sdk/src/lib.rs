@@ -33,10 +33,10 @@ pub mod testing;
 
 pub use client::{QuotaEnforcementError, QuotaManagerClientV1, QuotaOperatorClientV1};
 pub use engine::{
-    EngineConfigError, EngineError, EngineValidationInput, EnvironmentInputs, EvaluationBudget,
-    EvaluationContext, EvaluationFailure, EvaluationMeter, EvaluationOutcome, EvaluationQuota,
-    MetricEnvironmentSchema, PolicySchemaSnapshot, QuotaResolutionEngineV1, QuotaScopeTier,
-    ValidatedConfig,
+    EngineConfigError, EngineError, EngineRegistration, EngineValidationInput, EnvironmentInputs,
+    EvaluationBudget, EvaluationContext, EvaluationFailure, EvaluationMeter, EvaluationOutcome,
+    EvaluationQuota, MetricEnvironmentSchema, PolicySchemaSnapshot, QuotaResolutionEngineV1,
+    QuotaScopeTier, ValidatedConfig, linked_engines,
 };
 pub use gts::{
     CONSTRAINT_BASE, LEASE_RESOURCE, METRIC_BASE_TYPE, OPERATION_RESOURCE, OwnedDefinition,
@@ -61,3 +61,7 @@ pub use storage_plugin::{
     CONTRACT_MAJOR, EvaluatedBatch, EvaluatedMutation, QuotaEnforcementStoragePluginV1,
     StorageError,
 };
+
+// The engine registration macro reaches `inventory` through the SDK.
+#[doc(hidden)]
+pub use inventory as __inventory;
