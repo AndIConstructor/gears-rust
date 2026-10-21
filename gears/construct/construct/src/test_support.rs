@@ -795,7 +795,8 @@ impl AdmissionRulesSource for FixedRules {
     }
 }
 
-/// Rules that let every plan in the tests through, with avatar's floor.
+/// Rules that let every plan in the tests through, with a confidence floor
+/// of 0.6.
 pub fn open_rules() -> AdmissionRules {
     AdmissionRules {
         trusted_connectors: Allowed::Any,
