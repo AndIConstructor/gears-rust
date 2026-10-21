@@ -17,7 +17,7 @@ date: 2026-10-19
   - [Confirmation](#confirmation)
   - [Review and Supersession](#review-and-supersession)
 - [Pros and Cons of the Options](#pros-and-cons-of-the-options)
-  - [Open Responses as the single public contract, with Gateway extensions in a reserved namespace](#open-responses-as-the-single-public-contract-with-gateway-extensions-in-a-reserved-namespace)
+  - [Open Responses as the single public contract, with Gateway-owned types under the `cf_gears:` prefix](#open-responses-as-the-single-public-contract-with-gateway-owned-types-under-the-cf_gears-prefix)
   - [OpenAI Chat Completions as the public contract](#openai-chat-completions-as-the-public-contract)
   - [A custom platform schema](#a-custom-platform-schema)
   - [Open Responses plus a Chat Completions compatibility layer](#open-responses-plus-a-chat-completions-compatibility-layer)
@@ -43,14 +43,14 @@ The LLM Gateway gives platform gears one API over many LLM providers. It needs o
 
 ## Considered Options
 
-* Open Responses as the single public contract, with Gateway extensions in a reserved namespace.
+* Open Responses as the single public contract, with Gateway-owned types under the `cf_gears:` prefix.
 * OpenAI Chat Completions as the public contract.
 * A custom platform schema.
 * Open Responses plus a Chat Completions compatibility layer in the Gateway.
 
 ## Decision Outcome
 
-Chosen option: "Open Responses as the single public contract, with Gateway extensions in a reserved namespace", because it is the only option that gives typed items, typed streaming events, and a defined extension path in an existing open specification, without a second protocol for the Gateway to maintain. The Chat Completions compatibility layer is not adopted now. It stays open as a separate decision tied to llm-connectors migration planning.
+Chosen option: "Open Responses as the single public contract, with Gateway-owned types under the `cf_gears:` prefix", because it is the only option that gives typed items, typed streaming events, and a defined extension path in an existing open specification, without a second protocol for the Gateway to maintain. The Chat Completions compatibility layer is not adopted now. It stays open as a separate decision tied to llm-connectors migration planning.
 
 ### Decision Scope
 
@@ -58,7 +58,7 @@ This ADR decides:
 
 * Open Responses is the wire contract of the Gateway for create response (sync and streaming), on REST and in the SDK.
 * Embeddings use a Gateway-defined request and response (the SDK `EmbeddingRequest` and `EmbeddingResponse`) on `/llm-gateway/v1/embeddings`, outside the Open Responses specification, and follow the same versioning and `cf_gears:` extension rules.
-* The reserved Gateway namespace is the `cf_gears:` prefix: Gateway-owned types, tools, items, and stream events use it (for example `cf_gears:web_search` and `cf_gears:response.data.done`), so they cannot collide with Open Responses or provider names. Gateway extension fields on Open Responses objects (such as `ignored_parameters`) are additive optional fields defined in the SDK models.
+* Gateway namespace: Gateway-owned types, tools, items, and stream events use it (for example `cf_gears:web_search` and `cf_gears:response.data.done`), so they cannot collide with Open Responses or provider names. Gateway extension fields on Open Responses objects (such as `ignored_parameters`) are additive optional fields defined in the SDK models.
 * Input items, output items, tools, and stream events of types the Gateway does not know are carried as `Other` (`Extension`) values in the SDK models and relayed unchanged, never dropped or rewritten. Provider-specific request parameters travel in `extra_fields`, subject to the model's `allow_extra_params`.
 * The contract evolves by additive changes inside a version; breaking changes need a new version.
 
@@ -101,9 +101,9 @@ Review this ADR when a new Open Responses revision breaks compatibility with the
 
 ## Pros and Cons of the Options
 
-### Open Responses as the single public contract, with Gateway extensions in a reserved namespace
+### Open Responses as the single public contract, with Gateway-owned types under the `cf_gears:` prefix
 
-One protocol on REST and in the SDK; Gateway-owned types live in the reserved `cf_gears:` namespace.
+One protocol on REST and in the SDK; Gateway-owned types use the `cf_gears:` prefix.
 
 * Good, because typed items and typed streaming events cover text, tool calls, and reasoning in one model.
 * Good, because the specification defines extension points, so Gateway features do not need a private protocol.
