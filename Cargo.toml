@@ -372,8 +372,8 @@ rustls-cng-crypto = { version = "0.1", default-features = false, features = ["fi
 # field of SEC1 (rather than derived from the scalar in non-FIPS code),
 # preserving the FIPS-validated boundary at corecrypto for every
 # cryptographic operation. See ADR 0004.
-pkcs8 = "0.10"
-sec1 = { version = "0.7", default-features = false, features = ["alloc", "der"] }
+pkcs8 = "0.11"
+sec1 = { version = "0.8", default-features = false, features = ["alloc", "der"] }
 
 toolkit-contract = { package = "cf-gears-toolkit-contract", version = "0.4.0", path = "libs/toolkit-contract" }
 toolkit-contract-macros = { package = "cf-gears-toolkit-contract-macros", version = "0.1.6", path = "libs/toolkit-contract-macros" }
