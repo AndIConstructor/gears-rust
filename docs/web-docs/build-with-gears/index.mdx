@@ -116,7 +116,9 @@ pipx install git+https://github.com/constructorfabric/studio.git
 ### Docker, for the container-based lanes
 
 Building the framework and running `make quickstart` need no Docker. These targets do:
-`make e2e-docker`, `make test-pgq`, `make e2e-usage-collector`, and `make mini-chat-docker`.
+`make e2e-docker`, `make e2e-usage-collector`, `make mini-chat-docker`, `make test-db`, and
+`make test-integration`. The last two run test lanes, and most lanes start their database in a
+container, for example `make test-integration LANE=toolkit-db-pgq`.
 
 They need a running Docker daemon **and** two CLI plugins: **Compose**, which brings up the
 test environments, and **Buildx**, because `gears/mini-chat/deploy/docker/mini-chat.Dockerfile`
@@ -151,8 +153,15 @@ for your platform:
   ```
 
 Integrated distributions such as Docker Desktop, OrbStack, and Rancher Desktop ship both
-plugins. If a check fails on one of those, the daemon is most likely not running rather than a
-plugin missing.
+plugins. The two plugin checks run in the CLI alone and pass even when no daemon is running, so
+read a failure by which check it comes from:
+
+- `docker version` prints the `Client` section but fails at `Server` — the daemon is not
+  running, or the CLI points at a different one. Start your Docker runtime; if it is already
+  running, check the active context with `docker context ls`.
+- `docker compose version` or `docker buildx version` reports `unknown command` — the plugin is
+  not installed where the CLI looks for it. Starting the daemon does not fix that: install the
+  plugin or repair its link in `~/.docker/cli-plugins`, as described above.
 
 ## Build and run
 
