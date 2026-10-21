@@ -838,6 +838,56 @@ async fn a_replay_after_the_retention_window_is_a_new_operation() {
 }
 
 #[tokio::test]
+async fn a_record_that_replaced_an_expired_one_survives_the_sweep_that_selected_its_key() {
+    use crate::infra::storage::repo::idempotency_repo::{self as idem_repo, ScopeKey};
+    let h = Harness::up().await;
+    h.consumption_quota("u1", Some(100), Vec::new()).await;
+    let key = write(OperationType::Debit, "k1", 1);
+    let first = h.debit("u1", 10, &key).await.expect("debit");
+    let Retention::Recorded {
+        expires_at: first_expiry,
+    } = first.get().retention
+    else {
+        panic!("the debit is recorded");
+    };
+
+    // A sweep selects the key once its record has expired...
+    let sweep_at = first_expiry + time::Duration::seconds(1);
+    let all = toolkit_security::AccessScope::allow_all();
+    let conn = h.db.conn().expect("conn");
+    let doomed = idem_repo::select_expired(&conn, &all, 10, sweep_at)
+        .await
+        .expect("select");
+    assert_eq!(doomed.len(), 1);
+
+    // ...and before it deletes, a debit under the same key replaces the record.
+    h.set_now(sweep_at);
+    let second = h.debit("u1", 10, &key).await.expect("a new operation");
+    assert!(matches!(second, TransitionOutcome::Applied(_)));
+
+    let (tenant_id, subject_key, operation_type, idem_key) = &doomed[0];
+    let deleted = idem_repo::delete_if_expired(
+        &conn,
+        &all,
+        &ScopeKey {
+            tenant_id: *tenant_id,
+            subject_key,
+            operation_type,
+            idem_key,
+        },
+        sweep_at,
+    )
+    .await
+    .expect("delete");
+    assert_eq!(deleted, 0, "the replacement has not expired");
+
+    // So the replacement still answers its replay instead of debiting again.
+    let replay = h.debit("u1", 10, &key).await.expect("replay");
+    assert!(matches!(replay, TransitionOutcome::NoOp(_)));
+    h.down().await;
+}
+
+#[tokio::test]
 async fn the_operation_log_is_reclaimed_in_batches() {
     let h = Harness::up().await;
     h.consumption_quota("u1", Some(1000), Vec::new()).await;

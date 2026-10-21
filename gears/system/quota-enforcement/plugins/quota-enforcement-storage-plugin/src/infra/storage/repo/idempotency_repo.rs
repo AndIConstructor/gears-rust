@@ -171,18 +171,21 @@ pub async fn mark_reversed(
     Ok(affected.rows_affected == 1)
 }
 
-/// Delete up to `batch_size` records that expired before `before`.
+/// A primary key of a stored record, owned.
+pub type OwnedKey = (Uuid, Vec<u8>, String, String);
+
+/// Up to `batch_size` keys whose records expired before `before`.
 ///
 /// # Errors
 ///
-/// The scope or database error of the delete.
-pub async fn delete_expired(
+/// The scope or database error of the read.
+pub async fn select_expired(
     runner: &impl DBRunner,
     scope: &AccessScope,
     batch_size: u32,
     before: OffsetDateTime,
-) -> Result<u64, ScopeError> {
-    let doomed: Vec<(Uuid, Vec<u8>, String, String)> = Entity::find()
+) -> Result<Vec<OwnedKey>, ScopeError> {
+    Ok(Entity::find()
         .filter(Column::ExpiresAt.lt(before))
         .limit(u64::from(batch_size))
         .secure()
@@ -198,22 +201,30 @@ pub async fn delete_expired(
                 row.idem_key,
             )
         })
-        .collect();
-    let mut deleted = 0;
-    for (tenant_id, subject_key, operation_type, idem_key) in &doomed {
-        let key = ScopeKey {
-            tenant_id: *tenant_id,
-            subject_key,
-            operation_type,
-            idem_key,
-        };
-        let affected = Entity::delete_many()
-            .filter(addressed(&key))
-            .secure()
-            .scope_with(scope)
-            .exec(runner)
-            .await?;
-        deleted += affected.rows_affected;
-    }
-    Ok(deleted)
+        .collect())
+}
+
+/// Delete the record under `key` if it is still expired before `before`.
+///
+/// The expiry is part of the delete, not only of the selection that found the
+/// key: a writer may have replaced the expired record since, and its fresh
+/// record must survive, or a replay of it would run a second time.
+///
+/// # Errors
+///
+/// The scope or database error of the delete.
+pub async fn delete_if_expired(
+    runner: &impl DBRunner,
+    scope: &AccessScope,
+    key: &ScopeKey<'_>,
+    before: OffsetDateTime,
+) -> Result<u64, ScopeError> {
+    let affected = Entity::delete_many()
+        .filter(addressed(key))
+        .filter(Column::ExpiresAt.lt(before))
+        .secure()
+        .scope_with(scope)
+        .exec(runner)
+        .await?;
+    Ok(affected.rows_affected)
 }

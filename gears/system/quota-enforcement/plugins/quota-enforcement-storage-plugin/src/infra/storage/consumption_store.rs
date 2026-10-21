@@ -1582,9 +1582,24 @@ impl crate::domain::ports::ConsumptionStore for SqlConsumptionStore {
             .db
             .conn()
             .map_err(|error| unavailable(OPERATION, "connection", &error))?;
-        idem_repo::delete_expired(&conn, &AccessScope::allow_all(), batch_size, before)
+        let scope = AccessScope::allow_all();
+        let doomed = idem_repo::select_expired(&conn, &scope, batch_size, before)
             .await
-            .map_err(|error| lift(OPERATION, error.into()))
+            .map_err(|error| lift(OPERATION, error.into()))?;
+        // Re-checked per key, so a record a writer replaced meanwhile survives.
+        let mut deleted = 0;
+        for (tenant_id, subject_key, operation_type, idem_key) in &doomed {
+            let key = idem_repo::ScopeKey {
+                tenant_id: *tenant_id,
+                subject_key,
+                operation_type,
+                idem_key,
+            };
+            deleted += idem_repo::delete_if_expired(&conn, &scope, &key, before)
+                .await
+                .map_err(|error| lift(OPERATION, error.into()))?;
+        }
+        Ok(deleted)
     }
 
     async fn reclaim_operation_log(
