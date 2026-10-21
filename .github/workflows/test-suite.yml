@@ -25,7 +25,9 @@ jobs:
     name: nextest
     runs-on: ${{ inputs.os }}
     env:
-      RUSTFLAGS: "-C debuginfo=0"
+      # Windows: use lld-link. It comes with LLVM on the runner and links much
+      # faster than link.exe.
+      RUSTFLAGS: ${{ startsWith(inputs.os, 'windows') && '-C debuginfo=0 -C linker=lld-link' || '-C debuginfo=0' }}
       # nextest writes JUnit under the `ci` profile, and the Makefile copies it
       # to JUNIT_DIR. Keep it relative: make's sh breaks on Windows backslashes.
       NEXTEST_PROFILE: ci
