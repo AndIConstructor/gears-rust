@@ -5238,6 +5238,7 @@ dependencies = [
  "cf-gears-cluster-conformance",
  "cf-gears-cluster-sdk",
  "cf-gears-standalone-cluster-plugin",
+ "cf-gears-test-containers",
  "cf-gears-toolkit",
  "cf-gears-toolkit-macros",
  "dashmap",
