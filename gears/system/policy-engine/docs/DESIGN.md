@@ -359,7 +359,7 @@ document content), once per request, and the document content of active versions
 Adapter over `tenant-resolver`: the barrier-respecting ancestor chain for decisions (the only call per request), and for
 management calls reachability (barriers respected, or ignored to tell a tenant behind a barrier from one outside) and the
 caller's subtree (barriers ignored, each tenant with its barrier flag, so barrier-respecting reachability within it is
-derived in memory); each call bounded.
+derived in memory); each call bounded - by `hierarchy_timeout` on the decision path and by `management_hierarchy_timeout` on the management surface.
 
 #### REST API
 
@@ -389,7 +389,7 @@ The management client (`cpt-cf-policy-engine-interface-management-client`) and t
 | Assignment | assign, update the enforce flag, unassign, and their dry runs | `publish` | unstable |
 | Assignment | get, list | `read`; `publish` for dormant assignments at the caller's tenants | unstable |
 
-Lists are paged with the platform's OData conventions: bundles, versions and assignments are cursor-paged (`$top` and cursor, default page 25, maximum 100), bundles filterable by `name` (`eq`, `ne`, `in`, `contains`, `startswith`, `endswith`) and `owner_tenant_id` (`eq`, `ne`, `in`), versions newest ordinal first, assignments by identity and filterable by `bundle_id` and `tenant_id` (`eq`, `ne`, `in`). A listing's visibility is applied in the query, so pages come back full; it binds the caller's subtree and chain as `IN` lists, so its cost grows with the caller's subtree. No decision operation exists outside the engine plugin.
+Lists are paged with the platform's OData conventions: bundles, versions and assignments are cursor-paged (`$top` and cursor, default page 25, maximum 100), bundles filterable by `name` (`eq`, `ne`, `in`, `contains`, `startswith`, `endswith`) and `owner_tenant_id` (`eq`, `ne`, `in`), versions newest ordinal first, assignments by identity and filterable by `bundle_id` and `tenant_id` (`eq`, `ne`, `in`). A listing's visibility is applied in the query, so pages come back full; it binds the caller's subtree and chain as `IN` lists, within the backend's bind budget (`max_bind_params_for`, less a reserve for the filter and cursor). It binds up to five values per tenant of the caller's subtree, depending on its grants; a caller beyond the budget (in the worst case roughly 5,800 tenants on SQLite and 11,800 on PostgreSQL) is refused with `SUBTREE_TOO_LARGE`, never answered partially. Reading one assignment decides the same rule by point checks on its owner and target and reads no subtree, so it is not limited. The management surface's hierarchy calls are bounded by `management_hierarchy_timeout` (default 1 s), apart from the decision path's `hierarchy_timeout`, so a slow subtree read never loosens the decision path. A local tenant-closure projection, or a paged descendants read from the tenant resolver, would lift the limit; neither exists yet. No decision operation exists outside the engine plugin.
 
 A dry run (`check_publish`; `dry_run=true` on the operation's route) answers `204` when the operation would succeed
 and the operation's own problem otherwise. Validation answers the same way: `204` for valid content, otherwise the
@@ -574,7 +574,7 @@ Working assumptions, to be revisited with production data; the limits are enforc
 ## 4. Additional context
 
 Operators configure the built-in policies, the plugin's vendor and priority, the evaluation budget, the bounds on
-hierarchy calls, store reads and registry calls, the compile cache size, the content limits and the database; the
+hierarchy calls (decision and management apart), store reads and registry calls, the compile cache size, the content limits and the database; the
 keys, defaults and accepted maxima are defined in the [gear configuration](../policy-engine/src/config.rs). Unknown
 keys, a zero or oversized bound or limit, and any validation finding on a built-in policy fail startup. Every log line
 of a decision carries the request's correlation id; a dependency failure is logged with its cause.

@@ -37,11 +37,14 @@
 //!   above `C`, so this is exactly "the owner does not reach the target". The
 //!   bundle need not be readable: no content is shown.
 //!
-//! Both are decided from one subtree read (barriers ignored, with each
-//! tenant's barrier flag) and one chain read, not per row. Anything else -
-//! a target outside `C`'s subtree altogether included - is not shown, and
-//! the read reports it not found. A filter naming content the caller cannot
-//! see yields no rows rather than an error.
+//! The listing decides both from one subtree read (barriers ignored, with
+//! each tenant's barrier flag) and one chain read, not per row; the read of
+//! one assignment decides them by point checks on its owner and target, and
+//! never reads the subtree. Anything else - a target outside `C`'s subtree
+//! altogether included - is not shown, and the read reports it not found. A
+//! filter naming content the caller cannot see yields no rows rather than
+//! an error. A change the caller may not make to an assignment it sees is
+//! refused with `CAPABILITY_DENIED`, never reported absent or done.
 //!
 //! # Mutations
 //!
@@ -88,7 +91,9 @@ use super::error::{self, Subject};
 use super::service::{ManagementService, now};
 use crate::domain::model::{Assignment, AssignmentId, Bundle};
 use crate::domain::ports::{PortError, Subtree};
-use crate::domain::repos::{AssignmentRepository, AssignmentVisibility, RepoError, conflict};
+use crate::domain::repos::{
+    AssignmentRepository, AssignmentVisibility, BundleRepository, RepoError, conflict,
+};
 
 /// Where a tenant lies from the caller's own tenant (module documentation,
 /// "Barrier rule").
@@ -163,17 +168,99 @@ impl<S: ContentStore> ManagementService<S> {
         ctx: &SecurityContext,
         assignment_id: AssignmentId,
     ) -> Result<sdk::Assignment, ManagementError> {
-        let Some(view) = self.assignment_view(ctx).await? else {
+        let Some(assignment) = self.find_assignment(assignment_id).await? else {
             return Err(assignment_not_found(assignment_id));
         };
+        match self.seen(ctx, &assignment).await? {
+            Some(dormant) => Ok(assignment_to_sdk(&assignment, dormant)),
+            None => Err(assignment_not_found(assignment_id)),
+        }
+    }
+
+    /// Whether the caller would see `assignment` in
+    /// [`Self::list_assignments`] - `Some` with its dormant flag - decided by
+    /// point checks for this one row, never by reading the caller's subtree
+    /// (module documentation, "Visibility"): the owner is on the caller's
+    /// side of every barrier (in its chain, or reached from it), and either
+    /// the caller reads the bundle and reaches the target ignoring barriers,
+    /// or it may withdraw a dormant assignment at a target it reaches.
+    ///
+    /// # Errors
+    ///
+    /// `service_unavailable` when the PDP or the hierarchy cannot answer.
+    async fn seen(
+        &self,
+        ctx: &SecurityContext,
+        assignment: &Assignment,
+    ) -> Result<Option<bool>, ManagementError> {
+        let read = self.collection_grant(ctx, Capability::Read).await?;
+        let publish = self.collection_grant(ctx, Capability::Publish).await?;
+        let caller = ctx.subject_tenant_id();
+        if (read.is_none() && publish.is_none()) || caller.is_nil() {
+            return Ok(None);
+        }
+        let Some(chain) = self.caller_chain(ctx).await? else {
+            return Ok(None);
+        };
+        let (owner, target) = (assignment.owner_tenant_id, assignment.tenant_id);
+        let owner_reaching = chain.contains(&owner)
+            || self
+                .reachable(ctx, caller, owner, BarrierMode::Respect)
+                .await?;
+        let visible = if owner_reaching {
+            match &read {
+                Some(read) => {
+                    self.reachable(ctx, caller, target, BarrierMode::Ignore)
+                        .await?
+                        && self.bundle_readable(&read.scope, assignment).await?
+                }
+                None => false,
+            }
+        } else {
+            publish
+                .as_ref()
+                .is_some_and(|auth| auth.covers_tenant(target))
+                && self
+                    .reachable(ctx, caller, target, BarrierMode::Respect)
+                    .await?
+        };
+        if !visible {
+            return Ok(None);
+        }
+        Ok(Some(self.is_dormant(ctx, assignment).await?))
+    }
+
+    /// Whether `assignment`'s bundle is within `read`, as the listing's
+    /// bundle subquery decides it.
+    async fn bundle_readable(
+        &self,
+        read: &AccessScope,
+        assignment: &Assignment,
+    ) -> Result<bool, ManagementError> {
         let conn = self.conn()?;
-        self.store
-            .assignments()
-            .find_visible(&conn, &view.visibility, assignment_id)
+        Ok(self
+            .store
+            .bundles()
+            .get(&conn, read, assignment.bundle_id)
             .await
-            .map_err(|e| assignment_repo(e, assignment_id))?
-            .map(|assignment| view.to_sdk(&assignment))
-            .ok_or_else(|| assignment_not_found(assignment_id))
+            .map_err(|e| error::repo(e, Subject::Bundle(assignment.bundle_id)))?
+            .is_some())
+    }
+
+    /// The refusal for a change to `current` the caller may not make:
+    /// `CAPABILITY_DENIED` when the caller sees the assignment (a refusal
+    /// never pretends visible content is absent), `absent` otherwise.
+    async fn refusal(
+        &self,
+        ctx: &SecurityContext,
+        current: &Assignment,
+        absent: ManagementError,
+    ) -> Result<ManagementError, ManagementError> {
+        Ok(if self.seen(ctx, current).await?.is_some() {
+            ManagementError::CapabilityDenied
+        } else {
+            absent
+        })
     }
 
     /// Lists the assignments visible to the caller, one cursor page at a
@@ -182,7 +269,8 @@ impl<S: ContentStore> ManagementService<S> {
     /// # Errors
     ///
     /// `CAPABILITY_DENIED` when neither is granted; invalid argument for a
-    /// malformed query.
+    /// malformed query; `SUBTREE_TOO_LARGE` when the caller's subtree is too
+    /// large to evaluate the listing in one statement.
     pub async fn list_assignments(
         &self,
         ctx: &SecurityContext,
@@ -210,14 +298,16 @@ impl<S: ContentStore> ManagementService<S> {
     ///
     /// # Errors
     ///
-    /// `TENANT_BOUNDARY`; not found; `CAPABILITY_DENIED`.
+    /// `TENANT_BOUNDARY`; not found; `CAPABILITY_DENIED`;
+    /// `service_unavailable` when the hierarchy cannot answer - always before
+    /// anything is written.
     pub async fn update_assignment(
         &self,
         ctx: &SecurityContext,
         assignment_id: AssignmentId,
         enforce: bool,
     ) -> Result<sdk::Assignment, ManagementError> {
-        let auth = self.plan_update(ctx, assignment_id).await?;
+        let (auth, dormant) = self.plan_update(ctx, assignment_id).await?;
         let updated = self
             .commit(ctx, &auth, move |tx, env| {
                 Box::pin(async move {
@@ -239,7 +329,6 @@ impl<S: ContentStore> ManagementService<S> {
             })
             .await?;
         log_change("assignment updated", ctx, &updated);
-        let dormant = self.is_dormant(ctx, &updated).await?;
         Ok(assignment_to_sdk(&updated, dormant))
     }
 
@@ -369,8 +458,9 @@ impl<S: ContentStore> ManagementService<S> {
         Ok((auth, assignment))
     }
 
-    /// Every check [`Self::update_assignment`] runs, and the authorisation
-    /// it would write under; reads only.
+    /// Every check [`Self::update_assignment`] runs, the authorisation it
+    /// would write under, and whether the assignment is dormant (the update
+    /// changes neither of the tenants that decide it); reads only.
     ///
     /// # Errors
     ///
@@ -379,17 +469,29 @@ impl<S: ContentStore> ManagementService<S> {
         &self,
         ctx: &SecurityContext,
         assignment_id: AssignmentId,
-    ) -> Result<Authorization, ManagementError> {
+    ) -> Result<(Authorization, bool), ManagementError> {
         let current = self.prefetch_assignment(assignment_id).await?;
-        let auth = self.assignment_access(ctx, &current).await?;
+        let auth = match self.assignment_access(ctx, &current).await {
+            Ok(auth) => auth,
+            Err(err @ ManagementError::NotFound { .. }) => {
+                return Err(self.refusal(ctx, &current, err).await?);
+            }
+            Err(err) => return Err(err),
+        };
         self.guard_tenant(ctx, assignment_id, current.tenant_id)
             .await?;
         // The update writes under the grant's scope; one that does not admit
         // the row would change nothing.
-        if self.coverage(&auth, assignment_id).await? != Coverage::Covered {
-            return Err(assignment_not_found(assignment_id));
+        match self.coverage(&auth, assignment_id).await? {
+            Coverage::Covered => {}
+            Coverage::Uncovered => {
+                let absent = assignment_not_found(assignment_id);
+                return Err(self.refusal(ctx, &current, absent).await?);
+            }
+            Coverage::Gone => return Err(assignment_not_found(assignment_id)),
         }
-        Ok(auth)
+        let dormant = self.is_dormant(ctx, &current).await?;
+        Ok((auth, dormant))
     }
 
     /// Every check [`Self::unassign`] runs, and what it would delete; reads
@@ -413,8 +515,16 @@ impl<S: ContentStore> ManagementService<S> {
                     return Ok(withdrawal);
                 }
                 return match err {
-                    // Not visible to the caller: as good as absent.
-                    ManagementError::NotFound { .. } => Ok(Withdrawal::Nothing),
+                    // Not visible to the caller: as good as absent. One it
+                    // sees but may not remove is refused, never reported
+                    // withdrawn while it stays in force.
+                    ManagementError::NotFound { .. } => {
+                        if self.seen(ctx, &current).await?.is_some() {
+                            Err(ManagementError::CapabilityDenied)
+                        } else {
+                            Ok(Withdrawal::Nothing)
+                        }
+                    }
                     other => Err(other),
                 };
             }

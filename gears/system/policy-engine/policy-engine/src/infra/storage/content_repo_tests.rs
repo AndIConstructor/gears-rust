@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use toolkit_db::DbError;
 use toolkit_db::odata::LimitCfg;
 use toolkit_db::secure::{AccessScope, DbConn, SecureEntityExt, SecureUpdateExt, secure_insert};
-use toolkit_odata::ODataQuery;
+use toolkit_odata::{CursorV1, ODataOrderBy, ODataQuery, OrderKey, SortDir};
 use uuid::Uuid;
 
 use super::{
@@ -708,11 +708,7 @@ async fn visible_to(
     visibility: &AssignmentVisibility,
     assignment: &Assignment,
 ) -> bool {
-    OrmAssignmentRepository
-        .find_visible(conn, visibility, assignment.id)
-        .await
-        .unwrap()
-        .is_some()
+    listed_ids(conn, visibility).await.contains(&assignment.id)
 }
 
 async fn listed_ids(conn: &DbConn<'_>, visibility: &AssignmentVisibility) -> Vec<AssignmentId> {
@@ -856,25 +852,6 @@ async fn without_read_or_withdrawable_tenants_nothing_is_visible() {
     };
     assert!(!visible_to(&conn, &visibility, &row).await);
     assert!(listed_ids(&conn, &visibility).await.is_empty());
-}
-
-#[tokio::test]
-async fn an_unknown_assignment_id_is_not_found_even_when_everything_is_visible() {
-    let db = migrated_db().await;
-    let conn = db.conn().unwrap();
-    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
-    let bundle = seed_bundle(&conn, owner, "alpha").await;
-    seed_assignment(&conn, &bundle, target).await;
-
-    let found = OrmAssignmentRepository
-        .find_visible(
-            &conn,
-            &administers(owner, target),
-            AssignmentId(Uuid::new_v4()),
-        )
-        .await
-        .unwrap();
-    assert_eq!(found, None);
 }
 
 #[tokio::test]
@@ -1283,4 +1260,201 @@ async fn bundles_are_found_by_name_within_the_scope() {
         .await
         .unwrap();
     assert!(none.items.is_empty());
+}
+
+/// The error a listing under `visibility` refuses with.
+async fn refused(conn: &DbConn<'_>, visibility: AssignmentVisibility) -> RepoError {
+    OrmAssignmentRepository
+        .list_page(conn, &visibility, &ODataQuery::default())
+        .await
+        .unwrap_err()
+}
+
+#[tokio::test]
+async fn a_listing_whose_visibility_exceeds_the_bind_budget_is_refused() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let owner = Uuid::new_v4();
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let assignment = seed_assignment(&conn, &bundle, owner).await;
+    let tenants = |n: usize| -> Vec<Uuid> {
+        let mut tenants: Vec<Uuid> = (0..n).map(|_| Uuid::new_v4()).collect();
+        tenants.push(owner);
+        tenants
+    };
+    let large = |n: usize| AssignmentVisibility {
+        read: Some(scope(owner)),
+        subtree: tenants(n),
+        reaching: tenants(n),
+        withdrawable: Vec::new(),
+    };
+
+    // Within the budget, however large, the listing runs.
+    assert_eq!(listed_ids(&conn, &large(10_000)).await, [assignment.id]);
+    // Beyond it, it is refused before reaching the database.
+    let err = refused(&conn, large(20_000)).await;
+    assert!(matches!(err, RepoError::TooLarge), "{err:?}");
+
+    // The withdrawable alternative counts too, alone ...
+    let withdrawable_only = AssignmentVisibility {
+        read: None,
+        subtree: Vec::new(),
+        reaching: tenants(20_000),
+        withdrawable: tenants(20_000),
+    };
+    let err = refused(&conn, withdrawable_only).await;
+    assert!(matches!(err, RepoError::TooLarge), "{err:?}");
+    // ... and together with the administered one, where neither alone would
+    // exceed the budget.
+    let both = AssignmentVisibility {
+        read: Some(scope(owner)),
+        subtree: tenants(8_000),
+        reaching: tenants(8_000),
+        withdrawable: tenants(8_000),
+    };
+    let err = refused(&conn, both).await;
+    assert!(matches!(err, RepoError::TooLarge), "{err:?}");
+}
+
+/// A first page of one row, ordered by `field` (`id` breaks ties, newest
+/// first).
+fn ordered_by(field: &str, dir: SortDir) -> ODataQuery {
+    ODataQuery::default()
+        .with_order(ODataOrderBy(vec![OrderKey {
+            field: field.to_owned(),
+            dir,
+        }]))
+        .with_limit(1)
+}
+
+/// The page after one whose next cursor is `cursor`.
+fn after(cursor: &str) -> ODataQuery {
+    ODataQuery::default()
+        .with_limit(1)
+        .with_cursor(CursorV1::decode(cursor).unwrap())
+}
+
+/// `rows` ordered by `key`, ties broken by identity, newest first - the
+/// order the listings promise.
+fn sorted_by<T, K: Ord>(
+    mut rows: Vec<T>,
+    key: impl Fn(&T) -> K,
+    id: impl Fn(&T) -> Uuid,
+) -> Vec<T> {
+    rows.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| id(b).cmp(&id(a))));
+    rows
+}
+
+/// Every bundle a listing pages through from `first`, one row per page; a
+/// cursor that does not advance stops after `rows` pages instead of
+/// looping.
+async fn bundle_pages(conn: &DbConn<'_>, first: ODataQuery, rows: usize) -> Vec<BundleId> {
+    let repo = bundles();
+    let mut seen = Vec::new();
+    let mut page = repo.list_page(conn, &all(), &first).await.unwrap();
+    for _ in 0..=rows {
+        seen.extend(page.items.iter().map(|x| x.id));
+        let Some(cursor) = page.page_info.next_cursor else {
+            break;
+        };
+        page = repo.list_page(conn, &all(), &after(&cursor)).await.unwrap();
+    }
+    seen
+}
+
+/// [`bundle_pages`] for the assignments `visibility` admits.
+async fn assignment_pages(
+    conn: &DbConn<'_>,
+    visibility: &AssignmentVisibility,
+    first: ODataQuery,
+    rows: usize,
+) -> Vec<AssignmentId> {
+    let repo = OrmAssignmentRepository;
+    let mut seen = Vec::new();
+    let mut page = repo.list_page(conn, visibility, &first).await.unwrap();
+    for _ in 0..=rows {
+        seen.extend(page.items.iter().map(|x| x.id));
+        let Some(cursor) = page.page_info.next_cursor else {
+            break;
+        };
+        page = repo
+            .list_page(conn, visibility, &after(&cursor))
+            .await
+            .unwrap();
+    }
+    seen
+}
+
+#[tokio::test]
+async fn bundles_page_in_name_and_owner_order_across_equal_values() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut seeded = Vec::new();
+    for (tenant, name) in [
+        (a, "alpha"),
+        (b, "alpha"),
+        (a, "beta"),
+        (b, "beta"),
+        (a, "gamma"),
+    ] {
+        seeded.push(seed_bundle(&conn, tenant, name).await);
+    }
+    let n = seeded.len();
+    let ids = |rows: Vec<Bundle>| rows.into_iter().map(|x| x.id).collect::<Vec<_>>();
+
+    assert_eq!(
+        bundle_pages(&conn, ordered_by("name", SortDir::Asc), n).await,
+        ids(sorted_by(seeded.clone(), |x| x.name.clone(), |x| x.id.0)),
+        "by name, ascending"
+    );
+    assert_eq!(
+        bundle_pages(&conn, ordered_by("name", SortDir::Desc), n).await,
+        ids(sorted_by(
+            seeded.clone(),
+            |x| std::cmp::Reverse(x.name.clone()),
+            |x| x.id.0
+        )),
+        "by name, descending; the tiebreaker stays newest first"
+    );
+    assert_eq!(
+        bundle_pages(&conn, ordered_by("owner_tenant_id", SortDir::Asc), n).await,
+        ids(sorted_by(seeded, |x| x.owner_tenant_id, |x| x.id.0)),
+        "by owning tenant"
+    );
+}
+
+#[tokio::test]
+async fn assignments_page_in_bundle_and_target_order_across_equal_values() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let owner = Uuid::new_v4();
+    let (first, second) = (
+        seed_bundle(&conn, owner, "first").await,
+        seed_bundle(&conn, owner, "second").await,
+    );
+    let (t1, t2) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut seeded = Vec::new();
+    for (bundle, tenant) in [(&first, t1), (&first, t2), (&second, t1), (&second, t2)] {
+        seeded.push(seed_assignment(&conn, bundle, tenant).await);
+    }
+    let everything = AssignmentVisibility {
+        read: Some(all()),
+        subtree: vec![t1, t2],
+        reaching: vec![owner],
+        withdrawable: Vec::new(),
+    };
+    let n = seeded.len();
+    let ids = |rows: Vec<Assignment>| rows.into_iter().map(|x| x.id).collect::<Vec<_>>();
+
+    assert_eq!(
+        assignment_pages(&conn, &everything, ordered_by("bundle_id", SortDir::Asc), n).await,
+        ids(sorted_by(seeded.clone(), |x| x.bundle_id.0, |x| x.id.0)),
+        "by bundle"
+    );
+    assert_eq!(
+        assignment_pages(&conn, &everything, ordered_by("tenant_id", SortDir::Asc), n).await,
+        ids(sorted_by(seeded, |x| x.tenant_id, |x| x.id.0)),
+        "by target tenant"
+    );
 }

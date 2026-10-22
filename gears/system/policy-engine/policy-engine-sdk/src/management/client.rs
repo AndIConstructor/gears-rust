@@ -14,8 +14,9 @@ use super::models::{
 /// consumed in-process by tooling and by the REST layer.
 ///
 /// Every method takes the caller's `SecurityContext` first - the only source
-/// of the acting subject - and is authorised for the one capability its
-/// documentation names ([`Capability`](crate::gts::permissions::Capability)).
+/// of the acting subject - and is authorised for the capability its
+/// documentation names ([`Capability`](crate::gts::permissions::Capability)):
+/// one per method, except the assignment reads, which take either of two.
 /// Content the caller may not see is reported as not found. Only a draft can
 /// be modified; anything else is refused with
 /// [`VersionNotDraft`](super::ManagementError::VersionNotDraft).
@@ -239,17 +240,26 @@ pub trait PolicyManagementClientV1: Send + Sync {
     ) -> Result<Assignment, ManagementError>;
 
     /// Lists, with the platform's cursor pagination, the assignments
-    /// visible to the caller: those made by the tenants it may read whose
-    /// bundle it may read, and the dormant assignments at its own tenants it
-    /// may withdraw. Filterable by `bundle_id` and `tenant_id` (the target);
-    /// a filter naming content the caller cannot see yields no rows.
-    /// Capability: read, or publish for the dormant ones.
+    /// visible to the caller:
+    ///
+    /// - those of a bundle it may read, at a target in its subtree (barriers
+    ///   ignored), made by a tenant on its side of every barrier - its own,
+    ///   a descendant it reaches, or an ancestor that reaches it; one at a
+    ///   target behind a barrier is shown dormant;
+    /// - the dormant assignments at tenants it reaches on which it holds
+    ///   publish, whatever their bundle.
+    ///
+    /// Filterable by `bundle_id` and `tenant_id` (the target); a filter
+    /// naming content the caller cannot see yields no rows. Capability:
+    /// read, or publish for the dormant ones.
     ///
     /// # Errors
     ///
     /// [`CapabilityDenied`](super::ManagementError::CapabilityDenied) when
     /// neither capability is granted; invalid argument for a malformed
-    /// filter, limit or cursor.
+    /// filter, limit or cursor;
+    /// [`SubtreeTooLarge`](super::ManagementError::SubtreeTooLarge) when the
+    /// caller's subtree is too large to evaluate the listing.
     async fn list_assignments(
         &self,
         ctx: &SecurityContext,

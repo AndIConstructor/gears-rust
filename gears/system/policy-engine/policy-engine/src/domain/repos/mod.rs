@@ -68,6 +68,9 @@ pub enum RepoError {
     /// The listing query (order, cursor, limit) was refused.
     #[error("invalid query: {0}")]
     Query(toolkit_odata::Error),
+    /// The statement would bind more values than the backend accepts.
+    #[error("too many values to bind")]
+    TooLarge,
     /// Storage failure or a stored row that does not decode; never a caller
     /// error.
     #[error("database error: {0}")]

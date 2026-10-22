@@ -33,8 +33,7 @@ pub struct ActivationOutcome {
 }
 
 /// Which assignments a caller sees: the rule of
-/// [`AssignmentRepository::list_page`] and
-/// [`AssignmentRepository::find_visible`]. A row is visible when either
+/// [`AssignmentRepository::list_page`]. A row is visible when either
 ///
 /// - the caller administers it: its bundle is within `read`, its target in
 ///   `subtree` and its owner in `reaching`; or
@@ -286,19 +285,12 @@ pub trait AssignmentRepository: Send + Sync {
         tenant_id: Uuid,
     ) -> Result<bool, RepoError>;
 
-    /// The assignment, if `visibility` admits it.
-    async fn find_visible<C: DBRunner>(
-        &self,
-        runner: &C,
-        visibility: &AssignmentVisibility,
-        id: AssignmentId,
-    ) -> Result<Option<Assignment>, RepoError>;
-
     /// One `OData` page of the assignments `visibility` admits.
     ///
     /// # Errors
     ///
-    /// `Query` for a refused filter, order, cursor or limit.
+    /// `Query` for a refused filter, order, cursor or limit; `TooLarge` when
+    /// the visibility sets would bind more values than the backend accepts.
     async fn list_page<C: DBRunner>(
         &self,
         runner: &C,

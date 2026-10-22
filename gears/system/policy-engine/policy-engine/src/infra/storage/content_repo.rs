@@ -48,7 +48,7 @@ use toolkit_db::odata::sea_orm_filter::{PaginateOdataTryError, paginate_odata_tr
 use toolkit_db::odata::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
     AccessScope, DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt,
-    SecureUpdateExt, secure_insert, secure_insert_many,
+    SecureUpdateExt, max_bind_params_for, secure_insert, secure_insert_many,
 };
 use toolkit_odata::{ODataQuery, Page, SortDir};
 use uuid::Uuid;
@@ -652,6 +652,20 @@ impl OrmAssignmentRepository {
     }
 }
 
+/// Values a listing binds beyond its visibility condition: the `OData`
+/// filter, cursor and limit.
+const LISTING_RESERVE: usize = 1_000;
+
+/// The values `select` binds, counted from the statement itself so the count
+/// cannot drift from the condition. Their number does not depend on the
+/// backend, only their placeholders do, so any backend renders it.
+fn bound_values(select: &sea_orm::Select<assignment::Entity>) -> usize {
+    select
+        .build(sea_orm::DbBackend::Postgres)
+        .values
+        .map_or(0, |values| values.0.len())
+}
+
 /// The rows `visibility` admits, as one condition for a statement under the
 /// service scope (module documentation).
 fn visible(visibility: &AssignmentVisibility) -> Condition {
@@ -758,33 +772,17 @@ impl AssignmentRepository for OrmAssignmentRepository {
         Ok(row.is_some())
     }
 
-    async fn find_visible<C: DBRunner>(
-        &self,
-        runner: &C,
-        visibility: &AssignmentVisibility,
-        id: AssignmentId,
-    ) -> Result<Option<Assignment>, RepoError> {
-        let row = assignment::Entity::find()
-            .filter(assignment::Column::Id.eq(id.0))
-            .filter(visible(visibility))
-            .secure()
-            .scope_with(&service_scope())
-            .one(runner)
-            .await
-            .map_err(scope_err)?;
-        Ok(row.map(|row| mapper::assignment_from_model(&row)))
-    }
-
     async fn list_page<C: DBRunner>(
         &self,
         runner: &C,
         visibility: &AssignmentVisibility,
         query: &ODataQuery,
     ) -> Result<Page<Assignment>, RepoError> {
-        let base = assignment::Entity::find()
-            .filter(visible(visibility))
-            .secure()
-            .scope_with(&service_scope());
+        let select = assignment::Entity::find().filter(visible(visibility));
+        if bound_values(&select) > max_bind_params_for(runner).saturating_sub(LISTING_RESERVE) {
+            return Err(RepoError::TooLarge);
+        }
+        let base = select.secure().scope_with(&service_scope());
         paginate_odata::<AssignmentFilterField, AssignmentODataMapper, _, _, _, _>(
             base,
             runner,

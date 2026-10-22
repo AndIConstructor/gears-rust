@@ -3,22 +3,26 @@
 //! Assignment surface tests against in-memory `SQLite` with every migration
 //! applied, the fake tenant tree and the fake PDP.
 
+use std::sync::atomic::Ordering;
+
 use policy_engine_sdk::gts::permissions::actions;
-use policy_engine_sdk::management::{AssignmentSpec, ManagementError};
+use policy_engine_sdk::management::{AssignmentSpec, ManagementError, PublishOperation};
 use toolkit_db::secure::AccessScope;
 use toolkit_odata::{CursorV1, ODataQuery, parse_filter_string};
 use uuid::Uuid;
 
 use super::*;
 use crate::domain::management::error::reason_of;
+use crate::domain::management::test_support::governance::harness_over;
 use crate::domain::management::test_support::governance::{
     ALICE, Harness, ROOT, TENANT_A, TENANT_A1, TENANT_B, TENANT_S, TENANT_S1, UNKNOWN_TENANT,
     alice, bob, harness, sam,
 };
-use crate::domain::management::test_support::{PdpMode, ctx};
+use crate::domain::management::test_support::{FakePdp, PdpMode, ctx};
 use crate::domain::model::BundleId;
 use crate::domain::ports::PortError;
 use crate::infra::storage::content_repo::OrmAssignmentRepository;
+use crate::test_support::FakeTree;
 
 fn is_boundary(err: &ManagementError) {
     assert_eq!(err.category().http_status(), 403, "{err:?}");
@@ -744,4 +748,200 @@ async fn a_caller_whose_tenant_the_hierarchy_does_not_know_sees_nothing() {
 
     let stranger = ctx(Uuid::from_u128(0x5742), UNKNOWN_TENANT);
     assert!(listed(&h, &stranger).await.is_empty());
+}
+
+#[tokio::test]
+async fn reading_an_assignment_admits_exactly_what_the_listing_shows() {
+    let h = harness().await;
+    let a = alice();
+    let root = ctx(Uuid::from_u128(0x2007), ROOT);
+    let (bundle, _) = h.active(&a, &["deny_delete"]).await;
+    let (second, _) = h.active(&a, &["deny_delete"]).await;
+    let (root_bundle, _) = h.active(&root, &["deny_delete"]).await;
+    let rows = [
+        h.service
+            .assign(&a, AssignmentSpec::new(bundle.id, TENANT_A1))
+            .await
+            .unwrap()
+            .id,
+        stored_at(&h, bundle.id, TENANT_S).await.id,
+        stored_at(&h, bundle.id, TENANT_S1).await.id,
+        stored_at(&h, bundle.id, TENANT_B).await.id,
+        h.stored_by(second.id, ROOT, TENANT_A1).await.id,
+        h.service
+            .assign(&root, AssignmentSpec::new(root_bundle.id, TENANT_B))
+            .await
+            .unwrap()
+            .id,
+    ];
+    let modes = [
+        PdpMode::Allow(None),
+        PdpMode::Administers(vec![TENANT_S, TENANT_S1]),
+        // The shape `tr-authz` grants Alice: her tenant and its subtree.
+        PdpMode::Administers(vec![TENANT_A, TENANT_A1]),
+    ];
+    for mode in modes {
+        h.pdp.set_mode(mode.clone());
+        for caller in [alice(), sam(), bob(), root.clone()] {
+            let listed = listed(&h, &caller).await;
+            for id in rows {
+                let read = h.service.get_assignment(&caller, id).await;
+                let in_list = listed.iter().find(|(listed, _)| *listed == id);
+                assert_eq!(
+                    read.as_ref().ok().map(|a| (a.id, a.dormant)),
+                    in_list.copied(),
+                    "{mode:?}, caller {}: {id:?} read {read:?}",
+                    caller.subject_tenant_id()
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_subtree_too_large_to_list_is_refused_but_its_assignments_read() {
+    // A root with more descendants than one statement can bind.
+    let children: Vec<Uuid> = (0..16_000).map(|_| Uuid::new_v4()).collect();
+    let mut nodes = vec![(ROOT, None, false)];
+    nodes.extend(children.iter().map(|&child| (child, Some(ROOT), false)));
+    let h = harness_over(FakePdp::allow_all(), FakeTree::new(&nodes)).await;
+    let root = ctx(Uuid::from_u128(0x2007), ROOT);
+    let (bundle, _) = h.active(&root, &["deny_delete"]).await;
+    let assigned = h
+        .service
+        .assign(&root, AssignmentSpec::new(bundle.id, children[0]))
+        .await
+        .unwrap();
+
+    let err = h
+        .service
+        .list_assignments(&root, &ODataQuery::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err, ManagementError::SubtreeTooLarge);
+    assert_eq!(err.category().http_status(), 400);
+    assert_eq!(reason_of(&err).as_deref(), Some("SUBTREE_TOO_LARGE"));
+
+    let read = h.service.get_assignment(&root, assigned.id).await.unwrap();
+    assert_eq!(read, assigned);
+}
+
+#[tokio::test]
+async fn reading_an_assignment_never_reads_the_callers_subtree() {
+    let h = harness().await;
+    let a = alice();
+    let (bundle, _) = h.active(&a, &["deny_delete"]).await;
+    let live = h
+        .service
+        .assign(&a, AssignmentSpec::new(bundle.id, TENANT_A1))
+        .await
+        .unwrap();
+    let dormant = stored_at(&h, bundle.id, TENANT_S).await;
+
+    h.service.get_assignment(&a, live.id).await.unwrap();
+    h.service.get_assignment(&sam(), dormant.id).await.unwrap();
+    h.service.get_assignment(&bob(), live.id).await.unwrap_err();
+    assert_eq!(
+        h.tree.subtree_calls.load(Ordering::SeqCst),
+        0,
+        "one row is decided by point checks"
+    );
+}
+
+#[tokio::test]
+async fn a_visible_assignment_the_caller_may_not_change_is_refused() {
+    // Alice administers A and its subtree; ROOT assigned her bundle at A1.
+    // She sees it (its owner is in her chain), but publish on ROOT's
+    // content is not hers: every change is refused, never reported absent
+    // or done.
+    let h = harness().await;
+    let a = alice();
+    let (bundle, _) = h.active(&a, &["deny_delete"]).await;
+    let by_root = h.stored_by(bundle.id, ROOT, TENANT_A1).await;
+    h.pdp
+        .set_mode(PdpMode::Administers(vec![TENANT_A, TENANT_A1]));
+    assert_eq!(listed(&h, &a).await, vec![(by_root.id, false)]);
+    assert!(
+        !h.service
+            .get_assignment(&a, by_root.id)
+            .await
+            .unwrap()
+            .dormant
+    );
+
+    let unassign = PublishOperation::Unassign {
+        assignment_id: by_root.id,
+    };
+    assert_eq!(
+        h.service.check_publish(&a, unassign).await.unwrap_err(),
+        ManagementError::CapabilityDenied
+    );
+    assert_eq!(
+        h.service.unassign(&a, by_root.id).await.unwrap_err(),
+        ManagementError::CapabilityDenied
+    );
+    assert!(
+        h.stored_assignment(by_root.id).await.is_some(),
+        "still stored"
+    );
+    assert_eq!(
+        h.service
+            .update_assignment(&a, by_root.id, false)
+            .await
+            .unwrap_err(),
+        ManagementError::CapabilityDenied
+    );
+    assert!(h.stored_assignment(by_root.id).await.unwrap().enforce);
+
+    // Bob sees none of it: absent to him, as before.
+    assert!(matches!(
+        h.service
+            .update_assignment(&bob(), by_root.id, false)
+            .await
+            .unwrap_err(),
+        ManagementError::NotFound { .. }
+    ));
+    h.service.unassign(&bob(), by_root.id).await.unwrap();
+    assert!(h.stored_assignment(by_root.id).await.is_some());
+}
+
+#[tokio::test]
+async fn an_update_the_hierarchy_cannot_complete_changes_nothing() {
+    let h = harness().await;
+    let a = alice();
+    let (bundle, _) = h.active(&a, &["deny_delete"]).await;
+    let first = h
+        .service
+        .assign(&a, AssignmentSpec::new(bundle.id, TENANT_A1))
+        .await
+        .unwrap();
+    let second = h
+        .service
+        .assign(&a, AssignmentSpec::new(bundle.id, TENANT_A))
+        .await
+        .unwrap();
+    // How many hierarchy calls one update makes.
+    let before = h.tree.calls.load(Ordering::SeqCst);
+    h.service
+        .update_assignment(&a, first.id, false)
+        .await
+        .unwrap();
+    let per_update = h.tree.calls.load(Ordering::SeqCst) - before;
+
+    // The hierarchy fails on the last of them: the refusal comes before the
+    // write, never after it.
+    let start = h.tree.calls.load(Ordering::SeqCst);
+    h.tree.fail_from(
+        start + per_update - 1,
+        PortError::Unavailable("tenant resolver down".to_owned()),
+    );
+    let err = h
+        .service
+        .update_assignment(&a, second.id, false)
+        .await
+        .unwrap_err();
+    assert_eq!(err.category().http_status(), 503, "{err:?}");
+    let stored = h.stored_assignment(second.id).await.unwrap();
+    assert!(stored.enforce, "nothing was written");
+    assert_eq!(stored.updated_at, second.updated_at);
 }

@@ -327,6 +327,11 @@ pub mod governance {
     }
 
     pub async fn harness_with(pdp: FakePdp) -> Harness {
+        harness_over(pdp, tree()).await
+    }
+
+    /// A harness over `tree` instead of the tree above.
+    pub async fn harness_over(pdp: FakePdp, tree: FakeTree) -> Harness {
         let db = migrated_db().await;
         let validator = Arc::new(ContentValidator::new(Arc::new(FakeTypes), limits()));
         let store = Arc::new(StoreSet {
@@ -338,7 +343,7 @@ pub mod governance {
             assignments: OrmAssignmentRepository,
         });
         let pdp = Arc::new(pdp);
-        let tree = Arc::new(tree());
+        let tree = Arc::new(tree);
         let service = Arc::new(ManagementService::new(ManagementServiceParts {
             db: db.clone(),
             store,

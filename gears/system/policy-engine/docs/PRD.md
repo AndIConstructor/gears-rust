@@ -231,14 +231,16 @@ becomes self-managed, assignments made by ancestors above the new barrier **MUST
 become dormant and apply again if the barrier is removed. A dormant assignment can be removed by an administrator of the
 target tenant (`publish` on the target tenant, target reachable from the caller with barriers respected); the owner
 above the barrier is refused with `TENANT_BOUNDARY`. Unassigning never reports success for an assignment the caller can
-see but did not delete; one the caller cannot see is reported as absent.
+see but did not delete; one the caller cannot see is reported as absent. Any change the caller may not make to an
+assignment it can see (as the listing shows it) **MUST** be refused with `CAPABILITY_DENIED`, never reported absent.
 
 Assignments **MUST** be listable, filtered by bundle or by target tenant, and every assignment **MUST** say whether it is
 dormant. A caller sees the assignments of bundles it may read at its tenants (barriers ignored) made from its side of
 every barrier, so an owner sees an assignment that stopped applying, and the dormant assignments at tenants it reaches
 on which it holds `publish`, so an administrator of the target tenant can find what it may remove. A listing filter
 naming content the caller cannot see yields no rows; a read of an assignment the caller would not see in the listing
-reports it absent.
+reports it absent. A listing for a caller whose subtree is too large to evaluate is refused with `SUBTREE_TOO_LARGE`,
+never answered partially; reading one assignment is not limited.
 
 - **Actors**: `cpt-cf-policy-engine-actor-hierarchy-provider`, `cpt-cf-policy-engine-actor-tenant-policy-admin`
 
