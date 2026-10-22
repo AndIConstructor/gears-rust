@@ -372,7 +372,7 @@ pub struct TenantTypeRef(pub String);
 #[derive(JsonSchema, serde::Serialize, GtsTraitsSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TenantTypeTraits {
-    /// GTS type identifiers of tenant types allowed as parent. Empty array means the type is root-only or leaf-only. The root tenant type has allowed_parent_types: [] by convention.
+    /// GTS type identifiers of tenant types allowed as parent. Empty array means no parent tenant type is allowed, so a tenant of this type cannot be created under any parent; it does not restrict which types may list this type as their parent. The root tenant type has allowed_parent_types: [] by convention.
     #[serde(default)]
     pub allowed_parent_types: Vec<TenantTypeRef>,
     /// Whether tenants of this type typically require dedicated IdP-side resources. Account Management still calls IdpPluginClient::provision_tenant and deprovision_tenant; provider implementations may use this trait to decide whether to create resources or complete as a no-op.
