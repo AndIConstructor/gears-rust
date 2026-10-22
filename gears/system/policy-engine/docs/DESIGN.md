@@ -386,7 +386,7 @@ The management client (`cpt-cf-policy-engine-interface-management-client`) and t
 | Assignment | assign, update the enforce flag, unassign | `publish` | unstable |
 | Assignment | get, list | `read`; `publish` for dormant assignments at the caller's tenants | unstable |
 
-Lists are paged with the platform's OData conventions: bundles, versions and assignments are cursor-paged (`$top` and cursor, default page 25, maximum 100), versions newest ordinal first, assignments by identity and filterable by `bundle_id` and `tenant_id` (`eq`, `ne`, `in`). A listing's visibility is applied in the query, so pages come back full; it binds the caller's subtree and chain as `IN` lists, so its cost grows with the caller's subtree. No decision operation exists outside the engine plugin.
+Lists are paged with the platform's OData conventions: bundles, versions and assignments are cursor-paged (`$top` and cursor, default page 25, maximum 100), bundles filterable by `name` (`eq`, `ne`, `in`, `contains`, `startswith`, `endswith`) and `owner_tenant_id` (`eq`, `ne`, `in`), versions newest ordinal first, assignments by identity and filterable by `bundle_id` and `tenant_id` (`eq`, `ne`, `in`). A listing's visibility is applied in the query, so pages come back full; it binds the caller's subtree and chain as `IN` lists, so its cost grows with the caller's subtree. No decision operation exists outside the engine plugin.
 Errors are the SDK's [typed management error](../policy-engine-sdk/src/management/error.rs), a contract error: on
 the wire it is an RFC 9457 problem carrying the management error domain and the variant's stable `error_code`, with
 the variant's fields as its data. Clients match on the code or rebuild the typed error, never on messages. The same

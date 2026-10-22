@@ -1246,3 +1246,41 @@ async fn locking_a_draft_reports_its_current_documents_and_refuses_a_non_draft()
         Err(RepoError::NotFound)
     ));
 }
+
+#[tokio::test]
+async fn bundles_are_found_by_name_within_the_scope() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let repo = bundles();
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let alpha = seed_bundle(&conn, a, "alpha").await;
+    seed_bundle(&conn, a, "alphabet").await;
+    seed_bundle(&conn, b, "alpha").await;
+
+    let exact = repo
+        .list_page(&conn, &scope(a), &filtered("name eq 'alpha'"))
+        .await
+        .unwrap();
+    assert_eq!(
+        exact.items,
+        vec![alpha],
+        "another tenant's namesake is not seen"
+    );
+
+    let mut prefixed: Vec<String> = repo
+        .list_page(&conn, &scope(a), &filtered("startswith(name, 'alpha')"))
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|x| x.name)
+        .collect();
+    prefixed.sort();
+    assert_eq!(prefixed, ["alpha", "alphabet"]);
+
+    let none = repo
+        .list_page(&conn, &scope(a), &filtered("name eq 'gamma'"))
+        .await
+        .unwrap();
+    assert!(none.items.is_empty());
+}

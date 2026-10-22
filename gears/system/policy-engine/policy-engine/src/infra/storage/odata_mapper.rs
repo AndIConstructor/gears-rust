@@ -20,6 +20,8 @@ impl FieldToColumn<BundleFilterField> for BundleODataMapper {
     fn map_field(field: BundleFilterField) -> Column {
         match field {
             BundleFilterField::Id => Column::Id,
+            BundleFilterField::Name => Column::Name,
+            BundleFilterField::OwnerTenantId => Column::OwnerTenantId,
         }
     }
 }
@@ -30,6 +32,8 @@ impl ODataFieldMapping<BundleFilterField> for BundleODataMapper {
     fn extract_cursor_value(model: &Model, field: BundleFilterField) -> sea_orm::Value {
         match field {
             BundleFilterField::Id => sea_orm::Value::Uuid(Some(model.id)),
+            BundleFilterField::Name => sea_orm::Value::String(Some(model.name.clone())),
+            BundleFilterField::OwnerTenantId => sea_orm::Value::Uuid(Some(model.owner_tenant_id)),
         }
     }
 }

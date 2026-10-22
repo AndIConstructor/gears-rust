@@ -502,6 +502,83 @@ async fn bundles_update_and_names_stay_unique_per_tenant() {
     assert_eq!(page.items.len(), 2);
 }
 
+#[tokio::test]
+async fn a_bundle_is_found_by_its_name() {
+    let h = harness().await;
+    let a = alice();
+    let wanted = h
+        .service
+        .create_bundle(&a, NewBundle::new("baseline"))
+        .await
+        .unwrap();
+    h.service
+        .create_bundle(&a, NewBundle::new("baseline-strict"))
+        .await
+        .unwrap();
+    // Bob's namesake is outside Alice's scope.
+    h.service
+        .create_bundle(&bob(), NewBundle::new("baseline"))
+        .await
+        .unwrap();
+
+    let by_name = ODataQuery::default().with_filter(
+        toolkit_odata::parse_filter_string("name eq 'baseline'")
+            .unwrap()
+            .into_expr(),
+    );
+    let page = h.service.list_bundles(&a, &by_name).await.unwrap();
+    assert_eq!(page.items, vec![wanted]);
+}
+
+#[tokio::test]
+async fn a_name_and_an_owning_tenant_name_exactly_one_bundle() {
+    // A grant over two tenants, each with a bundle of the same name.
+    let h = harness_with(FakePdp::new(PdpMode::Administers(vec![TENANT_A, TENANT_B]))).await;
+    let in_a = h
+        .service
+        .create_bundle(&alice(), NewBundle::new("baseline"))
+        .await
+        .unwrap();
+    let in_b = h
+        .service
+        .create_bundle(&bob(), NewBundle::new("baseline"))
+        .await
+        .unwrap();
+    let query = |filter: String| {
+        ODataQuery::default().with_filter(
+            toolkit_odata::parse_filter_string(&filter)
+                .unwrap()
+                .into_expr(),
+        )
+    };
+
+    let mut both: Vec<_> = h
+        .service
+        .list_bundles(&alice(), &query("name eq 'baseline'".to_owned()))
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|b| b.id)
+        .collect();
+    both.sort_by_key(|id| id.0);
+    let mut expected = vec![in_a.id, in_b.id];
+    expected.sort_by_key(|id| id.0);
+    assert_eq!(both, expected, "one namesake per tenant");
+
+    let one = h
+        .service
+        .list_bundles(
+            &alice(),
+            &query(format!(
+                "name eq 'baseline' and owner_tenant_id eq {TENANT_B}"
+            )),
+        )
+        .await
+        .unwrap();
+    assert_eq!(one.items, vec![in_b]);
+}
+
 // ---------------------------------------------------------------------------
 // Authorisation and isolation
 // ---------------------------------------------------------------------------

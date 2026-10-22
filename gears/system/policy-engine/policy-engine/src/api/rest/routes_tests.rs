@@ -153,8 +153,9 @@ impl PolicyManagementClientV1 for FakeClient {
     async fn list_bundles(
         &self,
         _ctx: &SecurityContext,
-        _query: &ODataQuery,
+        query: &ODataQuery,
     ) -> Result<Page<Bundle>, ManagementError> {
+        self.record(format!("list_bundles filtered={}", query.has_filter()));
         Ok(Page::new(
             vec![bundle()],
             PageInfo {
@@ -629,6 +630,21 @@ async fn assignments_are_listed_a_page_at_a_time_with_their_dormant_flag() {
     assert_eq!(items[0]["dormant"], true);
     assert_eq!(body["page_info"]["limit"], 25);
     assert_eq!(client.last(), "list_assignments filtered=false");
+}
+
+#[tokio::test]
+async fn bundles_are_filtered_by_name() {
+    let (router, client) = build_router();
+
+    let (status, _, body) = send(
+        &router,
+        "GET",
+        "/policy-engine/v1/bundles?$filter=name%20eq%20%27baseline%27",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(client.last(), "list_bundles filtered=true");
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::http::StatusCode;
 use policy_engine_sdk::management::PolicyManagementClientV1;
-use policy_engine_sdk::management::odata::AssignmentFilterField;
+use policy_engine_sdk::management::odata::{AssignmentFilterField, BundleFilterField};
 use toolkit::api::OpenApiRegistry;
 use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt};
 
@@ -62,7 +62,9 @@ pub fn register_routes(
         .operation_id("policy_engine.list_bundles")
         .summary("List bundles for the scoped tenant")
         .description(
-            "Lists the bundles of the tenants the caller may manage, opaque-cursor paginated.",
+            "Lists the bundles of the tenants the caller may manage, opaque-cursor paginated. \
+             Filter by `name` and `owner_tenant_id` (for example `name eq 'baseline' and \
+             owner_tenant_id eq <tenant>`) to find a bundle by its name.",
         )
         .tag(TAG)
         .authenticated()
@@ -73,6 +75,8 @@ pub fn register_routes(
             StatusCode::OK,
             "Page of bundles",
         )
+        .with_odata_filter::<BundleFilterField>()
+        .with_odata_orderby::<BundleFilterField>()
         .standard_errors(openapi)
         .error_503(openapi)
         .register(router, openapi);

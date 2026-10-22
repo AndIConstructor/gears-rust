@@ -520,8 +520,9 @@ terminates the host.
 - **Stability**: unstable
 - **Description**: Bundles, versions (draft, replace, delete, validate, activate) and assignments. Errors are typed;
   each carries a stable code that also travels on the wire. Bundles, versions and assignments are cursor-paged
-  (OData `$top` and cursor; default page 25, maximum 100); versions are listed newest ordinal first; assignments are
-  filterable by `bundle_id` and `tenant_id` and carry a `dormant` flag.
+  (OData `$top` and cursor; default page 25, maximum 100); bundles are filterable by `name` and `owner_tenant_id`, so a
+  bundle can be found by its name; versions are listed newest ordinal first; assignments are filterable by `bundle_id` and `tenant_id` and
+  carry a `dormant` flag.
 
 #### Policy Administration REST API
 
