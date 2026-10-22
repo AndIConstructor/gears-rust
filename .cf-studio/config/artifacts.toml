@@ -164,10 +164,6 @@ reason = "Ignore chat-engine companion doc — WEBHOOK-PROTOCOL.md documents the
 patterns = ["gears/chat-engine/docs/WEBHOOK-PROTOCOL.md"]
 
 [[ignore]]
-reason = "Ignore module 'llm-gateway' (not SDLC-documented yet: PRD is a draft and DESIGN is missing). Remove this ignore after PRD/DESIGN conform to template."
-patterns = ["gears/llm-gateway/*"]
-
-[[ignore]]
 reason = "Ignore module 'mini-chat' docs (temporary: PRD/DESIGN constraints failing in CI)."
 patterns = ["gears/mini-chat/*"]
 
