@@ -20,9 +20,16 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 # Seen failing on #5395 (Windows), #5349 (Windows) and #5220 (coverage): the
 # rebalance cases two_subscribers_baseline_then_third_joins_mid_stream,
 # scale_down_via_disconnect, rolling_replacement_via_delete and
-# scale_down_via_delete. Quarantine for the whole binary, to be fixed.
+# scale_down_via_delete. Quarantine for exactly these four, to be fixed; the
+# binary's fifth case, rolling_replacement_via_disconnect, has not been seen
+# failing and runs without retries.
 [[profile.default.overrides]]
-filter = 'package(cf-gears-event-broker) & binary(consumer_group_rebalance_integration_tests)'
+filter = '''package(cf-gears-event-broker) & binary(consumer_group_rebalance_integration_tests) & (
+  test(=two_subscribers_baseline_then_third_joins_mid_stream)
+  | test(=scale_down_via_disconnect)
+  | test(=rolling_replacement_via_delete)
+  | test(=scale_down_via_delete)
+)'''
 retries = 2
 
 # Seen failing on #5354 (Integration tests). Quarantine, to be fixed.
