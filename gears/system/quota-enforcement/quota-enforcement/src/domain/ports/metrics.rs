@@ -215,7 +215,23 @@ impl fmt::Display for ValidationReason {
 
 /// Gear-specific instruments. Implemented on the platform meter in
 /// `infra::metrics`; a no-op double serves tests.
+// @cpt-dod:cpt-cf-quota-enforcement-dod-policy-engine-telemetry:p1
 pub trait QeMetrics: Send + Sync {
+    /// Registration or persisted-artifact bootstrap failure.
+    fn record_engine_bootstrap_failure(&self, engine: EngineLabel);
+    /// Evaluation duration on both success and failure.
+    fn record_engine_evaluation(&self, engine: EngineLabel, elapsed: std::time::Duration);
+    /// Rejected engine decision by closed invariant label.
+    fn record_plan_violation(
+        &self,
+        engine: EngineLabel,
+        invariant: quota_enforcement_sdk::engine::DebitPlanInvariant,
+    );
+    /// One committed transition, excluding no-op retries.
+    fn record_policy_transition(&self, transition: PolicyTransition);
+    /// One rejected optimistic concurrency check.
+    fn record_policy_conflict(&self);
+
     /// `denial_total{reason}` += 1.
     fn record_denial(&self, reason: DenialReason);
 
@@ -236,6 +252,17 @@ pub trait QeMetrics: Send + Sync {
 pub struct NoopMetrics;
 
 impl QeMetrics for NoopMetrics {
+    fn record_engine_bootstrap_failure(&self, _: EngineLabel) {}
+    fn record_engine_evaluation(&self, _: EngineLabel, _: std::time::Duration) {}
+    fn record_plan_violation(
+        &self,
+        _: EngineLabel,
+        _: quota_enforcement_sdk::engine::DebitPlanInvariant,
+    ) {
+    }
+    fn record_policy_transition(&self, _: PolicyTransition) {}
+    fn record_policy_conflict(&self) {}
+
     fn record_denial(&self, _reason: DenialReason) {}
 
     fn record_contract_validation_failure(
@@ -246,4 +273,59 @@ impl QeMetrics for NoopMetrics {
     }
 
     fn record_admitted_metric_violation(&self, _surface: ValidationSurface) {}
+}
+
+/// The telemetry label of a linked engine: its own `id()`.
+///
+/// Only a `&'static str` builds one, so the label set is the engines compiled
+/// into the binary; an operator-submitted `engine_id` (a runtime `String`)
+/// cannot become a label.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineLabel(&'static str);
+
+impl EngineLabel {
+    /// The label of a linked engine.
+    #[must_use]
+    pub fn of(engine: &dyn quota_enforcement_sdk::QuotaResolutionEngineV1) -> Self {
+        Self(engine.id())
+    }
+
+    /// The label for an engine id that came from a linked engine's `id()`.
+    #[must_use]
+    pub(crate) const fn from_linked_id(id: &'static str) -> Self {
+        Self(id)
+    }
+
+    /// Static telemetry value.
+    #[must_use]
+    pub const fn as_label(self) -> &'static str {
+        self.0
+    }
+}
+
+/// Committed policy transition labels.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyTransition {
+    /// Policy creation.
+    Create,
+    /// A new version.
+    Update,
+    /// Reactivation of historical version.
+    Rollback,
+    /// Soft deletion.
+    Delete,
+}
+impl PolicyTransition {
+    /// Static telemetry value.
+    #[must_use]
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Rollback => "rollback",
+            Self::Delete => "delete",
+        }
+    }
 }
