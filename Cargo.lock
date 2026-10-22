@@ -3400,7 +3400,7 @@ dependencies = [
 
 [[package]]
 name = "cf-gears-llm-gateway-sdk"
-version = "0.1.13"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cf-gears-model-registry-sdk",
@@ -3409,7 +3409,9 @@ dependencies = [
  "cf-gears-toolkit-security",
  "futures-core",
  "gts",
+ "rust_decimal",
  "schemars 1.2.3",
+ "secrecy",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
