@@ -24,8 +24,8 @@ use crate::domain::model::{
     VersionState,
 };
 use crate::domain::repos::{
-    ActiveContentLoader, AssignmentRepository, BundleRepository, RepoError, VersionRepository,
-    conflict,
+    ActiveContentLoader, AssignmentRepository, AssignmentVisibility, BundleRepository, RepoError,
+    VersionRepository, conflict,
 };
 use crate::infra::storage::entity::{bundle_version, document};
 
@@ -665,6 +665,337 @@ async fn assignment_is_unique_per_bundle_and_tenant_and_updates_enforce() {
     assert_eq!(repo.get(&conn, &scope(a), created.id).await.unwrap(), None);
     let err = repo.delete(&conn, &scope(a), created.id).await.unwrap_err();
     assert!(matches!(err, RepoError::NotFound), "{err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Assignment visibility and listing
+// ---------------------------------------------------------------------------
+
+/// A visibility that admits nothing until fields are set.
+fn nothing_visible() -> AssignmentVisibility {
+    AssignmentVisibility {
+        read: None,
+        subtree: Vec::new(),
+        reaching: Vec::new(),
+        withdrawable: Vec::new(),
+    }
+}
+
+/// The owner-side alternative: `owner` administers `target`'s assignments
+/// of bundles it can read.
+fn administers(owner: Uuid, target: Uuid) -> AssignmentVisibility {
+    AssignmentVisibility {
+        read: Some(scope(owner)),
+        subtree: vec![owner, target],
+        reaching: vec![owner, target],
+        withdrawable: Vec::new(),
+    }
+}
+
+async fn seed_assignment(conn: &DbConn<'_>, bundle: &Bundle, tenant: Uuid) -> Assignment {
+    OrmAssignmentRepository
+        .insert(
+            conn,
+            &scope(bundle.owner_tenant_id),
+            &assignment_of(bundle, tenant),
+        )
+        .await
+        .expect("insert assignment")
+}
+
+async fn visible_to(
+    conn: &DbConn<'_>,
+    visibility: &AssignmentVisibility,
+    assignment: &Assignment,
+) -> bool {
+    OrmAssignmentRepository
+        .find_visible(conn, visibility, assignment.id)
+        .await
+        .unwrap()
+        .is_some()
+}
+
+async fn listed_ids(conn: &DbConn<'_>, visibility: &AssignmentVisibility) -> Vec<AssignmentId> {
+    OrmAssignmentRepository
+        .list_page(conn, visibility, &ODataQuery::default())
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|a| a.id)
+        .collect()
+}
+
+fn filtered(text: &str) -> ODataQuery {
+    ODataQuery::default().with_filter(
+        toolkit_odata::parse_filter_string(text)
+            .expect("the fixture parses")
+            .into_expr(),
+    )
+}
+
+#[tokio::test]
+async fn an_owner_side_row_is_visible_when_bundle_target_and_owner_all_fit() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let row = seed_assignment(&conn, &bundle, target).await;
+
+    let visibility = administers(owner, target);
+    assert!(visible_to(&conn, &visibility, &row).await);
+    assert_eq!(listed_ids(&conn, &visibility).await, vec![row.id]);
+}
+
+#[tokio::test]
+async fn an_owner_side_row_needs_its_bundle_within_the_read_scope() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let row = seed_assignment(&conn, &bundle, target).await;
+
+    let mut visibility = administers(owner, target);
+    visibility.read = Some(scope(Uuid::new_v4()));
+    assert!(!visible_to(&conn, &visibility, &row).await);
+    assert!(listed_ids(&conn, &visibility).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_owner_side_row_needs_its_target_in_the_subtree() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let row = seed_assignment(&conn, &bundle, target).await;
+
+    let mut visibility = administers(owner, target);
+    visibility.subtree = vec![owner];
+    assert!(!visible_to(&conn, &visibility, &row).await);
+    assert!(listed_ids(&conn, &visibility).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_owner_side_row_needs_its_owner_among_the_reaching_tenants() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let row = seed_assignment(&conn, &bundle, target).await;
+
+    let mut visibility = administers(owner, target);
+    visibility.reaching = vec![target];
+    assert!(!visible_to(&conn, &visibility, &row).await);
+    assert!(listed_ids(&conn, &visibility).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_dormant_row_is_visible_where_it_is_withdrawable_whatever_its_bundle() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let row = seed_assignment(&conn, &bundle, target).await;
+
+    // No read grant at all, and the owner is on the far side of a barrier.
+    let visibility = AssignmentVisibility {
+        reaching: vec![target],
+        withdrawable: vec![target],
+        ..nothing_visible()
+    };
+    assert!(visible_to(&conn, &visibility, &row).await);
+    assert_eq!(listed_ids(&conn, &visibility).await, vec![row.id]);
+}
+
+#[tokio::test]
+async fn a_row_whose_owner_reaches_the_target_is_not_withdrawable() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let row = seed_assignment(&conn, &bundle, target).await;
+
+    let visibility = AssignmentVisibility {
+        reaching: vec![owner, target],
+        withdrawable: vec![target],
+        ..nothing_visible()
+    };
+    assert!(!visible_to(&conn, &visibility, &row).await);
+    assert!(listed_ids(&conn, &visibility).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_row_at_a_tenant_that_is_not_withdrawable_is_not_visible_through_it() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let row = seed_assignment(&conn, &bundle, target).await;
+
+    let visibility = AssignmentVisibility {
+        withdrawable: vec![Uuid::new_v4()],
+        ..nothing_visible()
+    };
+    assert!(!visible_to(&conn, &visibility, &row).await);
+}
+
+#[tokio::test]
+async fn without_read_or_withdrawable_tenants_nothing_is_visible() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let row = seed_assignment(&conn, &bundle, target).await;
+
+    // Even with every tenant listed, absent read and an empty withdrawable
+    // set admit nothing.
+    let visibility = AssignmentVisibility {
+        subtree: vec![owner, target],
+        reaching: vec![owner, target],
+        ..nothing_visible()
+    };
+    assert!(!visible_to(&conn, &visibility, &row).await);
+    assert!(listed_ids(&conn, &visibility).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_unknown_assignment_id_is_not_found_even_when_everything_is_visible() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    seed_assignment(&conn, &bundle, target).await;
+
+    let found = OrmAssignmentRepository
+        .find_visible(
+            &conn,
+            &administers(owner, target),
+            AssignmentId(Uuid::new_v4()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(found, None);
+}
+
+#[tokio::test]
+async fn assignments_are_listed_a_page_at_a_time_newest_id_first() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let repo = OrmAssignmentRepository;
+    let owner = Uuid::new_v4();
+    let targets = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    let mut seeded = Vec::new();
+    for target in targets {
+        seeded.push(seed_assignment(&conn, &bundle, target).await.id);
+    }
+    seeded.sort_by_key(|id| std::cmp::Reverse(id.0));
+    let mut visibility = administers(owner, targets[0]);
+    visibility.subtree.extend(targets);
+    visibility.reaching.extend(targets);
+
+    let first = repo
+        .list_page(&conn, &visibility, &ODataQuery::default().with_limit(1))
+        .await
+        .unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].id, seeded[0]);
+    assert!(first.page_info.next_cursor.is_some());
+
+    let mut ids = Vec::new();
+    let mut query = ODataQuery::default().with_limit(1);
+    loop {
+        let page = repo.list_page(&conn, &visibility, &query).await.unwrap();
+        assert!(page.items.len() <= 1);
+        ids.extend(page.items.iter().map(|a| a.id));
+        match page.page_info.next_cursor {
+            Some(cursor) => {
+                query = ODataQuery::default()
+                    .with_limit(1)
+                    .with_cursor(toolkit_odata::CursorV1::decode(&cursor).unwrap());
+            }
+            None => break,
+        }
+    }
+    assert_eq!(ids, seeded);
+}
+
+#[tokio::test]
+async fn a_filter_narrows_the_listing_by_bundle_or_target_tenant() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let repo = OrmAssignmentRepository;
+    let (owner, t1, t2) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let alpha = seed_bundle(&conn, owner, "alpha").await;
+    let beta = seed_bundle(&conn, owner, "beta").await;
+    let a1 = seed_assignment(&conn, &alpha, t1).await;
+    let a2 = seed_assignment(&conn, &alpha, t2).await;
+    let b1 = seed_assignment(&conn, &beta, t1).await;
+    let visibility = AssignmentVisibility {
+        read: Some(scope(owner)),
+        subtree: vec![owner, t1, t2],
+        reaching: vec![owner, t1, t2],
+        withdrawable: Vec::new(),
+    };
+    let ids = |page: toolkit_odata::Page<Assignment>| {
+        let mut ids: Vec<_> = page.items.into_iter().map(|a| a.id).collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    };
+    let sorted = |mut v: Vec<AssignmentId>| {
+        v.sort_by_key(|id| id.0);
+        v
+    };
+
+    let by_bundle = repo
+        .list_page(
+            &conn,
+            &visibility,
+            &filtered(&format!("bundle_id eq {}", alpha.id.0)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids(by_bundle), sorted(vec![a1.id, a2.id]));
+    let by_tenant = repo
+        .list_page(&conn, &visibility, &filtered(&format!("tenant_id eq {t1}")))
+        .await
+        .unwrap();
+    assert_eq!(ids(by_tenant), sorted(vec![a1.id, b1.id]));
+}
+
+#[tokio::test]
+async fn a_filter_never_widens_what_the_visibility_admits() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+    let (owner, target) = (Uuid::new_v4(), Uuid::new_v4());
+    let bundle = seed_bundle(&conn, owner, "alpha").await;
+    seed_assignment(&conn, &bundle, target).await;
+
+    let page = OrmAssignmentRepository
+        .list_page(
+            &conn,
+            &nothing_visible(),
+            &filtered(&format!("tenant_id eq {target}")),
+        )
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+}
+
+#[tokio::test]
+async fn an_unknown_filter_field_is_a_query_error() {
+    let db = migrated_db().await;
+    let conn = db.conn().unwrap();
+
+    let err = OrmAssignmentRepository
+        .list_page(
+            &conn,
+            &administers(Uuid::new_v4(), Uuid::new_v4()),
+            &filtered(&format!("owner_tenant_id eq {}", Uuid::new_v4())),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RepoError::Query(_)), "{err:?}");
 }
 
 // ---------------------------------------------------------------------------

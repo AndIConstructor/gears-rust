@@ -169,6 +169,14 @@ impl<S: ContentStore> PolicyManagementClientV1 for PolicyManagementLocalClient<S
         self.service.get_assignment(ctx, assignment_id).await
     }
 
+    async fn list_assignments(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+    ) -> Result<Page<Assignment>, ManagementError> {
+        self.service.list_assignments(ctx, query).await
+    }
+
     async fn update_assignment(
         &self,
         ctx: &SecurityContext,

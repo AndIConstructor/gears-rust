@@ -22,17 +22,27 @@
 //!
 //! # Service scope
 //!
-//! [`service_scope`] (`AccessScope::allow_all()`) is used by exactly the
-//! decision path: [`OrmActiveContentLoader`] reads the `assignment` rows of a
-//! tenant chain with their bundles' active `bundle_version` rows, and the
-//! `document` rows of the versions the compile cache misses.
+//! [`service_scope`] (`AccessScope::allow_all()`) is used by
+//!
+//! - the decision path: [`OrmActiveContentLoader`] reads the `assignment`
+//!   rows of a tenant chain with their bundles' active `bundle_version` rows,
+//!   and the `document` rows of the versions the compile cache misses;
+//! - the outer statement of an assignment read by visibility
+//!   ([`AssignmentVisibility`]): its two alternatives cannot share one
+//!   scope, so the caller's read scope is applied in a secure subquery (the
+//!   bundles it admits) and the other alternative is the tenants the domain
+//!   derived from the caller's publish grant.
 
 use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
-use policy_engine_sdk::management::odata::{BundleFilterField, VersionFilterField};
+use policy_engine_sdk::management::odata::{
+    AssignmentFilterField, BundleFilterField, VersionFilterField,
+};
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+};
 use time::{OffsetDateTime, UtcOffset};
 use toolkit_db::odata::sea_orm_filter::{PaginateOdataTryError, paginate_odata_try};
 use toolkit_db::odata::{LimitCfg, paginate_odata};
@@ -45,15 +55,15 @@ use uuid::Uuid;
 
 use super::entity::{assignment, bundle, bundle_version, document};
 use super::mapper;
-use super::odata_mapper::{BundleODataMapper, VersionODataMapper};
+use super::odata_mapper::{AssignmentODataMapper, BundleODataMapper, VersionODataMapper};
 use crate::domain::model::{
     Assignment, AssignmentId, Bundle, BundleId, BundleVersion, Document, DocumentId, VersionId,
     VersionState,
 };
 use crate::domain::ports::ActiveBinding;
 use crate::domain::repos::{
-    ActivationOutcome, ActiveContentLoader, AssignmentRepository, BundleRepository, RepoError,
-    VersionRepository, conflict,
+    ActivationOutcome, ActiveContentLoader, AssignmentRepository, AssignmentVisibility,
+    BundleRepository, RepoError, VersionRepository, conflict,
 };
 
 /// Largest `IN (...)` list one statement binds; well under every supported
@@ -62,6 +72,12 @@ const IN_CHUNK: usize = 500;
 
 /// Paging of a bundle's version listing.
 const VERSION_PAGE: LimitCfg = LimitCfg {
+    default: 25,
+    max: 100,
+};
+
+/// Paging of an assignment listing.
+const ASSIGNMENT_PAGE: LimitCfg = LimitCfg {
     default: 25,
     max: 100,
 };
@@ -609,8 +625,7 @@ pub struct OrmAssignmentRepository;
 
 impl OrmAssignmentRepository {
     /// The bundle's assignments within `scope`, by tenant then identity.
-    /// Test support only (asserting what a mutation wrote); no production
-    /// surface lists assignments by bundle.
+    /// Test support only (asserting what a mutation wrote).
     ///
     /// # Errors
     ///
@@ -635,6 +650,42 @@ impl OrmAssignmentRepository {
             .map(|row| mapper::assignment_from_model(&row))
             .collect())
     }
+}
+
+/// The rows `visibility` admits, as one condition for a statement under the
+/// service scope (module documentation).
+fn visible(visibility: &AssignmentVisibility) -> Condition {
+    let mut any = Condition::any();
+    if let Some(read) = &visibility.read {
+        let bundles = bundle::Entity::find()
+            .secure()
+            .scope_with(read)
+            .into_inner()
+            .select_only()
+            .column(bundle::Column::Id)
+            .into_query();
+        any = any.add(
+            Condition::all()
+                .add(assignment::Column::BundleId.in_subquery(bundles))
+                .add(assignment::Column::TenantId.is_in(visibility.subtree.iter().copied()))
+                .add(assignment::Column::OwnerTenantId.is_in(visibility.reaching.iter().copied())),
+        );
+    }
+    if !visibility.withdrawable.is_empty() {
+        any = any.add(
+            Condition::all()
+                .add(assignment::Column::TenantId.is_in(visibility.withdrawable.iter().copied()))
+                .add(
+                    assignment::Column::OwnerTenantId
+                        .is_not_in(visibility.reaching.iter().copied()),
+                ),
+        );
+    }
+    if any.is_empty() {
+        // Neither alternative applies: nothing is visible.
+        any = any.add(assignment::Column::Id.is_in(Vec::<Uuid>::new()));
+    }
+    any
 }
 
 #[async_trait]
@@ -674,6 +725,45 @@ impl AssignmentRepository for OrmAssignmentRepository {
             .await
             .map_err(scope_err)?;
         Ok(row.map(|row| mapper::assignment_from_model(&row)))
+    }
+
+    async fn find_visible<C: DBRunner>(
+        &self,
+        runner: &C,
+        visibility: &AssignmentVisibility,
+        id: AssignmentId,
+    ) -> Result<Option<Assignment>, RepoError> {
+        let row = assignment::Entity::find()
+            .filter(assignment::Column::Id.eq(id.0))
+            .filter(visible(visibility))
+            .secure()
+            .scope_with(&service_scope())
+            .one(runner)
+            .await
+            .map_err(scope_err)?;
+        Ok(row.map(|row| mapper::assignment_from_model(&row)))
+    }
+
+    async fn list_page<C: DBRunner>(
+        &self,
+        runner: &C,
+        visibility: &AssignmentVisibility,
+        query: &ODataQuery,
+    ) -> Result<Page<Assignment>, RepoError> {
+        let base = assignment::Entity::find()
+            .filter(visible(visibility))
+            .secure()
+            .scope_with(&service_scope());
+        paginate_odata::<AssignmentFilterField, AssignmentODataMapper, _, _, _, _>(
+            base,
+            runner,
+            query,
+            ("id", SortDir::Desc),
+            ASSIGNMENT_PAGE,
+            |row| mapper::assignment_from_model(&row),
+        )
+        .await
+        .map_err(odata_err)
     }
 
     async fn set_enforce<C: DBRunner>(

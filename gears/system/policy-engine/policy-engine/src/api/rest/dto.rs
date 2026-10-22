@@ -359,6 +359,10 @@ pub struct PolicyEngineAssignmentDto {
     pub updated_at: OffsetDateTime,
     /// Subject of the last modification.
     pub updated_by: Uuid,
+    /// `true` when the assignment does not apply: its owner tenant no longer
+    /// reaches its target with barriers respected. Its owner can no longer
+    /// change it; an administrator of the target tenant may withdraw it.
+    pub dormant: bool,
 }
 
 impl From<policy_engine_sdk::management::Assignment> for PolicyEngineAssignmentDto {
@@ -373,6 +377,7 @@ impl From<policy_engine_sdk::management::Assignment> for PolicyEngineAssignmentD
             created_by: value.created_by,
             updated_at: value.updated_at,
             updated_by: value.updated_by,
+            dormant: value.dormant,
         }
     }
 }

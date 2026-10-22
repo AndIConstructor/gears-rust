@@ -32,6 +32,33 @@ pub struct ActivationOutcome {
     pub superseded: Option<VersionId>,
 }
 
+/// Which assignments a caller sees: the rule of
+/// [`AssignmentRepository::list_page`] and
+/// [`AssignmentRepository::find_visible`]. A row is visible when either
+///
+/// - the caller administers it: its bundle is within `read`, its target in
+///   `subtree` and its owner in `reaching`; or
+/// - it is dormant at a tenant the caller may withdraw it from: its target
+///   is in `withdrawable` and its owner is not in `reaching`, so the owner
+///   does not reach the target with barriers respected.
+#[domain_model]
+#[derive(Debug, Clone)]
+pub struct AssignmentVisibility {
+    /// The caller's read scope, applied to the row's bundle (assignments
+    /// are read as content of their bundle); `None` when read is not
+    /// granted.
+    pub read: Option<AccessScope>,
+    /// The caller's tenant and all its descendants, barriers ignored.
+    pub subtree: Vec<Uuid>,
+    /// The tenants on the caller's side of every barrier: the descendants
+    /// it reaches and the ancestors that reach it, barriers respected, and
+    /// its own tenant.
+    pub reaching: Vec<Uuid>,
+    /// Tenants the caller reaches with barriers respected on whose content
+    /// it holds publish.
+    pub withdrawable: Vec<Uuid>,
+}
+
 // ---------------------------------------------------------------------------
 // Ports
 // ---------------------------------------------------------------------------
@@ -240,6 +267,26 @@ pub trait AssignmentRepository: Send + Sync {
         scope: &AccessScope,
         id: AssignmentId,
     ) -> Result<Option<Assignment>, RepoError>;
+
+    /// The assignment, if `visibility` admits it.
+    async fn find_visible<C: DBRunner>(
+        &self,
+        runner: &C,
+        visibility: &AssignmentVisibility,
+        id: AssignmentId,
+    ) -> Result<Option<Assignment>, RepoError>;
+
+    /// One `OData` page of the assignments `visibility` admits.
+    ///
+    /// # Errors
+    ///
+    /// `Query` for a refused filter, order, cursor or limit.
+    async fn list_page<C: DBRunner>(
+        &self,
+        runner: &C,
+        visibility: &AssignmentVisibility,
+        query: &ODataQuery,
+    ) -> Result<Page<Assignment>, RepoError>;
 
     /// Sets the `enforce` flag, `updated_at = at` and `updated_by = actor`.
     ///

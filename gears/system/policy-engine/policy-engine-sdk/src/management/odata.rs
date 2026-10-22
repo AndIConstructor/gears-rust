@@ -1,9 +1,11 @@
 //! `OData` schemas of the listings: standard toolkit cursor paging. Bundles
 //! are ordered by `id` (the tiebreaker), with no custom filter fields; a
-//! bundle's versions by `ordinal`, newest first.
+//! bundle's versions by `ordinal`, newest first; assignments by `id`,
+//! filterable by their bundle and target tenant.
 
 pub use generated::{
-    BundleQuery, BundleQueryFilterField as BundleFilterField, VersionQuery,
+    AssignmentQuery, AssignmentQueryFilterField as AssignmentFilterField, BundleQuery,
+    BundleQueryFilterField as BundleFilterField, VersionQuery,
     VersionQueryFilterField as VersionFilterField,
 };
 
@@ -31,5 +33,20 @@ mod generated {
         /// Version ordinal within its bundle.
         #[odata(filter(kind = "I64"))]
         pub ordinal: i64,
+    }
+
+    /// Filter and paging schema of an assignment listing (never
+    /// constructed; it only drives the derive).
+    #[derive(ODataFilterable)]
+    pub struct AssignmentQuery {
+        /// Assignment identity (the tiebreaker).
+        #[odata(filter(kind = "Uuid"))]
+        pub id: Uuid,
+        /// Assigned bundle.
+        #[odata(filter(kind = "Uuid"))]
+        pub bundle_id: Uuid,
+        /// Target tenant.
+        #[odata(filter(kind = "Uuid"))]
+        pub tenant_id: Uuid,
     }
 }

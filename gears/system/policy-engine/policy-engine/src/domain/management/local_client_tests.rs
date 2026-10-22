@@ -116,6 +116,14 @@ async fn every_method_round_trips_through_the_local_client() {
         client.get_assignment(&a, assigned.id).await.unwrap(),
         assigned
     );
+    assert_eq!(
+        client
+            .list_assignments(&a, &ODataQuery::default())
+            .await
+            .unwrap()
+            .items,
+        vec![assigned.clone()]
+    );
     let updated = client
         .update_assignment(&a, assigned.id, false)
         .await

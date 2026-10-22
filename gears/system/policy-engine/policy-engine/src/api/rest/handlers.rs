@@ -228,6 +228,18 @@ pub async fn get_assignment(
     ))
 }
 
+/// `GET /policy-engine/v1/assignments`.
+#[tracing::instrument(skip_all)]
+pub async fn list_assignments(
+    ctx: Option<Extension<SecurityContext>>,
+    Extension(client): Extension<Client>,
+    OData(query): OData,
+) -> ApiResult<Json<toolkit_odata::Page<PolicyEngineAssignmentDto>>> {
+    let ctx = error::require_context(ctx)?;
+    let page = client.list_assignments(&ctx, &query).await?;
+    Ok(Json(page.map_items(PolicyEngineAssignmentDto::from)))
+}
+
 /// `PATCH /policy-engine/v1/assignments/{id}`.
 #[tracing::instrument(skip_all)]
 pub async fn update_assignment(

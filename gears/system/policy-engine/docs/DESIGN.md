@@ -173,7 +173,7 @@ Built-in policies exist only in the gear's configuration; no runtime API reads o
 
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-constraint-hierarchy-external`
 
-The ancestor chain comes from `tenant-resolver` on every decision (one call), and reachability on management calls; there is no hierarchy cache.
+The ancestor chain comes from `tenant-resolver` on every decision (one call), and reachability and the caller's subtree on management calls; there is no hierarchy cache.
 
 #### Evaluation Is In-Process and Capability-Free
 
@@ -330,7 +330,12 @@ the acting subject on assignments (`created_by`, `updated_by`) and emits an info
 update-assignment and unassign with the actor, assignment id, bundle id and target tenant. A dormant assignment (its
 owner no longer in the target's barrier-respecting chain) may also be withdrawn by an administrator holding `publish`
 on the target tenant, reachable from the caller with barriers respected, so an assignment orphaned by a new barrier
-can be removed; its owner above the barrier gets `TENANT_BOUNDARY`. Unassign reports success only for a row it deleted
+can be removed; its owner above the barrier gets `TENANT_BOUNDARY`. Listing and reading assignments show a caller the
+assignments of bundles it may read at its tenants (barriers ignored) made from its side of every barrier, and the
+dormant assignments it may withdraw, each with a `dormant` flag. Both are decided from one barrier-ignoring subtree read
+(with each tenant's barrier flag) and one ancestor-chain read of the caller's tenant, and two collection
+authorizations (read, publish), never per row: every tenant the caller reaches shares its chain above it, so "the owner
+is on the far side of a barrier" is one SQL condition. Unassign reports success only for a row it deleted
 or that is absent (or invisible to the caller); a row the caller sees but whose grant does not cover it is refused
 with `CAPABILITY_DENIED`. A version's documents are read and written only through a version row the caller's scope
 admitted, so a grant constrained to a version's identity covers that version's whole content.
@@ -348,8 +353,10 @@ document content), once per request, and the document content of active versions
 
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-component-hierarchy-client`
 
-Adapter over `tenant-resolver`, always respecting barriers: the ancestor chain for decisions (the only call per request)
-and reachability for management calls; each call bounded.
+Adapter over `tenant-resolver`: the barrier-respecting ancestor chain for decisions (the only call per request), and for
+management calls reachability (barriers respected, or ignored to tell a tenant behind a barrier from one outside) and the
+caller's subtree (barriers ignored, each tenant with its barrier flag, so barrier-respecting reachability within it is
+derived in memory); each call bounded.
 
 #### REST API
 
@@ -377,9 +384,9 @@ The management client (`cpt-cf-policy-engine-interface-management-client`) and t
 | Version | get, list | `read` | unstable |
 | Version | activate | `publish` | unstable |
 | Assignment | assign, update the enforce flag, unassign | `publish` | unstable |
-| Assignment | get | `read` | unstable |
+| Assignment | get, list | `read`; `publish` for dormant assignments at the caller's tenants | unstable |
 
-Lists are paged with the platform's OData conventions: bundles and versions are cursor-paged (`$top` and cursor, default page 25, maximum 100), versions newest ordinal first. No decision operation exists outside the engine plugin.
+Lists are paged with the platform's OData conventions: bundles, versions and assignments are cursor-paged (`$top` and cursor, default page 25, maximum 100), versions newest ordinal first, assignments by identity and filterable by `bundle_id` and `tenant_id` (`eq`, `ne`, `in`). A listing's visibility is applied in the query, so pages come back full; it binds the caller's subtree and chain as `IN` lists, so its cost grows with the caller's subtree. No decision operation exists outside the engine plugin.
 Errors are the SDK's [typed management error](../policy-engine-sdk/src/management/error.rs), a contract error: on
 the wire it is an RFC 9457 problem carrying the management error domain and the variant's stable `error_code`, with
 the variant's fields as its data. Clients match on the code or rebuild the typed error, never on messages. The same
@@ -400,7 +407,7 @@ The engine plugin instance, the three resource types and the three permission in
 
 | Dependency | Use |
 |------------|-----|
-| `tenant-resolver` | Ancestor chain (decisions) and reachability (management), barriers respected |
+| `tenant-resolver` | Ancestor chain (decisions, barriers respected), reachability and subtree (management) |
 | `types-registry` | Concrete type id existence at startup, validate and activate |
 | `authz-resolver` | Management permission decisions |
 | `toolkit-db` | Postgres or SQLite |
@@ -527,7 +534,7 @@ Documents of a version, deleted with it. A document name is unique within its ve
 
 Assignments of bundles to tenants with their enforce flag, timestamps and the acting subjects (`created_by`,
 `updated_by`). Rows are hard-deleted on unassign. A bundle is assigned to a tenant at most once; the
-decision path reads assignments by tenant.
+decision path reads assignments by tenant, the listing by bundle or tenant (both indexed).
 
 ### 3.8 Deployment Topology
 

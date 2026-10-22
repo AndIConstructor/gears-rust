@@ -72,6 +72,7 @@ fn assignment(enforce: bool) -> Assignment {
         created_by: Uuid::from_u128(0x5B),
         updated_at: at(),
         updated_by: Uuid::from_u128(0x5B),
+        dormant: false,
     }
 }
 
@@ -275,6 +276,25 @@ impl PolicyManagementClientV1 for FakeClient {
         _id: AssignmentId,
     ) -> Result<Assignment, ManagementError> {
         Ok(assignment(true))
+    }
+
+    async fn list_assignments(
+        &self,
+        _ctx: &SecurityContext,
+        query: &ODataQuery,
+    ) -> Result<Page<Assignment>, ManagementError> {
+        self.record(format!("list_assignments filtered={}", query.has_filter()));
+        Ok(Page::new(
+            vec![Assignment {
+                dormant: true,
+                ..assignment(true)
+            }],
+            PageInfo {
+                next_cursor: None,
+                prev_cursor: None,
+                limit: 25,
+            },
+        ))
     }
 
     async fn update_assignment(
@@ -593,6 +613,54 @@ async fn assignments_assign_get_update_unassign() {
     let (status, _, _) = send(&router, "DELETE", &assignment_uri(), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(client.last(), "unassign");
+}
+
+#[tokio::test]
+async fn assignments_are_listed_a_page_at_a_time_with_their_dormant_flag() {
+    let (router, client) = build_router();
+
+    let (status, _, body) = send(&router, "GET", "/policy-engine/v1/assignments", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], ASSIGNMENT.to_string());
+    assert_eq!(items[0]["bundle_id"], BUNDLE.to_string());
+    assert_eq!(items[0]["tenant_id"], TENANT.to_string());
+    assert_eq!(items[0]["dormant"], true);
+    assert_eq!(body["page_info"]["limit"], 25);
+    assert_eq!(client.last(), "list_assignments filtered=false");
+}
+
+#[tokio::test]
+async fn assignments_are_filtered_by_bundle_and_target_tenant() {
+    let (router, client) = build_router();
+    let uri = format!(
+        "/policy-engine/v1/assignments?$filter=bundle_id%20eq%20{BUNDLE}%20and%20tenant_id%20eq%20{TENANT}"
+    );
+
+    let (status, _, _) = send(&router, "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(client.last(), "list_assignments filtered=true");
+}
+
+#[tokio::test]
+async fn an_unsupported_assignment_query_option_is_refused() {
+    let (router, client) = build_router();
+
+    let (status, _, body) = send(
+        &router,
+        "GET",
+        "/policy-engine/v1/assignments?$expand=bundle",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["status"], 400, "a problem body: {body}");
+    assert_eq!(
+        client.last(),
+        "",
+        "a refused query never reaches the client"
+    );
 }
 
 // -- Authentication -----------------------------------------------------------

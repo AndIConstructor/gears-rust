@@ -233,6 +233,13 @@ target tenant (`publish` on the target tenant, target reachable from the caller 
 above the barrier is refused with `TENANT_BOUNDARY`. Unassigning never reports success for an assignment the caller can
 see but did not delete; one the caller cannot see is reported as absent.
 
+Assignments **MUST** be listable, filtered by bundle or by target tenant, and every assignment **MUST** say whether it is
+dormant. A caller sees the assignments of bundles it may read at its tenants (barriers ignored) made from its side of
+every barrier, so an owner sees an assignment that stopped applying, and the dormant assignments at tenants it reaches
+on which it holds `publish`, so an administrator of the target tenant can find what it may remove. A listing filter
+naming content the caller cannot see yields no rows; a read of an assignment the caller would not see in the listing
+reports it absent.
+
 - **Actors**: `cpt-cf-policy-engine-actor-hierarchy-provider`, `cpt-cf-policy-engine-actor-tenant-policy-admin`
 
 #### Ancestor Guardrail Across a Barrier
@@ -389,7 +396,8 @@ internal, invalid request); no failure is ever reported as a permit, and no sett
 
 Every management operation **MUST** be authorized against the caller's own context for exactly one of three
 permissions, none implying another: `read` (read content), `author` (create and update bundles, create, replace,
-delete and validate drafts), `publish` (activate, assign, update assignment, unassign). Assigning needs a target tenant
+delete and validate drafts), `publish` (activate, assign, update assignment, unassign; also listing and reading the
+dormant assignments the caller may remove). Assigning needs a target tenant
 reachable from the caller with barriers respected; unassigning needs `publish` on the target tenant, reachable from the
 caller with barriers respected, so an administrator of the target tenant can remove an assignment whose owner is above a
 barrier; content the caller may not see looks absent. Bundle names must be
@@ -511,8 +519,9 @@ terminates the host.
 - **Type**: Rust client trait in ClientHub, in the gear's SDK
 - **Stability**: unstable
 - **Description**: Bundles, versions (draft, replace, delete, validate, activate) and assignments. Errors are typed;
-  each carries a stable code that also travels on the wire. Bundles and versions are cursor-paged
-  (OData `$top` and cursor; default page 25, maximum 100); versions are listed newest ordinal first.
+  each carries a stable code that also travels on the wire. Bundles, versions and assignments are cursor-paged
+  (OData `$top` and cursor; default page 25, maximum 100); versions are listed newest ordinal first; assignments are
+  filterable by `bundle_id` and `tenant_id` and carry a `dormant` flag.
 
 #### Policy Administration REST API
 

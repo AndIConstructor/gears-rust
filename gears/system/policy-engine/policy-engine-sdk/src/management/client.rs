@@ -197,16 +197,36 @@ pub trait PolicyManagementClientV1: Send + Sync {
         spec: AssignmentSpec,
     ) -> Result<Assignment, ManagementError>;
 
-    /// Reads an assignment. Capability: read.
+    /// Reads an assignment the caller would see in
+    /// [`list_assignments`](Self::list_assignments). Capability: read, or
+    /// publish for a dormant assignment at the caller's tenants.
     ///
     /// # Errors
     ///
-    /// Not found; [`TenantBoundary`](super::ManagementError::TenantBoundary).
+    /// Not found when absent or not visible to the caller.
     async fn get_assignment(
         &self,
         ctx: &SecurityContext,
         assignment_id: AssignmentId,
     ) -> Result<Assignment, ManagementError>;
+
+    /// Lists, with the platform's cursor pagination, the assignments
+    /// visible to the caller: those made by the tenants it may read whose
+    /// bundle it may read, and the dormant assignments at its own tenants it
+    /// may withdraw. Filterable by `bundle_id` and `tenant_id` (the target);
+    /// a filter naming content the caller cannot see yields no rows.
+    /// Capability: read, or publish for the dormant ones.
+    ///
+    /// # Errors
+    ///
+    /// [`CapabilityDenied`](super::ManagementError::CapabilityDenied) when
+    /// neither capability is granted; invalid argument for a malformed
+    /// filter, limit or cursor.
+    async fn list_assignments(
+        &self,
+        ctx: &SecurityContext,
+        query: &ODataQuery,
+    ) -> Result<Page<Assignment>, ManagementError>;
 
     /// Sets whether an assignment enforces its bundle's denials or only
     /// reports them. Capability: publish.

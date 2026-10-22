@@ -303,6 +303,11 @@ pub struct Assignment {
     pub updated_at: OffsetDateTime,
     /// Subject of the last modification (the creator until changed).
     pub updated_by: Uuid,
+    /// `true` when the assignment does not apply: its owner tenant no longer
+    /// reaches its target with barriers respected (a barrier was raised
+    /// between them). Its owner can no longer change it; an administrator
+    /// of the target tenant may withdraw it.
+    pub dormant: bool,
 }
 
 /// Request to assign a bundle to a tenant.

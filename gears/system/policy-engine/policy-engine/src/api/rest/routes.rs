@@ -11,8 +11,9 @@ use std::sync::Arc;
 use axum::Router;
 use axum::http::StatusCode;
 use policy_engine_sdk::management::PolicyManagementClientV1;
+use policy_engine_sdk::management::odata::AssignmentFilterField;
 use toolkit::api::OpenApiRegistry;
-use toolkit::api::operation_builder::OperationBuilder;
+use toolkit::api::operation_builder::{OperationBuilder, OperationBuilderODataExt};
 
 use super::dto::{
     PolicyEngineAssignmentDto, PolicyEngineBundleDto, PolicyEngineCreateAssignmentRequestDto,
@@ -299,6 +300,30 @@ pub fn register_routes(
             StatusCode::OK,
             "The assignment",
         )
+        .standard_errors(openapi)
+        .error_503(openapi)
+        .register(router, openapi);
+
+    let router = OperationBuilder::get("/policy-engine/v1/assignments")
+        .operation_id("policy_engine.list_assignments")
+        .summary("List assignments")
+        .description(
+            "Lists the assignments the caller administers and the dormant assignments at its \
+             tenants it may withdraw, opaque-cursor paginated. Filter by `bundle_id` or by \
+             `tenant_id` (the target); a filter naming content the caller cannot see yields \
+             an empty page.",
+        )
+        .tag(TAG)
+        .authenticated()
+        .no_license_required()
+        .handler(handlers::list_assignments)
+        .json_response_with_schema::<toolkit_odata::Page<PolicyEngineAssignmentDto>>(
+            openapi,
+            StatusCode::OK,
+            "Page of assignments",
+        )
+        .with_odata_filter::<AssignmentFilterField>()
+        .with_odata_orderby::<AssignmentFilterField>()
         .standard_errors(openapi)
         .error_503(openapi)
         .register(router, openapi);

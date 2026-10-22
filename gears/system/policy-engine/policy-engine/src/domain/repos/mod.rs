@@ -29,8 +29,8 @@ use toolkit_macros::domain_model;
 pub mod content;
 
 pub use content::{
-    ActivationOutcome, ActiveContentLoader, AssignmentRepository, BundleRepository,
-    VersionRepository,
+    ActivationOutcome, ActiveContentLoader, AssignmentRepository, AssignmentVisibility,
+    BundleRepository, VersionRepository,
 };
 
 /// Reasons carried by [`RepoError::Conflict`]. Where the management surface
