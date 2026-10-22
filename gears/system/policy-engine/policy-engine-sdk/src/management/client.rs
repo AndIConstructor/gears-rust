@@ -7,7 +7,7 @@ use toolkit_security::SecurityContext;
 use super::ManagementError;
 use super::models::{
     Assignment, AssignmentId, AssignmentSpec, Bundle, BundleId, BundlePatch, BundleVersion,
-    NewBundle, ValidationReport, VersionContent, VersionDetail, VersionId,
+    NewBundle, PublishOperation, VersionContent, VersionDetail, VersionId,
 };
 
 /// Policy management client, registered in `ClientHub` without scope and
@@ -147,20 +147,22 @@ pub trait PolicyManagementClientV1: Send + Sync {
         version_id: VersionId,
     ) -> Result<(), ManagementError>;
 
-    /// Validates a version and reports every finding against the document
-    /// that caused it. Never activates, never changes the version.
+    /// Validates a version's content, in any state, with the checks
+    /// activation applies to it. Never activates, never changes the version.
     /// Capability: author.
     ///
     /// # Errors
     ///
-    /// Not found; infrastructure failures that prevent validation (an
-    /// unreachable registry). Invalid content is a report, not an error.
+    /// [`ValidationFailed`](super::ManagementError::ValidationFailed) with
+    /// every finding, each against the document that caused it - the error
+    /// activating the content would return; not found; infrastructure
+    /// failures that prevent validation (an unreachable registry).
     async fn validate_version(
         &self,
         ctx: &SecurityContext,
         bundle_id: BundleId,
         version_id: VersionId,
-    ) -> Result<ValidationReport, ManagementError>;
+    ) -> Result<(), ManagementError>;
 
     /// Activates a draft: validates and compiles it, and supersedes the
     /// bundle's previously active version in the same transaction. Activating
@@ -179,6 +181,29 @@ pub trait PolicyManagementClientV1: Send + Sync {
         version_id: VersionId,
     ) -> Result<BundleVersion, ManagementError>;
 
+    // -- Dry runs ------------------------------------------------------------
+
+    /// Dry-runs a publish operation: runs every check the operation runs, in
+    /// its order and against the same state, and writes nothing. Capability:
+    /// publish, as the operation itself.
+    ///
+    /// `Ok` when the operation would succeed now (including as a no-op, such
+    /// as activating the active version or withdrawing an absent
+    /// assignment). The answer is advisory: it reserves nothing, and the
+    /// operation checks again when it runs, so a concurrent writer can still
+    /// make it fail ([`ConcurrentChange`](super::ManagementError::ConcurrentChange),
+    /// [`AssignmentExists`](super::ManagementError::AssignmentExists)).
+    ///
+    /// # Errors
+    ///
+    /// Exactly the error the operation would return, masking included:
+    /// content the caller may not see is not found, never refused.
+    async fn check_publish(
+        &self,
+        ctx: &SecurityContext,
+        operation: PublishOperation,
+    ) -> Result<(), ManagementError>;
+
     // -- Assignments ---------------------------------------------------------
 
     /// Assigns a bundle to a tenant. It applies to the tenant and its
@@ -190,7 +215,10 @@ pub trait PolicyManagementClientV1: Send + Sync {
     /// [`TenantBoundary`](super::ManagementError::TenantBoundary) for a tenant behind
     /// a self-managed barrier from the caller's context;
     /// [`AssignmentExists`](super::ManagementError::AssignmentExists); not found for
-    /// the bundle.
+    /// a bundle the caller may not read;
+    /// [`CapabilityDenied`](super::ManagementError::CapabilityDenied) when the
+    /// caller may read the bundle but its publish grant does not cover the
+    /// bundle or the new assignment.
     async fn assign(
         &self,
         ctx: &SecurityContext,

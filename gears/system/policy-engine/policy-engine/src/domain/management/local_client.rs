@@ -12,7 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use policy_engine_sdk::management::{
     Assignment, AssignmentId, AssignmentSpec, Bundle, BundleId, BundlePatch, BundleVersion,
-    ManagementError, NewBundle, PolicyManagementClientV1, ValidationReport, VersionContent,
+    ManagementError, NewBundle, PolicyManagementClientV1, PublishOperation, VersionContent,
     VersionDetail, VersionId,
 };
 use toolkit_macros::domain_model;
@@ -136,7 +136,7 @@ impl<S: ContentStore> PolicyManagementClientV1 for PolicyManagementLocalClient<S
         ctx: &SecurityContext,
         bundle_id: BundleId,
         version_id: VersionId,
-    ) -> Result<ValidationReport, ManagementError> {
+    ) -> Result<(), ManagementError> {
         self.service
             .validate_version(ctx, bundle_id, version_id)
             .await
@@ -151,6 +151,14 @@ impl<S: ContentStore> PolicyManagementClientV1 for PolicyManagementLocalClient<S
         self.service
             .activate_version(ctx, bundle_id, version_id)
             .await
+    }
+
+    async fn check_publish(
+        &self,
+        ctx: &SecurityContext,
+        operation: PublishOperation,
+    ) -> Result<(), ManagementError> {
+        self.service.check_publish(ctx, operation).await
     }
 
     async fn assign(

@@ -80,6 +80,7 @@ a failure, never a permit.
 | `cpt-cf-policy-engine-fr-evaluation-isolation` | `cpt-cf-policy-engine-component-evaluator` on a blocking task under the request's evaluation budget; the shared library's guards and denylists; hierarchy and registry calls bounded. |
 | `cpt-cf-policy-engine-fr-denial-versus-failure` | `cpt-cf-policy-engine-seq-fail-closed`. |
 | `cpt-cf-policy-engine-fr-admin-authorization` | `cpt-cf-policy-engine-component-management` asks the platform enforcer for one of three permissions per call. |
+| `cpt-cf-policy-engine-fr-publish-dry-run` | `cpt-cf-policy-engine-component-management` splits each publish operation into a plan that only reads and a write; the dry run is the plan without the write. |
 | `cpt-cf-policy-engine-fr-retry-safe-management` | Store uniqueness turns retries into conflicts; activate and unassign are no-ops when already done; unassign reports success only for a row it deleted, that does not exist, or that is invisible to the caller; a row the caller sees but may not remove is refused. |
 | `cpt-cf-policy-engine-fr-administration-audit` (p2) | Deferred; a full trail depends on the future platform Audit gear. Meanwhile assignments store `created_by`/`updated_by`, versions `activated_by`, and assign, update-assignment and unassign log the actor (see 4). |
 | `cpt-cf-policy-engine-fr-idempotent-management` (p2), `cpt-cf-policy-engine-fr-deprecation` (p2), `cpt-cf-policy-engine-fr-barrier-guardrail-reach` (p2) | Deferred; no design in this release. Platform-wide guardrails are built-in policies. |
@@ -324,7 +325,9 @@ as absence.
 
 - [ ] `p1` - **ID**: `cpt-cf-policy-engine-component-management`
 
-Bundle, version and assignment operations, each authorized for one of three permissions, run in a transaction.
+Bundle, version and assignment operations, each authorized for one of three permissions, run in a transaction. Each
+publish operation first runs a plan - every check, reading only - then writes what it decided; its dry run is the plan
+alone.
 Enforces draft-only writes, limits, and the barrier-respecting reachability of an assignment's target tenant. Records
 the acting subject on assignments (`created_by`, `updated_by`) and emits an info-level structured log line for assign,
 update-assignment and unassign with the actor, assignment id, bundle id and target tenant. A dormant assignment (its
@@ -382,11 +385,16 @@ The management client (`cpt-cf-policy-engine-interface-management-client`) and t
 | Bundle | get, list | `read` | unstable |
 | Version | create, replace and delete a draft; validate a draft | `author` | unstable |
 | Version | get, list | `read` | unstable |
-| Version | activate | `publish` | unstable |
-| Assignment | assign, update the enforce flag, unassign | `publish` | unstable |
+| Version | activate, and its dry run | `publish` | unstable |
+| Assignment | assign, update the enforce flag, unassign, and their dry runs | `publish` | unstable |
 | Assignment | get, list | `read`; `publish` for dormant assignments at the caller's tenants | unstable |
 
 Lists are paged with the platform's OData conventions: bundles, versions and assignments are cursor-paged (`$top` and cursor, default page 25, maximum 100), bundles filterable by `name` (`eq`, `ne`, `in`, `contains`, `startswith`, `endswith`) and `owner_tenant_id` (`eq`, `ne`, `in`), versions newest ordinal first, assignments by identity and filterable by `bundle_id` and `tenant_id` (`eq`, `ne`, `in`). A listing's visibility is applied in the query, so pages come back full; it binds the caller's subtree and chain as `IN` lists, so its cost grows with the caller's subtree. No decision operation exists outside the engine plugin.
+
+A dry run (`check_publish`; `dry_run=true` on the operation's route) answers `204` when the operation would succeed
+and the operation's own problem otherwise. Validation answers the same way: `204` for valid content, otherwise the
+`VALIDATION_FAILED` problem activation would return, with every finding.
+
 Errors are the SDK's [typed management error](../policy-engine-sdk/src/management/error.rs), a contract error: on
 the wire it is an RFC 9457 problem carrying the management error domain and the variant's stable `error_code`, with
 the variant's fields as its data. Clients match on the code or rebuild the typed error, never on messages. The same

@@ -268,6 +268,24 @@ pub trait AssignmentRepository: Send + Sync {
         id: AssignmentId,
     ) -> Result<Option<Assignment>, RepoError>;
 
+    /// Whether [`Self::insert`] under `scope` would admit `assignment` itself:
+    /// the scope's check of the row about to be written, decided in memory.
+    /// Writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// `Database` for a scope the check cannot evaluate.
+    fn insertable(&self, scope: &AccessScope, assignment: &Assignment) -> Result<bool, RepoError>;
+
+    /// Whether `bundle_id` is assigned to `tenant_id` within `scope`.
+    async fn exists_for<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        bundle_id: BundleId,
+        tenant_id: Uuid,
+    ) -> Result<bool, RepoError>;
+
     /// The assignment, if `visibility` admits it.
     async fn find_visible<C: DBRunner>(
         &self,

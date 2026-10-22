@@ -9,8 +9,8 @@
 //! [`PolicyEngineReplaceDraftContentRequestDto`]).
 
 use policy_engine_sdk::management::{
-    AssignmentSpec, Bundle, BundlePatch, BundleVersion, Document, NewBundle, ValidationFinding,
-    ValidationReport, VersionContent, VersionDetail, VersionState,
+    AssignmentSpec, Bundle, BundlePatch, BundleVersion, Document, NewBundle, VersionContent,
+    VersionDetail, VersionState,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -277,55 +277,6 @@ impl From<PolicyEngineReplaceDraftContentRequestDto> for VersionContent {
     fn from(value: PolicyEngineReplaceDraftContentRequestDto) -> Self {
         Self {
             documents: value.documents.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-/// One validation failure, reported against the document that caused it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[toolkit_macros::api_dto(response)]
-pub struct PolicyEngineValidationFindingDto {
-    /// The offending document; absent for a finding about the version as a
-    /// whole.
-    pub document_name: Option<String>,
-    /// Stable code from `policy_engine_sdk::management::finding`.
-    pub code: String,
-    /// Human-readable explanation for the author.
-    pub message: String,
-}
-
-impl From<ValidationFinding> for PolicyEngineValidationFindingDto {
-    fn from(value: ValidationFinding) -> Self {
-        Self {
-            document_name: value.document_name,
-            code: value.code,
-            message: value.message,
-        }
-    }
-}
-
-/// `POST .../versions/{version}/validate` response.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[toolkit_macros::api_dto(response)]
-pub struct PolicyEngineValidationReportDto {
-    /// The version validated.
-    pub version_id: Uuid,
-    /// `true` when no finding was reported.
-    pub valid: bool,
-    /// Every failure found; empty means valid.
-    pub findings: Vec<PolicyEngineValidationFindingDto>,
-    /// When the validation ran (RFC 3339).
-    #[serde(with = "time::serde::rfc3339")]
-    pub validated_at: OffsetDateTime,
-}
-
-impl From<ValidationReport> for PolicyEngineValidationReportDto {
-    fn from(value: ValidationReport) -> Self {
-        Self {
-            version_id: value.version_id.into(),
-            valid: value.findings.is_empty(),
-            findings: value.findings.into_iter().map(Into::into).collect(),
-            validated_at: value.validated_at,
         }
     }
 }

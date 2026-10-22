@@ -5,7 +5,6 @@
 
 use policy_engine_sdk::gts::permissions::actions;
 use policy_engine_sdk::management::{AssignmentSpec, ManagementError};
-use time::OffsetDateTime;
 use toolkit_db::secure::AccessScope;
 use toolkit_odata::{CursorV1, ODataQuery, parse_filter_string};
 use uuid::Uuid;
@@ -29,32 +28,7 @@ fn is_boundary(err: &ManagementError) {
 /// An assignment stored directly, as one made before its tenant raised a
 /// barrier would be.
 async fn stored_at(h: &Harness, bundle_id: BundleId, tenant: Uuid) -> Assignment {
-    stored_by(h, bundle_id, TENANT_A, tenant).await
-}
-
-/// An assignment of `bundle_id` made by `owner` at `tenant`, stored
-/// directly.
-async fn stored_by(h: &Harness, bundle_id: BundleId, owner: Uuid, tenant: Uuid) -> Assignment {
-    let conn = h.db.conn().unwrap();
-    let at = OffsetDateTime::now_utc();
-    OrmAssignmentRepository
-        .insert(
-            &conn,
-            &AccessScope::allow_all(),
-            &Assignment {
-                id: AssignmentId(Uuid::new_v4()),
-                bundle_id,
-                tenant_id: tenant,
-                owner_tenant_id: owner,
-                enforce: true,
-                created_at: at,
-                created_by: ALICE,
-                updated_at: at,
-                updated_by: ALICE,
-            },
-        )
-        .await
-        .unwrap()
+    h.stored_by(bundle_id, TENANT_A, tenant).await
 }
 
 #[tokio::test]
@@ -423,16 +397,7 @@ async fn a_target_tenant_cannot_withdraw_an_assignment_that_still_applies() {
 
 /// Whether the assignment row exists, whoever may see it.
 async fn is_stored(h: &Harness, id: AssignmentId) -> bool {
-    let conn = h.db.conn().unwrap();
-    crate::domain::repos::AssignmentRepository::get(
-        &OrmAssignmentRepository,
-        &conn,
-        &AccessScope::allow_all(),
-        id,
-    )
-    .await
-    .unwrap()
-    .is_some()
+    h.stored_assignment(id).await.is_some()
 }
 
 #[tokio::test]
@@ -602,8 +567,8 @@ async fn an_ancestors_assignment_of_a_readable_bundle_is_shown_live() {
     let h = harness().await;
     let a = alice();
     let (bundle, _) = h.active(&a, &["deny_delete"]).await;
-    let by_root = stored_by(&h, bundle.id, ROOT, TENANT_A1).await;
-    let by_root_behind = stored_by(&h, bundle.id, ROOT, TENANT_S).await;
+    let by_root = h.stored_by(bundle.id, ROOT, TENANT_A1).await;
+    let by_root_behind = h.stored_by(bundle.id, ROOT, TENANT_S).await;
 
     let mut seen = listed(&h, &a).await;
     seen.sort_by_key(|(id, _)| id.0);

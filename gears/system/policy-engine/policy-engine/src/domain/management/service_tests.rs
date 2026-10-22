@@ -8,7 +8,6 @@ use policy_engine_sdk::management::{
     self as sdk, BundlePatch, DocumentSpec, LimitKind, ManagementError, NewBundle, VersionContent,
     finding, limits,
 };
-use toolkit_db::secure::AccessScope;
 use toolkit_odata::ODataQuery;
 use uuid::Uuid;
 
@@ -19,8 +18,14 @@ use crate::domain::management::test_support::governance::{
 };
 use crate::domain::management::test_support::{FakePdp, PdpMode};
 use crate::domain::model::{BundleId, VersionId, VersionState};
-use crate::domain::repos::VersionRepository;
-use crate::infra::storage::content_repo::OrmVersionRepository;
+
+/// The findings a `VALIDATION_FAILED` error carries.
+fn findings_of(err: ManagementError) -> Vec<sdk::ValidationFinding> {
+    match err {
+        ManagementError::ValidationFailed { findings } => findings,
+        other => panic!("expected VALIDATION_FAILED, got {other:?}"),
+    }
+}
 
 fn content(documents: Vec<DocumentSpec>) -> VersionContent {
     VersionContent { documents }
@@ -34,16 +39,6 @@ fn syntax_error(name: &str) -> DocumentSpec {
 }
 
 impl Harness {
-    async fn stored_state(&self, id: VersionId) -> VersionState {
-        let conn = self.db.conn().unwrap();
-        OrmVersionRepository
-            .get_with_content(&conn, &AccessScope::allow_all(), id)
-            .await
-            .unwrap()
-            .expect("version exists")
-            .state
-    }
-
     /// A draft of `bundle` (Alice's) with valid documents `names`.
     async fn draft_with(&self, bundle: &sdk::Bundle, names: &[&str]) -> sdk::BundleVersion {
         let draft = self
@@ -106,18 +101,17 @@ async fn lifecycle_create_draft_validate_activate_seed_supersede() {
         )
         .await
         .unwrap();
-    let report = h
+    let invalid = h
         .service
         .validate_version(&a, bundle.id, v1.id)
         .await
-        .unwrap();
-    assert!(!report.is_valid());
-    assert!(report.findings.iter().any(|f| {
+        .unwrap_err();
+    let findings = findings_of(invalid.clone());
+    assert!(findings.iter().any(|f| {
         f.document_name.as_deref() == Some("broken") && f.code == finding::SYNTAX_ERROR
     }));
     assert!(
-        report
-            .findings
+        findings
             .iter()
             .all(|f| f.document_name.as_deref() != Some("deny_delete"))
     );
@@ -128,6 +122,7 @@ async fn lifecycle_create_draft_validate_activate_seed_supersede() {
         .unwrap_err();
     assert_eq!(err.category().http_status(), 400);
     assert_eq!(reason_of(&err).as_deref(), Some("VALIDATION_FAILED"));
+    assert_eq!(err, invalid, "validation answers what activation would");
     assert_eq!(h.stored_state(v1.id).await, VersionState::Draft);
 
     // Valid content activates; the bundle points at it.
@@ -141,13 +136,10 @@ async fn lifecycle_create_draft_validate_activate_seed_supersede() {
         valid
     );
     assert_eq!(valid.documents[0].spec, spec("deny_delete"));
-    assert!(
-        h.service
-            .validate_version(&a, bundle.id, v1.id)
-            .await
-            .unwrap()
-            .is_valid()
-    );
+    h.service
+        .validate_version(&a, bundle.id, v1.id)
+        .await
+        .unwrap();
     let active = h
         .service
         .activate_version(&a, bundle.id, v1.id)
@@ -366,13 +358,13 @@ async fn concrete_resource_types_must_exist_and_patterns_must_parse() {
         .await
         .unwrap();
 
-    let report = h
-        .service
-        .validate_version(&a, bundle.id, draft.id)
-        .await
-        .unwrap();
-    let codes: Vec<(&str, &str)> = report
-        .findings
+    let findings = findings_of(
+        h.service
+            .validate_version(&a, bundle.id, draft.id)
+            .await
+            .unwrap_err(),
+    );
+    let codes: Vec<(&str, &str)> = findings
         .iter()
         .map(|f| (f.document_name.as_deref().unwrap(), f.code.as_str()))
         .collect();

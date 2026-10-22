@@ -33,7 +33,7 @@ pub use error::{
 };
 pub use models::{
     Assignment, AssignmentId, AssignmentSpec, Bundle, BundleId, BundlePatch, BundleVersion,
-    Document, DocumentId, DocumentSpec, NewBundle, ValidationFinding, ValidationReport,
+    Document, DocumentId, DocumentSpec, NewBundle, PublishOperation, ValidationFinding,
     VersionContent, VersionDetail, VersionId, VersionState,
 };
 

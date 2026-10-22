@@ -56,6 +56,10 @@
 //! caller) succeeds without changes; one the caller sees but may not remove
 //! is refused, never reported withdrawn while it still exists.
 //!
+//! Each mutation runs its checks in a `plan_*` step that only reads, then
+//! writes what the plan decided; its dry run
+//! ([`check_publish`](ManagementService::check_publish)) is the plan alone.
+//!
 //! # Dormant assignments
 //!
 //! An assignment applies only while its owner tenant reaches its target with
@@ -109,39 +113,16 @@ impl<S: ContentStore> ManagementService<S> {
     ///
     /// `TENANT_BOUNDARY` for a target not reachable from the caller's
     /// context with barriers respected; `ASSIGNMENT_EXISTS`; not found for
-    /// the bundle; `CAPABILITY_DENIED`.
+    /// a bundle the caller may not read; `CAPABILITY_DENIED`, including for
+    /// a readable bundle whose publish grant does not cover it or the new
+    /// assignment.
     pub async fn assign(
         &self,
         ctx: &SecurityContext,
         spec: AssignmentSpec,
     ) -> Result<sdk::Assignment, ManagementError> {
-        let caller_tenant = ctx.subject_tenant_id();
-        let bundle_id = spec.bundle_id;
-        let bundle = self.prefetch_bundle(bundle_id).await?;
-        let auth = self
-            .mutation_access(
-                ctx,
-                Capability::Publish,
-                AccessTarget::owned_by(caller_tenant).resource(bundle_id),
-                Subject::Bundle(bundle_id),
-            )
-            .await?;
-        self.readable_bundle(ctx, &bundle).await?;
-        if self.reach(ctx, spec.tenant_id).await? != Reach::Reachable {
-            return Err(tenant_boundary());
-        }
-        let at = now();
-        let assignment = Assignment {
-            id: AssignmentId(Uuid::new_v4()),
-            bundle_id,
-            tenant_id: spec.tenant_id,
-            owner_tenant_id: caller_tenant,
-            enforce: spec.enforce,
-            created_at: at,
-            created_by: ctx.subject_id(),
-            updated_at: at,
-            updated_by: ctx.subject_id(),
-        };
+        let (auth, assignment) = self.plan_assign(ctx, &spec).await?;
+        let bundle_id = assignment.bundle_id;
         let created = self
             .commit(ctx, &auth, move |tx, env| {
                 Box::pin(async move {
@@ -236,10 +217,7 @@ impl<S: ContentStore> ManagementService<S> {
         assignment_id: AssignmentId,
         enforce: bool,
     ) -> Result<sdk::Assignment, ManagementError> {
-        let current = self.prefetch_assignment(assignment_id).await?;
-        let auth = self.assignment_access(ctx, &current).await?;
-        self.guard_tenant(ctx, assignment_id, current.tenant_id)
-            .await?;
+        let auth = self.plan_update(ctx, assignment_id).await?;
         let updated = self
             .commit(ctx, &auth, move |tx, env| {
                 Box::pin(async move {
@@ -280,18 +258,163 @@ impl<S: ContentStore> ManagementService<S> {
         ctx: &SecurityContext,
         assignment_id: AssignmentId,
     ) -> Result<(), ManagementError> {
-        let Some(current) = self.find_assignment(assignment_id).await? else {
+        let Withdrawal::Delete { auth, assignment } =
+            self.plan_unassign(ctx, assignment_id).await?
+        else {
             return Ok(());
+        };
+        let deleted = self
+            .commit(ctx, &auth, move |tx, env| {
+                Box::pin(async move {
+                    env.store
+                        .assignments()
+                        .delete(tx, &env.scope, assignment_id)
+                        .await
+                        .map_err(|e| assignment_repo(e, assignment_id))?;
+                    Ok(())
+                })
+            })
+            .await;
+        match deleted {
+            Ok(()) => {
+                log_change("unassigned", ctx, &assignment);
+                Ok(())
+            }
+            // Gone since the plan read it: withdrawn. Still there, but no
+            // longer within the scope the plan saw: refused, never reported
+            // withdrawn while it remains.
+            Err(ManagementError::NotFound { .. }) => {
+                if self.find_assignment(assignment_id).await?.is_some() {
+                    Err(ManagementError::CapabilityDenied)
+                } else {
+                    Ok(())
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    // -- Plans ---------------------------------------------------------------
+
+    /// Every check [`Self::assign`] runs, in its order, and the assignment
+    /// it would insert; reads only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::assign`].
+    pub(super) async fn plan_assign(
+        &self,
+        ctx: &SecurityContext,
+        spec: &AssignmentSpec,
+    ) -> Result<(Authorization, Assignment), ManagementError> {
+        let caller_tenant = ctx.subject_tenant_id();
+        let bundle_id = spec.bundle_id;
+        let bundle = self.prefetch_bundle(bundle_id).await?;
+        let auth = self
+            .mutation_access(
+                ctx,
+                Capability::Publish,
+                AccessTarget::owned_by(caller_tenant).resource(bundle_id),
+                Subject::Bundle(bundle_id),
+            )
+            .await?;
+        self.readable_bundle(ctx, &bundle).await?;
+        if self.reach(ctx, spec.tenant_id).await? != Reach::Reachable {
+            return Err(tenant_boundary());
+        }
+        // The insert's own checks, in its order: the bundle within the
+        // publish grant, the new row within it, and no assignment of the
+        // bundle to the tenant yet (by anyone: the pair is unique). The
+        // caller has read the bundle by now, so a grant that does not cover
+        // the write is a refusal, not an absence.
+        let conn = self.conn()?;
+        self.visible_bundle(&conn, &auth.scope, bundle_id)
+            .await
+            .map_err(|e| match e {
+                ManagementError::NotFound { .. } => ManagementError::CapabilityDenied,
+                other => other,
+            })?;
+        let at = now();
+        let assignment = Assignment {
+            id: AssignmentId(Uuid::new_v4()),
+            bundle_id,
+            tenant_id: spec.tenant_id,
+            owner_tenant_id: caller_tenant,
+            enforce: spec.enforce,
+            created_at: at,
+            created_by: ctx.subject_id(),
+            updated_at: at,
+            updated_by: ctx.subject_id(),
+        };
+        if !self
+            .store
+            .assignments()
+            .insertable(&auth.scope, &assignment)
+            .map_err(|e| assignment_repo(e, assignment.id))?
+        {
+            return Err(ManagementError::CapabilityDenied);
+        }
+        if self
+            .store
+            .assignments()
+            .exists_for(&conn, &AccessScope::allow_all(), bundle_id, spec.tenant_id)
+            .await
+            .map_err(|e| error::repo(e, Subject::Bundle(bundle_id)))?
+        {
+            return Err(ManagementError::AssignmentExists {
+                bundle_id,
+                tenant_id: spec.tenant_id,
+            });
+        }
+        Ok((auth, assignment))
+    }
+
+    /// Every check [`Self::update_assignment`] runs, and the authorisation
+    /// it would write under; reads only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::update_assignment`].
+    pub(super) async fn plan_update(
+        &self,
+        ctx: &SecurityContext,
+        assignment_id: AssignmentId,
+    ) -> Result<Authorization, ManagementError> {
+        let current = self.prefetch_assignment(assignment_id).await?;
+        let auth = self.assignment_access(ctx, &current).await?;
+        self.guard_tenant(ctx, assignment_id, current.tenant_id)
+            .await?;
+        // The update writes under the grant's scope; one that does not admit
+        // the row would change nothing.
+        if self.coverage(&auth, assignment_id).await? != Coverage::Covered {
+            return Err(assignment_not_found(assignment_id));
+        }
+        Ok(auth)
+    }
+
+    /// Every check [`Self::unassign`] runs, and what it would delete; reads
+    /// only.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::unassign`].
+    pub(super) async fn plan_unassign(
+        &self,
+        ctx: &SecurityContext,
+        assignment_id: AssignmentId,
+    ) -> Result<Withdrawal, ManagementError> {
+        let Some(current) = self.find_assignment(assignment_id).await? else {
+            return Ok(Withdrawal::Nothing);
         };
         let auth = match self.assignment_access(ctx, &current).await {
             Ok(auth) => auth,
             Err(err) => {
-                if let Dormant::Withdrawn = self.withdraw_dormant(ctx, &current).await? {
-                    return Ok(());
+                if let Some(withdrawal) = self.dormant_withdrawal(ctx, &current).await? {
+                    return Ok(withdrawal);
                 }
                 return match err {
                     // Not visible to the caller: as good as absent.
-                    ManagementError::NotFound { .. } => Ok(()),
+                    ManagementError::NotFound { .. } => Ok(Withdrawal::Nothing),
                     other => Err(other),
                 };
             }
@@ -300,13 +423,18 @@ impl<S: ContentStore> ManagementService<S> {
         // a success that leaves the assignment enforcing.
         self.guard_tenant(ctx, assignment_id, current.tenant_id)
             .await?;
-        match self.delete_assignment(ctx, &auth, &current).await? {
-            Deleted::Removed | Deleted::Gone => Ok(()),
+        match self.coverage(&auth, assignment_id).await? {
+            Coverage::Covered => Ok(Withdrawal::Delete {
+                auth,
+                assignment: current,
+            }),
+            // Withdrawn concurrently since it was read: as good as absent.
+            Coverage::Gone => Ok(Withdrawal::Nothing),
             // Authorised, but the grant does not cover this row.
-            Deleted::OutOfScope => match self.withdraw_dormant(ctx, &current).await? {
-                Dormant::Withdrawn => Ok(()),
-                Dormant::NotApplicable => Err(ManagementError::CapabilityDenied),
-            },
+            Coverage::Uncovered => self
+                .dormant_withdrawal(ctx, &current)
+                .await?
+                .ok_or(ManagementError::CapabilityDenied),
         }
     }
 
@@ -433,27 +561,26 @@ impl<S: ContentStore> ManagementService<S> {
         Ok(())
     }
 
-    /// Withdraws `current` on behalf of an administrator of its target
-    /// tenant when it is dormant (its owner no longer reaches the target with
-    /// barriers respected) and the caller reaches the target and holds the
-    /// publish capability there - a grant whose scope covers this row as
-    /// content of the target tenant. [`Dormant::NotApplicable`] when any of
-    /// that does not hold; the caller then answers as it would without this
-    /// path.
+    /// The withdrawal of `current` on behalf of an administrator of its
+    /// target tenant, when it is dormant (its owner no longer reaches the
+    /// target with barriers respected) and the caller reaches the target and
+    /// holds the publish capability there - a grant whose scope covers this
+    /// row as content of the target tenant. `None` when any of that does not
+    /// hold; the caller then answers as it would without this path.
     ///
     /// # Errors
     ///
     /// `service_unavailable` when the hierarchy or the PDP cannot answer;
-    /// `CAPABILITY_DENIED` when even the row-confined delete misses the row.
-    async fn withdraw_dormant(
+    /// `CAPABILITY_DENIED` when even the row-confined scope misses the row.
+    async fn dormant_withdrawal(
         &self,
         ctx: &SecurityContext,
         current: &Assignment,
-    ) -> Result<Dormant, ManagementError> {
+    ) -> Result<Option<Withdrawal>, ManagementError> {
         if !self.is_dormant(ctx, current).await?
             || self.reach(ctx, current.tenant_id).await? != Reach::Reachable
         {
-            return Ok(Dormant::NotApplicable);
+            return Ok(None);
         }
         // A decision for this one prefetched row. A grant can come with
         // constraints (another tenant's content, other rows): it counts only
@@ -463,7 +590,7 @@ impl<S: ContentStore> ManagementService<S> {
             .prefetched();
         match self.authz.authorize(ctx, Capability::Publish, target).await {
             Ok(auth) if auth.covers(current.tenant_id, current.id.0) => {}
-            Ok(_) | Err(AuthzError::Denied) => return Ok(Dormant::NotApplicable),
+            Ok(_) | Err(AuthzError::Denied) => return Ok(None),
             Err(err) => return Err(error::authz(err, || ManagementError::CapabilityDenied)),
         }
         // The grant is on the target tenant, not the owner's: the write is
@@ -474,10 +601,35 @@ impl<S: ContentStore> ManagementService<S> {
                 ScopeFilter::eq(pep_properties::RESOURCE_ID, current.id.0),
             ])),
         };
-        match self.delete_assignment(ctx, &auth, current).await? {
-            Deleted::Removed | Deleted::Gone => Ok(Dormant::Withdrawn),
-            Deleted::OutOfScope => Err(ManagementError::CapabilityDenied),
+        match self.coverage(&auth, current.id).await? {
+            Coverage::Covered => Ok(Some(Withdrawal::Delete {
+                auth,
+                assignment: current.clone(),
+            })),
+            Coverage::Gone => Ok(Some(Withdrawal::Nothing)),
+            Coverage::Uncovered => Err(ManagementError::CapabilityDenied),
         }
+    }
+
+    /// What a write under `auth` would find of the assignment `id`, read
+    /// without writing.
+    async fn coverage(
+        &self,
+        auth: &Authorization,
+        id: AssignmentId,
+    ) -> Result<Coverage, ManagementError> {
+        let conn = self.conn()?;
+        let scoped = self
+            .store
+            .assignments()
+            .get(&conn, &auth.scope, id)
+            .await
+            .map_err(|e| assignment_repo(e, id))?;
+        Ok(match scoped {
+            Some(_) => Coverage::Covered,
+            None if self.find_assignment(id).await?.is_some() => Coverage::Uncovered,
+            None => Coverage::Gone,
+        })
     }
 
     /// Whether `current`'s owner no longer reaches its target with barriers
@@ -495,43 +647,6 @@ impl<S: ContentStore> ManagementService<S> {
             Ok(chain) => Ok(!chain.contains(&current.owner_tenant_id)),
             Err(PortError::NotFound(_)) => Ok(false),
             Err(err) => Err(error::unavailable(err)),
-        }
-    }
-
-    /// Deletes `current` under `auth`, telling a row removed concurrently
-    /// apart from one the scope does not cover.
-    async fn delete_assignment(
-        &self,
-        ctx: &SecurityContext,
-        auth: &Authorization,
-        current: &Assignment,
-    ) -> Result<Deleted, ManagementError> {
-        let assignment_id = current.id;
-        let deleted = self
-            .commit(ctx, auth, move |tx, env| {
-                Box::pin(async move {
-                    env.store
-                        .assignments()
-                        .delete(tx, &env.scope, assignment_id)
-                        .await
-                        .map_err(|e| assignment_repo(e, assignment_id))?;
-                    Ok(())
-                })
-            })
-            .await;
-        match deleted {
-            Ok(()) => {
-                log_change("unassigned", ctx, current);
-                Ok(Deleted::Removed)
-            }
-            Err(ManagementError::NotFound { .. }) => {
-                if self.find_assignment(assignment_id).await?.is_some() {
-                    Ok(Deleted::OutOfScope)
-                } else {
-                    Ok(Deleted::Gone)
-                }
-            }
-            Err(err) => Err(err),
         }
     }
 
@@ -670,23 +785,30 @@ impl AssignmentView {
     }
 }
 
-/// What [`ManagementService::withdraw_dormant`] did.
-enum Dormant {
-    /// The assignment was dormant and the caller withdrew it.
-    Withdrawn,
-    /// The path does not apply: not dormant, target out of the caller's
-    /// reach, or no grant covering the target tenant.
-    NotApplicable,
+/// What a write under some scope would find of a stored assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Coverage {
+    /// The row, within the scope.
+    Covered,
+    /// The row exists outside the scope.
+    Uncovered,
+    /// The row no longer exists.
+    Gone,
 }
 
-/// What a scoped delete of an assignment did.
-enum Deleted {
-    /// The row was removed.
-    Removed,
-    /// The row was already gone (removed concurrently).
-    Gone,
-    /// The row exists but the scope does not cover it.
-    OutOfScope,
+/// What [`ManagementService::plan_unassign`] decided.
+#[domain_model]
+#[derive(Debug)]
+pub(super) enum Withdrawal {
+    /// Nothing to withdraw: absent, or not visible to the caller.
+    Nothing,
+    /// Delete `assignment` under `auth`.
+    Delete {
+        /// The scope the delete runs under.
+        auth: Authorization,
+        /// The assignment, as read.
+        assignment: Assignment,
+    },
 }
 
 /// The record of an assignment change: who, what, where.

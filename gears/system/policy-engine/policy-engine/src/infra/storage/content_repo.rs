@@ -47,8 +47,8 @@ use time::{OffsetDateTime, UtcOffset};
 use toolkit_db::odata::sea_orm_filter::{PaginateOdataTryError, paginate_odata_try};
 use toolkit_db::odata::{LimitCfg, paginate_odata};
 use toolkit_db::secure::{
-    AccessScope, DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureUpdateExt,
-    secure_insert, secure_insert_many,
+    AccessScope, DBRunner, ScopeError, SecureDeleteExt, SecureEntityExt, SecureInsertExt,
+    SecureUpdateExt, secure_insert, secure_insert_many,
 };
 use toolkit_odata::{ODataQuery, Page, SortDir};
 use uuid::Uuid;
@@ -725,6 +725,37 @@ impl AssignmentRepository for OrmAssignmentRepository {
             .await
             .map_err(scope_err)?;
         Ok(row.map(|row| mapper::assignment_from_model(&row)))
+    }
+
+    fn insertable(&self, scope: &AccessScope, assignment: &Assignment) -> Result<bool, RepoError> {
+        // The validation `secure_insert` runs, without executing the insert.
+        let row = mapper::assignment_active_model(assignment);
+        match assignment::Entity::insert(row.clone())
+            .secure()
+            .scope_with_model(scope, &row)
+        {
+            Ok(_) => Ok(true),
+            Err(ScopeError::TenantNotInScope { .. } | ScopeError::Denied(_)) => Ok(false),
+            Err(other) => Err(RepoError::Database(other.to_string())),
+        }
+    }
+
+    async fn exists_for<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        bundle_id: BundleId,
+        tenant_id: Uuid,
+    ) -> Result<bool, RepoError> {
+        let row = assignment::Entity::find()
+            .filter(assignment::Column::BundleId.eq(bundle_id.0))
+            .filter(assignment::Column::TenantId.eq(tenant_id))
+            .secure()
+            .scope_with(scope)
+            .one(runner)
+            .await
+            .map_err(scope_err)?;
+        Ok(row.is_some())
     }
 
     async fn find_visible<C: DBRunner>(
