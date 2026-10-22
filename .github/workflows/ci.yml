@@ -42,6 +42,12 @@ env:
   # Pinned nightly toolchain used by the coverage job. Independent of the pin in
   # shear-nightly.yml — they happen to match today but need not.
   RUSTUP_TOOLCHAIN_NIGHTLY: nightly-2026-08-21
+  # sccache release installed by mozilla-actions/sccache-action. Without a
+  # `version` the action queries the GitHub releases API on every job, which
+  # exhausted the installation rate limit during a Dependabot burst (2026-10-14).
+  # Dependabot does not track this value: bump it by hand, together with every
+  # other workflow that sets it (`grep -rn SCCACHE_VERSION .github/workflows`).
+  SCCACHE_VERSION: v0.18.0
 
 jobs:
   # ── Change detection ──────────────────────────────────────────────────
@@ -180,12 +186,9 @@ jobs:
           shared-key: pr-clippy-${{ hashFiles('rust-toolchain.toml') }}
 
       - name: Install sccache
-        # Without `version` the action queries the GitHub releases API on every job,
-        # which exhausted the installation rate limit during a Dependabot burst
-        # (2026-10-14). The pin must be bumped by hand.
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.18.0"
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Probe sccache & set RUSTC_WRAPPER
         shell: bash
@@ -310,7 +313,7 @@ jobs:
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.18.0"
+          version: ${{ env.SCCACHE_VERSION }}
 
       # Probe sccache; if startup fails, fall back to plain rustc (no hard CI failure).
       - name: Probe sccache & set RUSTC_WRAPPER
@@ -401,7 +404,7 @@ jobs:
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.18.0"
+          version: ${{ env.SCCACHE_VERSION }}
 
       # Probe sccache; if startup fails, fall back to plain rustc (no hard CI failure).
       - name: Probe sccache & set RUSTC_WRAPPER
@@ -621,7 +624,7 @@ jobs:
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.18.0"
+          version: ${{ env.SCCACHE_VERSION }}
 
       # Probe sccache; if startup fails, fall back to plain rustc (no hard CI failure).
       - name: Probe sccache & set RUSTC_WRAPPER
@@ -946,7 +949,7 @@ jobs:
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.18.0"
+          version: ${{ env.SCCACHE_VERSION }}
 
       - name: Probe sccache & set RUSTC_WRAPPER
         shell: bash
