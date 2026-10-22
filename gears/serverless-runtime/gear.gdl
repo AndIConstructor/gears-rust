@@ -1,3 +1,5 @@
+gdl_version = "1.0"
+
 # Every GDL field: https://github.com/constructorfabric/gearbox/blob/main/docs/gdl.md
 #
 # Gearbox description for the serverless-runtime gear, which has no crate yet.
@@ -8,7 +10,6 @@
 # (projected from #[toolkit::gear] then) -- and delete this file.
 
 gear(
-    gdl_version = "1.0",
     source = git(url = "https://github.com/constructorfabric/gears-rust", path = "gears/serverless-runtime"),
     implementation = "design",
     id = "serverless-runtime",

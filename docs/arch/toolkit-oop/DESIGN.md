@@ -77,7 +77,7 @@ application gears run out-of-process. The architecture is built on four pillars:
 
 | ADR ID                              | Decision Summary                                                                                       |
 |-------------------------------------|--------------------------------------------------------------------------------------------------------|
-| `cpt-cf-adr-deployment-profiles`    | Three named deployment profiles (Embedded, Host+Workers, K8s Native) instead of arbitrary combinations |
+| `cpt-cf-adr-deployment-profiles`    | Three named deployment profiles (Embedded, Self-Hosted, K8s Native) instead of arbitrary combinations |
 | `cpt-cf-adr-two-plane-auth`         | Two-plane auth: tenant plane re-validates JWT per hop; platform plane uses SA tokens (mTLS+SPIFFE next) |
 | `cpt-cf-adr-platform-plane-auth`   | Platform-plane authentication: SA tokens (Profile 3) / bootstrap token (Profile 2) first, mTLS + SPIFFE next |
 | `cpt-cf-adr-rest-first-oop`         | REST as primary OoP protocol; each gear runs its own HTTP server                                     |
@@ -229,7 +229,7 @@ token). `encode_bin` / `decode_bin` (which exclude `bearer_token`) remain in use
 
 | Entity                   | Description                                                                                       |
 |--------------------------|---------------------------------------------------------------------------------------------------|
-| DeploymentProfile        | Enum: `Embedded`, `HostWorkers`, `K8sNative`. Determines bootstrap behavior.                      |
+| DeploymentProfile        | Enum: `Embedded`, `SelfHosted`, `K8sNative`. Determines bootstrap behavior.                      |
 | OopWorkerConfig          | Configuration for an OoP gear: gear list, listen address, DirectoryService endpoint, profile. |
 | ServiceEndpoint          | Extended with `rest_url` field. Represents a discovered gear's HTTP endpoint.                   |
 | RegisterInstanceInfo     | Extended with `rest_endpoint` and `openapi_spec` fields for REST service registration.            |
@@ -1055,7 +1055,7 @@ and no bespoke gateway admin API is needed. Notes:
 - **Single-endpoint selection (Profile 3)**: a matched path resolves to a single, stable upstream endpoint (the first
   in deterministic instance order); cross-replica load balancing is delegated to the gear's stable k8s Service DNS
   rather than balanced in the proxy. The registry is instance-keyed and retains *all* of a gear's registered endpoints,
-  so this selection is a localized policy — the extension seam for Profile 2 (Host + Workers), where the proxy is the
+  so this selection is a localized policy — the extension seam for Profile 2 (Self-Hosted), where the proxy is the
   only load balancer and must select across distinct worker endpoints (e.g. round-robin), and for future metadata
   routing. In k8s all replicas advertise the same Service DNS address, so the retained endpoints are identical and
   selection reduces to that one VIP.
@@ -1347,7 +1347,7 @@ service discovery state. Persistent state (if needed for multi-host P2) will be 
 - No network calls between gears.
 - api-gateway serves all routes directly from the shared Axum router.
 
-#### Profile 2: Host + Workers (On-Premise)
+#### Profile 2: Self-Hosted
 
 ```
 ┌──────────────────────────────┐
