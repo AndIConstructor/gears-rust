@@ -392,8 +392,9 @@ the wire it is an RFC 9457 problem carrying the management error domain and the 
 the variant's fields as its data. Clients match on the code or rebuild the typed error, never on messages. The same
 SDK module holds the fixed content bounds.
 
-The engine plugin instance, the three resource types and the three permission instances are declared in the SDK's
-[GTS catalog](../policy-engine-sdk/src/gts.rs).
+The three resource types (id-only type schemas) and the three permission instances are declared in the SDK's
+[GTS catalog](../policy-engine-sdk/src/gts.rs) and reach `types-registry` through the `toolkit-gts` inventory. The
+engine plugin instance carries the configured vendor and priority, so the gear builds it and registers it at init.
 
 ### 3.4 Internal Dependencies
 
@@ -401,14 +402,14 @@ The engine plugin instance, the three resource types and the three permission in
 |------------|-----|
 | `admission-control-sdk` | Engine plugin contract and result building |
 | `toolkit-policy-evaluation` | Rego compilation with guards and denylist screen; evaluation budget |
-| `policy-engine-sdk` | Management client, models, typed management errors, GTS ids |
+| `policy-engine-sdk` | Management client, models, typed management errors, GTS types and ids |
 
 ### 3.5 External Dependencies
 
 | Dependency | Use |
 |------------|-----|
 | `tenant-resolver` | Ancestor chain (decisions, barriers respected), reachability and subtree (management) |
-| `types-registry` | Concrete type id existence at startup, validate and activate |
+| `types-registry` | Concrete type id existence at startup, validate and activate; registration of the engine plugin instance |
 | `authz-resolver` | Management permission decisions |
 | `toolkit-db` | Postgres or SQLite |
 
