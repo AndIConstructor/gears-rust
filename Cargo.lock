@@ -1661,6 +1661,7 @@ dependencies = [
  "cf-api-contracts",
  "cf-api-contracts-sdk",
  "cf-gears-authn-resolver",
+ "cf-gears-cluster-sdk",
  "cf-gears-static-authn-plugin",
  "cf-gears-toolkit",
  "cf-gears-toolkit-canonical-errors",
