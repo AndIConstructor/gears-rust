@@ -191,7 +191,7 @@ The Customer tenant defines its own `Shared` provider with the slug `openai`, wh
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-provider-management`
 
-The system **MUST** let a Tenant Administrator create, read, update, and delete providers in their own tenant. A provider has a name, a slug unique among the providers the tenant owns, a provider GTS type, an enabled flag, and a sharing mode. A provider belongs to exactly one tenant and is managed only by that tenant. The slug is immutable after creation. Deleting a provider deletes its models, and the change takes effect for later resolutions. When the deleted provider shadowed an inherited one, the inherited provider and its models become visible again.
+The system **MUST** let a Tenant Administrator create, read, update, and delete providers in their own tenant. A provider has a name, a slug unique among the providers the tenant owns, a provider GTS type, an enabled flag, and a sharing mode. A provider belongs to exactly one tenant and is managed only by that tenant. The slug and the provider GTS type are immutable after creation. Deleting a provider deletes its models, and the change takes effect for later resolutions. When the deleted provider shadowed an inherited one, the inherited provider and its models become visible again.
 
 - **Rationale**: Tenants need to describe where their models come from and keep control of that description.
 - **Actors**: `cpt-cf-model-registry-actor-tenant-admin`
@@ -267,9 +267,9 @@ The system **MUST** validate provider-specific settings against the GTS schema r
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-model-approval`
 
-The system **MUST** keep an approval state on each model, set by the owning tenant's administrator. Each model carries one of four approval states: Pending, Approved, Rejected, or Revoked, together with who made the last decision and when. Only Approved models **MUST** be available for evaluation. Approval is inherited with the model. A descendant tenant cannot change the approval of an inherited model and can only exclude it by shadowing its provider.
+The system **MUST** keep an approval state on each model, set by the owning tenant's administrator. Each model carries one of four approval states: Pending, Approved, Rejected, or Revoked, together with who made the last decision and when. Create and update **MAY** set the approval state under the model management permission. A model created without an approval state starts as Approved. Only Approved models **MUST** be available for evaluation. Approval is inherited with the model. A descendant tenant cannot change the approval of an inherited model and can only exclude it by shadowing its provider.
 
-- **Rationale**: The owning tenant controls which models are cleared for use, and the decision stays auditable.
+- **Rationale**: The owning tenant controls which models are cleared for use, and the latest decision and who made it stay visible.
 - **Actors**: `cpt-cf-model-registry-actor-tenant-admin`
 
 #### Model Sharing
@@ -285,7 +285,7 @@ The system **MUST** give models the same sharing modes as providers. A model **M
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-effective-catalog`
 
-The system **MUST** build a tenant's effective catalog from the providers and models it owns plus the shared providers and models of its ancestors. Shadowing is applied per provider slug, and the nearest tenant wins. Inherited entries **MUST** be read-only for the inheriting tenant. An inheriting tenant sees the full record of an inherited provider and model, including provider-specific settings and cost, general settings with `base_url` and the secret reference, default parameters, capabilities, and user-facing information.
+The system **MUST** build a tenant's effective catalog from the providers and models it owns plus the shared providers and models of its ancestors. Shadowing is applied per provider slug, and the nearest tenant whose provider is visible to the caller wins. Inherited entries **MUST** be read-only for the inheriting tenant. An inheriting tenant sees the full record of an inherited provider and model, including provider-specific settings and cost, general settings with `base_url` and the secret reference, default parameters, capabilities, and user-facing information.
 
 - **Rationale**: A single, predictable rule decides what each tenant sees, so all consumers get the same answer.
 - **Actors**: `cpt-cf-model-registry-actor-llm-gateway`, `cpt-cf-model-registry-actor-tenant-admin`, `cpt-cf-model-registry-actor-tenant-resolver`
@@ -305,7 +305,7 @@ The system **MUST**, given a canonical id and the calling tenant, return the ful
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-list-available-models`
 
-The system **MUST** list, for the calling tenant, exactly the models that would resolve successfully under `cpt-cf-model-registry-fr-resolve-model`. The list **MUST** support OData filtering, ordering, selection, and paging on the model's general fields: identity, lifecycle, approval, capabilities, and user-facing fields.
+The system **MUST** list, for the calling tenant, exactly the models that would resolve successfully under `cpt-cf-model-registry-fr-resolve-model`. The list **MUST** support OData filtering, ordering, selection, and paging on the model's general fields: identity, approval, capabilities, and user-facing fields.
 
 - **Rationale**: Users and consumer gears need to pick from models they can actually use.
 - **Actors**: `cpt-cf-model-registry-actor-consumer-gear`, `cpt-cf-model-registry-actor-llm-gateway`
@@ -325,9 +325,9 @@ The system **MUST** scope all management operations to the caller's tenant, and 
 
 - [ ] `p1` - **ID**: `cpt-cf-model-registry-fr-authorization`
 
-The system **MUST** authorize every management and resolution operation through the platform PDP. Distinct permissions **MUST** exist for managing providers, managing models, approving models, and evaluating models.
+The system **MUST** authorize every management and resolution operation through the platform PDP. Distinct permissions **MUST** exist for managing providers, managing models, and evaluating models.
 
-- **Rationale**: Separate permissions let organizations split catalog administration, approval, and use.
+- **Rationale**: Separate permissions let organizations split catalog administration and use.
 - **Actors**: `cpt-cf-model-registry-actor-authz-pdp`, `cpt-cf-model-registry-actor-tenant-admin`, `cpt-cf-model-registry-actor-llm-gateway`
 
 #### Management API Conventions
@@ -394,7 +394,7 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 - **Safety**: Not applicable. The gear is an information system with no physical interaction.
 - **Usability, accessibility, internationalization, offline use**: Not applicable. The gear has no user interface; consumer gears own presentation.
 - **Authentication**: Provided by the platform. The gear only consumes the authenticated security context.
-- **Regulatory compliance and privacy**: The gear stores configuration and the identity of the administrator who made a change, and no end-user personal data. Platform baselines apply.
+- **Regulatory compliance and privacy**: The gear stores configuration and the identity of administrators who made approval decisions or changes, and no end-user personal data. Platform baselines apply.
 - **Operations and monitoring**: Platform baselines apply. No gear-specific requirement.
 - **Documentation and support**: Platform baselines apply.
 
@@ -478,10 +478,10 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 - Root, Partner, and Customer tenants form a three-level hierarchy.
 
 **Main Flow**:
-1. The Root administrator creates the shared provider `openai` and its models, and approves them.
+1. The Root administrator creates the shared provider `openai` and its shared, approved models.
 2. The Partner tenant now sees `openai::gpt-4o` and `openai::gpt-4o-mini` as inherited, read-only entries.
 3. The Customer administrator creates its own shared provider with the slug `openai`.
-4. The Customer administrator creates and approves `openai::gpt-4o` under that provider.
+4. The Customer administrator creates a shared, approved `openai::gpt-4o` under that provider.
 5. Customer and its descendants now see only the Customer models of the `openai` provider.
 6. Partner and its other descendants still see the Root models.
 
@@ -499,7 +499,7 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 
 **Preconditions**:
 - A model exists in the administrator's tenant with approval state Pending.
-- The administrator holds the approval permission.
+- The administrator holds the model management permission.
 
 **Main Flow**:
 1. The administrator opens the model in their tenant.
@@ -582,6 +582,7 @@ An acknowledged change to a provider or model **MUST** survive restarts of the g
 - Confirm the resolution latency budget and load conditions (`cpt-cf-model-registry-nfr-resolution-latency`) and the availability and recovery targets (`cpt-cf-model-registry-nfr-availability`). (Owner: LLM Gateway team and Model Registry team, Resolve by: before P1 implementation begins)
 - Will descendant tenants need per-tenant approval overrides of inherited models? This is currently excluded by design. (Owner: Model Registry team, Resolve by: before DESIGN is approved)
 - Will multi-step approval through an external approval service be required later? (Owner: Platform Architecture, Resolve by: before P2 planning)
+- How will auto-discovery of provider models work? Discovered models would start as Pending and wait for an administrator's approval. (Owner: Model Registry team, Resolve by: before P2 planning)
 - Must cost settings be exposed in a provider-independent form for consumers other than LLM Gateway? (Owner: Model Registry team, Resolve by: before DESIGN is approved)
 
 ## 14. Traceability
