@@ -352,7 +352,7 @@ arch_status_svg_update: py-env
 
 # -------- Tests --------
 
-.PHONY: test-no-macros test-macros test-db test-integration test-graph-storage test-graph-storage-pg test-cluster-k8s coverage-cluster-k8s test-durable-execution-pg coverage-durable-execution-pg test-fips
+.PHONY: test-no-macros test-macros test-db test-integration test-graph-storage test-graph-storage-pg test-cluster-k8s coverage-cluster-k8s test-durable-execution-pg coverage-durable-execution-pg test-github-mirror-db test-github-mirror-scale test-fips
 
 # Run the workspace tests except the macro test crates (CI test job)
 test-no-macros: install-tools
@@ -716,6 +716,31 @@ test-fips: install-tools
 	$(call print_target_banner)
 	cargo nextest run -p cf-gears-toolkit -p cf-gears-toolkit-http -p cf-gears-oagw -p cf-gears-clickhouse-usage-collector-plugin \
 		--features cf-gears-toolkit/bootstrap,cf-gears-toolkit/fips,cf-gears-toolkit-http/fips,cf-gears-oagw/fips
+
+GM_PG_TAG := $(shell sed -n 's/^pub const POSTGRES_TAG: &str = "\(.*\)";/\1/p' libs/test-containers/src/lib.rs)
+GM_MARIADB_TAG := $(shell sed -n 's/^pub const MARIADB_TAG: &str = "\(.*\)";/\1/p' libs/test-containers/src/lib.rs)
+GM_PG_URL := postgres://postgres:pass@127.0.0.1:55432/postgres
+GM_MARIADB_URL := mysql://root:root@127.0.0.1:53306/mysql
+
+## Run the github-mirror gear's suite on PostgreSQL and MariaDB (Docker required)
+test-github-mirror-db: install-tools
+	$(call print_target_banner)
+	@docker rm -f gm-test-postgres gm-test-mariadb >/dev/null 2>&1 || true
+	docker run -d --name gm-test-postgres -e POSTGRES_PASSWORD=pass -p 55432:5432 postgres:$(GM_PG_TAG)
+	docker run -d --name gm-test-mariadb -e MARIADB_ROOT_PASSWORD=root -p 53306:3306 mariadb:$(GM_MARIADB_TAG)
+	@for i in $$(seq 1 120); do docker exec gm-test-postgres pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done; \
+		docker exec gm-test-postgres pg_isready -h 127.0.0.1 -U postgres
+	@for i in $$(seq 1 120); do docker exec gm-test-mariadb mariadb-admin ping -h 127.0.0.1 -uroot -proot >/dev/null 2>&1 && break; sleep 1; done; \
+		docker exec gm-test-mariadb mariadb-admin ping -h 127.0.0.1 -uroot -proot
+	GM_TEST_DATABASE_URL=$(GM_PG_URL) cargo nextest run -p cf-gears-github-mirror --features integration --no-fail-fast; pg=$$?; \
+	GM_TEST_DATABASE_URL=$(GM_MARIADB_URL) cargo nextest run -p cf-gears-github-mirror --features integration --no-fail-fast; maria=$$?; \
+	docker rm -f gm-test-postgres gm-test-mariadb >/dev/null; \
+	test $$pg -eq 0 && test $$maria -eq 0
+
+## Run the github-mirror gear's 110,000-entity interrupt-and-resume test (SQLite, minutes)
+test-github-mirror-scale: install-tools
+	$(call print_target_banner)
+	cargo nextest run -p cf-gears-github-mirror --test scale_resume_test --run-ignored ignored-only
 
 ## Cross-compile gate for the Windows+FIPS path (Windows handshake
 ## verification is the manual runbook in cf-gears-fips-probe/README.md). Catches
