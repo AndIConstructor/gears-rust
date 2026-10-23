@@ -35,7 +35,7 @@ fn type_id(raw: &str) -> GtsTypeId {
 
 fn evaluation_limits() -> quota_enforcement_sdk::engine::EvaluationLimits {
     quota_enforcement_sdk::engine::EvaluationLimits {
-        upper_timeout_ms: std::num::NonZeroU64::new(50).expect("nonzero"),
+        upper_timeout_ms: std::num::NonZeroU64::new(60_000).expect("nonzero"),
         cost_limit: std::num::NonZeroU64::new(10_000).expect("nonzero"),
     }
 }
@@ -88,6 +88,8 @@ impl Harness {
         let mut bundle = bundle_with_global_policy();
         if let Some(policy) = bundle.global_policy.as_mut() {
             policy.engine_id = "most-restrictive-wins".to_owned();
+            // Generous, so a slow runner hits the cost limit and never the 5 ms default.
+            policy.timeout_ms = Some(60_000);
         }
         storage.bootstrap(&bundle).await.expect("bootstrap");
         let classifications = MetricClassifications::from_pairs([(
@@ -657,6 +659,39 @@ async fn a_preview_resolves_the_same_tier_the_debit_would() {
         planned,
         vec![user],
         "a preview that disagreed with its debit would be worse than none"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_preview_names_the_engine_that_failed() {
+    let h = Harness::new().await;
+    h.quota(Some(1_000)).await;
+    h.tenant_quota(Some(50)).await;
+    let operations = Operations {
+        evaluation: quota_enforcement_sdk::engine::EvaluationLimits {
+            cost_limit: std::num::NonZeroU64::new(1).expect("nonzero"),
+            ..evaluation_limits()
+        },
+        ..h.operations()
+    };
+
+    let error = operations
+        .preview(
+            &ctx(),
+            PreviewRequest {
+                attribution: attribution(),
+                amount: 10,
+            },
+        )
+        .await
+        .expect_err("two quotas cost more than the budget allows");
+
+    assert!(
+        matches!(
+            &error,
+            DomainError::EngineCostExceeded { engine_id } if engine_id == "most-restrictive-wins"
+        ),
+        "{error:?}"
     );
 }
 

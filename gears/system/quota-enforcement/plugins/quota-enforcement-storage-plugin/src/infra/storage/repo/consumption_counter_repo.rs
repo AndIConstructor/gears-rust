@@ -151,6 +151,11 @@ pub async fn insert_period(
     .await
 }
 
+/// The next version; these rows never reset, so the last one wraps to 1.
+fn next_version(version: i32) -> i32 {
+    version.checked_add(1).unwrap_or(1)
+}
+
 /// Write a period row's counter and threshold marker, conditional on
 /// `expected_version`. `false` means the row moved first.
 ///
@@ -169,7 +174,7 @@ pub async fn write_counter(
     let affected = Entity::update_many()
         .col_expr(Column::Consumed, consumed.into())
         .col_expr(Column::HighestCrossedThresholdPct, marker.into())
-        .col_expr(Column::RecordVersion, (expected_version + 1).into())
+        .col_expr(Column::RecordVersion, next_version(expected_version).into())
         .col_expr(Column::UpdatedAt, now.into())
         .filter(Column::PeriodId.eq(period_id))
         .filter(Column::RecordVersion.eq(expected_version))
@@ -266,7 +271,10 @@ pub async fn write_allocation(
     let affected = alloc::Entity::update_many()
         .col_expr(alloc::Column::InFlight, in_flight.into())
         .col_expr(alloc::Column::HighestCrossedThresholdPct, marker.into())
-        .col_expr(alloc::Column::RecordVersion, (expected_version + 1).into())
+        .col_expr(
+            alloc::Column::RecordVersion,
+            next_version(expected_version).into(),
+        )
         .col_expr(alloc::Column::UpdatedAt, now.into())
         .filter(alloc::Column::QuotaId.eq(quota_id))
         .filter(alloc::Column::RecordVersion.eq(expected_version))

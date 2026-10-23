@@ -548,7 +548,12 @@ impl Operations<'_> {
         // Use the mutation path's bounded artifact-preparation retry.
         // @cpt-begin:cpt-cf-quota-enforcement-flow-evaluate-preview:p1:inst-prv-engine
         let outcome = prepared
-            .run(|| std::future::ready(evaluate(&context).map_err(storage_failure)))
+            .run(|| {
+                std::future::ready(
+                    evaluate(&context)
+                        .map_err(|failure| storage_failure(&policy.engine_id, failure)),
+                )
+            })
             .await?;
         // @cpt-end:cpt-cf-quota-enforcement-flow-evaluate-preview:p1:inst-prv-engine
         Ok(outcome.into_decision())
@@ -708,6 +713,7 @@ fn policy_values(admitted: &AdmittedEvaluation) -> (Value, Value) {
 /// An evaluation failure as the storage contract reports it, so the shared
 /// preparation driver can recognize a missing artifact.
 fn storage_failure(
+    engine_id: &str,
     failure: quota_enforcement_sdk::engine::EvaluationFailure,
 ) -> quota_enforcement_sdk::StorageError {
     match failure {
@@ -716,7 +722,7 @@ fn storage_failure(
             version,
         } => quota_enforcement_sdk::StorageError::PreparationRequired { policy_id, version },
         failure => quota_enforcement_sdk::StorageError::EvaluationFailed {
-            engine_id: String::new(),
+            engine_id: engine_id.to_owned(),
             failure,
         },
     }
