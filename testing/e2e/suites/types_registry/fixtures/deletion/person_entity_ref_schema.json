@@ -10,7 +10,7 @@
         "properties": {
           "person": {
             "type": "string",
-            "x-gts-ref": "gts.cf.e2e.deletion.person.v1~"
+            "x-gts-instance-ref": "gts.cf.e2e.deletion.person.v1~"
           }
         },
         "additionalProperties": true
