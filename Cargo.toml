@@ -50,6 +50,8 @@ debug = true
 
 [workspace]
 members = [
+    "gears/system/durable-execution/durable-execution",
+    "gears/system/durable-execution/durable-execution-sdk",
     "apps/cf-gears-example-server",
     "apps/cf-gears-flight-control",
     "tools/gts-analyze",
@@ -105,6 +107,7 @@ members = [
     "gears/file-storage/file-storage",
     "gears/github-mirror/github-mirror-sdk",
     "gears/github-mirror/github-mirror",
+    "gears/github-mirror/github-mirror-cli",
     "gears/system/account-management/account-management",
     "gears/system/account-management/account-management-sdk",
     "gears/system/account-management/plugins/static-idp-plugin",
@@ -163,6 +166,8 @@ members = [
     "gears/system/quota-enforcement/quota-enforcement-sdk",
     "gears/system/quota-enforcement/quota-enforcement",
     "gears/system/quota-enforcement/plugins/quota-enforcement-storage-plugin",
+    "gears/system/quota-enforcement/plugins/quota-enforcement-engine-most-restrictive",
+    "gears/system/quota-enforcement/plugins/quota-enforcement-engine-cel",
     "gears/mini-chat/mini-chat-sdk",
     "gears/mini-chat/mini-chat",
     "examples/toolkit/api-contracts/api-contracts-sdk",
@@ -330,6 +335,15 @@ string_lit_as_bytes = "deny"
 verbose_file_reads = "deny"
 
 [workspace.dependencies]
+cel-core = "=0.5.1"
+quota-enforcement-engine-cel = { package = "cf-gears-quota-enforcement-engine-cel", version = "0.1.0", path = "gears/system/quota-enforcement/plugins/quota-enforcement-engine-cel" }
+durable-execution = { package = "cf-gears-durable-execution", version = "0.1.0", path = "gears/system/durable-execution/durable-execution" }
+durable-execution-sdk = { package = "cf-gears-durable-execution-sdk", version = "0.1.0", path = "gears/system/durable-execution/durable-execution-sdk" }
+apalis = { version = "=1.0.0-rc.10", default-features = false, features = ["tracing", "limit"] }
+apalis-core = "=1.0.0-rc.10"
+# Keep SQLx runtime/TLS settings in the workspace. The adapter's default
+# tokio-comp feature enables rustls/ring alongside our aws-lc-rs provider.
+apalis-postgres = { version = "=1.0.0-rc.9", default-features = false, features = ["migrate"] }
 # libs
 toolkit = { package = "cf-gears-toolkit", version = "0.10.0", path = "libs/toolkit" }
 toolkit-http = { package = "cf-gears-toolkit-http", version = "0.6.18", path = "libs/toolkit-http" }
@@ -372,8 +386,8 @@ rustls-cng-crypto = { version = "0.1", default-features = false, features = ["fi
 # field of SEC1 (rather than derived from the scalar in non-FIPS code),
 # preserving the FIPS-validated boundary at corecrypto for every
 # cryptographic operation. See ADR 0004.
-pkcs8 = "0.10"
-sec1 = { version = "0.7", default-features = false, features = ["alloc", "der"] }
+pkcs8 = "0.11"
+sec1 = { version = "0.8", default-features = false, features = ["alloc", "der"] }
 
 toolkit-contract = { package = "cf-gears-toolkit-contract", version = "0.4.0", path = "libs/toolkit-contract" }
 toolkit-contract-macros = { package = "cf-gears-toolkit-contract-macros", version = "0.1.6", path = "libs/toolkit-contract-macros" }
@@ -413,6 +427,7 @@ authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", version = "0.5.2
 resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.3.5", path = "gears/system/resource-group/resource-group-sdk" }
 oagw-sdk = { package = "cf-gears-oagw-sdk", version = "0.5.15", path = "gears/system/oagw/oagw-sdk" }
 usage-collector-sdk = { package = "cf-gears-usage-collector-sdk", version = "0.3.14", path = "gears/system/usage-collector/usage-collector-sdk" }
+quota-enforcement-engine-most-restrictive = { package = "cf-gears-quota-enforcement-engine-most-restrictive", version = "0.1.0", path = "gears/system/quota-enforcement/plugins/quota-enforcement-engine-most-restrictive" }
 quota-enforcement-sdk = { package = "cf-gears-quota-enforcement-sdk", version = "0.1.0", path = "gears/system/quota-enforcement/quota-enforcement-sdk" }
 event-broker-sdk = { package = "cf-gears-event-broker-sdk", version = "0.2.6", path = "gears/system/event-broker/event-broker-sdk" }
 sqlite-event-broker-plugin = { package = "cf-gears-sqlite-event-broker-plugin", version = "0.1.0", path = "gears/system/event-broker/plugins/sqlite-event-broker-plugin" }
@@ -499,7 +514,10 @@ anyhow = "1.0"
 thiserror = "2.0"
 
 # Async runtime
-tokio = { version = "1.47", features = ["full"] }
+# <1.54: tokio 1.54 panics on a zero-capacity BufStream (tokio-rs/tokio#8494) and every
+# released pingora-core (<= 0.9.0) builds one per connection - oagw and event-broker
+# fail every proxied request. Lift once pingora ships cloudflare/pingora#1060.
+tokio = { version = ">=1.47, <1.54", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 # Default features include the `rand`-backed `strategy::jitter` helper used by
@@ -891,9 +909,9 @@ jsonschema = { version = "0.40", default-features = false }
 walkdir = "2.5"
 
 # GTS library — published on crates.io.
-gts-id = "0.12.1"
-gts = "0.12.1"
-gts-macros = "0.12.1"
+gts-id = "0.16.1"
+gts = "0.16.1"
+gts-macros = "0.16.1"
 
 license-resolver-sdk = { package = "cf-gears-license-resolver-sdk", version = "0.1.4", path = "gears/system/license-resolver/license-resolver-sdk" }
 license-resolver = { package = "cf-gears-license-resolver", version = "0.1.5", path = "gears/system/license-resolver/license-resolver" }

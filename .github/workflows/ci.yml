@@ -66,6 +66,7 @@ jobs:
       magika: ${{ steps.filter.outputs.magika }}
       onnx_embedding: ${{ steps.filter.outputs.onnx_embedding }}
       graph_storage: ${{ steps.filter.outputs.graph_storage }}
+      github_mirror: ${{ steps.filter.outputs.github_mirror }}
       dylint: ${{ steps.filter.outputs.dylint }}
       deps:   ${{ steps.filter.outputs.deps }}
       ci:     ${{ steps.filter.outputs.ci }}
@@ -87,10 +88,10 @@ jobs:
               - 'gears-rust.mk'
               - 'rust-toolchain.toml'
               - '.cargo/**'
-              # Input to `make check-release-config` in the test job: a config-only
+              # Input to `make check-release-config` in the repo-checks job: a config-only
               # edit must still get the release configuration validated.
               - 'release-plz.toml'
-              # Input to `make check-release-resolver` in the test job: a config-only
+              # Input to `make check-release-resolver` in the repo-checks job: a config-only
               # edit to the release manifest must still get the resolver + manifest
               # integrity (chart/dockerfile paths exist) tests run.
               - 'deploy/components.yaml'
@@ -117,6 +118,8 @@ jobs:
               - 'gears/graph-storage/graph-storage/**'
             graph_storage:
               - 'gears/graph-storage/**'
+            github_mirror:
+              - 'gears/github-mirror/**'
             dylint:
               - 'tools/dylint_lints/**'
             deps:
@@ -219,8 +222,10 @@ jobs:
       - name: cargo clippy
         run: tools/scripts/with_rust_annotations.sh make clippy
 
-  test:
-    name: Test Suite (${{ matrix.os }})
+  # Python checks of repo files. They need no Rust toolchain, so they run in
+  # their own short job.
+  repo-checks:
+    name: Repo checks
     needs: changes
     if: >-
       !cancelled()
@@ -228,44 +233,10 @@ jobs:
       || needs.changes.outputs.rust == 'true'
       || needs.changes.outputs.ci == 'true'
       || github.event_name == 'workflow_dispatch')
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
-    env:
-      RUSTFLAGS: "-C debuginfo=0"
-      # nextest writes JUnit under the `ci` profile; the Makefile copies each
-      # run's report into JUNIT_DIR (see `nextest_run`). Relative on purpose:
-      # an absolute Windows path would reach make's sh with backslashes.
-      NEXTEST_PROFILE: ci
-      JUNIT_DIR: test-results
+    runs-on: ubuntu-latest
     steps:
-      - name: Free disk space
-        if: runner.os == 'Linux'
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-
-      - name: Force LF in working tree (w/a for Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install protoc
-        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
-        with:
-          tool: protoc@3.34.1
 
       - name: Validate gear naming conventions
         run: python3 tools/scripts/validate_gear_names.py
@@ -285,63 +256,20 @@ jobs:
       - name: Release resolver tests (resolve_release.py + components.yaml)
         run: make check-release-resolver
 
-      - name: Install Go (required for aws-lc-fips-sys FIPS build)
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.21.x'  # pinned - see docs/security/fips/TOOLCHAIN.md
-          cache: false
-
-      - name: Install Rust toolchain from rust-toolchain.toml
-        run: |
-          rustup show active-toolchain || rustup toolchain install
-          rustup show
-
-      - name: Install nextest
-        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
-        with:
-          tool: nextest
-
-      # Cache Cargo registry/git + target/ across platforms.
-      - name: Cache Cargo/target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-bin: false
-          cache-targets: false
-          shared-key: pr-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
-
-      # Install sccache (cross-platform)
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: ${{ env.SCCACHE_VERSION }}
-
-      # Probe sccache; if startup fails, fall back to plain rustc (no hard CI failure).
-      - name: Probe sccache & set RUSTC_WRAPPER
-        shell: bash
-        run: |
-          if sccache --start-server >/dev/null 2>&1; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          else
-            echo "sccache failed, falling back to plain rustc"
-          fi
-
-      - name: cargo test (no macros)
-        shell: bash
-        run: tools/scripts/with_rust_annotations.sh make test-no-macros
-
-      # Published as GitHub Checks by test-report.yml (workflow_run), which has
-      # the `checks: write` this job lacks on fork PRs. `!cancelled()` so a
-      # failing run still ships its report; a missing report (build failure)
-      # is a warning here and the job is already red from the step above.
-      - name: Upload Rust test results
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rust-tests-${{ runner.os }}
-          path: test-results/*.xml
-          if-no-files-found: warn
-          retention-days: 14
+  test:
+    # test-report.yml looks for this name followed by ` / nextest`.
+    name: Test Suite (ubuntu-latest)
+    needs: changes
+    if: >-
+      !cancelled()
+      && (needs.changes.result != 'success'
+      || needs.changes.outputs.rust == 'true'
+      || needs.changes.outputs.ci == 'true'
+      || github.event_name == 'workflow_dispatch')
+    # macOS and Windows run once a day in macos-windows-tests.yml.
+    uses: ./.github/workflows/test-suite.yml
+    with:
+      os: ubuntu-latest
 
   integration:
     name: Integration tests
@@ -465,6 +393,12 @@ jobs:
           SETTINGS_SERVICE_PG_REQUIRE_DOCKER: "1"
         run: tools/scripts/with_rust_annotations.sh make test-integration LANE=settings-service-pg
 
+      - name: Test github-mirror (PostgreSQL and MariaDB, integration)
+        run: make test-github-mirror-db
+
+      - name: Test github-mirror (110k-entity interrupt and resume)
+        run: make test-github-mirror-scale
+
       # bss-pricing's Postgres tests are `#[ignore]`d behind Docker and ran in
       # no job until 2026-08-11 — every concurrency and trigger proof the crate
       # owns lives in them. This job already has Docker. The lane passes
@@ -501,6 +435,10 @@ jobs:
       - name: Test redis-cluster-plugin (redis integration)
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: tools/scripts/with_rust_annotations.sh make test-integration LANE=cluster-redis
+
+      - name: Test durable-execution (PostgreSQL and subprocess recovery)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: tools/scripts/with_rust_annotations.sh make test-durable-execution-pg
 
       - name: Test toolkit-db (sqlite integration)
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -798,6 +736,71 @@ jobs:
           disable_search: true
           fail_ci_if_error: ${{ github.event_name != 'pull_request' }}
 
+  test-github-mirror-coverage:
+    name: github-mirror (coverage floor)
+    needs: changes
+    if: >-
+      !cancelled()
+      && (needs.changes.result != 'success'
+      || needs.changes.outputs.github_mirror == 'true'
+      || needs.changes.outputs.deps == 'true'
+      || needs.changes.outputs.ci == 'true'
+      || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain (with llvm-tools)
+        uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
+          components: llvm-tools-preview
+
+      - name: Pin nightly for all cargo commands
+        run: echo "RUSTUP_TOOLCHAIN=${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}" >> "$GITHUB_ENV"
+
+      - name: Cache Cargo/target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          cache-targets: false
+          shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}-llvm-cov
+
+      - name: Install cargo-llvm-cov and nextest
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-llvm-cov, nextest
+
+      - name: Test and enforce the coverage floor
+        timeout-minutes: 30
+        env:
+          RUSTFLAGS: "-C debuginfo=0 --cfg coverage_nightly"
+          CARGO_LLVM_COV_TARGET_DIR: llvm-cov-target
+          CARGO_LLVM_COV_BUILD_DIR: llvm-cov-build
+        run: |
+          cargo llvm-cov nextest             -p cf-gears-github-mirror             --lcov --output-path lcov.info --fail-under-lines 85
+
+      - name: Upload to Codecov
+        if: always()
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          use_oidc: ${{ github.event_name != 'pull_request' }}
+          files: lcov.info
+          flags: github-mirror
+          disable_search: true
+          fail_ci_if_error: ${{ github.event_name != 'pull_request' }}
+
   # Runs the graph-storage ONNX embedding provider against a real model, which
   # is the only way this crate is checked at all: without artifacts its tests
   # skip, and a skipped test proves nothing about pooling, tokenization or the
@@ -1078,6 +1081,10 @@ jobs:
       #   4. The k8s-cluster-plugin L2/L3 k3s suites. These live behind
       #      `required-features = ["integration"]`.
       #
+      #   5. The durable-execution PostgreSQL suites behind the integration
+      #      feature, including subprocess recovery. A single test binary
+      #      shares the workspace-pinned PostgreSQL container.
+      #
       # The per-binary k3s loop (one container per binary, cleaned between —
       # nextest's process-per-test would start ~70 of them) lives in the
       # `coverage-cluster-k8s` Makefile target so this step stays readable; it
@@ -1114,6 +1121,10 @@ jobs:
           # Pass 4: k8s-cluster-plugin k3s suites (cargo test: no JUnit).
           fresh_report
           "$W" make coverage-cluster-k8s
+          # Pass 5: durable-execution PostgreSQL and subprocess recovery suites
+          # (cargo test: no JUnit).
+          fresh_report
+          "$W" make coverage-durable-execution-pg
           # Merge into the single report that gets uploaded.
           cargo llvm-cov report --lcov --output-path lcov.info
 
@@ -1135,7 +1146,7 @@ jobs:
           if [ -n "$report" ]; then
             python3 tools/scripts/junit_enrich.py --github "$report"
           else
-            echo "The failing pass left no JUnit report (a build error, or the k8s pass, which runs cargo test); see the step above."
+            echo "The failing pass left no JUnit report (a build error, or the k8s or durable-execution pass, which run cargo test); see the step above."
           fi
 
       # Upload LCOV report as a GitHub Actions artifact so it is always

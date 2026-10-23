@@ -405,7 +405,7 @@ no fields of its own beyond what the family genuinely requires.
   "additionalProperties": false,
   "properties": {
     "node_key":   { "type": "string", "minLength": 1, "maxLength": 512 },
-    "type":       { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph.node.v1~" },
+    "type":       { "type": "string", "x-gts-type-ref": "/$id" },
     "name":       { "type": "string", "maxLength": 1024 },
     "payload":    { "type": "object", "additionalProperties": true },
     "content":    { "type": "string" }
@@ -478,10 +478,10 @@ is frequently the wrong field to embed.
     "properties": {
       "family":      { "type": "string", "enum": ["static", "analysis"] },
       "src_types":   { "type": "array", "minItems": 1,
-                       "items": { "type": "string", "x-gts-ref": "gts.cf.core.graph.node.v1~" },
+                       "items": { "type": "string", "x-gts-type-ref": "gts.cf.core.graph.node.v1~" },
                        "default": ["gts.cf.core.graph.node.v1~"] },
       "dst_types":   { "type": "array", "minItems": 1,
-                       "items": { "type": "string", "x-gts-ref": "gts.cf.core.graph.node.v1~" },
+                       "items": { "type": "string", "x-gts-type-ref": "gts.cf.core.graph.node.v1~" },
                        "default": ["gts.cf.core.graph.node.v1~"] },
       "emit_events": { "type": "boolean", "default": false }
     },
@@ -490,7 +490,7 @@ is frequently the wrong field to embed.
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "type":          { "type": "string", "format": "gts-type-id", "x-gts-ref": "gts.cf.core.graph.edge.v1~" },
+    "type":          { "type": "string", "x-gts-type-ref": "/$id" },
     "src_node_key":  { "type": "string", "minLength": 1, "maxLength": 512 },
     "dst_node_key":  { "type": "string", "minLength": 1, "maxLength": 512 },
     "discriminator": { "type": "string", "maxLength": 256 },
@@ -528,8 +528,7 @@ wildcard token.
   "type": "object",
   "additionalProperties": true,
   "properties": {
-    "type": { "type": "string", "format": "gts-type-id",
-              "x-gts-ref": "gts.cf.core.graph.attribute.v1~" }
+    "type": { "type": "string", "x-gts-type-ref": "gts.cf.core.graph.attribute.v1~" }
   }
 }
 ```
@@ -675,7 +674,7 @@ knows where the fragment sits and can therefore declare paths into it.
                          "required": ["subject_id"],
                          "properties": {
                            "subject_id":   { "type": "string", "minLength": 1 },
-                           "subject_type": { "type": "string", "format": "gts-type-id" } } },
+                           "subject_type": { "type": "string", "x-gts-type-ref": "gts.*" } } },
         "method":      { "type": "string" },
         "model":       { "type": "string" },
         "produced_at": { "type": "string", "format": "date-time" },
@@ -829,7 +828,7 @@ accumulate, so a leaf restating `index` restates all of it.
 ##### Files and verification
 
 The schemas above are kept as registrable files under
-[`schemas/`](./schemas/), with the worked producer types in
+[`schemas/`](../graph-storage/schemas/), with the worked producer types in
 [`graph-storage/schemas/examples/`](../graph-storage/schemas/examples/) under the fictional `acme` vendor.
 This section is the normative narrative; those files are the same content in the
 form the types-registry accepts, so the chain can be validated mechanically
