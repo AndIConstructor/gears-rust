@@ -82,7 +82,7 @@ of its parent.
 | `cpt-cf-license-enforcement-fr-grant-conditions` | Conditions are constraints over the subject and resource `metadata` of the check. The evaluator defines their form (`cpt-cf-license-enforcement-adr-compile-time-evaluator`). Grant management validates them through the evaluator against the registered contract schema. A check evaluates them through the evaluator at a bounded cost. An absent attribute denies. |
 | `cpt-cf-license-enforcement-fr-type-references` | Write paths resolve every type id through types-registry: existence, derivation from the licensing base types, and admission by the resource contract. The check path compares the stored ids by their GTS derivation chain and never calls the registry (§3.1). |
 | `cpt-cf-license-enforcement-fr-grant-model` | One grant entity (§3.1) serves roots and sub-grants, so the check, the lifecycle, and delegation work on one shape. Each grant has one binding and at most one live child, and this keeps the count of licensed subjects a count of rows (I2, I3 in §3.1). |
-| `cpt-cf-license-enforcement-fr-admission-plugin` | Root grants come only from the admission boundary (`cpt-cf-license-enforcement-component-admission`), which hosts the one plugin that the binary links (`cpt-cf-license-enforcement-adr-compile-time-admission`). Evidence is the input from which the plugin admits root grants. An intake is a way for evidence to reach the plugin: `issue` takes grant parameters from an authorized caller, and `import` takes evidence bytes that the plugin parses. The boundary stores the evidence and the roots that it names in one transaction. It rejects evidence that is already admitted. The plugin rejects evidence that is older than the evidence that it replaces. The management API offers a create operation only for an intake that the plugin declares (§3.3). |
+| `cpt-cf-license-enforcement-fr-admission-plugin` | Root grants come only from the admission boundary (`cpt-cf-license-enforcement-component-admission`), which hosts the one plugin that the binary links (`cpt-cf-license-enforcement-adr-compile-time-admission`). Evidence is the input from which the plugin admits root grants. An intake is a way for evidence to reach the plugin: `issue` takes grant parameters from an authorized caller, and `import` takes evidence bytes that the plugin parses. The boundary stores the evidence and the roots that it names in one transaction. It rejects evidence that is already admitted. The plugin rejects evidence that is older than the evidence that it replaces. The management API rejects a create operation for an intake that the plugin does not declare (§3.3). |
 | `cpt-cf-license-enforcement-fr-grant-lifecycle` | A grant stores one of four states and changes it only through explicit operations of the grant service (`cpt-cf-license-enforcement-component-grant-service`, §3.1). Expiry, grace, and the end of grace are derived at evaluation from time. A descendant denies through the state of its root (`cpt-cf-license-enforcement-principle-derived-usability`). |
 | `cpt-cf-license-enforcement-fr-subject-binding` | A grant holds one binding: none, a subject, or a delegated sub-grant (§3.1). The bind and unbind operations of the grant service change it. A binding fixed at admission never changes (I8 in §3.1). |
 | `cpt-cf-license-enforcement-fr-delegation` | Delegation in the grant service creates one sub-grant per parent in one transaction, groups them as one delegation, and binds each parent to its child (§3.1, §3.6). The recipient must be a descendant as tenant-resolver reports it, and each sub-grant is a subset of its parent (I4 in §3.1). Return and recall reverse it. |
@@ -313,7 +313,8 @@ what the design needs. They are not complete.
 - A terminated grant has a termination reason: revoked, recalled, returned, rejected, or replaced.
 - The version increases at every change. A request can set it as a precondition.
 
-The grantor of a sub-grant is the holder of its parent. A grant on the tenant Subject type gives the tenant-wide scope
+The grantor of a sub-grant is the holder of its parent. A grant on the tenant Subject type 
+(`gts.cf.core.lic.subj.v1~cf.core.lic.tenant.v1~`, defined in `license-resolver-sdk`) gives the tenant-wide scope
 of the PRD. It is not a separate kind of grant and follows the same rules as any subject grant. 
 
 These fields come from `cpt-cf-license-enforcement-fr-grant-model`, `cpt-cf-license-enforcement-fr-subject-scope`, 
@@ -540,9 +541,9 @@ candidate tenant as `tenant-resolver` returns it.
 - [ ] `p1` - **ID**: `cpt-cf-license-enforcement-component-sdk`
 
 - **Why**: One transport-agnostic contract for callers, plugins, and the gear.
-- **Scope**: `LicenseEnforcementClient` trait (§3.3), DTOs, `Grant` and related models, `DenialReason`,
-  `LicenseEnforcementError`, the `GrantAdmissionPluginV1` trait with its evidence and intake types, and the
-  `GrantEvaluatorV1` trait.
+- **Scope**: the `LicenseEnforcementApi` contract and its REST projection (§3.3), DTOs, `Grant` and related models,
+  `DenialReason`, the `reason` and `subject` values of its `CanonicalError`s, the `GrantAdmissionPluginV1` trait with 
+   its evidence and intake types, and the `GrantEvaluatorV1` trait.
 - **Boundaries**: No logic, no state, no persistence, no verification code.
 - **Related**: Implemented by `cpt-cf-license-enforcement-component-management-api`, by the admission plugins, and by
   `cpt-cf-license-enforcement-component-evaluator`.
@@ -626,11 +627,12 @@ candidate tenant as `tenant-resolver` returns it.
 - [ ] `p1` - **ID**: `cpt-cf-license-enforcement-component-management-api`
 
 - **Why**: The REST and SDK surface, with one authorization and one semantics.
-- **Scope**: `OperationBuilder` routes and the in-process `LicenseEnforcementClient`. A `PolicyEnforcer` decision per
+- **Scope**: the routes of the REST projection and the in-process `LicenseEnforcementApi`. A `PolicyEnforcer` decision per
   operation, with the tenant from `SecurityContext`. Passes the PDP constraints as the `AccessScope` of the
   transaction. Idempotency token handling. `Problem` mapping. Validates a check-explain request against the registered
   contracts and `admitted_subjects`, as the `license-resolver` gateway does for a check.
-- **Boundaries**: No domain rules. Registers create routes only for the intakes that the linked plugin declares.
+- **Boundaries**: No domain rules. Rejects as `unimplemented` an operation that needs an intake that the linked plugin
+  does not declare.
 - **Related**: Calls `cpt-cf-license-enforcement-component-grant-service` and
   `cpt-cf-license-enforcement-component-check-service` (check-explain).
 
@@ -685,9 +687,14 @@ variants, and the resolver treats them as fail-closed. A denial is a decision, n
     store adds no fields, and the check uses the stored fields.
   - a revocation state of the root: suspended or terminated.
   - a denial reason.
-- `ctx` gives the plugin access to its own `PluginMaterial`. During `verify`, the plugin can write only its own
-  material, for example the clock high-water mark (`cpt-cf-license-enforcement-fr-clock-defense`). The plugin decides
-  how it stores this material. The check path changes no grant.
+- `ctx` gives the plugin read access to its own `PluginMaterial`. `admit` and `verify` return the material to write,
+  and the gear writes it: for `admit`, in the transaction of the admission; for `verify`, after it returns, for example
+  the clock high-water mark (`cpt-cf-license-enforcement-fr-clock-defense`). A write can name the value that the key
+  must hold, and the gear applies it only then. On a mismatch, the admission fails as a conflict, and a write after
+  `verify` is dropped. Thus a mark or a version that the plugin raises from the value that it read never goes back
+  under concurrent checks or imports. A failed write after `verify` does not change the decision, and the gear logs
+  it. The plugin decides how it stores this material. The check path changes
+  no grant.
 - `health()`.
 
 The plugin is a separate crate that depends only on the SDK. It registers itself at link time. The trait version is
@@ -705,16 +712,16 @@ The plugin is a separate crate that depends only on the SDK. It registers itself
 
 The evaluator is a separate crate that depends only on the SDK. It registers itself at link time.
 
-**Management** — REST under `/license-enforcement/v1`, and the same operations on `LicenseEnforcementClient`:
+**Management** — REST under `/license-enforcement/v1`, and the same operations on `LicenseEnforcementApi`:
 
 | Method | Path                                                                                            | Description                                                                                                                                                                                               | Stability |
 |--------|-------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------|
-| `POST` | `/packs`, `/grants`                                                                             | Issue through the `issue` intake. Absent without that intake.                                                                                                                                             | unstable  |
-| `POST` | `/evidence`                                                                                     | Submit evidence to the linked plugin through the `import` intake. Absent without that intake.                                                                                                             | unstable  |
-| `GET`  | `/packs`, `/packs/{id}`, `/grants`, `/grants/{id}`                                              | Read and list, tenant-scoped, with filters on resource type, state, and subject. Lists carry unbound, bound, and delegated counts per pack and resource type.                                             | unstable  |
-| `POST` | `/packs/{id}/{suspend,reinstate,revoke,renew,replace}`                                          | Pack verbs, atomic over members. Absent without the `issue` intake.                                                                                                                                       | unstable  |
+| `POST` | `/packs`, `/grants`                                                                             | Issue through the `issue` intake. `unimplemented` without that intake.                                                                                                                                    | unstable  |
+| `POST` | `/evidence`                                                                                     | Submit evidence (base64 in JSON) to the linked plugin through the `import` intake. `unimplemented` without that intake.                                                                                   | unstable  |
+| `GET`  | `/packs`, `/packs/{id}`, `/grants`, `/grants/{id}`, `/delegations/{id}`                         | Read and list in the scope that the PDP gives. Lists take OData `$filter` and `$orderby` on resource type, state, subject, pack, and parent grant, and a cursor. A filter only narrows a list. Packs carry unbound, bound, and delegated counts per resource. | unstable  |
+| `POST` | `/packs/{id}/{suspend,reinstate,revoke,renew,replace}`                                          | Pack verbs, atomic over members. `unimplemented` without the `issue` intake.                                                                                                                              | unstable  |
 | `POST` | `/grants/{id}/{accept,reject,suspend,reinstate,revoke,renew,bind,unbind,return,recall,replace}` | Grant verbs. `replace` takes successors through the `issue` intake. Without the `issue` intake, replacement is evidence supersession, and the API rejects root `suspend`, `reinstate`, `revoke`, `renew`. | unstable  |
-| `POST` | `/delegations`                                                                                  | Delegate N unbound grants (by ids, or by resource type and count) to a recipient tenant in one transaction                                                                                                | unstable  |
+| `POST` | `/delegations`                                                                                  | Delegate N unbound grants (by ids, or by resource and count) to a recipient tenant in one transaction                                                                                                     | unstable  |
 | `POST` | `/delegations/{id}/{accept,reject,return,recall}`                                               | Delegation verbs, atomic over its sub-grants                                                                                                                                                              | unstable  |
 | `POST` | `/check-explain`                                                                                | Decision, reason, matched grant, and diagnostics that the check would produce                                                                                                                             | unstable  |
 
@@ -735,6 +742,7 @@ idempotency token and may carry `expected_version`. Verb availability per actor 
 | `IdempotencyConflict`            | `already_exists`      | same token, different payload                                                                                                                                                                                                              |
 | `EvidenceRejected(reason)`       | `invalid_argument`    | plugin rejects: verification failure, replay, version regression                                                                                                                                                                           |
 | `EvaluationTimeout`              | `deadline_exceeded`   | the wall-clock guard of condition evaluation expires during a check or check-explain. The resolver fails closed. It is not a decision.                                                                                                     |
+| `IntakeNotServed`                | `unimplemented`       | the operation needs an intake that the linked plugin does not declare                                                                                                                                                                      |
 | `DependencyUnavailable`          | `service_unavailable` | PDP, registry, tenant-resolver, or store cannot answer. The module refuses the operation.                                                                                                                                                  |
 
 ### 3.4 Internal Dependencies
@@ -960,7 +968,7 @@ the stored models and the fields that the design needs. It is not a complete sch
   the recipient.
 - Retention default: 400 days for terminated grants. The operator can configure it.
 
-**Management without the `issue` intake.** The build registers no issue route. Vendor statements about a root
+**Management without the `issue` intake.** The API rejects the issue operations as `unimplemented`. Vendor statements about a root
 (suspend, reinstate, revoke, renew) arrive only through the `import` intake. The management API rejects
 these verbs on roots and packs. Thus a stored root state can make the answer narrower (the holder rejects or returns)
 but never wider.

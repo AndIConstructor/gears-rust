@@ -208,6 +208,7 @@ members = [
     "gears/system/license-resolver/license-resolver-sdk",
     "gears/system/license-resolver/license-resolver",
     "gears/system/license-resolver/plugins/static-license-plugin",
+    "gears/system/license-enforcement/license-enforcement-sdk",
     "gears/system/admission-control/admission-control-sdk",
     "gears/system/admission-control/admission-control",
     "gears/system/policy-engine/policy-engine-sdk",
@@ -943,6 +944,7 @@ gts-macros = "0.16.1"
 license-resolver-sdk = { package = "cf-gears-license-resolver-sdk", version = "0.2.1", path = "gears/system/license-resolver/license-resolver-sdk" }
 license-resolver = { package = "cf-gears-license-resolver", version = "0.1.7", path = "gears/system/license-resolver/license-resolver" }
 static-license-plugin = { package = "cf-gears-static-license-plugin", version = "0.1.7", path = "gears/system/license-resolver/plugins/static-license-plugin" }
+license-enforcement-sdk = { package = "cf-gears-license-enforcement-sdk", version = "0.1.0", path = "gears/system/license-enforcement/license-enforcement-sdk" }
 
 # Admission control + policy engine
 admission-control-sdk = { package = "cf-gears-admission-control-sdk", version = "0.1.0", path = "gears/system/admission-control/admission-control-sdk" }
