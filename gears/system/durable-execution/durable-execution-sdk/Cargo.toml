@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+[lib]
+name = "cf_gears_durable_execution_sdk"
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
