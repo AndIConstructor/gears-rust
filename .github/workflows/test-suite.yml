@@ -12,24 +12,31 @@ on:
         description: Runner label, e.g. ubuntu-latest.
         required: true
         type: string
+    # A called workflow must declare these, even for environment secrets.
+    # Optional: without them the job uses the GitHub cache.
+    secrets:
+      S3_ACCESS_KEY_ID:
+        description: S3 access key id for the selected cache environment.
+        required: false
+      S3_SECRET_ACCESS_KEY:
+        description: S3 secret access key for the selected cache environment.
+        required: false
 
 # A called workflow does not get the caller's env, so set it here.
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
-  SCCACHE_CACHE_SIZE: "2G"
   CARGO_INCREMENTAL: "0"
-  # sccache release installed by mozilla-actions/sccache-action. Without a
-  # `version` the action queries the GitHub releases API on every job, which
-  # exhausted the installation rate limit during a Dependabot burst (2026-10-14).
-  # Dependabot does not track this value: bump it by hand, together with every
-  # other workflow that sets it (`grep -rn SCCACHE_VERSION .github/workflows`).
-  SCCACHE_VERSION: v0.18.0
 
 jobs:
   nextest:
     name: nextest
     runs-on: ${{ inputs.os }}
+    # sccache S3 keys: read-write on main, read-only elsewhere. See .github/actions/sccache.
+    # No environment until the S3_BUCKET variable is set, so the job runs without one.
+    environment:
+      name: ${{ vars.S3_BUCKET != '' && (github.ref == 'refs/heads/main' && 'ci-cache-write' || 'ci-cache-read') || '' }}
+      deployment: false
     env:
       # Windows: use lld-link. It comes with LLVM on the runner and links much
       # faster than link.exe.
@@ -89,21 +96,15 @@ jobs:
           cache-targets: false
           shared-key: pr-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
 
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      # Only main writes to the cache. See .github/actions/sccache.
+      - name: Set up sccache
+        uses: ./.github/actions/sccache
         with:
-          version: ${{ env.SCCACHE_VERSION }}
-
-      # If sccache does not start, build with plain rustc instead of failing.
-      - name: Probe sccache & set RUSTC_WRAPPER
-        shell: bash
-        run: |
-          if sccache --start-server >/dev/null 2>&1; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          else
-            echo "sccache failed, falling back to plain rustc"
-          fi
+          s3-endpoint: ${{ vars.S3_ENDPOINT }}
+          s3-region: ${{ vars.S3_REGION }}
+          s3-bucket: ${{ vars.S3_BUCKET }}
+          s3-access-key-id: ${{ secrets.S3_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.S3_SECRET_ACCESS_KEY }}
 
       - name: cargo test (no macros)
         shell: bash
