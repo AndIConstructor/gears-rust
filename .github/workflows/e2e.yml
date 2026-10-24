@@ -25,8 +25,8 @@ permissions:
   issues: write
 
 concurrency:
-  group: e2e-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,6 +37,12 @@ env:
   # symbol table, and it dominates both link time and cache size. Same value
   # the compiling jobs in ci.yml use.
   RUSTFLAGS: "-C debuginfo=0"
+  # sccache release installed by mozilla-actions/sccache-action. Without a
+  # `version` the action queries the GitHub releases API on every job, which
+  # exhausted the installation rate limit during a Dependabot burst (2026-10-14).
+  # Dependabot does not track this value: bump it by hand, together with every
+  # other workflow that sets it (`grep -rn SCCACHE_VERSION .github/workflows`).
+  SCCACHE_VERSION: v0.18.0
 
 jobs:
   # Cheap, always-on guard: pure text parsing, no Docker daemon, no toolchain.
@@ -225,6 +231,8 @@ jobs:
       # Install sccache (cross-platform)
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: ${{ env.SCCACHE_VERSION }}
 
       # Probe sccache; if startup fails, fall back to plain rustc (no hard CI failure).
       - name: Probe sccache & set RUSTC_WRAPPER
