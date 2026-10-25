@@ -72,6 +72,8 @@ E2E_SERVER_FEATURE_ARGS ?= $(if $(E2E_SERVER_FEATURES),--features $(E2E_SERVER_F
 OPENAPI_SERVER_FEATURES ?= $(E2E_SERVER_FEATURES)
 OPENAPI_SERVER_FEATURE_ARGS ?= $(E2E_SERVER_FEATURE_ARGS)
 
+GTS_VALIDATOR_MIN_VERSION ?= 0.16.1
+
 # -------- Set up --------
 
 .PHONY: setup py-env
@@ -104,7 +106,7 @@ setup: .setup-stamp py-env
 	cargo install cargo-fuzz
 	cargo install cargo-hack
 	cargo install --locked cargo-shear --version $(SHEAR_VERSION)
-	cargo install gts-validator
+	cargo install gts-validator --version '>=${GTS_VALIDATOR_MIN_VERSION}'
 	@if echo "$$OS" | grep -iq windows || [ -n "$$COMSPEC" ]; then \
 		echo "NOTE: kani-verifier is not supported on Windows; skipping (use WSL2/Docker for Kani)."; \
 		echo "Installing cargo-llvm-cov (supported on Windows; needs llvm-tools-preview)..."; \
@@ -171,7 +173,7 @@ docker-pins:
 # Uses gts-validator binary (install via: cargo install gts-validator)
 gts-docs:
 	$(call print_target_banner)
-	$(call check_tool,gts-validator)
+	$(call check_tool_version,gts-validator,>=$(GTS_VALIDATOR_MIN_VERSION))
 	gts-validator \
 		--vendor cf,vendor,example,fabrikam \
 		--exclude "target/*" \
