@@ -677,10 +677,10 @@ coverage-cluster-k8s:
 	$(call k8s_cluster_suite,cargo llvm-cov test --no-report,coverage: )
 
 # Use one test binary so PostgreSQL scenarios share the testcontainers fixture.
-DURABLE_EXECUTION_PG_TEST_ARGS := -p cf-gears-durable-execution --lib --features integration \
-	-- --skip infra::storage::process_tests::worker_child --test-threads=4
+DURABLE_EXECUTION_PG_TEST_ARGS := -p cf-gears-toolkit-durable-execution --lib --features integration \
+	-- --skip store::process_tests::worker_child --test-threads=4
 
-## Run the durable-execution gear's PostgreSQL and subprocess recovery suites (Docker required)
+## Run the durable-execution library's PostgreSQL and subprocess recovery suites (Docker required)
 ## Uses `cargo test`, not `nextest`: the scenarios live in one test binary so
 ## they share a single testcontainers PostgreSQL fixture.
 test-durable-execution-pg: install-tools

@@ -1047,7 +1047,7 @@ jobs:
       #   4. The k8s-cluster-plugin L2/L3 k3s suites. These live behind
       #      `required-features = ["integration"]`.
       #
-      #   5. The durable-execution PostgreSQL suites behind the integration
+      #   5. The toolkit-durable-execution PostgreSQL suites behind the integration
       #      feature, including subprocess recovery. A single test binary
       #      shares the workspace-pinned PostgreSQL container.
       #

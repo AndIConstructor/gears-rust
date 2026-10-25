@@ -2772,72 +2772,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cf-gears-durable-execution"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "apalis",
- "apalis-core",
- "apalis-postgres",
- "async-trait",
- "aws-lc-rs",
- "axum",
- "cf-gears-authn-resolver",
- "cf-gears-authn-resolver-sdk",
- "cf-gears-authz-resolver",
- "cf-gears-authz-resolver-sdk",
- "cf-gears-durable-execution-sdk",
- "cf-gears-test-containers",
- "cf-gears-toolkit",
- "cf-gears-toolkit-canonical-errors",
- "cf-gears-toolkit-db",
- "cf-gears-toolkit-db-macros",
- "cf-gears-toolkit-macros",
- "cf-gears-toolkit-security",
- "chrono",
- "hex",
- "parking_lot",
- "proptest",
- "sea-orm",
- "sea-orm-migration",
- "secrecy",
- "serde",
- "serde_json",
- "sqlx",
- "temp-env",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "cf-gears-durable-execution-sdk"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "aws-lc-rs",
- "cf-gears-toolkit",
- "cf-gears-toolkit-canonical-errors",
- "cf-gears-toolkit-gts",
- "cf-gears-toolkit-security",
- "chrono",
- "futures-util",
- "hex",
- "proptest",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "trybuild",
- "uuid",
-]
-
-[[package]]
 name = "cf-gears-event-broker"
 version = "0.2.8"
 dependencies = [
@@ -2957,7 +2891,6 @@ dependencies = [
  "cf-gears-clickhouse-usage-collector-plugin",
  "cf-gears-cluster",
  "cf-gears-credstore",
- "cf-gears-durable-execution",
  "cf-gears-file-parser",
  "cf-gears-file-storage",
  "cf-gears-github-mirror",
@@ -4747,6 +4680,43 @@ dependencies = [
  "quote",
  "syn 3.0.9",
  "trybuild",
+]
+
+[[package]]
+name = "cf-gears-toolkit-durable-execution"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "apalis",
+ "apalis-core",
+ "apalis-postgres",
+ "async-trait",
+ "aws-lc-rs",
+ "cf-gears-test-containers",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-db",
+ "cf-gears-toolkit-db-macros",
+ "cf-gears-toolkit-security",
+ "chrono",
+ "futures-util",
+ "hex",
+ "parking_lot",
+ "proptest",
+ "sea-orm",
+ "sea-orm-migration",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "temp-env",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "trybuild",
+ "uuid",
 ]
 
 [[package]]
