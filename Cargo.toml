@@ -50,8 +50,6 @@ debug = true
 
 [workspace]
 members = [
-    "gears/system/durable-execution/durable-execution",
-    "gears/system/durable-execution/durable-execution-sdk",
     "apps/cf-gears-example-server",
     "apps/cf-gears-flight-control",
     "tools/gts-analyze",
@@ -82,6 +80,7 @@ members = [
     "libs/toolkit-stable-hash",
     "libs/toolkit-transport-grpc",
     "libs/toolkit-taskward",
+    "libs/toolkit-durable-execution",
     "libs/toolkit-utils",
     "libs/ai/toolkit-onnx-runtime",
     "libs/rustls-corecrypto-provider",
@@ -337,8 +336,6 @@ verbose_file_reads = "deny"
 [workspace.dependencies]
 cel-core = "=0.5.1"
 quota-enforcement-engine-cel = { package = "cf-gears-quota-enforcement-engine-cel", version = "0.1.0", path = "gears/system/quota-enforcement/plugins/quota-enforcement-engine-cel" }
-durable-execution = { package = "cf-gears-durable-execution", version = "0.1.0", path = "gears/system/durable-execution/durable-execution" }
-durable-execution-sdk = { package = "cf-gears-durable-execution-sdk", version = "0.1.0", path = "gears/system/durable-execution/durable-execution-sdk" }
 apalis = { version = "=1.0.0-rc.10", default-features = false, features = ["tracing", "limit"] }
 apalis-core = "=1.0.0-rc.10"
 # Keep SQLx runtime/TLS settings in the workspace. The adapter's default
@@ -371,6 +368,7 @@ toolkit-security = { package = "cf-gears-toolkit-security", version = "0.11.0", 
 toolkit-stable-hash = { package = "cf-gears-toolkit-stable-hash", version = "0.1.0", path = "libs/toolkit-stable-hash" }
 toolkit-transport-grpc = { package = "cf-gears-toolkit-transport-grpc", version = "0.9.0", path = "libs/toolkit-transport-grpc" }
 toolkit-taskward = { package = "cf-gears-toolkit-taskward", version = "0.1.0", path = "libs/toolkit-taskward" }
+toolkit-durable-execution = { package = "cf-gears-toolkit-durable-execution", version = "0.1.0", path = "libs/toolkit-durable-execution" }
 toolkit-utils = { package = "cf-gears-toolkit-utils", version = "0.7.2", path = "libs/toolkit-utils" }
 toolkit-onnx-runtime = { package = "cf-gears-toolkit-onnx-runtime", version = "0.1.0", path = "libs/ai/toolkit-onnx-runtime" }
 rustls-corecrypto-provider = { package = "cf-gears-rustls-corecrypto-provider", version = "0.1.3", path = "libs/rustls-corecrypto-provider" }
