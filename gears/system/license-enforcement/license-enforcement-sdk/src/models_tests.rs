@@ -2,7 +2,10 @@ use serde_json::json;
 use time::macros::datetime;
 use uuid::Uuid;
 
-use super::{Binding, Grant, GrantState, Permissions, ResourceRef, SubjectRef, Validity, Window};
+use super::{
+    Binding, DelegatedPermissions, Grant, GrantState, Permissions, ResourceRef, SubjectRef,
+    Validity, Window,
+};
 use crate::ids::{EvidenceId, GrantId};
 
 fn gts(id: &str) -> gts::GtsTypeId {
@@ -85,14 +88,19 @@ fn inherited_validity_and_delegated_binding_round_trip() {
 fn grant_ignores_unknown_fields() {
     let mut json = serde_json::to_value(grant()).unwrap();
     json["added_later"] = json!(1);
+    json["permissions"]["added_later"] = json!(1);
+    json["validity"]["window"]["added_later"] = json!(1);
+    json["resource"]["added_later"] = json!(1);
+    json["binding"]["subject"]["added_later"] = json!(1);
     assert_eq!(serde_json::from_value::<Grant>(json).unwrap(), grant());
 }
 
 #[test]
 fn request_side_types_reject_unknown_fields() {
-    let err = serde_json::from_value::<ResourceRef>(json!({
-        "type": "gts.cf.core.lic.res.v1~acme.app.lic.seat.v1~",
-        "idd": "x",
+    let err = serde_json::from_value::<DelegatedPermissions>(json!({
+        "may_bind": true,
+        "requires_acceptance": false,
+        "may_bindd": true,
     }));
     assert!(err.is_err());
 }

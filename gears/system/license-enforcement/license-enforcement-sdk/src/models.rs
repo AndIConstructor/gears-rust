@@ -1,8 +1,8 @@
 //! The grant model (DESIGN §3.1).
 //!
-//! Request models and the value types that requests and responses share
-//! reject unknown fields, so a misspelled field fails instead of being dropped.
-//! A new field in them is a new contract version.
+//! Request-only models reject unknown fields, so a misspelled field fails
+//! instead of being dropped. Types that responses carry accept unknown fields,
+//! so a new field does not break older clients.
 
 use gts::GtsTypeId;
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,6 @@ use crate::ids::{DelegationId, EvidenceId, GrantId, PackId};
 ///
 /// Without `id` the grant covers every instance of the type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ResourceRef {
     /// Resource contract type, derived from `gts.cf.core.lic.res.v1~`.
     #[serde(rename = "type")]
@@ -28,7 +27,6 @@ pub struct ResourceRef {
 
 /// A concrete subject: a Subject contract type and an instance id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct SubjectRef {
     /// Subject contract type, derived from `gts.cf.core.lic.subj.v1~`.
     #[serde(rename = "type")]
@@ -60,7 +58,6 @@ pub enum Binding {
 /// A validity window. `grace_until`, when present, ends a grace period that
 /// starts at `expires_at`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Window {
     /// Start of validity, inclusive.
     #[serde(with = "time::serde::rfc3339")]
@@ -106,7 +103,6 @@ impl Validity {
 
 /// Holder permissions of a grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct Permissions {
     /// The holder may `bind` and `unbind`.
     pub may_bind: bool,
