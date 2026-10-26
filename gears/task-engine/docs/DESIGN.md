@@ -49,7 +49,7 @@ The Task Engine is a distributed, multi-tenant task orchestration control plane 
 
 **ID**: `cpt-cf-task-engine-design-positioning`
 
-**Control plane, not an executor.** The Task Engine owns task state, queues, leases, timers, waits and history, but **runs no task code and hosts no workers**. Workers are separate processes that claim tasks through the REST API or SDK. Running a gear's own activities and workflows in-process, on a local worker, is the job of the [Durable Execution](../../system/durable-execution/docs/PRD.md) gear. A Durable Execution activity may be a Task Engine client or worker; the reverse never applies. The two gears share no tables, queues, or state; PRD §1.1 *Boundary with Durable Execution* says which one to use for which work.
+**Control plane, not an executor.** The Task Engine owns task state, queues, leases, timers, waits and history, but **runs no task code and hosts no workers**. Workers are separate processes that claim tasks through the REST API or SDK. Running a gear's own activities and workflows in-process, on a local worker, is the job of the [Durable Execution](../../../libs/toolkit-durable-execution/docs/PRD.md) gear. A Durable Execution activity may be a Task Engine client or worker; the reverse never applies. The two gears share no tables, queues, or state; PRD §1.1 *Boundary with Durable Execution* says which one to use for which work.
 
 The architecture follows a **DDD-Light layered design** (SDK → API/Transport → Domain → Infrastructure) consistent with the ToolKit framework. The system is decomposed into five internal subsystems:
 

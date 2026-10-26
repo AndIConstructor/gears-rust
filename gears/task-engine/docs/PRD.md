@@ -68,7 +68,7 @@ description: "Product requirements for the Task Engine gear: durable, multi-tena
 
 **Task Engine** is a CF/Gears gear that orchestrates units of work ("tasks") for many tenants across a cluster. API clients create tasks; workers claim them, run them, and report results. The engine owns the full task lifecycle: queues with priorities and concurrency limits, safe claiming with leases, timeouts, retries, durable waits, dependencies, progress, and an audit trail. Task types are extensible through the Global Type System (GTS).
 
-The engine is a **control plane only**: it runs no task code and hosts no workers. Running a gear's own activities and workflows in-process, on a local worker, is the job of the [Durable Execution](../../system/durable-execution/docs/PRD.md) gear.
+The engine is a **control plane only**: it runs no task code and hosts no workers. Running a gear's own activities and workflows in-process, on a local worker, is the job of the [Durable Execution](../../../libs/toolkit-durable-execution/docs/PRD.md) gear.
 
 This PRD states **what** the engine must do and **why**. **How** it is built is in [DESIGN.md](./DESIGN.md) and the [ADRs](./ADR/).
 
