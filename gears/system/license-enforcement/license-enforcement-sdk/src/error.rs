@@ -7,12 +7,23 @@
 //! - `InvalidArgument` → `field_violations[].reason` from [`reason`];
 //! - `FailedPrecondition` → `violations[].type` is [`PRECONDITION_TYPE`],
 //!   `violations[].subject` from [`precondition`];
+//! - `Aborted` → `reason` from [`aborted`];
 //! - `Unimplemented` → the linked plugin does not serve the intake that the
 //!   operation needs (`issue` or `import`). The binary cannot serve it at all,
 //!   so no discriminator is needed.
 
 /// `violations[].type` of every `FailedPrecondition` of this module.
 pub const PRECONDITION_TYPE: &str = "STATE";
+
+/// `reason` values of `Aborted`.
+pub mod aborted {
+    /// `expected_version` differs from the current version. Read the object
+    /// again before a retry.
+    pub const OPTIMISTIC_LOCK_FAILURE: &str = "OPTIMISTIC_LOCK_FAILURE";
+    /// A concurrent admission changed the plugin material that `admit` read.
+    /// Retry the request with the same idempotency token.
+    pub const ADMISSION_CONFLICT: &str = "ADMISSION_CONFLICT";
+}
 
 /// `violations[].subject` values of `FailedPrecondition`.
 pub mod precondition {

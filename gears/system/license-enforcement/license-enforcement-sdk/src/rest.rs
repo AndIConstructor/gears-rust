@@ -9,7 +9,7 @@
 //! `list_packs` and `list_grants` are `#[server_manual]`: the gear registers
 //! `GET /packs` and `GET /grants` with `OperationBuilder`, the `OData`
 //! extractor, and `with_odata_filter`, as other gears do. The client sends
-//! [`ListQuery`](crate::dto::ListQuery), which that extractor binds.
+//! [`ListQuery`], which that extractor binds.
 //!
 //! Every method is retryable: reads are safe, and every write carries an
 //! idempotency token, so a repeated write returns the first result.
