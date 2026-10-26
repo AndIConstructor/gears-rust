@@ -297,13 +297,9 @@ pub fn derived_event_type_schema(
 /// Consumer-group resource type - PEP/error matching only, no schema
 /// generation (no `types-registry` inventory entry).
 pub const CONSUMER_GROUP_RESOURCE_TYPE: &str = gts_id!("cf.core.events.consumer_group.v1~");
-/// Event-type resource type - error payloads only. The GTS type it names no
-/// longer exists as a registered type (an event type is a derived schema of
-/// `EventV1` now). Authorization no longer uses it: the broker asks the PEP
-/// about the event's own type, or the `EventV1` base type for a wildcard
-/// interest (`docs/DESIGN.md` §3.3). Error payloads still identify the
-/// event-type resource by this id, and like its siblings here it has no
-/// `types-registry` inventory entry to disagree with.
+/// Legacy event-type id used only in error payloads; not registered in types-registry.
+/// Authorization uses concrete event types or the `EventV1` base type for wildcard
+/// interests (`docs/DESIGN.md` §3.3).
 pub const EVENT_TYPE_RESOURCE_TYPE: &str = gts_id!("cf.core.events.event_type.v1~");
 /// Subscription resource type - PEP/error matching only.
 pub const SUBSCRIPTION_RESOURCE_TYPE: &str = gts_id!("cf.core.events.subscription.v1~");

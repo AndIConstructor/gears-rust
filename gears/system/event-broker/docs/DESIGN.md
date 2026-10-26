@@ -1952,32 +1952,36 @@ All errors follow RFC 9457 Problem Details (`application/problem+json`) using th
 | `gts.cf.core.events.subject_type.v1~` | producers | consumers | — (subject types owned by other modules) |
 | `gts.cf.core.events.consumer_group.v1~` | — | consumers (named groups; explicit grant required) | group creators (POST `/v1/consumer-groups`) and `types_registry` upserts |
 
-Wildcards in the granted pattern are supported on every cell above. A *requested* wildcard (a JOIN interest such as `…vendor.audit.*`) is checked differently; see below.
+Wildcards are supported in granted resource patterns.
 
-**What the PEP is asked**: the resource type of each check is the concrete GTS id of the resource acted on, so a decision point matches a grant against the type string alone, as it does for every other gear:
+**PEP checks** use the resource's GTS id:
 
-| Check | PEP resource type | Property (also sent) |
-|---|---|---|
-| publish, `produce` | the event's own type, e.g. `gts.cf.core.events.event.v1~vendor.audit.login.v1~` | `event_type_id` |
-| JOIN, `consume` on a topic | the topic id, e.g. `gts.cf.core.events.topic.v1~vendor.events.tenants.v1` | `topic_id` |
-| JOIN, `consume` on an exact event-type interest | that event type | `event_type_id` |
-| JOIN, `consume` on a wildcard interest (`…vendor.audit.*`) | the event base type `gts.cf.core.events.event.v1~` | `event_type_id` (the pattern) |
-| delivery, `consume` on each matching event | the event's concrete type | `event_type_id` |
-| any check on a named group: JOIN, get and list (`consume`), delete (`manage`) | the group id | `consumer_group_id` |
-| create a group, `define` | the family `gts.cf.core.events.consumer_group.v1~` (no group exists yet) | — |
+| Operation | Action | PEP resource type | Resource property |
+|---|---|---|---|
+| Publish | `produce` | Event type | `event_type_id` |
+| JOIN a topic | `consume` | Topic id | `topic_id` |
+| JOIN an exact event-type interest | `consume` | Event type | `event_type_id` |
+| JOIN a wildcard interest | `consume` | `gts.cf.core.events.event.v1~` | `event_type_id` (the pattern) |
+| Deliver a matching event | `consume` | Event type | `event_type_id` |
+| JOIN, get or list a named group | `consume` | Group id | `consumer_group_id` |
+| Delete a named group | `manage` | Group id | `consumer_group_id` |
+| Create a group | `define` | `gts.cf.core.events.consumer_group.v1~` | — |
 
-A wildcard pattern is not a GTS identifier, and a decision point that parses the resource type as one would reject it, so a wildcard interest is checked on the event base type: only a grant on the whole event family allows it, unless the decision point evaluates the pattern in `event_type_id` and finds that a grant covers it. Evaluating whether a granted pattern covers a requested one is a follow-up; until then a narrow grant such as `…event.v1~vendor.*` allows exact interests under it, not a wildcard interest. Tenant scope stays its own check on `gts.cf.core.events.request.v1~`.
+Wildcard interests use the event base type because a wildcard pattern is not a
+valid GTS id. They currently require a grant covering the whole event family.
+Checking whether a narrower grant covers the requested pattern is not yet
+implemented. Tenant scope is checked separately on `gts.cf.core.events.request.v1~`.
 
-An id that cannot be an event type is refused before any PEP call, so a request naming another gear's type never becomes an authorization question about that gear's resource: a publish whose type does not derive from `gts.cf.core.events.event.v1~` gets `404 EventTypeNotFound` (the answer the lookup would give anyway), and a JOIN interest that overlaps no event type - neither covered by nor covering the event base type - gets `400 BadTypePattern`.
+Before authorization, publishing a type outside the event family returns
+`404 EventTypeNotFound`. A JOIN pattern that neither covers nor is covered by
+the event family returns `400 BadTypePattern`.
 
-A successful JOIN does not grant every type a selector can match. A bare type
-selector also matches derived types, whose permissions may differ. Before
-queuing each matching event, delivery asks the PEP for `consume` on that event's
-concrete type using the stream caller's security context. Denied events are
-filtered out and count as examined, not delivered. An evaluation failure closes
-the stream with `teardown` without emitting or advancing the reported frontier
-for the current batch, allowing it to be replayed after recovery. Decisions are
-not cached across events; this adds one PEP evaluation per matching event.
+Delivery checks `consume` for each matching event using the stream caller's
+security context, including derived types matched by a parent selector.
+Denied events count as examined but are not delivered. If evaluation returns an error,
+the stream closes with `teardown`; the current batch is neither emitted nor
+reported as progress, so it can be replayed. Decisions are not cached: each
+matching event requires one PEP evaluation.
 
 **Subject_type is enforced on two independent dimensions**:
 1. **Authorization** (the `subject_type:produce` / `subject_type:consume` permission above) — *capability*: can the principal write or read events whose subject is of this type?

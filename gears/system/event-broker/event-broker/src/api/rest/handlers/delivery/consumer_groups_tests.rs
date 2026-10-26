@@ -580,7 +580,6 @@ async fn named_consumer_group_get_and_delete_reject_a_caller_without_permission(
 
 #[tokio::test]
 async fn list_consumer_groups_checks_a_named_group_on_its_own_id() {
-    // Every PEP question the listing asks, as (action, resource type).
     let asked = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     let recorder = Arc::clone(&asked);
     let harness = EventBrokerHarness::builder()
@@ -605,8 +604,6 @@ async fn list_consumer_groups_checks_a_named_group_on_its_own_id() {
         .await
         .assert_status(200);
 
-    // The group's own id, so a grant can name one shared group; the family
-    // label `gts.cf.core.events.consumer_group.v1~` would match every group.
     let asked = asked.lock().unwrap();
     assert!(
         asked

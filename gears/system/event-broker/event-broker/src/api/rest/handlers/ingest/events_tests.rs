@@ -759,7 +759,6 @@ async fn publish_rejected_for_unauthorized_tenant_id_returns_403() {
 
 #[tokio::test]
 async fn publish_checks_produce_on_the_events_own_type_not_a_family_label() {
-    // Every PEP question the publish asks, as (action, resource type).
     let asked = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     let recorder = Arc::clone(&asked);
     let harness = EventBrokerHarness::builder()
@@ -808,9 +807,6 @@ async fn publish_checks_produce_on_the_events_own_type_not_a_family_label() {
         })
         .map(|(_, resource)| resource.clone())
         .collect();
-    // A grant on `gts.cf.core.events.event.v1~x.eb.t1.*` can now match the
-    // publish; a check on the fixed `event_type.v1~` label could only be
-    // matched by a grant covering every producer's events.
     assert_eq!(produce, ["gts.cf.core.events.event.v1~x.eb.t1.foo.v1~"]);
 }
 

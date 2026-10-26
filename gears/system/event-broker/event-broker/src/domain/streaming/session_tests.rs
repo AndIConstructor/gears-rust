@@ -921,8 +921,7 @@ async fn a_quiet_session_parks_between_frames_rather_than_spinning() {
     );
 }
 
-/// A parent selector matches a derived event, but the parent permission does
-/// not authorize it. Check the actual frame stream, not just PEP request names.
+/// A parent selector can match a derived event that the caller cannot consume.
 #[tokio::test]
 async fn parent_subscription_does_not_deliver_a_denied_derived_type() {
     use crate::test_support::authz_doubles::DenyingAuthZ;

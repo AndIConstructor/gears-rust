@@ -820,7 +820,6 @@ async fn join_rejected_for_missing_topic_consume_permission_returns_403() {
 
 #[tokio::test]
 async fn join_checks_consume_on_the_concrete_topic_and_types() {
-    // Every PEP question the JOIN asks, as (action, resource type).
     let asked = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
     let recorder = Arc::clone(&asked);
     let harness = EventBrokerHarness::builder()

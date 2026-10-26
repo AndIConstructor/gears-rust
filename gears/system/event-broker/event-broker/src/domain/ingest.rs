@@ -366,12 +366,8 @@ where
     ) -> Result<PublishAck, DomainError> {
         use crate::domain::idempotency::ProducerIdempotencyOutcome;
 
-        // Authz/tenant-scope enforcement (`gears-rust#4516`,
-        // `eb-authz-enforcement`) - before topic/schema validation, per
-        // `DESIGN.md`'s Validation Pipeline step 1 ordering.
-        // The event's own type, so a grant can confine a producer to its own
-        // event types (`docs/DESIGN.md` §3.3); a type that is not an event
-        // type at all is refused before the PEP is asked.
+        // Reject non-event types, then authorize before topic/schema validation
+        // (`docs/DESIGN.md`, Validation Pipeline step 1 and §3.3).
         let event_type_resource = event_type_resource(&request.r#type)?;
         self.policy_enforcer
             .access_scope_with(
