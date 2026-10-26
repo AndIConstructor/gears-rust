@@ -1,7 +1,0 @@
-[gear]
-name = "Model Registry"
-description = "Tenant-scoped catalog of AI model providers and models with inheritance, shadowing, and owner-tenant approval."
-category = "gen-ai"
-is_plugin = false
-has_plugins = true
-has_extension_point = true
