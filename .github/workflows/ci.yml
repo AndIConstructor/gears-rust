@@ -38,6 +38,9 @@ env:
   # CARGO_* variable in its cache keys, so changing one rebuilds everything.
   # Usually better determinism and smaller cache churn in CI.
   CARGO_INCREMENTAL: "0"
+  CI_PREINSTALLED_TOOLS: nextest
+  # The one cargo-gears pin for CI; gears.mk reads it from the environment too.
+  CARGO_GEARS_VERSION: 0.0.8
   # Pinned nightly toolchain used by the coverage job. Independent of the pin in
   # shear-nightly.yml — they happen to match today but need not.
   RUSTUP_TOOLCHAIN_NIGHTLY: nightly-2026-08-21
@@ -187,9 +190,11 @@ jobs:
           cache-bin: false
           cache-targets: false
           shared-key: pr-clippy-${{ hashFiles('rust-toolchain.toml') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # Only main writes to the cache. See .github/actions/sccache.
       - name: Set up sccache
+        id: sccache
         uses: ./.github/actions/sccache
         # Reused below as `*sccache-inputs`.
         with: &sccache-inputs
@@ -217,6 +222,11 @@ jobs:
       # their code (E0308, DE0904, clippy::...) when the command fails.
       - name: cargo clippy
         run: tools/scripts/with_rust_annotations.sh make clippy
+
+      - name: Save compilation metrics
+        if: always() && runner.os == 'Linux' && steps.sccache.outputs.enabled == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/sccache-stats
 
   # Python checks of repo files. They need no Rust toolchain, so they run in
   # their own short job.
@@ -327,6 +337,7 @@ jobs:
           cache-bin: false
           cache-targets: false
           shared-key: pr-${{ runner.os }}-integration-${{ hashFiles('rust-toolchain.toml') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # Only main writes to the cache. See .github/actions/sccache.
       - name: Set up sccache
@@ -465,6 +476,11 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Save compilation metrics
+        if: always() && runner.os == 'Linux' && steps.setup.outputs.enabled == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/sccache-stats
+
   test-fips:
     name: FIPS verification (${{ matrix.os }})
     needs: changes
@@ -536,9 +552,11 @@ jobs:
           cache-bin: false
           cache-targets: false
           shared-key: pr-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-fips
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # Only main writes to the cache. See .github/actions/sccache.
       - name: Set up sccache
+        id: sccache
         uses: ./.github/actions/sccache
         with: *sccache-inputs
 
@@ -563,6 +581,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: cargo check --target x86_64-pc-windows-msvc -p cf-gears-toolkit-http --features fips
+
+      - name: Save compilation metrics
+        if: always() && runner.os == 'Linux' && steps.sccache.outputs.enabled == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/sccache-stats
 
   # The gear's whole suite against a real PostgreSQL with pgvector, and its
   # own coverage floor, in one pass.
@@ -621,6 +644,7 @@ jobs:
           cache-bin: false
           cache-targets: false
           shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}-llvm-cov
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # The same pin as the workspace coverage job: the v2.70.3 one installed
       # cargo-llvm-cov 0.8.5, which on nightly-2026-08-21 ran every test and
@@ -732,6 +756,7 @@ jobs:
           cache-bin: false
           cache-targets: false
           shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}-llvm-cov
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-llvm-cov and nextest
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -806,6 +831,7 @@ jobs:
           cache-bin: false
           cache-targets: false
           shared-key: pr-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-onnx
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Fetch ONNX Runtime shared library
         shell: bash
@@ -905,9 +931,11 @@ jobs:
           cache-bin: false
           cache-targets: false
           shared-key: pr-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-magika
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # Only main writes to the cache. See .github/actions/sccache.
       - name: Set up sccache
+        id: sccache
         uses: ./.github/actions/sccache
         with: *sccache-inputs
 
@@ -925,6 +953,11 @@ jobs:
         shell: bash
         timeout-minutes: 10
         run: cargo test -p cf-gears-file-parser --features magika
+
+      - name: Save compilation metrics
+        if: always() && runner.os == 'Linux' && steps.sccache.outputs.enabled == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/sccache-stats
 
   cfs:
     name: CFS
@@ -1008,6 +1041,7 @@ jobs:
           cache-bin: false
           cache-targets: false
           shared-key: pr-${{ runner.os }}-nightly-${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}-llvm-cov
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -1142,7 +1176,9 @@ jobs:
           toolchain: stable
 
       - name: Install cargo-gears
-        run: cargo install --locked cargo-gears@0.0.8
+        uses: ./.github/actions/cargo-gears
+        with:
+          version: ${{ env.CARGO_GEARS_VERSION }}
 
       - name: Run architecture lints
         run: tools/scripts/with_rust_annotations.sh cargo gears lint --dylint
