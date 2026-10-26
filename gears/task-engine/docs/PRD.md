@@ -444,7 +444,7 @@ Concurrency limits bound running tasks; nothing else bounds waiting ones. A clie
 | `global_max_queue_depth` | `queued` tasks in all queues of a task domain | config | 5,000,000 |
 | `tenant_max_deferred_tasks` | `scheduled`, `blocked`, and `waiting` tasks of one tenant in a task domain | config | 100,000 |
 
-`0` means unlimited. For a queue, a config override wins over the queue registration, which wins over the config default. `global_max_queue_depth` is a last-line safety ceiling and **MAY** be checked against a periodically sampled count, so it can be passed by at most one sampling interval; the other limits **MUST** never be passed at admission.
+`0` means unlimited. For a queue, a config override wins over the queue registration, which wins over the config default. `queue_max_queue_depth` and `global_max_queue_depth` cover all tenants, so an exact count would make every create and claim of a queue wait on one shared counter. They **MAY** therefore be checked against a periodically sampled count and passed by at most the admissions of one sampling interval. The per-tenant limits (`tenant_max_queue_depth`, `tenant_max_deferred_tasks`) **MUST** never be passed at admission.
 
 Rules:
 
@@ -1487,7 +1487,7 @@ The engine does not process personal data of its own, but it stores caller ident
 - [ ] A wait on a non-waitable topic is rejected (`400`); waits in ≥ 1,000 tenants never change the broker subscription
 - [ ] With two task domains, an event matching waits in both is applied exactly once in each, also after a crash and redelivery, and each domain's outgoing events commit with its state changes
 - [ ] Concurrency limits (queue and type, global and per tenant) are never exceeded under concurrent claims
-- [ ] Queue depth limits are never exceeded at admission under concurrent creates (the domain ceiling within one sampling interval), and no tenant ever has more than `tenant_max_deferred_tasks` deferred tasks (including `waiting`); a full limit returns `429` (`QUEUE_DEPTH_LIMIT`) with `Retry-After` and shows no other tenant's usage; replays and requeues are never refused
+- [ ] Per-tenant queue depth limits are never exceeded at admission under concurrent creates, the queue-wide and domain-wide limits are exceeded by at most one sampling interval of admissions, and no tenant ever has more than `tenant_max_deferred_tasks` deferred tasks (including `waiting`); a full limit returns `429` (`QUEUE_DEPTH_LIMIT`) with `Retry-After` and shows no other tenant's usage; replays and requeues are never refused
 - [ ] A type with a derived dedup identity accepts creates with or without a key (a sent key has no effect on the identity), answers a duplicate with `409`, and gives callers with different `authz_scope` values (or different subjects under `subject` scope) independent tasks
 - [ ] Supersession: a newer order value cancels the in-flight task (result `superseded`, `superseded_by` set, capacity freed) atomically with the new insert; an equal value is a replay; a lower value is rejected `STALE_ORDER`, even after the newer task finished; a caller without `cancel` on the old task gets `403` and nothing changes
 - [ ] Tenant A cannot see or change tenant B's tasks

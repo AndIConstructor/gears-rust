@@ -83,7 +83,7 @@ Chosen option: **Option 5 — Live/history split with a fixed partition ring, re
 
 A singleton maintenance loop per domain (advisory lock `te-maintenance`) drives retention the way the Event Broker's retention worker does: a paced tick computes the bounds, runs bounded, idempotent passes, and reports what it did; a failed pass removes nothing and the next tick repeats it. During bucket `c` it recycles slot `s = (c + 1) mod N`, holding bucket `B = c + 1 − N`:
 
-1. **Mark** `s` as `recycling` for bucket `B` in the domain's `te_ring_state` (one row per slot). From then on, every write for a task of bucket `B` (a new event, entry, tag change, or terminal result of a task created that long ago) goes to the `_retained` tables, so no new row lands in `s`. Nodes re-read `te_ring_state` every `runtime_config_poll_secs`; the next step waits at least that long plus the longest transaction time.
+1. **Mark** `s` as `recycling` for bucket `B` in the domain's `te_ring_state` (one row per slot), in a transaction that locks that row. This is a **fence**, not a timer: every write for a task of an old bucket (`b ≤ c + 2 − N`; the bucket being recycled, older ones, and one bucket of margin for clock differences) locks the same row first, writes to the ring only if the row is `active` for its bucket, and otherwise writes to the `_retained` tables. So the mark waits for writers that already hold the row, and every later writer sees `recycling`. When the mark commits, no new row can land in `s`. Newer tasks skip the check, so the hot path pays nothing.
 2. **Hard limit.** Force-cancel non-terminal tasks older than `hard_retention_days` through `finalize()` with `forcibly_cancelled`, in bounded batches.
 3. **Rescue.** Copy into `te_*_retained` (batched, idempotent) every row in `s` of a task that must outlive it: the task is still **non-terminal**, or it is terminal and `terminal_at + effective_retention > now` (late completions, longer type policies, tenant legal holds).
 4. **Truncate** slot `s` in every history table: PostgreSQL `TRUNCATE` of the partition, MySQL `ALTER TABLE … TRUNCATE PARTITION`, SQLite bounded `DELETE … WHERE ring_slot = s`. Through the ToolKit helper only (below), with a short lock timeout and retry.
@@ -114,7 +114,7 @@ Tests MUST check that:
 * the migrations create exactly `N` partitions per history table on PostgreSQL and MySQL, and no foreign key between task tables on any backend;
 * no truncation removes data of a non-terminal task or of a task whose retention has not ended;
 * rows written for a task of a `recycling` bucket land in the `_retained` tables, and reads by task ID find them;
-* a slot is never written after it was marked `recycling`, including by transactions that started before the mark;
+* a slot is never written after it was marked `recycling`, including by transactions that started before the mark and by nodes whose cache or clock is out of date;
 * a task completing late keeps its full retention from `terminal_at`;
 * a tenant with a long policy is rescued and does not block truncation for other tenants;
 * claim latency is independent of history volume, and a search with a `created_at` window touches only the slots that cover it;

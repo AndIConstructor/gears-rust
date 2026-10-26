@@ -95,16 +95,17 @@ Deadlock retry stays only as a safety net for orders the analysis does not cover
 
 ### Throughput
 
-A counter row with a non-zero limit is held from step 3 to commit, so claims that need the same row serialize on it; a claim that loses the head row waits for the winner's commit and then moves on. Both waits last one short transaction. The design keeps that cost low:
+A counter row with a non-zero limit is held from step 3 to commit, so claims that need the same row serialize on it. Without `SKIP LOCKED`, claims on different nodes also read the same head rows; a claim that loses a head row waits for the winner's commit **while it still holds its counter locks**, so other claims wait behind it. Both waits last one short transaction, but together they can make claims on one queue run one after another. The design keeps that cost low:
 
 * **Batch claims**: one transaction claims up to `max_tasks` tasks with one `+k` per counter row.
 * **Node-local coalescing**: parked waiters with the same subject, compiled scope, and queue set share one database claim, so database load grows with nodes, not with workers.
-* **Hot-row sharding**: a wide `queue_global` / `type_global` row is split into shards whose sub-limits sum to at most N; a claim reserves on one shard with room.
+* **No queue-wide depth row**: the queue-wide and domain-wide depth limits are sampled ceilings (DESIGN §3.7 Hot-row rules), so claims and creates of a queue do not all lock one shared backlog row. Only the per-tenant backlog row of each claimed task is touched.
+* **Hot-row sharding**: a large limit — global or per tenant — is split into shards whose sub-limits sum to at most N; a claim reserves on one shard with room. A busy tenant therefore does not turn its own row into a hot spot.
 * **Unlimited means untouched**: a dimension with limit `0` has no counter row and is never locked.
 
 Estimate to be confirmed by the benchmark: a claim transaction of 2–5 ms on PostgreSQL serializes at 200–500 transactions per second per counter shard; with batches of up to 32 and coalescing this is well above the 500 claims/s NFR on one queue.
 
-**Backend acceleration is a ToolKit strategy, not a gear decision.** If the benchmark shows that head-row waits dominate, `toolkit-db` may select candidates internally with `FOR UPDATE SKIP LOCKED` on PostgreSQL/MySQL (as its outbox already does), under the same contract and the same exact order among free rows. An opt-in `Spread` strategy (candidate spreading, Option 4) exists only with PRD sign-off on the relaxed order. The Task Engine never names either.
+**Backend acceleration is a ToolKit strategy, not a gear decision.** The Task Engine asks `toolkit-db` ([#5478](https://github.com/constructorfabric/gears-rust/issues/5478)) to select candidates with `FOR UPDATE SKIP LOCKED` on PostgreSQL/MySQL **by default** (as its outbox already does), under the same contract and the same exact order among free rows, so a losing claim skips a taken head row instead of waiting for it. SQLite keeps plain guarded updates (one writer). An opt-in `Spread` strategy (candidate spreading, Option 4) exists only with PRD sign-off on the relaxed order. The Task Engine never names either.
 
 ### ToolKit contract
 
@@ -140,7 +141,7 @@ Tests MUST check, on PostgreSQL, MySQL/MariaDB, and SQLite, that:
 * reservation, state changes, backlog, timers, outbox, and sessions commit or roll back together;
 * concurrent claims and completions on the same queue never deadlock (no `40P01` / `1213` under the stress test).
 
-Benchmark (exit criterion for `accepted`): PostgreSQL and MySQL 8 × {1, 10, 100, 500} workers × {1, 10} queues × {`fifo`, `round_robin`} × `max_tasks` {1, 16} × queue limit {0, 100, 10 000}, plus one run where a single tenant holds 100K `queued` tasks at its `per_tenant_concurrency_limit`. Record p50/p99 claim latency, claims/s, lost races per claim, counter-row wait time, and contention retries. **Pass:** `cpt-cf-task-engine-nfr-latency` and `cpt-cf-task-engine-nfr-throughput` on PostgreSQL with ≥ 100 workers on one queue, and claims/s do not drop from 10 to 100 workers.
+Benchmark (exit criterion for `accepted`): PostgreSQL and MySQL 8 × {1, 10, 100, 500} workers × {1, 10} queues × {`fifo`, `round_robin`} × `max_tasks` {1, 16} × queue limit {0, 100, 10 000} × engine nodes {1, 3}, with the per-tenant queue-depth limits **enabled** and creates running at the same time as claims; plus one run where a single tenant holds 100K `queued` tasks at its `per_tenant_concurrency_limit`, and one where a single tenant does all creates and claims (the platform-tenant case). Record p50/p99 claim latency, claims/s, lost races per claim, counter-row wait time, and contention retries. **Pass:** `cpt-cf-task-engine-nfr-latency` and `cpt-cf-task-engine-nfr-throughput` on PostgreSQL with ≥ 100 workers on one queue, and claims/s do not drop from 10 to 100 workers.
 
 ## Pros and Cons of the Options
 

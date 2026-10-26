@@ -54,7 +54,7 @@ Chosen option: **Option 3 — Database slot rows with guarded atomic reservation
 Each concurrency dimension scope has one counter row holding `used` and `limit_value`. The rows are split by **scope**, so that the secure ORM can protect the per-tenant ones:
 
 * **Cross-tenant dimensions** (`queue_global`, `type_global`) live in `te_concurrency_slots`, keyed `(dimension_code, scope_id, shard)`. The table has no tenant column and holds no tenant data, so it is `#[secure(unrestricted)]`, reached on request paths only through a narrow `GlobalCounterRepo` (guarded `+1`/`−1` on a key computed from an already-authorized task row) under a justified `allow_all()`.
-* **Per-tenant dimensions** (`queue_tenant`, `type_tenant`) live in `te_tenant_concurrency_slots`, keyed `(owner_tenant_id, dimension_code, scope_id)`, with `owner_tenant_id` as a real `tenant_col`. Request paths write them under `scope.tenant_only()` after the task row was authorized with the full scope, so a reservation charged to the wrong tenant fails in the ORM.
+* **Per-tenant dimensions** (`queue_tenant`, `type_tenant`) live in `te_tenant_concurrency_slots`, keyed `(owner_tenant_id, dimension_code, scope_id, shard)`, with `owner_tenant_id` as a real `tenant_col`. Request paths write them under `scope.tenant_only()` after the task row was authorized with the full scope, so a reservation charged to the wrong tenant fails in the ORM.
 
 Every key column is `NOT NULL` (the dimension says whether `scope_id` is a queue or a task type), so each primary key is a real uniqueness constraint on every backend. A claim reserves every applicable dimension inside the claim transaction, **before it writes any task row**, in the fixed lock order defined in DESIGN §3.7 (counters before task rows; global rows before tenant rows): one guarded `used = used + k WHERE used + k <= limit_value` per counter row, then the guarded `queued → claimed` updates, then the unused part of `k` is returned on the same rows (ADR-0008, ToolKit secure claim primitive). If any dimension is full the candidate is skipped without any task write, and the claim moves on to tasks governed by other scopes. Single-task admissions use one guarded `used = used + 1 WHERE used < limit_value` per row.
 
@@ -62,7 +62,7 @@ Slots are released whenever a task leaves `claimed` or `running` for a state tha
 
 A singleton maintenance loop reconciles each counter row from the live tasks charged to it, in either direction. It locks the counter row first and counts in a new statement afterwards, so a claim or release running at the same time is either counted or applied after the correction — never lost or counted twice (DESIGN §3.7 Counter reconciliation). On MySQL/MariaDB the reconciliation transaction runs at `READ COMMITTED`.
 
-With `counter_shards = S > 1`, a hot cross-tenant row is split into S shards whose sub-limits sum to at most N (ADR-0008); per-tenant rows are naturally spread and stay unsharded. The optional Cluster ready-task cache may pre-sort candidates, but the database reservation always decides.
+With `counter_shards = S > 1`, a row with a large limit is split into S shards whose sub-limits sum to at most N (ADR-0008). This applies to per-tenant rows too: most tenants stay on one shard, but one busy tenant (for example the platform tenant on the `system` queue) must not turn its own row into a hot spot. The optional Cluster ready-task cache may pre-sort candidates, but the database reservation always decides.
 
 ### Consequences
 
@@ -71,7 +71,7 @@ With `counter_shards = S > 1`, a hot cross-tenant row is split into S shards who
 * A claim returns `429 CONCURRENCY_LIMIT` only when nothing could be assigned and capacity was the reason.
 * Limits can change at runtime; each task domain applies new limits in its maintenance loop.
 * Slot reconciliation must run regularly (`slot_reconcile_interval_secs`); it locks only counter rows, never task rows, so it cannot deadlock with claims.
-* Each leased task carries the shards it reserved (`queue_slot_shard`, `type_slot_shard`).
+* Each leased task carries the shards it reserved (`queue_slot_shard`, `type_slot_shard`, `tenant_queue_slot_shard`, `tenant_type_slot_shard`).
 * Per-tenant counters get the same ORM tenant isolation as task rows; the cross-tenant table is a declared, lint-gated exception to the ToolKit `unrestricted` guidance (DESIGN §2.1), justified because it has no tenant column and is reachable only through `GlobalCounterRepo`.
 
 ### Confirmation

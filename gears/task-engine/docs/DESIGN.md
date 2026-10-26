@@ -205,7 +205,7 @@ Tenant-owned tables (`te_tasks`, `te_task_state`, `te_task_results`, `te_task_en
 
 **Per-tenant counters are tenant-scoped** (per [`06_authn_authz_secure_orm.md` §Unrestricted entities](../../../docs/toolkit_unified_system/06_authn_authz_secure_orm.md)). Request paths write them under `scope.tenant_only()`, after the task row was authorized with the full scope in the same transaction (the mini-chat pattern). A wrong-tenant write then fails in the ORM.
 
-**`unrestricted` entities** have no tenant column: `te_concurrency_slots` and `te_queue_backlog` (cross-tenant counts only), `te_worker_blacklist`, `te_worker_sessions` (reached only with `worker_subject = ctx.subject_id` on request paths, §3.7), and `te_runtime_config`. The two counter tables are still touched in tenant requests, so they are a **declared exception** to the guide, with these controls ([`16_defect_class_to_control_map.md` §Globally scoped tables](../../../docs/toolkit_unified_system/16_defect_class_to_control_map.md)):
+**`unrestricted` entities** have no tenant column: `te_concurrency_slots` (cross-tenant counts only), `te_worker_blacklist`, `te_worker_sessions` (reached only with `worker_subject = ctx.subject_id` on request paths, §3.7), and `te_runtime_config`. The counter table is still touched in tenant requests, so it is a **declared exception** to the guide, with these controls ([`16_defect_class_to_control_map.md` §Globally scoped tables](../../../docs/toolkit_unified_system/16_defect_class_to_control_map.md)):
 
 - Access only through `GlobalCounterRepo`: a guarded `+n`/`−n` on a key taken from an already-authorized task row; no read or list on request paths.
 - Each `allow_all()` call site carries a justification; the lint gate rejects any other `allow_all()` on a request path.
@@ -546,7 +546,7 @@ Every transition into a terminal state (`completed`, `failed`, `dead_lettered`, 
 
 **Timer lifecycle across requeues** (PRD §5.3 *Deadlines survive requeues*): the lifetime and SLA timers are armed at creation and are removed only by a terminal transition. Retry re-enqueue, lease-expiry/assignment-timeout requeue, parking in `waiting`, and resumption never delete them; the state-specific timers (queue timeout, scheduled enqueue, wait timeout) are removed or re-armed on each transition, and the state-specific lease fields (`session_id`, `handoff_until`, `assignment_deadline`, `execution_deadline`) are cleared whenever the task leaves `claimed`/`running`.
 
-**Queue-depth accounting** (PRD §5.2): two counted sets, changed in the same transaction as the state. **Queued** (`queued`) feeds `queue_global` (`te_queue_backlog`) and `queue_tenant` (`te_tenant_queue_backlog`); `domain_global` is a sampled ceiling (§3.7 Hot-row rules). **Deferred** (`scheduled`, `blocked`, `waiting`) feeds `tenant_deferred`.
+**Queue-depth accounting** (PRD §5.2): two counted sets, changed in the same transaction as the state. **Queued** (`queued`) feeds `queue_tenant` (`te_tenant_queue_backlog`); the queue-wide and domain-wide limits (`queue_global`, `domain_global`) are sampled ceilings with no counter row (§3.7 Hot-row rules). **Deferred** (`scheduled`, `blocked`, `waiting`) feeds `tenant_deferred`.
 
 - **Admission** (guarded, may get `429`): creation, bulk move, admin re-enqueue, recurring spawn (once PRD §5.22 exists), and deferral by choice — dependency add (→ `blocked`), park (→ `waiting`), release with delay (→ `scheduled`). Leaving `queued` this way also decrements queued.
 - **Re-entry** (never refused): retry and lease-expiry requeue (→ `scheduled`), release without delay (→ `queued`).
@@ -713,7 +713,7 @@ Responsibilities:
 - **Supersession** (types declaring `supersede`): in the create transaction, compare the order value with `te_supersede_heads`; newer → cancel the group's non-terminal task via the cancel path (PDP `cancel` check on that task with the caller's scope first), equal → dedup, older → `failed_precondition` / `STALE_ORDER` (§4.6). Reject `cancellable=false` on these types
 - **Urgency** (PRD §5.2): default `normal`; `critical` needs a PEP check for `expedite` (else `403`)
 - **Creator authority** (PRD §5.11 Creator authority; §3.3 Authorization Model): for a `creator_verified` type, run the type's creator checks with the caller's own `SecurityContext` **before** the create transaction opens (PDP calls never run inside a transaction); store the verdicts in `te_tasks.authority_json` and the `verified` flag on each `te_resource_refs` row (§4.6 Task Creation Admission, step 0)
-- **Queue-depth admission**: reserve capacity on every applicable dimension (`te_queue_backlog` for `queue_global`, `te_tenant_queue_backlog` for `queue_tenant` / `tenant_deferred`) in the same transaction as the insert; full → `resource_exhausted` `429` (`QUEUE_DEPTH_LIMIT`) (§4.6)
+- **Queue-depth admission**: check the sampled `queue_global` and `domain_global` ceilings before the transaction, and reserve the per-tenant dimensions (`te_tenant_queue_backlog` for `queue_tenant` / `tenant_deferred`) in the same transaction as the insert; full → `resource_exhausted` `429` (`QUEUE_DEPTH_LIMIT`) (§4.6)
 - Validate payload size limits on **every payload-changing write** (create, checkpoint/context-update, complete with output, set-wait with checkpoint): aggregate `input + context + output` ≤ 64 KiB measured as **uncompressed canonical JSON** before compression; reject `413` leaving stored payload unchanged. The size check and the payload write are one **revision-guarded** update (`te_task_state.revision`, §4.6 Payload-Changing Writes); a write that loses the guard to a concurrent payload write is rejected `409` `aborted` / `CONCURRENT_MODIFICATION` and may be retried by the caller
 - **Authorize links** (PRD §5.9 Link Authorization), first, in the same transaction:
   - **Parent**: must exist under the caller's scope, be unfinished, not `waiting`, and in the same tenant. Then either `parent_lease_token` matches the parent's lease held by the caller, or a PEP check allows `update` on it.
@@ -746,7 +746,7 @@ Dispatch engine. Owns priority-ordered task dispatch, atomic claiming, concurren
 
 Responsibilities:
 - Atomic claim (ADR-0008, through `toolkit_db::secure::claim`): each queue yields its next candidates in PRD §5.2 order with a plain scoped read, and candidates are merged across queues by `(urgency, created_at, task_id)`; queue listing order has no effect (k-way merge, §4.6 Task Assignment). Concurrency slots are reserved with guarded `+k` updates before any task write; then guarded `queued → claimed` updates assign up to `max_tasks` tasks, each with its own lease, unused reservations are settled, and all of it commits in one transaction in the lock order of §3.7 Lock ordering. Two workers cannot claim the same task. Waiters on one node with the same subject, compiled scope, and queue set share one database claim (node-local coalescing). All queues in one claim request **MUST** resolve to a single task domain (§3.8); a multi-domain claim is rejected `invalid_argument` `400` — exact claim ordering is preserved within one database. `attempt` is incremented here (the single authoritative increment point). The same guarded update sets a random UUID v4 `lease_token` (not v7: its timestamp part is predictable), `assignee_subject = ctx.subject_id`, and `lease_epoch + 1` (SDK `Lease`, §3.2 SDK Security Model).
-- Resolve and maintain effective queue-depth limits (config override → queue GTS `queue_max_queue_depth` → config default `queue_max_queue_depth`; `tenant_max_queue_depth`, `tenant_max_deferred_tasks` and `global_max_queue_depth` from config) into `te_queue_backlog.limit_value` (global) and `te_tenant_queue_backlog.limit_value` (per tenant), and keep the counters consistent on every pending-set transition (§3.1 Queue-depth accounting); bulk move re-admits against the destination queue per task
+- Resolve and maintain effective queue-depth limits (config override → queue GTS `queue_max_queue_depth` → config default `queue_max_queue_depth`; `tenant_max_queue_depth`, `tenant_max_deferred_tasks` and `global_max_queue_depth` from config) into the sampled ceilings (queue-wide and domain-wide) and `te_tenant_queue_backlog.limit_value` (per tenant), and keep the per-tenant counters consistent on every pending-set transition (§3.1 Queue-depth accounting); bulk move re-admits against the destination queue per task
 - Enforce multi-dimensional concurrency limits: per-queue global, per-queue per-tenant, per-type global, per-type per-tenant — a candidate is assigned only if **every** dimension has capacity. A dimension at capacity blocks only the tasks it governs: the candidate is skipped, the saturated scope is excluded from the rest of the scan, and the claim proceeds to other tenants'/types' tasks (§4.6 Task Assignment). The claim returns `429 CONCURRENCY_LIMIT` only when nothing could be assigned and at least one eligible task was skipped for capacity
 - Support long-poll claiming: if no tasks available and timeout specified (clamped to `claim_max_wait_secs`, default 50 s), park (no DB connection, no admission permit) and retry on a `newTask` or `slotReleased` signal **or** on the node's queue-watcher tick, so wake-up works across nodes (§3.2 Signal System)
 - Heartbeat processing (ADR-0017): one guarded update renews the worker session (`te_worker_sessions`, `WHERE session_id = ? AND worker_subject = ctx.subject_id AND status = active`), then one read checks each listed lease (`lease_token`, `assignee_subject`, `session_id`, state; mismatch → `LEASE_LOST` for that lease) and returns the control response (cancel flag, current state). No `te_task_state` row is written. Workers holding several leases **SHOULD** use the batch heartbeat endpoint; the SDK worker runtime does this automatically. Session expiry requeues the session's tasks via the **same retry-policy backoff** as an explicit failure (transition to `scheduled` with computed `run_after`, not immediate `queued`) — see §4.6 sessionScan
@@ -842,7 +842,7 @@ On the PostgreSQL/MySQL production profile, retention is realized primarily by *
 **Ring geometry** (fixed at installation, §4.1 `retention.ring`): `bucket_days` `W` (default 7) and `ring_slots` `N = ⌈drop_horizon_days / W⌉ + 2` (default 17). Every history row stores `ring_slot = ⌊days_since_epoch(task_created_at) / W⌋ mod N`. The drop horizon (`drop_horizon_days`, default = `global_retention_days`) is deliberately the **common** retention, not the longest one, so one long policy can never block recycling for the whole domain. Changing `W` or `N` is a schema migration that builds a new ring.
 
 Maintenance sequence (per domain), during bucket `c`, for slot `s = (c + 1) mod N` holding bucket `B = c + 1 − N` (its newest rows are at least `(N − 2) × W ≥ drop_horizon_days` old):
-1. **Mark**: set `s` to `recycling` for bucket `B` in `te_ring_state` (§3.7). From then on every write for a task of bucket `B` goes to the `_retained` tables. Wait at least `runtime_config_poll_secs` plus the longest transaction time, so no node or in-flight transaction still writes into `s`.
+1. **Mark**: in one short transaction, read the `te_ring_state` row of slot `s` with `lock_exclusive()` and set it to `recycling` for bucket `B`. This is a fence, not a timer: every write for a task of an old bucket locks the same row first (§3.7 *Ring fence*). So the mark waits for writers that already hold the row, and every writer after it sees `recycling` and writes to the `_retained` tables. When the mark commits, nothing can write into `s` any more, and step 2 starts at once.
 2. **Hard limit**: force-cancel non-terminal tasks older than `hard_retention_days` through `finalize()` with `forcibly_cancelled` (§4.6 Terminal Transition), in bounded batches; they then become terminal history like any other.
 3. **Rescue**: copy into `te_*_retained` (batched, idempotent) every row in slot `s` of a task that must outlive it:
    - the task is still **non-terminal**; or
@@ -850,7 +850,7 @@ Maintenance sequence (per domain), during bucket `c`, for slot `s = (c + 1) mod 
    The rescued set is small (long-lived tasks and long-retention tenants/types). Live-only tables need no step here.
 4. **Truncate** slot `s` in every history table through the ToolKit helper `truncate_partition(table, slot)` (ToolKit work [#5481](https://github.com/constructorfabric/gears-rust/issues/5481); PostgreSQL `TRUNCATE` of the partition, MySQL `ALTER TABLE … TRUNCATE PARTITION`), with a short lock timeout and retry. Then set `s` free for bucket `B + N`.
 5. **Expire leftovers**: bounded `DELETE` of expired `_retained` rows, of rows under policies **shorter** than the drop horizon (by `ring_slot` and `terminal_at`), of `te_dedup` rows with `expires_at < now` (§3.7 `te_dedup`), and of `te_supersede_heads` rows of removed tasks (by `latest_created_at`, minus rescued IDs). These are the only row deletes, on narrow rows at the create rate.
-6. Capacity reconciliation: read the latest runtime configuration version, update the local concurrency and queue-depth limits for this domain in one transaction, save the applied version number, and retry if this step fails. Then reconcile `used` in the five counter tables with the lock-then-count procedure (§3.7 Counter reconciliation) and report orphan rows (`te_orphan_rows_total`; there are no DB foreign keys)
+6. Capacity reconciliation: read the latest runtime configuration version, update the local concurrency and queue-depth limits for this domain in one transaction, save the applied version number, and retry if this step fails. Then reconcile `used` in the four counter tables with the lock-then-count procedure (§3.7 Counter reconciliation) and report orphan rows (`te_orphan_rows_total`; there are no DB foreign keys)
 
 There is no partition provisioning and no runtime `CREATE` / `DROP PARTITION`: the `N` partitions per history table are created once by the migrations. Outbox row pruning is handled by the Event Broker SDK producer / `toolkit_db::outbox` vacuum stage, not the Retention Service. All Retention Service loops run under the advisory-lock leader (§3.8) so only one instance performs maintenance.
 
@@ -1118,7 +1118,7 @@ All authenticated endpoints below use `.authenticated()` + `.require_license_fea
 |---|---|---|---|
 | `GET` | `/admin/dlq` | List dead-letter queue tasks | `admin` |
 | `POST` | `/admin/tasks/{id}/reenqueue` | Re-enqueue a `dead_lettered` or `failed` task (PRD §5.8 Re-enqueue rules): retry budgets reset, previous result cleared, lifetime restarted, dedup identity re-taken (`409` if held by another task) | `admin` |
-| `POST` | `/admin/config` | Save a new runtime configuration version into `te_runtime_config` in the default domain database, and publish `configUpdated` in the same transaction — one event per queue whose effective settings change (a task-type-pattern override or global default fans out to every affected queue), all carrying the saved `config_version`. Returns `202 Accepted` with the version number. Because each task domain has its own database, the limits cannot update everywhere in one transaction. Instead, each domain's background maintenance job reads new versions and updates its local `te_concurrency_slots` and `te_queue_backlog` limits, records the applied version locally, and retries if a step fails | `configure` on queues (`queue_configure`) |
+| `POST` | `/admin/config` | Save a new runtime configuration version into `te_runtime_config` in the default domain database, and publish `configUpdated` in the same transaction — one event per queue whose effective settings change (a task-type-pattern override or global default fans out to every affected queue), all carrying the saved `config_version`. Returns `202 Accepted` with the version number. Because each task domain has its own database, the limits cannot update everywhere in one transaction. Instead, each domain's background maintenance job reads new versions and updates its local counter limits and sampled ceilings, records the applied version locally, and retries if a step fails | `configure` on queues (`queue_configure`) |
 | `GET` | `/admin/config/{version}` | Check if a config version has been applied across all domains, showing which domains are updated and which are still pending | `configure` on queues (`queue_configure`) |
 
 **DLQ inspection task-domain scope** (PRD §5.8/§5.19): `GET /admin/dlq` is a read/inspection path. Dead-letter queues are not routed (§3.8), so it **fans out across all task domains** and merges results (§4.6 Multi-Shard Search), unless it is filtered by a source queue (`dead_lettered_from`), which names one domain. `configUpdated` (from `/admin/config`) is written to the local event log/outbox like other events.
@@ -1411,12 +1411,12 @@ The task data is split into two tables — **`te_tasks`** (immutable after creat
 | `te_tags`, `te_resource_refs` | Search attributes, kept for the task's whole retention | Ring (`ring_slot`) | Truncated with the task's slot, not row by row |
 | `te_wait_conditions`, `te_dependencies`, `te_timers` | **Live-only** rows of non-terminal tasks (for dependencies: the successor) | **No** | Deleted at the terminal transition, so they stay as small as the live set; history is in `te_events` and `te_task_results.predecessors` |
 | `te_*_retained` (one per ring table, same columns) | Rows **rescued** from a slot before it is truncated, and new rows of **retained** tasks (see RetentionService) | **No** | Holds the rare rows that must outlive their slot |
-| `te_ring_state` | One row per slot: `ring_slot`, `bucket`, `status` (`active` / `recycling` / `free`), `changed_at` | **No** | Tells every node which buckets are retained, so no write lands in a slot being recycled |
+| `te_ring_state` | One row per slot: `ring_slot`, `bucket`, `status` (`active` / `recycling` / `free`), `changed_at` | **No** | The ring fence: writers of old buckets and the recycling step lock the same row, so no write lands in a slot being recycled (§3.7 *Ring fence*) |
 | `te_dedup`, `te_supersede_heads` | Creation identities | **No** | Primary key must be globally unique; narrow rows deleted in batches |
 
 - **Terminal transition** (worker complete/fail, cancel, timeout, dead-letter): in one transaction, move the row from `te_task_state` to `te_task_results` (copying the predecessor list into `predecessors`) and delete the task's live-only rows. A `cascade` timer created in that transaction stays until its cascade ends (§4.6 Cascades). Admin re-enqueue moves the state row back but does not restore dependencies. Idempotent completion replay (§3.2 TaskService) reads `te_task_results`.
 - **Partition key = `ring_slot SMALLINT NOT NULL`** = `⌊days_since_epoch(task_created_at) / bucket_days⌋ mod ring_slots`, computed once in Rust from the task's UUID v7 id, for every ring table above (PostgreSQL / MySQL `PARTITION BY LIST (ring_slot)`, exactly `ring_slots` partitions created by the migrations through a ToolKit helper, [#5481](https://github.com/constructorfabric/gears-rust/issues/5481)). All rows of one task land in one slot, a lookup by `task_id` filters `ring_slot = slot_of(id)`, and a `created_at` window filters `ring_slot IN (slots covering it)`. Engine-scoped events with no task (`configUpdated`, `workerBlacklisted`) use their own event id timestamp.
-- **Retained tasks**: a task whose bucket's slot is `recycling` or was recycled (`te_ring_state`, cached per node and re-read every `runtime_config_poll_secs`) is **retained**: its reads and all its new rows (events, entries, tag changes, terminal result) use the `te_*_retained` tables, never the ring.
+- **Ring fence and retained tasks**: let `c` be the current bucket. A transaction that writes a history row (event, entry, tag change, terminal result) for a task of bucket `b ≤ c + 2 − N` first reads the `te_ring_state` row of the task's slot with `lock_exclusive()`. This covers the bucket being recycled now, every older bucket, and one more bucket as a margin for clock differences between nodes. If the row is `active` for bucket `b`, the row goes to the ring. Otherwise the task is **retained**: its reads and all its new rows use the `te_*_retained` tables, never the ring. Writes for newer tasks, which are almost all writes, skip the check. Only tasks older than about `(N − 3) × W` days take this lock, so it costs nothing on the hot path. Because the mark step (§3.2 RetentionService) locks the same row, no write can land in a slot after it is marked `recycling`, whatever a node's cache or clock says. ToolKit work: [#5481](https://github.com/constructorfabric/gears-rust/issues/5481).
 - **No database foreign keys between task tables** (ADR-0009): PostgreSQL needs the partition key in a foreign key to a partitioned table, MySQL does not support them at all, and rescue moves rows to `_retained` tables. Rows that refer to a task are written and removed in that task's transactions; reconciliation reports orphans (`te_orphan_rows_total`).
 - **Reads** of a task: `te_task_state` (live) or `te_task_results` (terminal), joined with `te_tasks`, from the ring or, for a retained task, from the `_retained` tables; history/entries read the ring table `UNION ALL` its `_retained` table (the retained side is small and indexed by `task_id`).
 - **SQLite**: no partitioning; the same tables exist unpartitioned with `ring_slot` indexed, and recycling a slot is a bounded `DELETE … WHERE ring_slot = ?` after the same rescue (§3.2 RetentionService).
@@ -1493,7 +1493,9 @@ The task data is split into two tables — **`te_tasks`** (immutable after creat
 | `progress_json` | JSON (nullable) | |
 | `queue_slot_shard` | SMALLINT (nullable) | Shard of the `queue_global` concurrency row this task reserved at claim; `NULL` when not leased or the dimension is unlimited. Release decrements exactly this shard, and reconciliation counts per shard from it (§3.7 Counter reconciliation) |
 | `type_slot_shard` | SMALLINT (nullable) | Same, for the `type_global` concurrency row |
-| `backlog_shard` | SMALLINT (nullable) | Shard of the `queue_global` backlog row this task occupies while `queued`; `NULL` otherwise |
+| `tenant_queue_slot_shard` | SMALLINT (nullable) | Same, for the `queue_tenant` concurrency row |
+| `tenant_type_slot_shard` | SMALLINT (nullable) | Same, for the `type_tenant` concurrency row |
+| `backlog_shard` | SMALLINT (nullable) | Shard of the per-tenant backlog row this task occupies: `queue_tenant` while `queued`, `tenant_deferred` while `scheduled` / `blocked` / `waiting`; `NULL` otherwise. A task is in one set at a time, so one column is enough |
 | `updated_at` | TIMESTAMP | |
 
 **Indexes**:
@@ -1515,7 +1517,7 @@ Heartbeats never write this table (ADR-0017); it changes only on claims, state t
 
 #### `te_task_results` — terminal task state (written once at the terminal transition)
 
-Same columns as `te_task_state` minus the live-only dispatch/lease columns (`run_after`, `session_id`, `handoff_until`, `assignment_deadline`, `execution_deadline`, `resume_pending`, `queue_slot_shard`, `type_slot_shard`, `backlog_shard`, `bg_slot`), plus:
+Same columns as `te_task_state` minus the live-only dispatch/lease columns (`run_after`, `session_id`, `handoff_until`, `assignment_deadline`, `execution_deadline`, `resume_pending`, `queue_slot_shard`, `type_slot_shard`, `tenant_queue_slot_shard`, `tenant_type_slot_shard`, `backlog_shard`, `bg_slot`), plus:
 
 | Column | Type | Notes |
 |---|---|---|
@@ -1549,11 +1551,12 @@ Cross-tenant counters live in an unscoped table, per-tenant counters in a tenant
 | `owner_tenant_id` | UUID NOT NULL | The task's owner tenant |
 | `dimension_code` | TINYINT / SMALLINT | `queue_tenant` or `type_tenant` |
 | `scope_id` | UUID NOT NULL | Queue ID or task type ID |
-| `limit_value` | INT | Effective limit after config/GTS resolution |
+| `shard` | SMALLINT NOT NULL | Hot-row shard index (default 0; Hot-row rules below) |
+| `limit_value` | INT | Effective limit after config/GTS resolution (per-shard when sharded) |
 | `used` | INT | This tenant's `claimed` + `running` tasks |
 | `updated_at` | TIMESTAMP | |
 
-**Indexes**: PK `(owner_tenant_id, dimension_code, scope_id)`. Unsharded.
+**Indexes**: PK `(owner_tenant_id, dimension_code, scope_id, shard)`. Sharded by the same rule as the global rows (Hot-row rules below).
 
 **Scoping**: see §2.1 (`GlobalCounterRepo` for the global table, `scope.tenant_only()` for the tenant table). Callers never read either table directly.
 
@@ -1565,12 +1568,11 @@ Concurrency enforcement **MUST** reserve slots atomically before moving a task t
 
 0. **`te_dependency_locks`** (the tenant's dependency-graph lock), only in dependency-add transactions, and always first (§4.6 Dependency Graph Validation).
 1. **`te_concurrency_slots`**, by `(dimension_code, scope_id, shard)`.
-2. **`te_tenant_concurrency_slots`**, by `(owner_tenant_id, dimension_code, scope_id)`.
-3. **`te_queue_backlog`**, by `(dimension_code, queue_id, shard)`.
-4. **`te_tenant_queue_backlog`**, by `(owner_tenant_id, dimension_code, queue_id)`.
-5. **`te_tenant_wait_counters`**, by `(owner_tenant_id, dimension_code, scope_id)`.
-6. **`te_task_state` rows**, in a fixed order: ascending `task_id` for claims and bulk operations; for cascades and links, predecessor before successors and parent before children (a link locks the linked parent or predecessors before it inserts or changes the dependent task).
-7. **`te_worker_sessions`** last, by `session_id` (claims and accepts renew the session at the end of their transaction). Session expiry locks **only** the session row in its own transaction and requeues the session's tasks in later transactions, so it never holds a session row while waiting for a task row (ADR-0017).
+2. **`te_tenant_concurrency_slots`**, by `(owner_tenant_id, dimension_code, scope_id, shard)`.
+3. **`te_tenant_queue_backlog`**, by `(owner_tenant_id, dimension_code, queue_id, shard)`.
+4. **`te_tenant_wait_counters`**, by `(owner_tenant_id, dimension_code, scope_id)`.
+5. **`te_task_state` rows**, in a fixed order: ascending `task_id` for claims and bulk operations; for cascades and links, predecessor before successors and parent before children (a link locks the linked parent or predecessors before it inserts or changes the dependent task).
+6. **`te_worker_sessions`** last, by `session_id` (claims and accepts renew the session at the end of their transaction). Session expiry locks **only** the session row in its own transaction and requeues the session's tasks in later transactions, so it never holds a session row while waiting for a task row (ADR-0017).
 
 **Plan → counters → transition → settle.** A transaction first reads the tasks it will change without a lock (state, queue, tenant, type, recorded shards), sums the counter deltas per row, and applies them in the order above (admissions and claim reservations with their guard). Then it runs each task transition as a guarded update on the **expected** state. A guard that matches zero rows means the task changed after the plan: a single-task call rolls back and reports the lost race (`LEASE_LOST`, `CONCURRENT_MODIFICATION`, or a retry, as today); a multi-task transaction skips that task and redoes it in a fresh transaction (bulk: within the same request; cascades: the next cascade batch). Finally it settles the difference on counter rows it **already holds** — a transaction never locks a counter row after it has locked a task row.
 
@@ -1586,21 +1588,21 @@ Safety net: the database may still report a deadlock that this ordering does not
 
 - **Sharding preserves the upper bound.** With `S = effective_shards > 1` (§3.7 Hot-row rules, ADR-0008 hot-row sharding), the configured limit `N` is partitioned into `S` per-shard sub-limits whose **sum is ≤ N** (the remainder `N mod S` is distributed so no rounding pushes the total above `N`). Because a claim reserves against exactly one shard, the cluster-wide maximum concurrent tasks is `Σ per_shard_limit ≤ N`. Sharding trades perfectly-even utilisation (a shard may reject while another has spare capacity, so effective concurrency can dip **below** `N`) for reduced hot-row contention — it never admits **more** than `N`.
 
-- **Shards are recorded, never guessed.** A reservation on a sharded row stores the shard it took on the task (`te_task_state.queue_slot_shard`, `type_slot_shard`, `backlog_shard`), and every release decrements exactly that shard with `used = used − 1 WHERE … AND used > 0`. So each shard's `used` equals the number of live tasks holding it, and a release can never drive another shard negative or let it admit beyond its sub-limit.
+- **Shards are recorded, never guessed.** A reservation on a sharded row stores the shard it took on the task (`te_task_state.queue_slot_shard`, `type_slot_shard`, `tenant_queue_slot_shard`, `tenant_type_slot_shard`, `backlog_shard`), and every release decrements exactly that shard with `used = used − 1 WHERE … AND used > 0`. So each shard's `used` equals the number of live tasks holding it, and a release can never drive another shard negative or let it admit beyond its sub-limit.
 
 - **Drift comes only from bugs or manual edits.** Every counter change shares a transaction with the state change it accounts for, so `used` equals the true count except after a defect. Drift may go either way; an upward drift makes the limiter stricter, a downward one would make it laxer.
 
 **ID**: `cpt-cf-task-engine-design-counter-reconciliation`
 
-**Counter reconciliation** (all counter tables, §3.2 RetentionService step 5; on startup and every `slot_reconcile_interval_secs`). Recounting while claims, releases, and admissions run concurrently is only safe if no change can fall between the count and the write. Each counter row — one `(dimension, scope, shard)` or one tenant row — is reconciled in its own short transaction:
+**Counter reconciliation** (all counter tables, §3.2 RetentionService step 5; on startup and every `slot_reconcile_interval_secs`). Recounting while claims, releases, and admissions run concurrently is only safe if no change can fall between the count and the write. Each counter row — one `(dimension, scope, shard)`, global or per tenant — is reconciled in its own short transaction:
 
 ```
 BEGIN
   c = CounterRow::find(key).lock_exclusive()          # 1. lock the counter row FIRST
   n = count(live tasks charged to this row)           # 2. then count, in a NEW statement, from te_task_state
         # concurrency: state IN (claimed, running) AND <scope> [AND <x>_slot_shard = shard]
-        # queue_global/queue_tenant: state = queued [AND backlog_shard = shard]
-        # tenant_deferred: state IN (scheduled, blocked, waiting)
+        # queue_tenant: state = queued AND <tenant, queue> AND backlog_shard = shard
+        # tenant_deferred: state IN (scheduled, blocked, waiting) AND <tenant> AND backlog_shard = shard
         # tenant_wait_counters: pending event conditions of the dimension
   if n != c.used:
     UPDATE counter SET used = n WHERE key = ?          # either direction
@@ -1612,22 +1614,9 @@ Why this is safe on every backend: every change takes the counter row before it 
 
 **Shard count changes**: when a limit change alters `effective_shards`, the maintenance job creates the new shard rows and gives every shard index `≥` the new count `limit_value = 0` (**draining**: guarded reservations skip it, releases still decrement it). A draining row is deleted once its `used` reaches 0. The new shards' sub-limits sum to at most `N − Σ used(draining)`, so the total never exceeds `N` during the change.
 
-#### `te_queue_backlog` and `te_tenant_queue_backlog`
+#### `te_tenant_queue_backlog`
 
-Queue-depth counters (PRD §5.2), with the same mechanism and scope split as the concurrency counters. Separate tables because the counted sets (`queued`; deferred = `scheduled` + `blocked` + `waiting`) and the refusal rules (admission only) differ.
-
-`te_queue_backlog` — cross-tenant (`#[secure(unrestricted)]`, no tenant column):
-
-| Column | Type | Notes |
-|---|---|---|
-| `dimension_code` | TINYINT / SMALLINT | `queue_global` (`domain_global` is a sampled gauge with no row) |
-| `queue_id` | UUID NOT NULL | The queue |
-| `shard` | SMALLINT NOT NULL | Hot-row shard index (sharded by default, Hot-row rules below) |
-| `limit_value` | INT | Effective limit after config/GTS resolution |
-| `used` | INT | `queued` tasks of the queue, all tenants |
-| `updated_at` | TIMESTAMP | |
-
-**Indexes**: PK `(dimension_code, queue_id, shard)`.
+Per-tenant queue-depth counters (PRD §5.2), with the same mechanism as the concurrency counters. A separate table because the counted sets (`queued`; deferred = `scheduled` + `blocked` + `waiting`) and the refusal rules (admission only) differ. The queue-wide and domain-wide limits have no counter rows; they are sampled ceilings (Hot-row rule 2).
 
 `te_tenant_queue_backlog` — per tenant (`Scopable`, `tenant_col = owner_tenant_id`):
 
@@ -1636,21 +1625,22 @@ Queue-depth counters (PRD §5.2), with the same mechanism and scope split as the
 | `owner_tenant_id` | UUID NOT NULL | The task's owner tenant |
 | `dimension_code` | TINYINT / SMALLINT | `queue_tenant` or `tenant_deferred` |
 | `queue_id` | UUID NOT NULL | The queue, or the nil UUID for `tenant_deferred` (all queues of the domain) |
-| `limit_value` | INT | Effective limit after config resolution |
+| `shard` | SMALLINT NOT NULL | Hot-row shard index (default 0; Hot-row rules below) |
+| `limit_value` | INT | Effective limit after config resolution (per-shard when sharded) |
 | `used` | INT | `queue_tenant`: the tenant's `queued` tasks in the queue; `tenant_deferred`: its deferred tasks in the domain |
 | `updated_at` | TIMESTAMP | |
 
-**Indexes**: PK `(owner_tenant_id, dimension_code, queue_id)`. Rows are created on first admission (`INSERT … ON CONFLICT DO NOTHING`, then the guarded increment).
+**Indexes**: PK `(owner_tenant_id, dimension_code, queue_id, shard)`. Rows are created on first admission (`INSERT … ON CONFLICT DO NOTHING`, then the guarded increment).
 
-**Hot-row rules** (apply to all counter tables, including `te_tenant_wait_counters`):
+**Hot-row rules** (apply to all counter tables):
 
 1. **Unlimited means untouched.** A dimension whose effective limit is `0` has **no counter row** and is skipped on the create/claim/release path entirely. When a runtime config change sets a non-zero limit, the maintenance job (§3.2 RetentionService step 5) creates the row(s) from a recount before enforcement starts; setting a limit back to `0` deletes them.
 
-2. **`domain_global` is a sampled ceiling, not a transactional counter.** It would otherwise be one row updated by every create and claim in the domain. Instead the maintenance leader samples the domain's `queued` count every `queue_depth.domain_sample_secs` (default 5 s, an index-only count on `te_task_state`) into an in-memory gauge shared via `te_runtime_config`; creation is refused `429` `QUEUE_DEPTH_LIMIT` (dimension `domain_global`) while the latest sample is ≥ the limit. Overshoot is bounded by one sampling interval of admissions — acceptable for a last-line safety ceiling.
+2. **Queue-wide and domain-wide depth are sampled ceilings, not counters.** An exact counter for "queued tasks in this queue, all tenants" would be locked by every create and every claim of the queue, and claims would wait on it while holding their other counter locks. So there is no such row. The maintenance leader counts `queued` tasks per queue and per domain every `queue_depth.sample_secs` (default 5 s, index-only counts on `te_task_state`) and shares the numbers through `te_runtime_config`. Admission (create, bulk move, re-enqueue) is refused `429` `QUEUE_DEPTH_LIMIT` (dimension `queue` or `domain_global`) while the latest sample is at or above the limit. A limit can be passed by at most the admissions of one sampling interval. The per-tenant limits (`queue_tenant`, `tenant_deferred`) stay exact, so one tenant still cannot use another tenant's capacity.
 
-3. **Wide scopes are sharded by default.** `queue_global` backlog rows and `queue_global` / `type_global` concurrency rows use `effective_shards = min(counter_shards, max(1, limit / 32))` (`counter_shards` default 8). Large limits spread across shards; small limits stay on one row so they are not fragmented into unusable per-shard slices. A claim reads all shards of a scope (plain read), picks one at random among those with room, and then locks only that one; it reports the dimension full only when no shard had room, so sharding never refuses while capacity exists elsewhere (§4.6 Task Assignment). Single-task admissions keep the guarded `+1` on a random shard and try the remaining shards on refusal. The shard taken is stored on the task row and released exactly (§3.7 Counter reconciliation).
+3. **Large limits are sharded, global and per tenant alike.** Every concurrency and backlog row uses `effective_shards = min(counter_shards, max(1, limit / 32))` (`counter_shards` default 8). Large limits spread across shards; small limits stay on one row so they are not fragmented into unusable per-shard slices. A claim reads all shards of a scope (plain read), picks one at random among those with room, and then locks only that one; it reports the dimension full only when no shard had room, so sharding never refuses while capacity exists elsewhere (§4.6 Task Assignment). Single-task admissions keep the guarded `+1` on a random shard and try the remaining shards on refusal. The shard taken is stored on the task row and released exactly (§3.7 Counter reconciliation).
 
-4. Per-tenant dimensions (`queue_tenant`, `type_tenant`, `tenant_deferred`) are naturally spread across tenants and stay unsharded.
+4. **Why per-tenant rows are sharded too.** Most tenants are small, and their rows stay on one shard (a limit of 20 running tasks gives 1 shard). But one busy tenant — for example the platform tenant creating all `system` tasks — would otherwise send every create and claim to one row. With `tenant_max_queue_depth = 100,000` its backlog row gets 8 shards. `te_tenant_wait_counters` stays on one row per key: waits are set far less often than tasks are created or claimed.
 
 **Scoping**: as for the concurrency counters (§2.1). Introspection shows only what the caller's scope permits.
 
@@ -1960,7 +1950,7 @@ Multiple instances share the database and coordinate **without any DB-specific S
 
 **Backend suitability**: PostgreSQL is the recommended production backend. MySQL/MariaDB 8.0+ is fully supported. **SQLite is supported for development, testing, and low-volume single-node embedded use only** — its single-writer model serializes writes and it lacks native partitioning. This is a `toolkit-db` framework property, not a consequence of any Task-Engine-specific SQL. Consistent with ADR-0008 and ADR-0009.
 
-**Recovery and upgrades** (PRD §6.1 Service Availability and Recovery, Rolling Upgrade): all state is in the domain databases, so backup and point-in-time recovery are database operations. On start after a restore, each instance re-reads `te_timers`, the deadline columns of `te_task_state`, `te_worker_sessions` (sessions whose `lease_until` passed during the outage expire on the first scan), and `te_ring_state` (which buckets are retained, §3.7), and the maintenance leader reconciles `used` in the five counter tables (`te_concurrency_slots`, `te_tenant_concurrency_slots`, `te_queue_backlog`, `te_tenant_queue_backlog`, `te_tenant_wait_counters`) from task and wait-condition rows (§3.7 Counter reconciliation) before claims are served; until then the readiness check reports not ready (§3.3 Health and metrics). Migrations use expand/contract: a release only adds columns, tables, and enum values; it removes them one release later, once no older instance is running. New enum values follow the evolution contract in §3.1.
+**Recovery and upgrades** (PRD §6.1 Service Availability and Recovery, Rolling Upgrade): all state is in the domain databases, so backup and point-in-time recovery are database operations. On start after a restore, each instance re-reads `te_timers`, the deadline columns of `te_task_state`, `te_worker_sessions` (sessions whose `lease_until` passed during the outage expire on the first scan), and `te_ring_state` (which buckets are retained, §3.7), and the maintenance leader reconciles `used` in the four counter tables (`te_concurrency_slots`, `te_tenant_concurrency_slots`, `te_tenant_queue_backlog`, `te_tenant_wait_counters`) and takes the first queue-depth samples from task and wait-condition rows (§3.7 Counter reconciliation) before claims are served; until then the readiness check reports not ready (§3.3 Health and metrics). Migrations use expand/contract: a release only adds columns, tables, and enum values; it removes them one release later, once no older instance is running. New enum values follow the evolution contract in §3.1.
 
 **Task Domains**: When configured, different queues are routed to different databases. Each domain has its own connection pool, migrations, retention schedule, event outbox, and `te_event_inbox` (§3.2). A `default` domain catches unmatched queues and holds `te_runtime_config` and the consumer offsets.
 
@@ -2104,7 +2094,7 @@ gears:
       claim_saturation_ttl_ms: 250        # how long a node remembers a full scope; cleared early by a local slotReleased (§4.6)
       claim_max_wait_secs: 50             # cap on the long-poll timeout a claim may request (larger values are clamped); below common 60 s proxy idle timeouts
       claim_poll_interval_ms: 1000        # cross-node long-poll wake-up: per-node queue-watcher probe interval, jittered ±20% (§3.2 Signal System)
-      counter_shards: 8                   # max shards for wide counter rows (queue_global, type_global); effective = min(8, limit/32) (§3.7 Hot-row rules)
+      counter_shards: 8                   # max shards for any concurrency or backlog row, global or per tenant; effective = min(8, limit/32) (§3.7 Hot-row rules)
       slot_reconcile_interval_secs: 300   # recompute the counter tables' used values from task rows (§3.7)
 
       max_payload_size_bytes: 65536       # 64 KiB per task/entry (uncompressed canonical JSON, aggregate input+context+output)
@@ -2141,12 +2131,12 @@ gears:
         per_tenant: {}
 
       queue_depth:                        # PRD §5.2 Queue Depth Limits; 0 = unlimited
-        queue_max_queue_depth: 1000000            # per queue, when its GTS registration omits queue_max_queue_depth
+        queue_max_queue_depth: 1000000            # per queue (sampled ceiling), when its GTS registration omits queue_max_queue_depth
         tenant_max_queue_depth: 100000            # `queued` tasks per queue, per tenant
-        global_max_queue_depth: 5000000           # `queued` tasks across all queues, per task domain
+        global_max_queue_depth: 5000000           # `queued` tasks across all queues, per task domain (sampled ceiling)
         tenant_max_deferred_tasks: 100000         # `scheduled` + `blocked` + `waiting` tasks per tenant, per task domain
         retry_after_secs: 30                      # base Retry-After on QUEUE_DEPTH_LIMIT (jittered)
-        domain_sample_secs: 5                     # sampling interval of the soft domain_global ceiling (§3.7 Hot-row rules)
+        sample_secs: 5                            # sampling interval of the queue-wide and domain-wide depth ceilings (§3.7 Hot-row rules)
         overrides:                                # most specific pattern wins; overrides GTS registration; runtime-updatable (admin)
           - pattern: "gts.cf.core.tasks.queue.v1~cf.system.*"
             queue_max_queue_depth: 100000
@@ -2434,8 +2424,8 @@ try_claim_once(queues, want, waiters, scope):
     #    picks = the first `want` candidates in merge order that fit the plan; give each pick to the next
     #    waiter that is not blacklisted on its queue (waiters in arrival order).
     .counters(|c| [queue_global(c.queue, shard), type_global(c.type, shard),
-                   queue_tenant(c.queue, c.tenant), type_tenant(c.type, c.tenant)]   # limit 0 → no row, skipped
-              + backlog [queue_global(c.queue, c.backlog_shard), queue_tenant(c.queue, c.tenant)])
+                   queue_tenant(c.queue, c.tenant, shard), type_tenant(c.type, c.tenant, shard)]   # limit 0 → no row, skipped
+              + backlog [queue_tenant(c.queue, c.tenant, c.backlog_shard)])   # queue-wide depth is sampled: no row
 
     # 3. Reserve, in the canonical counter order of §3.7 (concurrency, then backlog), each row once:
     #      concurrency: UPDATE … SET used = used + k WHERE <key> AND used + k <= limit_value
@@ -2450,7 +2440,9 @@ try_claim_once(queues, want, waiters, scope):
         .col_expr(assignment_deadline, now + assignment_timeout)                 # NULL when not configured
         .col_expr(attempt, attempt + if resume_pending {0} else {1}).col_expr(resume_pending, false)
         .col_expr(lease_token, random_uuid_v4()).col_expr(lease_epoch, lease_epoch + 1)
-        .col_expr(queue_slot_shard, c.queue_shard).col_expr(type_slot_shard, c.type_shard).col_expr(backlog_shard, NULL)
+        .col_expr(queue_slot_shard, c.queue_shard).col_expr(type_slot_shard, c.type_shard)
+        .col_expr(tenant_queue_slot_shard, c.tenant_queue_shard).col_expr(tenant_type_slot_shard, c.tenant_type_shard)
+        .col_expr(backlog_shard, NULL)
         .filter(task_id = c.task_id AND state_code = Queued)                     # the guard
         .secure().scope_with(scope))
     #    1 row → won. 0 rows → lost race (another claim, a cancel, a move, a timeout): take the next candidate of
@@ -2569,8 +2561,8 @@ BEGIN
   #    b) Links (PRD §5.9): the parent and each predecessor are read with the caller's scope (parent: full
   #       scope; predecessors: read_scope); a missing, foreign, or forbidden one → the same 404, never 403.
   #    c) Queue-depth dimensions of the new task's initial state:
-  #       queued              -> [queue_global (te_queue_backlog), queue_tenant (te_tenant_queue_backlog)]
-  #                              (domain_global: sampled ceiling, checked before BEGIN)
+  #       queued              -> [queue_tenant (te_tenant_queue_backlog)]
+  #                              (queue-wide and domain-wide: sampled ceilings, checked before BEGIN)
   #       scheduled / blocked -> [tenant_deferred (te_tenant_queue_backlog, queue_id = nil UUID)]
   #       dimensions with limit 0 have no row and are skipped (Hot-row rules, §3.7)
 
@@ -2578,12 +2570,11 @@ BEGIN
   #    releases (if planned) and the new task's admission (+1) are summed per row, so a replacement is never
   #    refused for capacity its own predecessor was holding.
   for row in counter_rows(plan) sorted canonically:
-      r = if row.is_global():
-            GlobalCounterRepo::apply(row, net_delta, pick_shard())          # admission shard stored as backlog_shard
-          else:
-            TenantQueueBacklog::update_many().col_expr(used, used + net_delta)
-              .filter(<row key> AND (net_delta <= 0 OR used + net_delta <= limit_value))
-              .secure().scope_with(scope.tenant_only()).exec()
+      r = TenantQueueBacklog::update_many().col_expr(used, used + net_delta)
+            .filter(<row key, shard> AND (net_delta <= 0 OR used + net_delta <= limit_value))
+            .secure().scope_with(scope.tenant_only()).exec()
+          # admission: a random shard with room (others tried on refusal), stored as backlog_shard;
+          # release: the recorded backlog_shard
       if r.rows_affected == 0: ROLLBACK; return 429 resource_exhausted QUEUE_DEPTH_LIMIT(dim), Retry-After
 
   # 4. Task rows, in the §3.7 order (parent / predecessors first, ascending task_id).
@@ -2893,9 +2884,9 @@ finalize(t, result_code, route = none, guard = default_guard(t), extra = []) -> 
   0. Plan (plain reads, no locks): t's state, queue, tenant, type, recorded shards and pending event
      conditions; for an inline cascade (step 8) also the first cascade_inline_limit dependents and theirs.
   1. Counters, from the recorded shards (§3.7), in the canonical counter order, each row once with the
-     summed delta: release concurrency slots if t held a lease (queue_slot_shard / type_slot_shard and the
-     tenant rows); release queue-depth capacity of the set t leaves (queued: queue_global via backlog_shard +
-     queue_tenant; scheduled / blocked / waiting: tenant_deferred); release te_tenant_wait_counters places of
+     summed delta: release concurrency slots if t held a lease (the four recorded *_slot_shard columns);
+     release queue-depth capacity of the set t leaves (queued: queue_tenant; scheduled / blocked / waiting:
+     tenant_deferred; both via the recorded backlog_shard); release te_tenant_wait_counters places of
      t's pending event conditions; the same for the planned inline dependents.
   2. Guarded update of t's te_task_state row on its expected (planned) state (and the lease fence for worker
      calls); rows_affected == 0 → return lost_race: the caller rolls back the transaction, so the counter
@@ -3033,7 +3024,7 @@ Consistent with PRD §4.2:
 | `cpt-cf-task-engine-fr-priority-dispatch` | §3.2 QueueService, TaskService; §3.7 dispatch indexes; §4.6 Task Assignment algorithm |
 | `cpt-cf-task-engine-fr-tenant-fairness` | §4.6 Task Assignment (Tenant round-robin); §3.7 `ix_te_task_state_tenant_dispatch`; §4.1 `tenant_fairness_overrides` |
 | `cpt-cf-task-engine-fr-queue-concurrency` | §3.2 QueueService (concurrency enforcement); §3.7 Counter reconciliation (`cpt-cf-task-engine-design-counter-reconciliation`); ADR-0005 |
-| `cpt-cf-task-engine-fr-queue-depth` | §3.1 Queue-depth accounting; §3.2 QueueService / TaskService; §3.7 `te_queue_backlog`; §3.9 Admission control; §4.1 `queue_depth`; §4.3 metrics; §4.5 Queue-depth admission security; §4.6 Task Creation Admission |
+| `cpt-cf-task-engine-fr-queue-depth` | §3.1 Queue-depth accounting; §3.2 QueueService / TaskService; §3.7 `te_tenant_queue_backlog` and Hot-row rules; §3.9 Admission control; §4.1 `queue_depth`; §4.3 metrics; §4.5 Queue-depth admission security; §4.6 Task Creation Admission |
 | `cpt-cf-task-engine-fr-type-concurrency` | §3.2 QueueService; §4.6 Task Assignment (type limit check) |
 | `cpt-cf-task-engine-fr-concurrency-overrides` | §4.1 Configuration (concurrency_overrides) |
 | `cpt-cf-task-engine-fr-runtime-config` | §3.3 Admin Endpoints; §4.1 Configuration |
