@@ -578,7 +578,11 @@ impl GithubClient {
     ) -> Result<(Admission<'_>, SemaphorePermit<'_>), DomainError> {
         let pool = self.pool().await?;
         loop {
-            let pooled = pool.pick(api == GithubApi::Graphql).await;
+            let Some(pooled) = pool.pick(api == GithubApi::Graphql).await else {
+                return Err(DomainError::AccessLost(
+                    "GitHub answered 401 Unauthorized to every token in the pool".to_owned(),
+                ));
+            };
             let asked = Instant::now();
             tokio::select! {
                 admitted = pooled.controller.admit() => {
@@ -870,6 +874,19 @@ impl GithubClient {
             let seen = self
                 .observe(&admission.pooled.controller, response.headers(), status)
                 .await;
+            if status == reqwest::StatusCode::UNAUTHORIZED && admission.pooled.drop_from_pool() {
+                self.count(
+                    &options.telemetry,
+                    &sent,
+                    status.as_u16(),
+                    Outcome::Failed,
+                    took,
+                    &seen,
+                );
+                drop(permit);
+                drop(admission);
+                continue;
+            }
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
                 self.count(
                     &options.telemetry,
@@ -1212,6 +1229,19 @@ impl GithubClient {
             let seen = self
                 .observe(&admission.pooled.controller, response.headers(), status)
                 .await;
+            if status == reqwest::StatusCode::UNAUTHORIZED && admission.pooled.drop_from_pool() {
+                self.count(
+                    telemetry,
+                    &sent,
+                    status.as_u16(),
+                    Outcome::Failed,
+                    took,
+                    &seen,
+                );
+                drop(permit);
+                drop(admission);
+                continue;
+            }
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
                 self.count(
                     telemetry,

@@ -20,6 +20,12 @@ impl TokenFingerprint {
             digest::digest(&SHA256, token.as_bytes()).as_ref(),
         ))
     }
+
+    /// The first 12 hex digits: enough to tell tokens apart in a log line.
+    #[must_use]
+    pub fn short(&self) -> &str {
+        &self.0[..12]
+    }
 }
 
 /// Registry mapping token fingerprints to their controllers.
