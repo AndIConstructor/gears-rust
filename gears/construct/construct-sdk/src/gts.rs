@@ -132,7 +132,7 @@ pub struct RecordV1<P: GtsSchema> {
     /// from this base.
     #[serde(rename = "type")]
     #[schemars(extend(
-        "x-gts-ref" = gts_id!("cf.connectors.core.record.v1~"),
+        "x-gts-type-ref" = gts_id!("cf.connectors.core.record.v1~"),
         "maxLength" = 1024,
         "pattern" = r"^gts\.[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*){3}\.v[0-9]+(\.[0-9]+)?~([a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*){3}\.v[0-9]+(\.[0-9]+)?~)+$"
     ))]

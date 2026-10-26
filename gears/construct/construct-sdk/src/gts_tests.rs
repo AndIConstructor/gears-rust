@@ -38,8 +38,11 @@ fn every_record_type_is_in_the_link_time_inventory() {
 fn every_record_type_validates_in_a_gts_store_and_only_the_base_is_abstract() {
     let mut store = store();
     for type_id in RECORD_TYPES {
+        // The keywords and the chain are checked here; a reference such as
+        // `type`'s `x-gts-type-ref` resolves against the full types registry,
+        // which this store does not hold.
         let resolved = store
-            .validate_schema(type_id)
+            .validate_schema_with(type_id, gts::GtsRefValidation::None)
             .unwrap_or_else(|err| panic!("{type_id}: {err}"));
         assert_eq!(
             resolved.is_abstract,
@@ -73,7 +76,10 @@ fn the_envelope_is_closed_and_requires_its_members() {
         base["properties"]["subject_id"]["type"], "string",
         "an absent subject is left out, never null"
     );
-    assert_eq!(base["properties"]["type"]["x-gts-ref"], RECORD_BASE_TYPE);
+    assert_eq!(
+        base["properties"]["type"]["x-gts-type-ref"],
+        RECORD_BASE_TYPE
+    );
 }
 
 #[test]

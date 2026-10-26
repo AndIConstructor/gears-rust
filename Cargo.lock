@@ -2668,7 +2668,7 @@ dependencies = [
  "cf-gears-toolkit-security",
  "gts",
  "jsonschema 0.40.2",
- "schemars 1.2.1",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "time",
