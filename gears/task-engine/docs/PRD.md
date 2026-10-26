@@ -607,6 +607,8 @@ An event condition **SHOULD** support an optional `match_expression` that is che
 
 An **input** condition has an `input_schema` (JSON Schema or GTS type reference) and an optional `prompt`. It is satisfied by an API call that provides a JSON value valid against the schema. The value is stored and given to the worker on resume. Providing input needs the `update` action on the task (§5.11).
 
+The schema comes from the caller, so it is untrusted input. It **MUST** be checked when the wait is set, and refused (`400`) if it is too large or too deep, refers to anything outside itself other than a GTS type the caller can see (no remote `$ref`), or uses a regular expression that cannot be checked in linear time. The provided value is subject to the payload size limit (§5.1).
+
 - **Rationale**: Tasks can ask people or systems for data or decisions without being completed and recreated.
 - **Actors**: `cpt-cf-task-engine-actor-api-consumer`
 
@@ -913,7 +915,7 @@ Every protected request **MUST** be authenticated by the platform (API Gateway a
 
 - [ ] `p1` - **ID**: `cpt-cf-task-engine-fr-authz`
 
-Every access **MUST** be authorized by the platform policy decision point (AuthZ Resolver), and its constraints **MUST** limit which tasks a query can see or change. Authorization fails closed: a denial, an unreachable PDP, or missing constraints result in `403`. PDP internals are never shown to clients.
+Every access **MUST** be authorized by the platform policy decision point (AuthZ Resolver), and its constraints **MUST** limit which tasks a query can see or change. Authorization fails closed: a denial, an unreachable PDP, or missing constraints result in `403`. PDP internals are never shown to clients. **No existence oracle**: a request about one task that the caller may not read **MUST** get the same `404` as a task that does not exist; `403` is returned only when the caller may read the task but not perform the action.
 
 Permissions are GTS permission instances (base type `gts.cf.toolkit.authz.permission.v1~`) in the `task_engine` namespace:
 
@@ -1239,9 +1241,9 @@ A claim **MUST** complete within 50 ms (p50) and 200 ms (p99) under normal load,
 
 - [ ] `p1` - **ID**: `cpt-cf-task-engine-nfr-throughput`
 
-Each node **MUST** sustain at least 1,000 task creations and 500 claims per second under normal load.
+One task domain (one PostgreSQL database) **MUST** sustain at least 1,000 task creations and 500 claims per second under normal load. All engine nodes share the domain's database, so more nodes add availability and request capacity, not database write capacity; more write capacity comes from more task domains (§5.19).
 
-- **Threshold**: Sustained for 60 seconds with ≤ 5% errors on one node with PostgreSQL. The claim figure **MUST** also hold with ≥ 100 workers claiming from the **same** queue.
+- **Threshold**: Sustained for 60 seconds with ≤ 5% errors, with one domain database and both one and three engine nodes; the three-node run **MUST NOT** be slower than the one-node run. The claim figure **MUST** also hold with ≥ 100 workers claiming from the **same** queue.
 
 #### Cache Degradation
 

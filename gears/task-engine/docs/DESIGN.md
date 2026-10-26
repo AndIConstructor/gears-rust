@@ -205,13 +205,20 @@ Tenant-owned tables (`te_tasks`, `te_task_state`, `te_task_results`, `te_task_en
 
 **Per-tenant counters are tenant-scoped** (per [`06_authn_authz_secure_orm.md` §Unrestricted entities](../../../docs/toolkit_unified_system/06_authn_authz_secure_orm.md)). Request paths write them under `scope.tenant_only()`, after the task row was authorized with the full scope in the same transaction (the mini-chat pattern). A wrong-tenant write then fails in the ORM.
 
-**`unrestricted` entities** have no tenant column: `te_concurrency_slots` (cross-tenant counts only), `te_worker_blacklist`, `te_worker_sessions` (reached only with `worker_subject = ctx.subject_id` on request paths, §3.7), and `te_runtime_config`. The counter table is still touched in tenant requests, so it is a **declared exception** to the guide, with these controls ([`16_defect_class_to_control_map.md` §Globally scoped tables](../../../docs/toolkit_unified_system/16_defect_class_to_control_map.md)):
+**`unrestricted` entities** have no tenant column: `te_concurrency_slots` (cross-tenant counts only), `te_worker_blacklist`, `te_worker_sessions`, and `te_runtime_config`. The first three are touched in tenant requests, so they are a **declared exception** to the guide, with these controls ([`16_defect_class_to_control_map.md` §Globally scoped tables](../../../docs/toolkit_unified_system/16_defect_class_to_control_map.md)):
 
-- Access only through `GlobalCounterRepo`: a guarded `+n`/`−n` on a key taken from an already-authorized task row; no read or list on request paths.
+- `te_concurrency_slots`: only through `GlobalCounterRepo` — a guarded `+n`/`−n` on a key taken from an already-authorized task row; no read or list on request paths. `GET /queues` reads it only after a queue `read` decision.
+- `te_worker_sessions` and `te_worker_blacklist`: only through repositories whose every request-path statement has `worker_subject = ctx.subject_id` in its guard, so a caller reaches only its own workers' rows.
 - Each `allow_all()` call site carries a justification; the lint gate rejects any other `allow_all()` on a request path.
-- `GET /queues` reads them only after a queue `read` decision.
 
-**System background loops (the only exception)**: the timer wheel, the session and deadline scans, retention, slot reconciliation, priority aging, and the event consumer act for the engine, not for a subject, so they have no PDP scope. They read and write tenant-owned tables (for example `te_timers`, `te_task_state`, `te_wait_conditions`) under `AccessScope::allow_all()`. This is allowed only in these named loops, which never take input from an API caller. Each row they change keeps its own `owner_tenant_id`, and any event they write carries that tenant. No request handler may use `allow_all()` on a tenant-owned table.
+**`allow_all()` on request paths — the complete list.** A request handler may use `AccessScope::allow_all()` only in these cases, and the lint gate rejects any other:
+
+1. The `unrestricted` repositories above.
+2. The **ToolKit prefetch read** of one task by ID ([`06_authn_authz_secure_orm.md` §GET prefetch pattern](../../../docs/toolkit_unified_system/06_authn_authz_secure_orm.md)): it reads only the task's tenant, type, and queue, so the engine can ask the PDP about this task. The prefetched row is never returned and never written; the response always comes from a scoped read or a scoped, guarded write (§3.3 Authorization Model).
+
+No other request-path access to a tenant-owned table uses `allow_all()`.
+
+**System background loops (the only exception)**: the timer wheel, the session and deadline scans, retention, slot reconciliation, priority aging, and the event consumer act for the engine, not for a subject, so they have no PDP scope. They read and write tenant-owned tables (for example `te_timers`, `te_task_state`, `te_wait_conditions`) under `AccessScope::allow_all()`. This is allowed only in these named loops, which never take input from an API caller. Each row they change keeps its own `owner_tenant_id`, and any event they write carries that tenant. Request handlers follow the complete list above.
 
 **ID**: `cpt-cf-task-engine-principle-rfc9457`
 
@@ -235,7 +242,7 @@ Tenant-owned tables (`te_tasks`, `te_task_state`, `te_task_results`, `te_task_en
 
 **ID**: `cpt-cf-task-engine-principle-fail-closed`
 
-**Fail-closed authorization**: Denied decisions, unreachable PDP, and missing constraints result in 403 Forbidden. PDP internals are never exposed to clients.
+**Fail-closed authorization**: Denied decisions, unreachable PDP, and missing constraints result in 403 Forbidden, except that a single task the caller may not read answers 404, like a missing task (§3.3 *No existence oracle*). PDP internals are never exposed to clients.
 
 **ID**: `cpt-cf-task-engine-principle-fenced-execution`
 
@@ -809,7 +816,7 @@ Responsibilities:
 - Manage four built-in wait condition kinds:
   - **Timer**: set `resume_at`, auto-satisfy when time reached (via TimerService)
   - **Event**: match incoming events by `event_type`, optional `subject_id`/`subject_type`, optional CEL `match_expression`
-  - **Input**: accept structured JSON input validated against declared schema
+  - **Input**: accept structured JSON input validated against declared schema. The schema is untrusted, so it is checked at set time against `input_waits` (§4.1): at most `max_schema_bytes` and `max_schema_depth`; `$ref` only to the schema itself (`#/…`) or to a GTS type resolved with the caller's visibility, never to a URL or file (the workspace `jsonschema` crate is built without remote resolvers); `pattern` / `patternProperties` compiled with the linear-time `regex` engine (`jsonschema::PatternOptions::regex()`), so a pattern that needs backtracking (look-around, back-references) is refused. Any violation → `invalid_argument` `400`, naming the rule; nothing is stored. `prompt` is at most `max_prompt_bytes`. The compiled validator is cached per condition while the wait is pending
   - **Children**: satisfied when the task has no non-terminal children (`te_task_state.parent_task_id`). Checked at park time (no live child → satisfied at once) and after each child's terminal transition (§4.6 Cascades); `resolved_payload` holds the count of children per terminal state
 - Support ALL/ANY semantics for multiple wait conditions on a single task
 - **Arm, then park** (PRD §5.4 Arm before acting): `POST /tasks/{id}/wait-conditions` with `park = false` (worker, fenced by `lease_token`, task stays `running`) inserts the group with `parked_at = NULL` (**armed**). For event conditions no subscription change is needed: the consumer already covers every waitable topic (§3.2 Event Consumer), so the condition starts matching as soon as the arm commits, and the call returns then. Matches while armed set the condition `satisfied` and store `resolved_payload`, but never change task state. `POST /tasks/{id}/wait-conditions/park` (fenced, optional checkpoint): if the armed group is already complete, delete it, return the resolved data, and keep the task `running` under the same lease; otherwise set `parked_at = now`, start the wait timeouts, and park the task as for a one-step set-wait. Any transition out of `running` other than park (complete, fail, release, lease loss, cancel) sets the armed conditions to `cancelled` in the same transaction. A task has at most one wait group (armed or parked); a second set or arm is rejected `failed_precondition` `400`
@@ -865,7 +872,7 @@ On SQLite (dev/test/low-volume) partitioning is unavailable: the same tables are
 Lifecycle events are published via the **Event Broker SDK managed outbox producer** (`event_broker_sdk::DbProducer` + `ProducerOutboxQueue`, `outbox` feature) — the Task Engine does **not** hand-roll an outbox table, a relay, or a broker-delivery handler. Publishing through the Event Broker SDK is a **mandated platform standard** (all gears use it), so there is no ADR for the choice itself; the producer-surface, dedup-mode, and partitioning decisions below are the only Task-Engine-specific detail.
 
 Design:
-- Lifecycle events are `TypedEvent` structs covering the full PRD §5.10 event-type set: `TaskCreated`, `TaskQueued`, `TaskClaimed`, `TaskStarted`, `TaskCompleted`, `TaskFailed`, `TaskCancelRequested`, `TaskCancelled`, `TaskCheckpointed`, `TaskProgressed`, `TaskWaiting`, `TaskResumed`, `TaskRetrying`, `TaskReassigned`, `TaskDeadLettered`, `TaskTimedOut`, `SlaBreached`, `WaitConditionSet`, `WaitConditionSatisfied`, `WaitTimedOut`, `WorkerBlacklisted`, `ConfigUpdated`. Naming: the struct name is PascalCase (`TaskCreated`), the short name used in this document and in `te_events.event_type` is camelCase (`taskCreated`), and the GTS type-name segment is its snake_case form (`…cf.core.tasks.task_created.v1~`). Each event's `type` is a Task-Engine **derived event type** of the Event Broker base event type — `gts.cf.core.events.event.v1~cf.core.tasks.<event>.v1~` (e.g. `…cf.core.tasks.task_claimed.v1~`) — registered in `types_registry` at startup. Each type narrows `data` to its payload contract and fixes its traits: `topic` (`gts.cf.core.events.topic.v1~cf.core.tasks.task_events.v1`), `partition_key` (`/subject`), and `allowed_subject_types`; see [`schemas/types/`](./schemas/types/). The Task Engine does **not** define an event/topic base type of its own — these derive from the Event Broker base types. Each emitted event also carries a **stable unique event ID** (the `te_events.id` assigned in the same transaction) and `subject = task_id` with `subject_type` = the task's GTS type (task-scoped events allow any type derived from `gts.cf.core.tasks.task.v1~`). Queue-scoped events (`ConfigUpdated` — one per affected queue per config save, see §3.3 `/admin/config` — and `WorkerBlacklisted`) use the queue ID as `subject` and the queue type `gts.cf.core.tasks.queue.v1~` as `subject_type`; `WorkerBlacklisted` carries the worker identity in `data.worker`. `TaskReassigned`, `WorkerBlacklisted`, and `ConfigUpdated` back the "MUST be recorded in the event history" requirements in PRD §5.6 and §5.2. `TaskProgressed` is emitted only by the Progress Cache flush (§3.2 Progress Cache). Task-scoped events also carry the task's current `queue` and, when a subject's API or worker call caused the event, that subject as `actor` (absent for engine-caused events such as timeouts and cascades), so consumers can route and audit without reading the task back. Published events never carry a task error's `message` or `context`, because they are free text that may echo payload data (PRD §6.1 Data Protection); `taskFailed` and `taskRetrying` carry only `domain`, `code`, `fault`, and `retryable`. Task-scoped event payloads carry the task's `resource_refs` (PRD §5.1 Resource References) so consumers can route per resource without a read-back. Consumers dedup on the stable event ID (at-least-once delivery); wait-condition resolution is idempotent so a duplicate event cannot satisfy a wait twice
+- Lifecycle events are `TypedEvent` structs covering the full PRD §5.10 event-type set: `TaskCreated`, `TaskQueued`, `TaskClaimed`, `TaskStarted`, `TaskCompleted`, `TaskFailed`, `TaskCancelRequested`, `TaskCancelled`, `TaskCheckpointed`, `TaskProgressed`, `TaskWaiting`, `TaskResumed`, `TaskRetrying`, `TaskReassigned`, `TaskDeadLettered`, `TaskTimedOut`, `SlaBreached`, `WaitConditionSet`, `WaitConditionSatisfied`, `WaitTimedOut`, `WorkerBlacklisted`, `ConfigUpdated`. Naming: the struct name is PascalCase (`TaskCreated`), the short name used in this document and in the API is camelCase (`taskCreated`), `te_events` stores its enum discriminant (`event_type_code`), and the GTS type-name segment is its snake_case form (`…cf.core.tasks.task_created.v1~`). Each event's `type` is a Task-Engine **derived event type** of the Event Broker base event type — `gts.cf.core.events.event.v1~cf.core.tasks.<event>.v1~` (e.g. `…cf.core.tasks.task_claimed.v1~`) — registered in `types_registry` at startup. Each type narrows `data` to its payload contract and fixes its traits: `topic` (`gts.cf.core.events.topic.v1~cf.core.tasks.task_events.v1`), `partition_key` (`/subject`), and `allowed_subject_types`; see [`schemas/types/`](./schemas/types/). The Task Engine does **not** define an event/topic base type of its own — these derive from the Event Broker base types. Each emitted event also carries a **stable unique event ID** (the `te_events.id` assigned in the same transaction) and `subject = task_id` with `subject_type` = the task's GTS type (task-scoped events allow any type derived from `gts.cf.core.tasks.task.v1~`). Queue-scoped events (`ConfigUpdated` — one per affected queue per config save, see §3.3 `/admin/config` — and `WorkerBlacklisted`) use the queue ID as `subject` and the queue type `gts.cf.core.tasks.queue.v1~` as `subject_type`; `WorkerBlacklisted` carries the worker identity in `data.worker`. `TaskReassigned`, `WorkerBlacklisted`, and `ConfigUpdated` back the "MUST be recorded in the event history" requirements in PRD §5.6 and §5.2. `TaskProgressed` is emitted only by the Progress Cache flush (§3.2 Progress Cache). Task-scoped events also carry the task's current `queue` and, when a subject's API or worker call caused the event, that subject as `actor` (absent for engine-caused events such as timeouts and cascades), so consumers can route and audit without reading the task back. Published events never carry a task error's `message` or `context`, because they are free text that may echo payload data (PRD §6.1 Data Protection); `taskFailed` and `taskRetrying` carry only `domain`, `code`, `fault`, and `retryable`. Task-scoped event payloads carry the task's `resource_refs` (PRD §5.1 Resource References) so consumers can route per resource without a read-back. Consumers dedup on the stable event ID (at-least-once delivery); wait-condition resolution is idempotent so a duplicate event cannot satisfy a wait twice
 - **One producer and outbox per task domain** (§3.8), since an event can commit with its state change only in the task's own database. At startup, in each domain database, `event_producer.rs` runs the SDK producer-registration and toolkit-db outbox migrations, builds a `DbProducer` (`EventBrokerApi` from `ClientHub`, `DbDeduplication::managed(ProducerMode::Monotonic)`, identity `task-engine/<domain>`) and binds a `ProducerOutboxQueue` named `<outbox_queue>-<domain>`
 - Domain services **enqueue** each event in the state-change transaction on the task's domain producer: `producers[domain].enqueue(&txn, TaskClaimed { .. })`. The SDK does not call the broker while the txn is open. `ConfigUpdated` uses the `default` domain (home of `te_runtime_config`); `WorkerBlacklisted` uses the queue's domain. Per-task order holds, because a task never changes domain; queue-scoped events from different domains have no mutual order
 - The SDK owns delivery, idempotent-producer dedup, `(topic, broker_partition)` → outbox-partition mapping (per-task ordering via subject), leasing, backoff, retries, dead-lettering, and vacuum. All backend-specific claiming (`SKIP LOCKED` / single-writer) lives inside the SDK / `toolkit-db`, not the Task Engine
@@ -1005,7 +1012,8 @@ See [ADR-0016](ADR/0016-authorization-model.md) and PRD §5.11.
 - `supported_properties` for tasks: `owner_tenant_id`, `id`, `owner_id`, `type_id`, `queue_id`, `assignee_subject`, `created_by`. `type_id` and `queue_id` are `pep_prop` columns on `te_task_state` and `te_task_results`.
 - The PDP returns GTS IDs in constraints; the engine maps them to Registry References before building SQL. A pattern the PDP cannot expand to IDs is a denial.
 - A permission on `gts.cf.core.tasks.task.v1~` covers every task type (GTS derived-type coverage), so a policy can grant one type, a pattern, or all.
-- Single-task operations use the ToolKit prefetch pattern: read the task's type and queue, call the PDP, then apply the constraints in the same guarded write.
+- Single-task operations use the ToolKit prefetch pattern: read the task's tenant, type, and queue (§2.1, the only request-path `allow_all()` on a task table), call the PDP, then apply the constraints in the scoped read or the guarded write.
+- **No existence oracle** (same rule as links, PRD §5.9): a single-task request answers `404` when the task does not exist **or** the caller may not `read` it. So a missing task, another tenant's task, and a task hidden by policy look the same. The engine answers `403` only when the caller may read the task but not perform the action (for example `cancel` without the `cancel` action, or `critical` without `expedite`). When the requested action is denied, the engine makes one extra PDP call for `read` to choose between the two answers; this happens only on the denial path.
 
 **Planes** (toolkit ADR-0008): every task operation uses the tenant plane (`SecurityContext`). Platform services (platform workers, the engine's event-publishing subject, and its event-consuming subject) get it from AuthN client credentials as root-tenant service subjects. The publishing and consuming subjects are separate and hold only their broker grants (§3.2 Event Producer, Event Consumer); neither is ever used to authorize a task operation. The platform plane (`PlatformSecurityContext`) is used only to register the engine's GTS types, instances, and permissions at startup; it never reaches `PolicyEnforcer`.
 
@@ -1136,7 +1144,19 @@ Search uses the ToolKit **OData** surface exactly as the platform implements it,
 | `created_at desc` (default) or `asc` | always | the task ID order: IDs are UUID v7, so creation order is ID order (`ix_te_task_state_tenant_id`, `ix_te_task_results_tenant_id`) |
 | `terminal_at desc` or `asc` | `$filter` limits `state` to terminal states | `ix_te_task_results_tenant_terminal` |
 
-Any other key → `invalid_argument` `400` naming the allowed keys. The engine always appends `id` in the same direction as the tiebreaker. Other fields (state, queue, type, assignee, urgency, priority) are filters, applied inside the bounded index range.
+Any other key → `invalid_argument` `400` naming the allowed keys. The engine always appends `id` in the same direction as the tiebreaker.
+
+**Which index serves a filter** (so a selective filter does not scan a large tenant's whole window):
+
+| Filter | Terminal tasks (`te_task_results`) | Live tasks (`te_task_state`) |
+|---|---|---|
+| `state` | `(owner_tenant_id, state_code, task_id)` | `ix_te_task_state_tenant_state` |
+| `type` | `ix_te_task_results_tenant_type` | applied inside the tenant range (the live set is small) |
+| `queue` | `ix_te_task_results_tenant_queue` | applied inside the tenant range |
+| `tags`, `resource_refs` | `ix_te_tags_key_value`, `ix_te_resource_refs_lookup`, joined by `task_id` | the same indexes |
+| other (`assignee`, `urgency`, `priority`, `dependencies`) | applied inside the range of the index above | applied inside the tenant range |
+
+With several filters in one query, the database picks the most selective of these indexes and applies the other filters inside its range. The live table gets no extra search indexes on purpose (§3.7 *Live table maintenance*). The search-latency NFR is measured with these filters.
 
 **Bounds** (PRD §5.17): a search that can return terminal tasks must have a `created_at` range of at most `search_max_window_days`; without one the engine adds `created_at ge now − search_default_window_days`. A wider range → `invalid_argument` `400`. The range becomes a `ring_slot IN (…)` filter on the history ring (§3.7), so the cost does not grow with stored history and touches at most the slots that cover the window. A search whose `state` filter allows only non-terminal states reads only the live table and has no window. The extractor rejects `$top=0` and does not cap page size, so the handler clamps `$top` to `search_max_top` (`search_max_top_full` at `view=full`).
 
@@ -1176,7 +1196,7 @@ Mapping of Task-Engine failure conditions to canonical categories (`gts.cf.core.
 
 | Task-Engine condition | Canonical category | Typical HTTP |
 |---|---|---|
-| Task/entry/wait-condition not found | `not_found` | 404 |
+| Task/entry/wait-condition not found, or the caller may not `read` it (§3.3 Authorization Model, *No existence oracle*) | `not_found` | 404 |
 | Parent or predecessor missing, foreign, or not usable by the caller (PRD §5.9) | `not_found` (field violation) | 404 |
 | Accept by anyone but the new assignee, or nothing to accept | `not_found` | 404 |
 | Urgency `critical` requested without the `expedite` action | `permission_denied` | 403 |
@@ -1515,6 +1535,16 @@ The deadline scans filter on `bg_slot` inside the index (it is the last key colu
 
 Heartbeats never write this table (ADR-0017); it changes only on claims, state transitions, and progress flushes.
 
+**ID**: `cpt-cf-task-engine-design-live-table-maintenance`
+
+**Live table maintenance (dead rows)**: `te_task_state` works like a queue table: every task is inserted, updated a few times, and deleted at its terminal transition. On PostgreSQL every update or delete leaves a dead row version, and an update that changes an indexed column also adds new index entries. Most transitions change `state_code`, which is in most indexes above, so they cannot be in-place (HOT) updates. If vacuum falls behind, claim and deadline scans walk over dead index entries at the head of their ranges and get slower, although the live set stays small. The same pattern applies to the other live-only tables (`te_wait_conditions`, `te_timers`, `te_dependencies`, `te_worker_sessions`, and the counter tables). Rules:
+- **Aggressive per-table autovacuum**, set in the migrations for these tables (PostgreSQL storage parameters): `autovacuum_vacuum_scale_factor = 0`, `autovacuum_vacuum_threshold` of a few thousand dead rows, `autovacuum_vacuum_cost_limit` raised, so vacuum runs by dead-row count, not by table size.
+- **`fillfactor = 80`** on `te_task_state`, so updates that touch no indexed column (progress flush, `cancel_requested`, payload and `revision` writes) can stay in-place (HOT) and leave no index garbage.
+- **No new index on this table without a write-cost review.** Search over terminal tasks uses `te_task_results` (written once); the live table only carries the indexes that dispatch, deadline scans, and live search need.
+- **Monitor**: export dead-row count and last autovacuum time per live table as metrics (`te_live_table_dead_rows{table}`), and alert when dead rows stay above a threshold.
+- **MySQL/MariaDB**: InnoDB purges old row versions in the background; alert on purge lag (history list length) instead.
+- **Benchmark**: the throughput benchmark (ADR-0008) also runs for at least one hour at 1,000 creates/s and checks that claim p99 does not grow over time.
+
 #### `te_task_results` — terminal task state (written once at the terminal transition)
 
 Same columns as `te_task_state` minus the live-only dispatch/lease columns (`run_after`, `session_id`, `handoff_until`, `assignment_deadline`, `execution_deadline`, `resume_pending`, `queue_slot_shard`, `type_slot_shard`, `tenant_queue_slot_shard`, `tenant_type_slot_shard`, `backlog_shard`, `bg_slot`), plus:
@@ -1525,7 +1555,7 @@ Same columns as `te_task_state` minus the live-only dispatch/lease columns (`run
 | `lease_token` | UUID (nullable) | Final holder's token, for idempotent completion replay (§3.2 TaskService) |
 | `predecessors` | JSON (nullable) | Predecessor list and mode, copied from `te_dependencies` at the terminal transition |
 
-**Partitioning**: ring slot (`ring_slot`, derived from the UUID v7 `task_id`), aligned with `te_tasks` (ADR-0009). **Indexes** (per partition): PK `(task_id, ring_slot)`; `ix_te_task_results_tenant_id` `(owner_tenant_id, task_id)` and `(owner_tenant_id, state_code, task_id)` for tenant-scoped search in creation order; `ix_te_task_results_tenant_terminal` `(owner_tenant_id, state_code, terminal_at, task_id)` for search by finish time and DLQ inspection; `(terminal_at)` for retention.
+**Partitioning**: ring slot (`ring_slot`, derived from the UUID v7 `task_id`), aligned with `te_tasks` (ADR-0009). **Indexes** (per partition): PK `(task_id, ring_slot)`; `ix_te_task_results_tenant_id` `(owner_tenant_id, task_id)` and `(owner_tenant_id, state_code, task_id)` for tenant-scoped search in creation order; `ix_te_task_results_tenant_terminal` `(owner_tenant_id, state_code, terminal_at, task_id)` for search by finish time and DLQ inspection; `ix_te_task_results_tenant_type` `(owner_tenant_id, type_id, task_id)` and `ix_te_task_results_tenant_queue` `(owner_tenant_id, queue_id, task_id)` for search filtered by type or queue (§3.3 Search Parameters); `(terminal_at)` for retention. Rows are written once, so these indexes cost one insert each and no update churn.
 
 #### `te_concurrency_slots` and `te_tenant_concurrency_slots`
 
@@ -1727,6 +1757,9 @@ Latest order value per supersede group (PRD §5.1 Task Supersession). Tenant-sco
 | `payload` | BLOB | Compressed JSON |
 | `owner_tenant_id` | UUID | Inherited from task (Scopable) |
 | `created_at` | TIMESTAMP | |
+| `ring_slot` | SMALLINT NOT NULL | Partition key (ADR-0009), from `task_id` |
+
+**Indexes** (per partition): PK `(id, ring_slot)`; `ix_te_entries_task` `(task_id, created_at, id)` — list a task's entries by time; the type and creator filters (PRD §5.5) are applied inside this range, which is bounded by the task's own entries.
 
 #### `te_wait_conditions`
 
@@ -1794,11 +1827,14 @@ Latest order value per supersede group (PRD §5.1 Task Supersession). Tenant-sco
 |---|---|---|
 | `id` | UUID (PK) | **Stable unique event ID** (UUID v7); the same ID travels on the published event so consumers dedup on it |
 | `task_id` | UUID (nullable) | `NULL` for engine-scoped events not tied to one task (`configUpdated`, `workerBlacklisted`) |
-| `event_type` | VARCHAR(50) | e.g., `taskCreated`, `taskClaimed`, `taskReassigned`, `workerBlacklisted`, `configUpdated` |
+| `event_type_code` | TINYINT / SMALLINT | Stable `TaskEventType` enum discriminant (`taskCreated`, `taskClaimed`, …, `configUpdated`); the API returns the camelCase name. A number, not a string, because this table holds billions of rows (§3.1 enum evolution contract) |
 | `actor_identity` | VARCHAR(256) | |
 | `payload` | BLOB | Compressed JSON event details |
 | `owner_tenant_id` | UUID | Inherited from task (Scopable); for engine-scoped events the acting subject's tenant (`configUpdated`: the admin; `workerBlacklisted`: the worker) |
 | `timestamp` | TIMESTAMP | |
+| `ring_slot` | SMALLINT NOT NULL | Partition key (ADR-0009), from `task_id`, or from `id` for engine-scoped events |
+
+**Indexes** (per partition): PK `(id, ring_slot)`; `ix_te_events_task` `(task_id, id)` — the task's history in order, for `GET /tasks/{id}/events` and the capped history at search `view=full`. Reads always add the tenant scope and `ring_slot = slot_of(task_id)`, so a lookup touches one partition (plus the small `_retained` table).
 
 `te_events` is the **immutable local audit log** and is **always** written (including `taskCreated`) in the same transaction as the state change that produced the event, regardless of the external event-publishing policy (PRD §5.10). The publishing policy (§4.1 `event_policies`, which may be `none`) governs only whether an event is additionally `enqueue`d to the outbox for external delivery — it never suppresses the local log write. `id` is the stable event ID reused by the outbound `TypedEvent` (§3.2 Event Producer), so at-least-once external delivery is safely deduplicated downstream. (Not yet possible with today's SDK, which stamps its own ID — see the TODO in §3.2 Event Producer and [#5491](https://github.com/constructorfabric/gears-rust/issues/5491).)
 
@@ -1841,7 +1877,7 @@ Schema, indexes, claiming, dedup, leasing, and vacuum are owned by the Event Bro
 | `value` | VARCHAR(256) | |
 | `owner_tenant_id` | UUID | Inherited (Scopable) |
 
-**Indexes**: PK `(task_id, key, ring_slot)`; `ix_te_tags_key_value` on `(owner_tenant_id, key, value)` (per partition) — tenant-scoped tag filtering.
+**Indexes**: PK `(task_id, key, ring_slot)`; `ix_te_tags_key_value` on `(owner_tenant_id, key, value, task_id)` (per partition) — tenant-scoped tag filtering; `task_id` last, so matches come out in creation order and a page needs no sort.
 
 #### `te_resource_refs`
 
@@ -1856,7 +1892,7 @@ Written once at creation. **Partitioned** like `te_tags`; rescued rows move to `
 | `verified` | BOOLEAN | `true` only if a creator check of the task type confirmed, at creation, that the creator may act on this resource (§3.3 Creator authority); otherwise `false`. Returned in search, on claim, and in task-scoped events |
 | `owner_tenant_id` | UUID | Inherited (Scopable) |
 
-**Indexes**: PK `(task_id, resource_type_id, resource_id, ring_slot)`; `ix_te_resource_refs_lookup` on `(owner_tenant_id, resource_type_id, resource_id)` (per partition) — tenant-scoped "all tasks touching this resource" filtering. Max rows per task: `max_resource_refs_per_task` (§4.1); excess rejected with `invalid_argument` `400`.
+**Indexes**: PK `(task_id, resource_type_id, resource_id, ring_slot)`; `ix_te_resource_refs_lookup` on `(owner_tenant_id, resource_type_id, resource_id, task_id)` (per partition) — tenant-scoped "all tasks touching this resource" filtering, in creation order. Max rows per task: `max_resource_refs_per_task` (§4.1); excess rejected with `invalid_argument` `400`.
 
 #### `te_worker_blacklist`
 
@@ -2010,6 +2046,7 @@ Steady-state write rates at the §6.1 profile (100K running tasks, 1,000 creates
 | Local audit log (`te_events`) | ≈ 8 rows per task lifecycle → ≈ 8K rows/s; ≈ 4 × 10⁹ rows over the 100-day horizon at 500M tasks | Always written (PRD §5.10); compressed payloads; slot truncation is the only bulk removal (ADR-0009). Capacity planning **MUST** include this table |
 | External events (outbox) | `lifecycle` preset ≈ 4–5 per task → ≈ 5K rows/s; `all` ≈ 8K rows/s | Default event policy is `lifecycle`, not `all`; high-volume system types narrow further via `event_policies.per_type` |
 | Counter rows | 1 update per applicable non-zero dimension per create/claim/release | Hot-row rules (§3.7): unlimited dimensions untouched, `domain_global` sampled, wide scopes sharded |
+| **Total per task** | A short lifecycle (create → claim → start → complete) is about 25–40 row writes (inserts, updates, deletes) across task, state, result, dedup, counter, timer, history, and outbox tables, so 1,000 creates/s ≈ 25–40K row writes/s on the domain database. Estimate; the throughput benchmark measures the real figure | All nodes share the domain database, so this rate does not drop when nodes are added; more write capacity comes from more task domains (§3.8, PRD §6.1 Throughput). `te_events` and the outbox both store each published event on purpose: the history is kept for the task's retention, the outbox row only until delivery |
 
 #### Graceful degradation ordering
 
@@ -2075,6 +2112,11 @@ gears:
         max_eval_failures: 10                     # consecutive budget-exceeded evaluations before the condition resolves (reason eval_budget_exceeded)
         max_wait_secs: 604800                     # cap on every event condition's timeout (default applied when none is set); bounds how long set-time consume checks stay in force (§3.2 Event wait authorization)
         slow_event_cost_warn: 1000000             # WARN log (tenant, type; no payload) when one event's total evaluation cost exceeds this
+
+      input_waits:                        # PRD §5.4 Input Wait Condition; the caller's input_schema is untrusted (§3.2 WaitConditionService)
+        max_schema_bytes: 16384           # serialized input_schema
+        max_schema_depth: 32              # nesting depth of the schema document
+        max_prompt_bytes: 4096
 
       cel:                                # ADR-0007; cost units are charged from inside the evaluation (per node and per byte copied)
         max_expression_bytes: 4096        # same as the Event Broker filter limit
@@ -2269,6 +2311,7 @@ All instruments are OpenTelemetry metrics exported through the platform meter pr
 | `te_progress_flush_duration` | Histogram | — | Progress cache flush time |
 | `te_blob_compression_ratio` | Histogram | — | Compression ratio |
 | `te_db_pool_active` | Gauge | `domain` | Active DB connections per domain |
+| `te_live_table_dead_rows` | Gauge | `domain`, `table` | Dead row versions in a live-only table (PostgreSQL); InnoDB purge lag on MySQL (§3.7 *Live table maintenance*) |
 | `te_request_duration_seconds` | Histogram | `method`, `route`, `status` | HTTP request latency (`route` = path template) |
 | `te_retention_removed_total` | Counter | `domain`, `table`, `how` | Rows removed by retention (`how` = `truncate` / `delete`), per sweep like the Event Broker retention worker's report (§3.2 RetentionService) |
 | `te_retention_rescued_total` | Counter | `domain`, `table` | Rows rescued into `_retained` tables before a slot was truncated |
