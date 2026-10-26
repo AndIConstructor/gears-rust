@@ -79,11 +79,14 @@ impl EventFilter for AuthorizedInterestFilter {
         if !self.matches(event) {
             return Ok(false);
         }
+        // Stored events passed the same event-type check at publish, so this
+        // cannot refuse one; `?` keeps the fail-closed path if it ever did.
+        let resource = event_type_resource(&event.r#type)?;
         match self
             .policy_enforcer
             .access_scope_with(
                 &self.ctx,
-                &event_type_resource(&event.r#type),
+                &resource,
                 "consume",
                 None,
                 &AccessRequest::new()

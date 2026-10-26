@@ -21,9 +21,11 @@
 //! "depending on configuration", not something this domain layer
 //! re-implements against a second SDK.
 
+use std::sync::LazyLock;
+
 use authz_resolver_sdk::{AccessRequest, PolicyEnforcer, ResourceType};
 use event_broker_sdk::gts::{CONSUMER_GROUP_RESOURCE_TYPE, EventV1, REQUEST_RESOURCE_TYPE};
-use gts::{GtsIdPattern, GtsTypeId};
+use gts::{GtsId, GtsIdPattern, GtsIdPatternSegment, GtsTypeId};
 use toolkit_gts::{GtsInstanceId, GtsSchema};
 use toolkit_security::{SecurityContext, pep_properties};
 use uuid::Uuid;
@@ -37,14 +39,50 @@ use crate::domain::error::{DomainError, ErrorCode};
 pub const CONSUMER_GROUP_FAMILY_RESOURCE: ResourceType =
     ResourceType::from_static(CONSUMER_GROUP_RESOURCE_TYPE, &[]);
 
-/// PEP resource for one concrete event type: `produce` on publish, `consume`
-/// on a JOIN interest that names the type exactly.
-#[must_use]
-pub fn event_type_resource(event_type: &GtsTypeId) -> ResourceType {
-    ResourceType::new(event_type.as_ref().to_owned(), &[])
+/// Every event type derives from the event base type, so this wildcard-free
+/// pattern covers exactly the set of possible event types. `None` only if the
+/// SDK's base type id stopped being a valid pattern, which [`event_family`]
+/// turns into a refusal rather than a panic.
+static EVENT_FAMILY: LazyLock<Option<GtsIdPattern>> =
+    LazyLock::new(|| GtsIdPattern::try_new(EventV1::TYPE_ID).ok());
+
+/// The event family pattern; fails closed when it cannot be built.
+fn event_family() -> Result<&'static GtsIdPattern, DomainError> {
+    EVENT_FAMILY.as_ref().ok_or_else(|| {
+        DomainError::Internal(format!(
+            "event base type '{}' is not a valid GTS pattern",
+            EventV1::TYPE_ID
+        ))
+    })
 }
 
-/// PEP resource for one JOIN event-type interest.
+/// PEP resource for the event type a publish names (`produce`).
+///
+/// A type that does not derive from the event base type cannot be an event
+/// type, so it is rejected before the PEP is asked: otherwise a publish naming
+/// another gear's type (say an IRM resource type) would become an authorization
+/// question about that gear's resource, which a broad role on its family could
+/// pass. The rejection is the same `404 EventTypeNotFound` the publish would
+/// reach after the lookup, only earlier.
+///
+/// # Errors
+/// `DomainError::NotFound` with `EventTypeNotFound` when `event_type` does not
+/// derive from `gts.cf.core.events.event.v1~`; `DomainError::Internal` if the
+/// event family pattern cannot be built.
+pub fn event_type_resource(event_type: &GtsTypeId) -> Result<ResourceType, DomainError> {
+    let family = event_family()?;
+    let is_event = GtsId::try_new(event_type.as_ref()).is_ok_and(|id| id.matches_pattern(family));
+    if !is_event {
+        return Err(DomainError::NotFound {
+            code: ErrorCode::EventTypeNotFound,
+            message: format!("event type '{event_type}' is not registered"),
+            resource: event_type.to_string(),
+        });
+    }
+    Ok(ResourceType::new(event_type.as_ref().to_owned(), &[]))
+}
+
+/// PEP resource for one JOIN event-type interest (`consume`).
 ///
 /// A pattern without a wildcard names one event type (or the event base type
 /// itself), so it is checked as that type. A wildcard pattern such as
@@ -54,14 +92,38 @@ pub fn event_type_resource(event_type: &GtsTypeId) -> ResourceType {
 /// pattern itself in the `event_type_id` property for a decision point that
 /// can tell whether a grant covers it. Either way the check is at least as
 /// strict as before: the base type is what a family grant on events covers.
-#[must_use]
-pub fn event_type_interest_resource(pattern: &GtsIdPattern) -> ResourceType {
-    let pattern = pattern.pattern();
-    if pattern.contains('*') {
+///
+/// A pattern that cannot match any event type is rejected before the PEP is
+/// asked, for the same reason as in [`event_type_resource`]. A pattern overlaps
+/// the event family when the family covers it (narrower, e.g.
+/// `…event.v1~vendor.*`) or it covers the family (broader, e.g.
+/// `gts.cf.core.events.*`).
+///
+/// # Errors
+/// `DomainError::Validation` with `BadTypePattern` when `pattern` cannot match
+/// any event type; `DomainError::Internal` if the event family pattern cannot
+/// be built.
+pub fn event_type_interest_resource(pattern: &GtsIdPattern) -> Result<ResourceType, DomainError> {
+    let family = event_family()?;
+    if !(family.covers(pattern) || pattern.covers(family)) {
+        return Err(DomainError::Validation {
+            code: ErrorCode::BadTypePattern,
+            message: format!(
+                "event type selector '{}' cannot match any event type ({}…)",
+                pattern.pattern(),
+                EventV1::TYPE_ID
+            ),
+        });
+    }
+    let wildcard = pattern
+        .segments()
+        .iter()
+        .any(GtsIdPatternSegment::is_wildcard);
+    Ok(if wildcard {
         ResourceType::from_static(EventV1::TYPE_ID, &[])
     } else {
-        ResourceType::new(pattern.to_owned(), &[])
-    }
+        ResourceType::new(pattern.pattern().to_owned(), &[])
+    })
 }
 
 /// PEP resource for one concrete topic (`topic:consume` on JOIN).

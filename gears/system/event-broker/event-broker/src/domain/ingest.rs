@@ -369,12 +369,14 @@ where
         // Authz/tenant-scope enforcement (`gears-rust#4516`,
         // `eb-authz-enforcement`) - before topic/schema validation, per
         // `DESIGN.md`'s Validation Pipeline step 1 ordering.
+        // The event's own type, so a grant can confine a producer to its own
+        // event types (`docs/DESIGN.md` §3.3); a type that is not an event
+        // type at all is refused before the PEP is asked.
+        let event_type_resource = event_type_resource(&request.r#type)?;
         self.policy_enforcer
             .access_scope_with(
                 ctx,
-                // The event's own type, so a grant can confine a producer to
-                // its own event types (`docs/DESIGN.md` §3.3).
-                &event_type_resource(&request.r#type),
+                &event_type_resource,
                 "produce",
                 None,
                 &AccessRequest::new()

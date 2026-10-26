@@ -460,10 +460,11 @@ where
 
             for pattern in &interest.types {
                 let pattern_str = pattern.pattern();
+                let interest_resource = event_type_interest_resource(pattern)?;
                 self.policy_enforcer
                     .access_scope_with(
                         ctx,
-                        &event_type_interest_resource(pattern),
+                        &interest_resource,
                         "consume",
                         None,
                         &AccessRequest::new()

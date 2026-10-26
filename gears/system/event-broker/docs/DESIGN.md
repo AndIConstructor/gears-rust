@@ -1952,7 +1952,7 @@ All errors follow RFC 9457 Problem Details (`application/problem+json`) using th
 | `gts.cf.core.events.subject_type.v1~` | producers | consumers | — (subject types owned by other modules) |
 | `gts.cf.core.events.consumer_group.v1~` | — | consumers (named groups; explicit grant required) | group creators (POST `/v1/consumer-groups`) and `types_registry` upserts |
 
-Wildcards in the resource pattern are supported on every cell above.
+Wildcards in the granted pattern are supported on every cell above. A *requested* wildcard (a JOIN interest such as `…vendor.audit.*`) is checked differently; see below.
 
 **What the PEP is asked**: the resource type of each check is the concrete GTS id of the resource acted on, so a decision point matches a grant against the type string alone, as it does for every other gear:
 
@@ -1963,10 +1963,12 @@ Wildcards in the resource pattern are supported on every cell above.
 | JOIN, `consume` on an exact event-type interest | that event type | `event_type_id` |
 | JOIN, `consume` on a wildcard interest (`…vendor.audit.*`) | the event base type `gts.cf.core.events.event.v1~` | `event_type_id` (the pattern) |
 | delivery, `consume` on each matching event | the event's concrete type | `event_type_id` |
-| JOIN on a named group, `consume` | the group id | `consumer_group_id` |
+| any check on a named group: JOIN, get and list (`consume`), delete (`manage`) | the group id | `consumer_group_id` |
 | create a group, `define` | the family `gts.cf.core.events.consumer_group.v1~` (no group exists yet) | — |
 
-A wildcard pattern is not a GTS identifier, and a decision point that parses the resource type as one would reject it, so a wildcard interest is checked on the event base type: only a grant on the whole event family allows it, unless the decision point evaluates the pattern in `event_type_id` and finds that a grant covers it. Tenant scope stays its own check on `gts.cf.core.events.request.v1~`.
+A wildcard pattern is not a GTS identifier, and a decision point that parses the resource type as one would reject it, so a wildcard interest is checked on the event base type: only a grant on the whole event family allows it, unless the decision point evaluates the pattern in `event_type_id` and finds that a grant covers it. Evaluating whether a granted pattern covers a requested one is a follow-up; until then a narrow grant such as `…event.v1~vendor.*` allows exact interests under it, not a wildcard interest. Tenant scope stays its own check on `gts.cf.core.events.request.v1~`.
+
+An id that cannot be an event type is refused before any PEP call, so a request naming another gear's type never becomes an authorization question about that gear's resource: a publish whose type does not derive from `gts.cf.core.events.event.v1~` gets `404 EventTypeNotFound` (the answer the lookup would give anyway), and a JOIN interest that overlaps no event type - neither covered by nor covering the event base type - gets `400 BadTypePattern`.
 
 A successful JOIN does not grant every type a selector can match. A bare type
 selector also matches derived types, whose permissions may differ. Before
