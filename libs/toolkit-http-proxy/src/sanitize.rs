@@ -108,7 +108,10 @@ const TRAILER_DROPPED: [HeaderName; 12] = [
 /// (as this extension) or the response body to where the trailers are
 /// sanitized.
 #[derive(Debug, Clone)]
-pub(crate) struct HopFields(pub(crate) Arc<[HeaderName]>);
+pub(crate) struct HopFields(
+    /// The field names `Connection` nominated.
+    pub(crate) Arc<[HeaderName]>,
+);
 
 /// Remove `names` from `headers`. Most messages carry none of them, and one
 /// pass over the few headers present is cheaper than a lookup per name.
