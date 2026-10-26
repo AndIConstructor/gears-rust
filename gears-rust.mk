@@ -72,6 +72,8 @@ E2E_SERVER_FEATURE_ARGS ?= $(if $(E2E_SERVER_FEATURES),--features $(E2E_SERVER_F
 OPENAPI_SERVER_FEATURES ?= $(E2E_SERVER_FEATURES)
 OPENAPI_SERVER_FEATURE_ARGS ?= $(E2E_SERVER_FEATURE_ARGS)
 
+GTS_VALIDATOR_MIN_VERSION ?= 0.16.1
+
 # -------- Set up --------
 
 .PHONY: setup py-env
@@ -104,7 +106,7 @@ setup: .setup-stamp py-env
 	cargo install cargo-fuzz
 	cargo install cargo-hack
 	cargo install --locked cargo-shear --version $(SHEAR_VERSION)
-	cargo install gts-validator
+	cargo install gts-validator --version '>=${GTS_VALIDATOR_MIN_VERSION}'
 	@if echo "$$OS" | grep -iq windows || [ -n "$$COMSPEC" ]; then \
 		echo "NOTE: kani-verifier is not supported on Windows; skipping (use WSL2/Docker for Kani)."; \
 		echo "Installing cargo-llvm-cov (supported on Windows; needs llvm-tools-preview)..."; \
@@ -134,11 +136,14 @@ ensure-submodules:
 		echo "ERROR: Uninitialized git submodules detected. Run 'git submodule update --init --recursive'." && exit 1; \
 	fi
 
-# Run markdown checks with 'lychee'
+# Run markdown checks with 'lychee'.
+# Mirrors the pre-commit hook's scope: every tracked .md outside docs/web-docs (that tree has
+# Starlight route-relative links, see web-docs-check). git ls-files does not descend into the
+# guidelines/DNA submodule, so it is passed explicitly.
 lychee: ensure-submodules
 	$(call print_target_banner)
 	$(call check_tool,lychee)
-	lychee --exclude-path 'docs/web-docs' docs examples guidelines gears/system/event-broker/docs studio-kit-gears
+	git ls-files -z '*.md' ':!:docs/web-docs/**' | xargs -0 lychee --offline --no-progress --config lychee.toml guidelines/DNA
 
 ## Validate internal links in web-docs.
 # The web-docs pages use Starlight route-relative links (e.g. ../foo/) that only
@@ -168,7 +173,7 @@ docker-pins:
 # Uses gts-validator binary (install via: cargo install gts-validator)
 gts-docs:
 	$(call print_target_banner)
-	$(call check_tool,gts-validator)
+	$(call check_tool_version,gts-validator,>=$(GTS_VALIDATOR_MIN_VERSION))
 	gts-validator \
 		--vendor cf,vendor,example,fabrikam \
 		--exclude "target/*" \
@@ -349,7 +354,7 @@ arch_status_svg_update: py-env
 
 # -------- Tests --------
 
-.PHONY: test-no-macros test-macros test-db test-integration test-graph-storage test-graph-storage-pg test-cluster-k8s coverage-cluster-k8s test-github-mirror-db test-github-mirror-scale test-fips
+.PHONY: test-no-macros test-macros test-db test-integration test-graph-storage test-graph-storage-pg test-cluster-k8s coverage-cluster-k8s test-durable-execution-pg coverage-durable-execution-pg test-github-mirror-db test-github-mirror-scale test-fips
 
 # Run the workspace tests except the macro test crates (CI test job)
 test-no-macros: install-tools
@@ -369,16 +374,14 @@ test-graph-storage: install-tools
 	$(call print_target_banner)
 	cargo nextest run -p cf-gears-graph-storage -p cf-gears-graph-storage-sdk
 
-## Run the graph-storage gear's PostgreSQL 19 lane (Docker required)
-## The same conformance suite against the built-in store, plus the SQL/PGQ cases that only a real
-## server can answer. It needs an image carrying PostgreSQL 19 **and**
-## pgvector — `test_containers::postgres_graph()` pins a stock 19beta
-## alpine, which has only the former — so point GEARS_TEST_PG_GRAPH_IMAGE at
-## one until the platform pin carries both. GEARS_TEST_PG_GRAPH_REQUIRED=1
+## Run the graph-storage gear's PostgreSQL lane (Docker required)
+## The same conformance suite against the built-in store, plus the cases only a real
+## server can answer. It needs PostgreSQL 16+ with pgvector: point
+## GEARS_TEST_PG_GRAPH_IMAGE at one (CI uses pgvector/pgvector:0.8.7-pg18). GEARS_TEST_PG_GRAPH_REQUIRED=1
 ## turns "no such image, skipping" into a failure, so CI cannot go green by
 ## running nothing; that is the default here, because a target whose whole
 ## purpose is the database has no business passing without one.
-## Every case in this lane gets its own PostgreSQL instance (two of them are
+## Every case in this lane gets its own PostgreSQL instance (some of them are
 ## operator surgery on server-wide state), and more than a handful at once is
 ## more than Docker and PostgreSQL will take: the pools time out and a
 ## different case fails on each run. nextest runs each case in its own
@@ -414,14 +417,9 @@ lane_post_toolkit-db-sqlite = cargo build -p cf-gears-toolkit-db --examples --fe
 ## toolkit-db on PostgreSQL.
 lane_args_toolkit-db-pg = -p cf-gears-toolkit-db --features pg,integration
 
-## The SQL/PGQ lane: toolkit-db's unit suites under the `pgq` feature (the
-## secure graph builder and its tests compile only there), the PostgreSQL 19
-## integration suite (tests/pg, Docker required; a testcontainers PG19) and the
-## trybuild guards. `pgq` implies `pg`, so without the filter this would re-run
-## every PG18 Docker suite the toolkit-db-pg lane just ran; the filter keeps only
-## what this lane adds. The PG19 suite skips itself while the pre-GA image is
-## unavailable; CI sets GEARS_TEST_PG_GRAPH_REQUIRED=1 so there the skip is a
-## failure — do the same locally once the image is expected to be present.
+## The SQL/PGQ lane: toolkit-db's unit, integration (tests/pg) and trybuild
+## suites under the `pgq` feature. `pgq` implies `pg`, so the filter keeps only
+## what this lane adds to the toolkit-db-pg lane.
 lane_args_toolkit-db-pgq = -p cf-gears-toolkit-db --features pgq,integration -E 'kind(lib) | binary(mod) | binary(ui)'
 
 ## toolkit-db on MySQL.
@@ -670,6 +668,25 @@ test-cluster-k8s: install-tools
 coverage-cluster-k8s:
 	$(call print_target_banner)
 	$(call k8s_cluster_suite,cargo llvm-cov test --no-report,coverage: )
+
+# Use one test binary so PostgreSQL scenarios share the testcontainers fixture.
+DURABLE_EXECUTION_PG_TEST_ARGS := -p cf-gears-toolkit-durable-execution --lib --features integration \
+	-- --skip store::process_tests::worker_child --test-threads=4
+
+## Run the durable-execution library's PostgreSQL and subprocess recovery suites (Docker required)
+## Uses `cargo test`, not `nextest`: the scenarios live in one test binary so
+## they share a single testcontainers PostgreSQL fixture.
+test-durable-execution-pg: install-tools
+	$(call print_target_banner)
+	cargo test $(DURABLE_EXECUTION_PG_TEST_ARGS)
+
+## Add the durable-execution PostgreSQL coverage to the current cargo-llvm-cov session
+## The coverage sibling of `test-durable-execution-pg`. Like
+## `coverage-cluster-k8s`, it does not clean or report: the coverage job in
+## .github/workflows/ci.yml brackets it.
+coverage-durable-execution-pg:
+	$(call print_target_banner)
+	cargo llvm-cov test --no-rustc-wrapper --no-report $(DURABLE_EXECUTION_PG_TEST_ARGS)
 
 ## Run FIPS-mode integration tests (requires Go for aws-lc-fips-sys).
 ## Covers:

@@ -164,10 +164,6 @@ reason = "Ignore chat-engine companion doc — WEBHOOK-PROTOCOL.md documents the
 patterns = ["gears/chat-engine/docs/WEBHOOK-PROTOCOL.md"]
 
 [[ignore]]
-reason = "Ignore module 'llm-gateway' (not SDLC-documented yet: PRD is a draft and DESIGN is missing). Remove this ignore after PRD/DESIGN conform to template."
-patterns = ["gears/llm-gateway/*"]
-
-[[ignore]]
 reason = "Ignore module 'mini-chat' docs (temporary: PRD/DESIGN constraints failing in CI)."
 patterns = ["gears/mini-chat/*"]
 
@@ -378,6 +374,26 @@ extensions = [".rs"]
 [[systems.autodetect.codebase]]
 name = "Storage Plugin Tests"
 path = "{system_root}/plugins/{system}-storage-plugin/tests"
+extensions = [".rs"]
+
+[[systems.autodetect.codebase]]
+name = "Most Restrictive Engine src"
+path = "{system_root}/plugins/{system}-engine-most-restrictive/src"
+extensions = [".rs"]
+
+[[systems.autodetect.codebase]]
+name = "Most Restrictive Engine tests"
+path = "{system_root}/plugins/{system}-engine-most-restrictive/tests"
+extensions = [".rs"]
+
+[[systems.autodetect.codebase]]
+name = "CEL Engine src"
+path = "{system_root}/plugins/{system}-engine-cel/src"
+extensions = [".rs"]
+
+[[systems.autodetect.codebase]]
+name = "CEL Engine tests"
+path = "{system_root}/plugins/{system}-engine-cel/tests"
 extensions = [".rs"]
 
 # Nested sub-plugin scope: account-management/docs/tr-plugin/ carries its own PRD/DESIGN/ADR.

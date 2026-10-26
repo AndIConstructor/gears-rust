@@ -1,4 +1,3 @@
-// Created: 2026-08-13 by Virtuozzo International GmbH
 //! The category repository contract.
 //!
 //! Declared in the domain and implemented in `infra`, so the service depends on
@@ -206,8 +205,10 @@ pub trait CategoryRepository: Send + Sync {
     /// scope, never to the returned page: filtering afterwards yields short
     /// pages and a cursor that skips rows the caller was entitled to.
     ///
-    /// Ordered by `sort_order` then `name` so the cursor is deterministic.
-    /// The listing carries the size of the whole filtered set.
+    /// Ordered by `sort_order` then `name` unless the caller sent an
+    /// `$orderby`, in which case that order applies with `name` appended as the
+    /// tiebreaker, so the cursor is deterministic either way. The listing
+    /// carries the size of the whole filtered set.
     ///
     /// # Errors
     /// [`DomainError::Validation`] when the query references an unmapped field

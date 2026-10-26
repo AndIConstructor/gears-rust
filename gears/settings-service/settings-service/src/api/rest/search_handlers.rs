@@ -1,4 +1,3 @@
-// Created: 2026-09-17 by Virtuozzo International GmbH
 //! The search handler: browse's gates, then the corpus decision, then the
 //! service — and the `hidden` exclusion on the way out.
 
@@ -144,6 +143,7 @@ pub async fn search_settings(
                 visibility: &domain_visibility,
                 needle: &needle,
                 corpus,
+                target: target_tenant,
                 tenant_ids: &tenant_ids,
                 hidden_for: &caller_chain,
                 override_limit: SEARCH_OVERRIDE_LIMIT,

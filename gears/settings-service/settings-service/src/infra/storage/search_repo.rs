@@ -1,9 +1,8 @@
-// Created: 2026-09-17 by Virtuozzo International GmbH
 //! The search queries, in the dialect of the database in use.
 //!
 //! Two dialects, one shape. On `PostgreSQL` every predicate is `ILIKE` over
 //! exactly the expression a trigram GIN index is built on — `key`,
-//! `description`, `categories.name`, `(default_value #>> '{}')`,
+//! `display_name`, `description`, `categories.name`, `(default_value #>> '{}')`,
 //! `(value #>> '{}')` — with the classification predicate the split index
 //! pairs of DESIGN §4.7 carry, so each half of a pair serves its own corpus.
 //! On `SQLite` the same predicates are `LIKE` scans; the gear's single-node
@@ -26,7 +25,7 @@ use uuid::Uuid;
 
 use crate::domain::category::Category;
 use crate::domain::category::visibility::DomainVisibility;
-use crate::domain::declaration::Declaration;
+use crate::domain::declaration::{Declaration, DeclarationStatus};
 use crate::domain::error::DomainError;
 use crate::domain::odata::Listing;
 use crate::domain::search::{Corpus, Needle, SearchRepository, SearchRequest};
@@ -153,6 +152,9 @@ impl SearchRepo {
     /// pair, whose predicate this is.
     fn value_matches(self, corpus: Corpus, tenant_ids: &[Uuid], pattern: &str) -> Condition {
         Condition::all()
+            // A flagged override is not served — resolution falls through it —
+            // so what it holds is not a match.
+            .add(setting_value::Column::NeedsReview.eq(false))
             .add(setting_value::Column::SecretRef.is_null())
             .add(value_repo::subjectless())
             .add(
@@ -228,6 +230,7 @@ impl SearchRepository for SearchRepo {
 
         let matched = Condition::any()
             .add(self.contains("setting_declarations.key", &pattern))
+            .add(self.contains("setting_declarations.display_name", &pattern))
             .add(self.contains("setting_declarations.description", &pattern))
             .add(declaration::Column::CategoryId.in_subquery(categories.into_query()))
             .add(default_matches)
@@ -237,20 +240,17 @@ impl SearchRepository for SearchRepo {
             declaration_repo::apply_visibility(DeclarationEntity::find(), request.visibility),
             request.hidden_for,
         )
-        .filter(declaration::Column::Status.eq("active"))
+        .filter(declaration::Column::Status.eq(DeclarationStatus::Active.as_str()))
         .filter(matched);
-        // `needs_review eq true`, in the query: only settings with an override
-        // flagged for review at one of the bounded tenants. A page filtered
-        // afterwards would page the unfiltered set, which is the defect a
-        // filter in the query exists to avoid.
+        // `needs_review eq true`, in the query: only settings whose own
+        // override at the target is flagged for review — the same narrowing the
+        // browse applies. A page filtered afterwards would page the unfiltered
+        // set, which is the defect a filter in the query exists to avoid.
         if request.flagged_only {
-            let flagged = ValueEntity::find()
-                .select_only()
-                .column(setting_value::Column::DeclarationId)
-                .filter(setting_value::Column::NeedsReview.eq(true))
-                .filter(setting_value::Column::TenantId.is_in(request.tenant_ids.iter().copied()))
-                .filter(value_repo::subjectless());
-            base = base.filter(declaration::Column::Id.in_subquery(flagged.into_query()));
+            base = base.filter(
+                declaration::Column::Id
+                    .in_subquery(value_repo::flagged_declarations_at(request.target)),
+            );
         }
 
         // Tiebreaker `key`, unique, so a page boundary neither repeats nor

@@ -1,22 +1,56 @@
-// Created: 2026-09-06 by Virtuozzo International GmbH
 //! `ValueRepository` over `setting_values`.
 
 use async_trait::async_trait;
+use sea_orm::ExprTrait as _;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, QueryTrait};
+use settings_service_sdk::odata::DeclarationFilterField;
+use toolkit_db::odata::{LimitCfg, filter_node_to_condition, paginate_odata};
 use toolkit_db::secure::{DBRunner, SecureDeleteExt, SecureEntityExt, SecureUpdateExt};
+use toolkit_odata::filter::convert_expr_to_filter_node;
+use toolkit_odata::{ODataOrderBy, ODataQuery, OrderKey, Page, SortDir};
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
+use crate::domain::odata::ReviewOrderField;
 use crate::domain::precondition;
-use crate::domain::value::{StoredValue, ValueDraft, ValueRepository};
+use crate::domain::value::{
+    DistinctValue, ListedValue, ReviewRequest, StoredValue, ValueDraft, ValueRepository,
+};
 use crate::infra::storage::clock::{now, stamp_after};
+use crate::infra::storage::declaration_odata_mapper::DeclarationODataMapper;
+use crate::infra::storage::declaration_repo;
+use crate::infra::storage::entity::declaration::{self, Entity as DeclarationEntity};
 use crate::infra::storage::entity::setting_value::{self, Entity as ValueEntity};
+use crate::infra::storage::odata_mapper::ReviewODataMapper;
+
+/// Page bounds of the review listing: the browse's, which it is the row-level
+/// companion of.
+const REVIEW_LIMIT_CFG: LimitCfg = LimitCfg {
+    default: 50,
+    max: 200,
+};
 
 /// The repository. Stateless: every operation takes its connection.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ValueRepo;
+
+/// One group of the distinct-values read.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct DistinctRow {
+    value: Option<serde_json::Value>,
+    data_classification: String,
+    n: i64,
+}
+
+/// One row of the listing projection.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct ListedRow {
+    tenant_id: Uuid,
+    value: Option<serde_json::Value>,
+    data_classification: String,
+}
 
 /// Converts a stored setting value row to the domain type.
 pub(crate) fn to_domain(model: setting_value::Model) -> StoredValue {
@@ -58,6 +92,21 @@ fn map_write_error(err: &toolkit_db::secure::ScopeError) -> DomainError {
 /// subject dimension and never answer a request that named no subject.
 pub(crate) fn subjectless() -> sea_orm::Condition {
     sea_orm::Condition::all().add(setting_value::Column::SubjectType.is_null())
+}
+
+/// The ids of the declarations whose own subject-less override at `tenant` is
+/// flagged for review, as a subquery — served by `idx_values_needs_review`.
+///
+/// One predicate for every surface that narrows to "flagged at the target"
+/// (the browse and the search), so the two cannot read the flag differently.
+pub(crate) fn flagged_declarations_at(tenant: Uuid) -> sea_orm::sea_query::SelectStatement {
+    ValueEntity::find()
+        .select_only()
+        .column(setting_value::Column::DeclarationId)
+        .filter(setting_value::Column::NeedsReview.eq(true))
+        .filter(setting_value::Column::TenantId.eq(tenant))
+        .filter(subjectless())
+        .into_query()
 }
 
 #[async_trait]
@@ -114,6 +163,105 @@ impl ValueRepository for ValueRepo {
             .await
             .map_err(db_error)?;
         Ok(rows.into_iter().map(to_domain).collect())
+    }
+
+    async fn count_in_tenants<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        declaration_id: Uuid,
+        tenant_ids: &[Uuid],
+    ) -> Result<u64, DomainError> {
+        if tenant_ids.is_empty() {
+            return Ok(0);
+        }
+        // `SELECT COUNT(*)` over the predicate of `find_in_tenants`.
+        ValueEntity::find()
+            .filter(setting_value::Column::DeclarationId.eq(declaration_id))
+            .filter(setting_value::Column::TenantId.is_in(tenant_ids.iter().copied()))
+            .filter(subjectless())
+            .secure()
+            .scope_with(scope)
+            .count(conn)
+            .await
+            .map_err(db_error)
+    }
+
+    async fn distinct_values_in_tenants<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        declaration_id: Uuid,
+        tenant_ids: &[Uuid],
+    ) -> Result<Vec<DistinctValue>, DomainError> {
+        if tenant_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // `SELECT value, data_classification, COUNT(id) ... GROUP BY value,
+        // data_classification` over the predicate of `find_in_tenants`: the
+        // distinct pairs and their multiplicity, nothing else of a row. The
+        // secret rows (`value IS NULL`) group together per classification.
+        let groups = ValueEntity::find()
+            .filter(setting_value::Column::DeclarationId.eq(declaration_id))
+            .filter(setting_value::Column::TenantId.is_in(tenant_ids.iter().copied()))
+            .filter(subjectless())
+            .secure()
+            .scope_with(scope)
+            .project_all(conn, |q| {
+                q.select_only()
+                    .column(setting_value::Column::Value)
+                    .column(setting_value::Column::DataClassification)
+                    .column_as(Expr::col(setting_value::Column::Id).count(), "n")
+                    .group_by(setting_value::Column::Value)
+                    .group_by(setting_value::Column::DataClassification)
+                    .into_model::<DistinctRow>()
+            })
+            .await
+            .map_err(db_error)?;
+        Ok(groups
+            .into_iter()
+            .map(|group| DistinctValue {
+                value: group.value,
+                data_classification: group.data_classification,
+                count: u64::try_from(group.n).unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    async fn list_in_tenants<C: DBRunner>(
+        &self,
+        conn: &C,
+        scope: &AccessScope,
+        declaration_id: Uuid,
+        tenant_ids: &[Uuid],
+    ) -> Result<Vec<ListedValue>, DomainError> {
+        if tenant_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The predicate of `find_in_tenants`, three columns of it.
+        let rows = ValueEntity::find()
+            .filter(setting_value::Column::DeclarationId.eq(declaration_id))
+            .filter(setting_value::Column::TenantId.is_in(tenant_ids.iter().copied()))
+            .filter(subjectless())
+            .secure()
+            .scope_with(scope)
+            .project_all(conn, |q| {
+                q.select_only()
+                    .column(setting_value::Column::TenantId)
+                    .column(setting_value::Column::Value)
+                    .column(setting_value::Column::DataClassification)
+                    .into_model::<ListedRow>()
+            })
+            .await
+            .map_err(db_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ListedValue {
+                tenant_id: row.tenant_id,
+                value: row.value,
+                data_classification: row.data_classification,
+            })
+            .collect())
     }
 
     async fn find_all<C: DBRunner>(
@@ -224,32 +372,102 @@ impl ValueRepository for ValueRepo {
             .map_err(db_error)
     }
 
-    async fn list_flagged<C: DBRunner>(
+    async fn list_review<C: DBRunner>(
         &self,
         conn: &C,
-        scope: &AccessScope,
-        declaration_ids: &[Uuid],
-        tenant_ids: &[Uuid],
-        limit: usize,
-    ) -> Result<Vec<StoredValue>, DomainError> {
-        if declaration_ids.is_empty() || tenant_ids.is_empty() {
-            return Ok(Vec::new());
+        request: &ReviewRequest<'_>,
+    ) -> Result<Page<StoredValue>, DomainError> {
+        // @cpt-begin:cpt-cf-settings-service-flow-value-resolution-review-list:p1:inst-vr-review-6
+        // The declarations a row may belong to, as a subquery: visible to the
+        // caller, not hidden on its chain, within the narrowed grant and the
+        // filter's selectors — all in the query, so the page is cut and counted
+        // after them and comes back full.
+        let mut declarations = declaration_repo::exclude_hidden_for(
+            declaration_repo::apply_visibility(DeclarationEntity::find(), request.visibility),
+            request.hidden_for,
+        );
+        if let Some(expr) = request.declarations {
+            let invalid = |message: String| DomainError::Validation {
+                field: "$filter".to_owned(),
+                code: crate::field::ODATA_QUERY,
+                message,
+            };
+            let node = convert_expr_to_filter_node::<DeclarationFilterField>(expr)
+                .map_err(|e| invalid(e.to_string()))?;
+            declarations = declarations.filter(
+                filter_node_to_condition::<DeclarationFilterField, DeclarationODataMapper>(&node)
+                    .map_err(invalid)?,
+            );
         }
-        let rows = ValueEntity::find()
-            .filter(setting_value::Column::NeedsReview.eq(true))
-            .filter(setting_value::Column::DeclarationId.is_in(declaration_ids.iter().copied()))
-            .filter(setting_value::Column::TenantId.is_in(tenant_ids.iter().copied()))
-            .filter(subjectless())
-            .order_by_asc(setting_value::Column::DeclarationId)
-            .order_by_asc(setting_value::Column::TenantId)
-            // One past the bound: the caller tells a full answer from a cut one.
-            .limit(u64::try_from(limit.saturating_add(1)).unwrap_or(u64::MAX))
+        let permitted = declarations
             .secure()
-            .scope_with(scope)
-            .all(conn)
-            .await
-            .map_err(db_error)?;
-        Ok(rows.into_iter().map(to_domain).collect())
+            .scope_with(request.scope)
+            .into_inner()
+            .select_only()
+            .column(declaration::Column::Id)
+            .into_query();
+
+        // The subtree is the filter on the rows, as it is for every read over
+        // the target's descendants: the caller's grant narrows the settings, and
+        // the tenants were gated and walked before this.
+        let base = ValueEntity::find()
+            .filter(setting_value::Column::NeedsReview.eq(true))
+            .filter(subjectless())
+            .filter(setting_value::Column::TenantId.is_in(request.tenant_ids.iter().copied()))
+            .filter(setting_value::Column::DeclarationId.in_subquery(permitted))
+            .secure()
+            .scope_with(&AccessScope::allow_all());
+
+        // A fixed, total order: declaration, then tenant — `uq_value_scope`
+        // makes the pair unique for subject-less rows — so a page boundary
+        // inside one setting's rows neither repeats nor skips one. The caller's
+        // own `$filter` and order are not read; the binding the cursor carries
+        // is.
+        let query = ODataQuery {
+            filter: None,
+            order: ODataOrderBy(vec![OrderKey {
+                field: "declaration_id".to_owned(),
+                dir: SortDir::Asc,
+            }]),
+            limit: request.query.limit,
+            cursor: request.query.cursor.clone(),
+            filter_hash: request.query.filter_hash.clone(),
+            select: None,
+        };
+        let page = paginate_odata::<ReviewOrderField, ReviewODataMapper, _, _, _, _>(
+            base,
+            conn,
+            &query,
+            ("tenant_id", SortDir::Asc),
+            REVIEW_LIMIT_CFG,
+            to_domain,
+        )
+        .await
+        .map_err(|err| match err {
+            // The database failing is not the caller's cursor.
+            toolkit_odata::Error::Db(_) | toolkit_odata::Error::ParsingUnavailable(_) => {
+                db_error(err)
+            }
+            toolkit_odata::Error::InvalidFilter(_)
+            | toolkit_odata::Error::InvalidOrderByField(_)
+            | toolkit_odata::Error::OrderMismatch
+            | toolkit_odata::Error::FilterMismatch
+            | toolkit_odata::Error::InvalidCursor
+            | toolkit_odata::Error::InvalidLimit
+            | toolkit_odata::Error::OrderWithCursor
+            | toolkit_odata::Error::CursorInvalidBase64
+            | toolkit_odata::Error::CursorInvalidJson
+            | toolkit_odata::Error::CursorInvalidVersion
+            | toolkit_odata::Error::CursorInvalidKeys
+            | toolkit_odata::Error::CursorInvalidFields
+            | toolkit_odata::Error::CursorInvalidDirection => DomainError::Validation {
+                field: "cursor".to_owned(),
+                code: crate::field::ODATA_QUERY,
+                message: err.to_string(),
+            },
+        })?;
+        Ok(page)
+        // @cpt-end:cpt-cf-settings-service-flow-value-resolution-review-list:p1:inst-vr-review-6
     }
 
     async fn insert<C: DBRunner>(
