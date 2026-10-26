@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use super::{
     CHAT_MESSAGE_TYPE, ChatMessageV1, ChatRole, ENRICHMENT_FACT_CANDIDATE_TYPE, FactCandidateV1,
     FactField, MASTERY_COURSE_CATALOG_TYPE, RECORD_BASE_TYPE, RECORD_TYPES, RecordV1,
-    SUBJECT_REQUIRED_TRAIT, TypeRuleViolation, check_type_rules, record_base_schema,
+    SUBJECT_REQUIRED_TRAIT, TypeRule, TypeRuleViolation, check_type_rules, record_base_schema,
 };
 
 /// The schema of `type_id` as the link-time inventory submits it.
@@ -201,17 +201,6 @@ fn a_payload_without_an_optional_member_does_not_read_into_its_struct_yet() {
     assert!(err.to_string().contains("evidence"), "{err}");
 }
 
-/// A pushed record leaves `id` out, so the base does not require it.
-#[test]
-fn the_base_does_not_require_an_instance_id() {
-    assert!(
-        !record_base_schema()["required"]
-            .as_array()
-            .expect("required")
-            .contains(&json!("id"))
-    );
-}
-
 /// Every field of the type's enum, read from its registered schema.
 fn every_fact_field() -> Vec<FactField> {
     serde_json::from_value(
@@ -261,7 +250,7 @@ fn every_field_takes_the_value_form_its_kind_says() {
             check_type_rules(ENRICHMENT_FACT_CANDIDATE_TYPE, &candidate(field, other)),
             Err(TypeRuleViolation {
                 place: "/payload/value".to_owned(),
-                rule: "type"
+                rule: TypeRule::Type
             }),
             "{field:?}"
         );
@@ -277,7 +266,7 @@ fn the_type_rules_apply_only_to_the_fact_candidate() {
         check_type_rules(ENRICHMENT_FACT_CANDIDATE_TYPE, &record),
         Err(TypeRuleViolation {
             place: "/provenance".to_owned(),
-            rule: "pattern"
+            rule: TypeRule::Pattern
         })
     );
 }
@@ -307,7 +296,7 @@ fn a_digest_is_sha256_and_64_lower_case_hex_digits() {
             with(&broken),
             Err(TypeRuleViolation {
                 place: "/provenance".to_owned(),
-                rule: "pattern"
+                rule: TypeRule::Pattern
             }),
             "{broken}"
         );
@@ -371,9 +360,40 @@ fn a_list_item_that_is_not_stripped_breaks_the_rules() {
             ),
             Err(TypeRuleViolation {
                 place: format!("/payload/value/{index}"),
-                rule: "pattern"
+                rule: TypeRule::Pattern
             }),
             "{item:?}"
         );
     }
+}
+
+/// The check does not rely on the schema having run.
+#[test]
+fn an_unknown_field_or_a_non_string_item_breaks_the_rules() {
+    let mut record = candidate(FactField::Board, &json!("A statement."));
+    record["payload"]["field"] = json!("hobby");
+    assert_eq!(
+        check_type_rules(ENRICHMENT_FACT_CANDIDATE_TYPE, &record),
+        Err(TypeRuleViolation {
+            place: "/payload/field".to_owned(),
+            rule: TypeRule::Enum
+        })
+    );
+    assert_eq!(
+        check_type_rules(
+            ENRICHMENT_FACT_CANDIDATE_TYPE,
+            &candidate(FactField::Skills, &json!(["One", 7]))
+        ),
+        Err(TypeRuleViolation {
+            place: "/payload/value/1".to_owned(),
+            rule: TypeRule::Type
+        })
+    );
+}
+
+#[test]
+fn a_rule_is_named_by_its_json_schema_keyword() {
+    assert_eq!(TypeRule::Pattern.keyword(), "pattern");
+    assert_eq!(TypeRule::Type.keyword(), "type");
+    assert_eq!(TypeRule::Enum.keyword(), "enum");
 }

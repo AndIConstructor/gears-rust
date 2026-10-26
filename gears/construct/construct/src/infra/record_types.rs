@@ -3,9 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use construct_sdk::gts::{
-    RECORD_BASE_TYPE, SUBJECT_REQUIRED_TRAIT, check_type_rules, record_base_schema,
-};
+use construct_sdk::gts::{RECORD_BASE_TYPE, SUBJECT_REQUIRED_TRAIT, record_base_schema};
 use jsonschema::error::ValidationErrorKind;
 use jsonschema::{Draft, ValidationError, Validator};
 use serde_json::Value;
@@ -24,14 +22,13 @@ pub const DEFAULT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// [`RecordTypes`] backed by the types registry, read through `ClientHub`.
 ///
-/// A record is checked in four steps: against the base envelope, which this
+/// A record is checked in three steps: against the base envelope, which this
 /// gear knows without the registry; then its type is looked up, must be
 /// concrete and must derive from the base; then the record is checked against
-/// that type's effective schema, which includes the base; last, against the
-/// rules of its type and the types it derives from that a generated schema
-/// cannot carry (`construct_sdk::gts::check_type_rules`). The first broken
+/// that type's effective schema, which includes the base. The first broken
 /// rule is reported, with its place as a JSON pointer. A passing record gets
-/// each type's own trait values along its chain, which intake resolves. A
+/// its type chain and each type's own trait values along it, with which the
+/// domain checks the rules a generated schema cannot carry. A
 /// value from the record is never repeated: the type is named only once the
 /// envelope has accepted it as a well-formed type id.
 ///
@@ -173,7 +170,14 @@ fn traits_of(schema: &GtsTypeSchema) -> TypeTraits {
             }
         })
         .collect();
-    TypeTraits { subject_chain }
+    let type_chain = schema
+        .ancestors()
+        .map(|type_schema| type_schema.type_id.as_ref().to_owned())
+        .collect();
+    TypeTraits {
+        type_chain,
+        subject_chain,
+    }
 }
 
 /// The first rule the record breaks, if any.
@@ -268,21 +272,6 @@ impl RecordTypes for RegistryRecordTypes {
         let validator = self.validator_for(type_id, &schema)?;
         first_violation(&validator, record, Some(type_id))?;
         // @cpt-end:cpt-cf-construct-algo-record-intake-check-record:p1:inst-check-schema
-
-        // @cpt-begin:cpt-cf-construct-algo-record-intake-check-record:p1:inst-check-type-rules
-        // The rules a generated schema cannot carry, for the record's type and
-        // every type it derives from.
-        for type_schema in schema.ancestors() {
-            check_type_rules(type_schema.type_id.as_ref(), record).map_err(|broken| {
-                Refusal::new(
-                    RefusalReason::SchemaViolation,
-                    Some(type_id),
-                    Place::Pointer(broken.place),
-                    broken.rule,
-                )
-            })?;
-        }
-        // @cpt-end:cpt-cf-construct-algo-record-intake-check-record:p1:inst-check-type-rules
 
         Ok(traits_of(&schema))
     }

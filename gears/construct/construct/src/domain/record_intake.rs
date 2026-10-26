@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use authz_resolver_sdk::PolicyEnforcer;
 use authz_resolver_sdk::models::TenantMode;
 use authz_resolver_sdk::pep::{AccessRequest, ResourceType};
-use construct_sdk::gts::RecordTraits;
+use construct_sdk::gts::{RecordTraits, check_type_rules};
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -358,12 +358,31 @@ pub enum SubjectTrait {
 }
 
 /// What a record's type and the types it derives from state about the record
-/// beyond its schema: each type's own trait values, the record's type first
-/// and the record base type last.
+/// beyond its schema, the record's type first and the record base type last:
+/// their type ids, and each type's own trait values.
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeTraits {
+    pub type_chain: Vec<String>,
     pub subject_chain: Vec<SubjectTrait>,
+}
+
+/// The rules a generated schema cannot carry, for the record's type and every
+/// type it derives from (`construct_sdk::gts::check_type_rules`). A broken rule
+/// is a refusal `SCHEMA_VIOLATION` at its place, naming the record's type.
+pub(crate) fn check_type_rules_of(traits: &TypeTraits, record: &Value) -> Result<(), Refusal> {
+    let record_type = traits.type_chain.first().map(String::as_str);
+    for type_id in &traits.type_chain {
+        check_type_rules(type_id, record).map_err(|broken| {
+            Refusal::new(
+                RefusalReason::SchemaViolation,
+                record_type,
+                Place::Pointer(broken.place),
+                broken.rule.keyword(),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 impl TypeTraits {
@@ -583,6 +602,10 @@ impl<I: RecordIdRepository + 'static, S: SubjectSettingsRepository + 'static>
         // @cpt-begin:cpt-cf-construct-algo-record-intake-check-record:p1:inst-check-type
         let traits = self.ports.types.check(record).await?;
         // @cpt-end:cpt-cf-construct-algo-record-intake-check-record:p1:inst-check-type
+
+        // @cpt-begin:cpt-cf-construct-algo-record-intake-check-record:p1:inst-check-type-rules
+        check_type_rules_of(&traits, record)?;
+        // @cpt-end:cpt-cf-construct-algo-record-intake-check-record:p1:inst-check-type-rules
 
         let envelope = Envelope::read(record)?;
 

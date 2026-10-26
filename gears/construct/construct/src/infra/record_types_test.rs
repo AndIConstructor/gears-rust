@@ -19,7 +19,9 @@ use uuid::Uuid;
 
 use super::record_types::RegistryRecordTypes;
 use crate::domain::error::DomainError;
-use crate::domain::record_intake::{Place, RecordTypes, Refusal, RefusalReason};
+use crate::domain::record_intake::{
+    Place, RecordTypes, Refusal, RefusalReason, TypeTraits, check_type_rules_of,
+};
 use crate::test_support::{
     chat_record, example_records, hub_with_record_types, sdk_record_type_schemas,
 };
@@ -33,9 +35,18 @@ fn types() -> RegistryRecordTypes {
     RegistryRecordTypes::new(hub_with_record_types()).expect("record types")
 }
 
-/// The refusal a check gives, failing the test on any other outcome.
+/// What intake's type check gives for a record: the adapter's checks, then
+/// the rules a generated schema cannot carry, which the domain runs.
+async fn checked(types: &RegistryRecordTypes, record: &Value) -> Result<TypeTraits, DomainError> {
+    let traits = types.check(record).await?;
+    check_type_rules_of(&traits, record)?;
+    Ok(traits)
+}
+
+/// The refusal intake's type check gives, failing the test on any other
+/// outcome.
 async fn refused_by(types: &RegistryRecordTypes, record: &Value) -> Refusal {
-    match types.check(record).await {
+    match checked(types, record).await {
         Err(DomainError::Refused(refusal)) => refusal,
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -776,8 +787,7 @@ fn skills_candidate() -> Value {
 
 #[tokio::test]
 async fn a_fact_candidate_with_a_list_value_for_a_list_field_passes() {
-    types()
-        .check(&skills_candidate())
+    checked(&types(), &skills_candidate())
         .await
         .expect("a skills list passes");
 }
@@ -834,7 +844,7 @@ async fn the_fact_candidates_rules_beyond_its_schema_refuse_a_record_that_breaks
     ));
 
     let mut record = skills_candidate();
-    record["payload"]["value"][2] = json!("\u{1f}\u{2003}");
+    record["payload"]["value"][2] = json!("\u{1f}\u{2003}\u{1c}");
     cases.push((
         "a separator and an em space",
         record,
@@ -960,12 +970,33 @@ proptest! {
         prop_assert_eq!(checked.is_ok(), pattern.is_valid(&json!(provenance)));
     }
 
-    /// The type rules never panic, whatever JSON they are given.
+    /// The type rules never panic, whatever `field` and `value` a candidate
+    /// with valid digests carries, so every case reaches the value checks.
     #[test]
-    fn the_type_rules_answer_any_json_without_a_panic(record in any_json()) {
+    fn the_type_rules_answer_any_field_and_value_without_a_panic(
+        field in any_json(),
+        value in any_json(),
+    ) {
+        let mut record = skills_candidate();
+        record["payload"]["field"] = field;
+        record["payload"]["value"] = value;
         let _outcome = construct_sdk::gts::check_type_rules(
             construct_sdk::gts::ENRICHMENT_FACT_CANDIDATE_TYPE,
             &record,
         );
+    }
+}
+
+#[tokio::test]
+async fn an_empty_or_non_string_list_item_is_refused_at_the_item() {
+    let types = types();
+    for (item, rule) in [(json!(""), "minLength"), (json!(7), "type")] {
+        let mut record = skills_candidate();
+        record["payload"]["value"][0] = item.clone();
+
+        let refused = refused_by(&types, &record).await;
+
+        assert_eq!(refused.place, Place::pointer("/payload/value/0"), "{item}");
+        assert_eq!(refused.rule, rule, "{item}");
     }
 }

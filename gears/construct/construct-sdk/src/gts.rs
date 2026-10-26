@@ -349,17 +349,42 @@ pub struct FactCandidateV1 {
     pub rationale: Option<String>,
 }
 
-/// A rule of a record type that its generated schema cannot carry, broken:
-/// where, as a JSON pointer, and which rule, named like a JSON Schema keyword.
+/// Which kind of rule a [`TypeRuleViolation`] broke, named like the JSON
+/// Schema keyword it stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeRule {
+    /// The text does not have the required form.
+    Pattern,
+    /// The value is not of the required JSON type.
+    Type,
+    /// The value is not one of the allowed values.
+    Enum,
+}
+
+impl TypeRule {
+    /// The JSON Schema keyword this rule stands for, as a refusal names it.
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Pattern => "pattern",
+            Self::Type => "type",
+            Self::Enum => "enum",
+        }
+    }
+}
+
+/// A rule of a record type that its generated schema cannot carry, broken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeRuleViolation {
+    /// Where in the record, as a JSON pointer.
     pub place: String,
-    pub rule: &'static str,
+    /// Which rule.
+    pub rule: TypeRule,
 }
 
 impl std::fmt::Display for TypeRuleViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} breaks {}", self.place, self.rule)
+        write!(f, "{} breaks {}", self.place, self.rule.keyword())
     }
 }
 
@@ -377,7 +402,8 @@ impl std::error::Error for TypeRuleViolation {}
 ///   ends with whitespace, by the set of the identity derivation, which is wider than the schema's `\S` in a validator that
 ///   follows ECMA-262.
 ///
-/// The record must already have passed the type's schema.
+/// It does not rely on the schema having run: an unknown `field` or a list
+/// item that is not a string is refused here too.
 ///
 /// # Errors
 ///
@@ -392,26 +418,32 @@ pub fn check_type_rules(
     let broken = |place: String, rule| Err(TypeRuleViolation { place, rule });
     for member in ["provenance", "version"] {
         if !record[member].as_str().is_some_and(is_sha256_digest) {
-            return broken(format!("/{member}"), "pattern");
+            return broken(format!("/{member}"), TypeRule::Pattern);
         }
     }
     let payload = &record["payload"];
-    let list_field = FactField::deserialize(&payload["field"]).is_ok_and(FactField::is_list);
-    match (&payload["value"], list_field) {
+    let Ok(field) = FactField::deserialize(&payload["field"]) else {
+        return broken("/payload/field".to_owned(), TypeRule::Enum);
+    };
+    match (&payload["value"], field.is_list()) {
         (serde_json::Value::Array(items), true) => {
-            match items.iter().position(|item| {
-                item.as_str()
-                    .is_some_and(|item| is_blank(item) || !is_stripped(item))
-            }) {
-                Some(index) => broken(format!("/payload/value/{index}"), "pattern"),
-                None => Ok(()),
+            for (index, item) in items.iter().enumerate() {
+                let place = || format!("/payload/value/{index}");
+                match item.as_str() {
+                    None => return broken(place(), TypeRule::Type),
+                    Some(item) if is_blank(item) || !is_stripped(item) => {
+                        return broken(place(), TypeRule::Pattern);
+                    }
+                    Some(_) => {}
+                }
             }
+            Ok(())
         }
         (serde_json::Value::String(value), false) if is_blank(value) => {
-            broken("/payload/value".to_owned(), "pattern")
+            broken("/payload/value".to_owned(), TypeRule::Pattern)
         }
         (serde_json::Value::String(_), false) => Ok(()),
-        _ => broken("/payload/value".to_owned(), "type"),
+        _ => broken("/payload/value".to_owned(), TypeRule::Type),
     }
 }
 

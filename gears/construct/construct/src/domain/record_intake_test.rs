@@ -677,6 +677,7 @@ fn the_subject_rule_resolves_across_the_type_chain() {
 
     let required = |chain: &[S]| {
         TypeTraits {
+            type_chain: Vec::new(),
             subject_chain: chain.to_vec(),
         }
         .subject_required()
@@ -696,4 +697,33 @@ fn the_subject_rule_resolves_across_the_type_chain() {
     // With nothing declared, the SDK's default: a subject is required.
     assert!(required(&[S::Unset, S::Unset]));
     assert!(required(&[]));
+}
+
+/// The rules a generated schema cannot carry are the domain's: a fact
+/// candidate whose provenance is no digest is refused and nothing is stored.
+#[tokio::test]
+async fn a_record_that_breaks_its_types_rules_beyond_the_schema_is_refused() {
+    let db = inmem_db().await;
+    let fixture = IntakeFixture::default();
+    let intake = fixture.build(&db);
+    let mut record = crate::test_support::example_records()
+        .into_iter()
+        .find(|record| record["type"] == construct_sdk::gts::ENRICHMENT_FACT_CANDIDATE_TYPE)
+        .expect("a fact candidate example");
+    record["provenance"] = json!("board/whatever");
+
+    let result = intake.submit(&connector(), Uuid::new_v4(), record).await;
+
+    let Err(DomainError::Refused(refusal)) = result else {
+        panic!("expected a refusal, got {result:?}");
+    };
+    assert_eq!(refusal.reason, RefusalReason::SchemaViolation);
+    assert_eq!(refusal.place, Place::pointer("/provenance"));
+    assert_eq!(refusal.rule, "pattern");
+    assert_eq!(
+        refusal.type_id.as_deref(),
+        Some(construct_sdk::gts::ENRICHMENT_FACT_CANDIDATE_TYPE)
+    );
+    assert!(fixture.received().is_empty());
+    assert_eq!(stored_record_ids(&db).await, 0);
 }
