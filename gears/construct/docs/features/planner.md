@@ -414,7 +414,8 @@ before the write at the deadline.
 The system **MUST** offer `POST /api/construct/v1/subjects/{subject_id}/facts/manage`, which takes `message` and
 `conversation` and answers `200` with `outcome` (`stored` or `nothing_changed`), `reason`, and the counts `added`,
 `replaced` and `removed`. It **MUST** answer `404`, as for a subject that does not exist, when the caller may not act
-for the subject: another subject, or no "manage facts" permission from the AuthZ resolver. It **MUST** answer `400`
+for the subject: another subject, no "manage facts" permission from the AuthZ resolver, or a policy scope that leaves
+the subject's settings out. It **MUST** answer `400`
 naming the field, without a model call, for a `message` longer than 4 000 characters or a `conversation` longer than
 16 000. A blank message stores nothing without a model call. A failed dependency answers `503`. The agent in the plan's origin is the caller the
 platform authenticated, and the steps before the write have a deadline inside the gateway's request timeout.
