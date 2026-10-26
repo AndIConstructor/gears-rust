@@ -23,6 +23,7 @@
 pub mod api_v1;
 pub mod authz_doubles;
 pub mod body;
+pub mod fault_broker;
 // Not every harness convenience method (builder customization beyond
 // tenant/subject id, additional response assertions like `assert_header`)
 // is exercised by the specific handler tests that exist today (task group
@@ -53,6 +54,7 @@ pub use authz_doubles::DenyingAuthZ;
 )]
 pub use body::IntoBody;
 pub use body::Json;
+pub use fault_broker::{DeliveredOutcome, DeliveredPublish, FaultInjectingBroker, TransientFault};
 #[allow(
     unused_imports,
     reason = "general-purpose harness API surface, not all of it exercised yet"
@@ -98,7 +100,7 @@ use crate::domain::cluster::EventBrokerCluster;
 
 /// `standalone_event_broker_cluster()` wires the toolkit's own real,
 /// production `LocalDirectoryClient` (backed by a fresh `GearManager`, the
-/// same in-memory store `gear-orchestrator` itself runs standalone mode on -
+/// same in-memory store `service-discovery` itself runs standalone mode on -
 /// no DB, no network) into the same `ClientHub` production code paths
 /// (`module::EventBrokerModule::register_self`, `infra::dispatcher::forward`)
 /// resolve their `Arc<dyn DirectoryClient>` from, so dispatcher tests

@@ -96,8 +96,8 @@ pub struct ApiGatewayConfig {
     #[serde(default)]
     pub gateway_proxy: GatewayProxyConfig,
 
-    /// Platform-plane credential for the embedded platform-host, serving **both
-    /// directions** from one block:
+    /// Platform-plane credential for the embedded flight-control host, serving
+    /// **both directions** from one block:
     ///
     /// - **Inbound** — `internal_auth_middleware`, installed ahead of the tenant
     ///   plane, validates the `X-ToolKit-Internal-Token` on co-hosted internal
@@ -155,7 +155,7 @@ pub struct GatewayProxyConfig {
     /// Enable the directory-driven reverse proxy.
     pub enabled: bool,
     /// gRPC endpoint of the `DirectoryService` (e.g. the grpc-hub endpoint,
-    /// `http://gear-orchestrator:50051`). Required when `enabled` is true.
+    /// `http://service-discovery:50051`). Required when `enabled` is true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory_endpoint: Option<String>,
     /// Interval (seconds) between directory polls that refresh the proxy route
@@ -194,7 +194,7 @@ impl GatewayProxyConfig {
             _ => Err(
                 "invalid gateway_proxy configuration: `gateway_proxy.enabled` is true but \
                  `gateway_proxy.directory_endpoint` is unset or empty; set it to the \
-                 DirectoryService gRPC endpoint (e.g. \"http://gear-orchestrator:50051\") \
+                 DirectoryService gRPC endpoint (e.g. \"http://service-discovery:50051\") \
                  or disable the reverse proxy"
                     .to_owned(),
             ),
@@ -265,6 +265,7 @@ impl Default for ApiGatewayConfig {
     }
 }
 
+/// Gateway-wide default limits and timeouts applied to routes that do not override them.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Defaults {
@@ -519,9 +520,22 @@ impl Serialize for RetryAfter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyType {
-    /// Key by the authenticated subject (`SecurityContext::subject_id()`).
+    /// Key by the identity the operation's auth plane validated:
+    ///
+    /// - tenant (`.authenticated()`): the subject UUID
+    ///   (`SecurityContext::subject_id()`), e.g.
+    ///   `150853ab-322c-455d-9793-8d71bf6973d9`;
+    /// - platform (`.platform_authenticated()`): the calling workload, never its
+    ///   instance — `platform:k8s:<namespace>/<service_account>`,
+    ///   `platform:spiffe:<trust_domain>/<name>` or `platform:shared:<name>`,
+    ///   with `%` and `/` in a component percent-encoded.
+    ///
     /// Identity keying requires authentication, so identity-keyed zones may only
-    /// be referenced by operations marked `require_security_context = true`.
+    /// be referenced by operations marked `require_security_context = true`, and
+    /// never by anonymous operations. With `auth_disabled = true` they are
+    /// allowed only on platform operations, whose callers are still validated.
+    /// A zone may serve both planes: their keys never collide, and they share
+    /// its budget, including `max_keys`; use separate zones to isolate them.
     Identity,
     /// Key by client IP address. Usable before authentication.
     Ip,
@@ -580,7 +594,9 @@ pub struct InFlightLimitZone {
     /// admission (a held gate is never evicted, so a cap filled by live
     /// requests stays closed until they finish).
     pub max_keys: u64,
-    /// Keys that bypass this zone entirely (e.g. privileged identities).
+    /// Keys that bypass this zone entirely (e.g. privileged identities), in the
+    /// zone's key format (see [`KeyType`]): a client IP, a tenant subject UUID,
+    /// or a `platform:` workload key.
     #[serde(default)]
     pub excluded_keys: Vec<String>,
 }
@@ -670,7 +686,7 @@ mod tests {
     fn enabled_proxy_with_endpoint_is_accepted() {
         let cfg = GatewayProxyConfig {
             enabled: true,
-            directory_endpoint: Some("http://gear-orchestrator:50051".to_owned()),
+            directory_endpoint: Some("http://service-discovery:50051".to_owned()),
             ..GatewayProxyConfig::default()
         };
         assert!(cfg.validate().is_ok());

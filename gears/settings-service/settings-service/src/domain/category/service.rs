@@ -1,4 +1,3 @@
-// Created: 2026-08-13 by Virtuozzo International GmbH
 //! Category operations.
 //!
 //! Generic over the repository rather than holding a trait object: the
@@ -8,6 +7,7 @@
 //! every operation below can run in a transaction when its caller needs one.
 
 use toolkit_db::secure::DBRunner;
+use toolkit_macros::domain_model;
 use toolkit_security::SecurityContext;
 
 use crate::audit::{AuditOperation, AuditRecord, AuditSink, AuditValue, ImageClass};
@@ -24,6 +24,7 @@ use crate::domain::precondition::{self, ETag};
 /// The two always travel together — an audit record needs both, and splitting
 /// them across parameters invites a call site that supplies one and forgets the
 /// other.
+#[domain_model]
 #[derive(Clone, Copy)]
 pub struct Actor<'a> {
     /// The authenticated caller.
@@ -49,6 +50,7 @@ fn snapshot(category: &Category) -> serde_json::Value {
 }
 
 /// Category create, read, update and delete.
+#[domain_model]
 pub struct CategoryService<R, S> {
     repo: R,
     sink: S,
@@ -167,7 +169,7 @@ impl<R: CategoryRepository, S: AuditSink> CategoryService<R, S> {
         conn: &C,
         scope: &AccessScope,
         query: &toolkit_odata::ODataQuery,
-    ) -> Result<toolkit_odata::Page<Category>, DomainError> {
+    ) -> Result<crate::domain::odata::Listing<Category>, DomainError> {
         crate::domain::odata::reject_unsupported_options(query, "categories")?;
         crate::domain::odata::reject_unsortable::<crate::domain::odata::CategoryOrderField>(
             query,

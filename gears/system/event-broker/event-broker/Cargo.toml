@@ -65,12 +65,9 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 chrono = { workspace = true, features = ["clock", "serde"] }
-rand = { workspace = true }
 bytes = { workspace = true }
-parking_lot = { workspace = true }
 jsonschema = { workspace = true }
 toolkit-stable-hash = { workspace = true }
-base64 = { workspace = true }
 http-body-util = { workspace = true }
 
 # `bootstrap` feature: `toolkit::bootstrap::{AppConfig, run_server}`, used
@@ -86,15 +83,10 @@ toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 toolkit-odata = { workspace = true, features = ["with-utoipa"] }
 toolkit-macros = { workspace = true }
 utoipa = { workspace = true }
-authz-resolver-sdk = { workspace = true }
+authz-resolver-sdk = { workspace = true, features = ["rest-client"] }
 authz-resolver = { workspace = true }
 types-registry = { workspace = true }
-# `domain/authz.rs`'s `TOPIC_RESOURCE`/`EVENT_TYPE_RESOURCE` consts invoke
-# `gts_id!(...)` for real (unlike `api/rest/error.rs`'s
-# `#[resource_error(gts_id!(...))]`, which never macro-expands its inner
-# `gts_id!(...)` token - the outer attribute macro parses it as a literal
-# pattern directly) - a real invocation needs `toolkit_gts` resolvable from
-# this crate directly, so this can no longer be dev-only.
+# GTS ids and schema metadata used by domain authorization.
 toolkit-gts = { workspace = true }
 # `domain/ingest.rs`'s `subject_type_allowed`/`domain/specification.rs`'s
 # `validate_allowed_subject_types` need `GtsIdPattern`/`GtsId::matches_pattern`

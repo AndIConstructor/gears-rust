@@ -3,7 +3,7 @@
 //! No new process and no `TypesRegistryGear::init`: the database is a real file, and
 //! the `RegistryService`, `DBProvider`, pool and connections are dropped between
 //! phases; phase two reopens the file and re-runs the test migration path. Full
-//! process restart and startup seeding remain T30's e2e obligation.
+//! startup seeding is verified in T31; full process restart is verified in T41.
 //!
 //! The comparison is on whole `Model` values rather than a hand-picked column list,
 //! over all eight tables written by one Type Schema followed by one Instance
@@ -25,7 +25,7 @@ use toolkit_gts::gts_id;
 
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::{Accepted, Candidate, OperationDispatch, SubmitRequest};
-use types_registry::domain::enums::{OperationKind, OperationStatus};
+use types_registry::domain::enums::OperationStatus;
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::registry_service::{EntityKey, RegistryService, ServiceError};
 use types_registry::infra::storage::entity::enums as storage_enums;
@@ -75,7 +75,7 @@ async fn submit_admitted(
     request: &SubmitRequest,
     now: OffsetDateTime,
 ) -> Result<Accepted, ServiceError> {
-    let accepted = svc.submit(request, now).await?;
+    let accepted = svc.submit(common::caller(), request, now).await?;
     if !accepted.terminal() {
         svc.admit(accepted.operation_id, now).await?;
     }
@@ -165,7 +165,6 @@ async fn read_durable_state(db: &Arc<DBProvider<DbError>>) -> DurableState {
 fn submission(key: &str, gts_id: &str, content: Value) -> SubmitRequest {
     SubmitRequest {
         idempotency_key: Some(key.to_owned()),
-        kind: OperationKind::Registration,
         dry_run: false,
         candidates: vec![Candidate {
             gts_id: gts_id.to_owned(),
@@ -204,7 +203,7 @@ async fn a_schema_and_instance_survive_database_reopen() {
 
         for operation_id in [accepted_schema.operation_id, accepted_instance.operation_id] {
             let op = svc
-                .operation(operation_id)
+                .operation(common::caller(), operation_id)
                 .await
                 .expect("read operation")
                 .expect("the operation exists");
@@ -257,12 +256,17 @@ async fn a_schema_and_instance_survive_database_reopen() {
     // current-state branch and two separate tables.
     let svc = service(&db);
     let schema_by_id = svc
-        .entity(&EntityKey::parse(CF_TYPE), FieldSelection::full())
+        .entity(
+            common::caller(),
+            &EntityKey::parse(CF_TYPE),
+            FieldSelection::full(),
+        )
         .await
         .expect("read by identifier")
         .expect("the schema survived");
     let schema_by_uuid = svc
         .entity(
+            common::caller(),
             &EntityKey::parse(&schema_uuid.to_string()),
             FieldSelection::full(),
         )
@@ -270,7 +274,11 @@ async fn a_schema_and_instance_survive_database_reopen() {
         .expect("read by Registry Reference")
         .expect("the schema survived");
     let instance_by_id = svc
-        .entity(&EntityKey::parse(CF_INSTANCE), FieldSelection::full())
+        .entity(
+            common::caller(),
+            &EntityKey::parse(CF_INSTANCE),
+            FieldSelection::full(),
+        )
         .await
         .expect("read Instance by identifier")
         .expect("the Instance survived");
@@ -322,13 +330,13 @@ async fn a_schema_and_instance_survive_database_reopen() {
         (instance_operation_id, CF_INSTANCE),
     ] {
         let op = svc
-            .operation(operation_id)
+            .operation(common::caller(), operation_id)
             .await
             .expect("read operation")
             .expect("the operation survived");
         assert_eq!(op.status, OperationStatus::Completed);
         assert_eq!(op.items.len(), 1);
-        assert_eq!(op.items[0].gts_id, gts_id);
+        assert_eq!(op.items[0].key.gts_id(), Some(gts_id));
     }
 
     // The idempotency record is durable too. Comparing all eight tables proves
@@ -363,7 +371,11 @@ async fn a_nonterminal_operation_survives_reopen_and_completes_when_admitted() {
     let accepted_id = {
         let db = test_db_file(&path).await;
         let accepted = service(&db)
-            .submit(&submission("resume-key", CF_TYPE, authored.clone()), BOOT)
+            .submit(
+                common::caller(),
+                &submission("resume-key", CF_TYPE, authored.clone()),
+                BOOT,
+            )
             .await
             .expect("accepted");
         assert!(!accepted.replayed);
@@ -390,7 +402,11 @@ async fn a_nonterminal_operation_survives_reopen_and_completes_when_admitted() {
     let db = test_db_file(&path).await;
     let svc = service(&db);
     let replay = svc
-        .submit(&submission("resume-key", CF_TYPE, authored.clone()), BOOT)
+        .submit(
+            common::caller(),
+            &submission("resume-key", CF_TYPE, authored.clone()),
+            BOOT,
+        )
         .await
         .expect("the retry is accepted");
 
@@ -409,7 +425,7 @@ async fn a_nonterminal_operation_survives_reopen_and_completes_when_admitted() {
         .expect("a redelivery admits the operation acceptance left behind");
 
     let op = svc
-        .operation(accepted_id)
+        .operation(common::caller(), accepted_id)
         .await
         .expect("read operation")
         .expect("the operation exists");
@@ -417,7 +433,11 @@ async fn a_nonterminal_operation_survives_reopen_and_completes_when_admitted() {
     assert_eq!(op.items[0].resource_version, Some(1));
 
     let entity = svc
-        .entity(&EntityKey::parse(CF_TYPE), FieldSelection::full())
+        .entity(
+            common::caller(),
+            &EntityKey::parse(CF_TYPE),
+            FieldSelection::full(),
+        )
         .await
         .expect("read")
         .expect("admission registered the entity");
@@ -491,7 +511,10 @@ async fn an_entity_without_its_current_state_is_reported_as_corrupt() {
             (CF_TYPE, "no current Type Schema state"),
             (CF_INSTANCE, "no current Instance state"),
         ] {
-            match svc.entity(&EntityKey::parse(gts_id), selection).await {
+            match svc
+                .entity(common::caller(), &EntityKey::parse(gts_id), selection)
+                .await
+            {
                 Err(ServiceError::CorruptDocument(detail)) => {
                     assert!(detail.contains(expected), "unexpected detail: {detail}");
                 }

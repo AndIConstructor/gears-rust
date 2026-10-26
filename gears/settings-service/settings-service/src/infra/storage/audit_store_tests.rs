@@ -1,4 +1,3 @@
-// Created: 2026-09-07 by Virtuozzo International GmbH
 //! The store over an in-memory database: append, history, retention.
 
 use std::sync::Arc;
@@ -38,7 +37,7 @@ async fn history(
     tenant: Uuid,
     limit: Option<u64>,
     cursor: Option<toolkit_odata::CursorV1>,
-) -> toolkit_odata::Page<crate::audit::StoredAuditRecord> {
+) -> crate::domain::odata::Listing<crate::audit::StoredAuditRecord> {
     let conn = db.conn().expect("connection");
     AuditStore
         .history(

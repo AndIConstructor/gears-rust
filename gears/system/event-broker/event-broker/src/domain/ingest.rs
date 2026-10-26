@@ -10,7 +10,7 @@ use toolkit_gts::GtsInstanceId;
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use crate::domain::authz::{EVENT_TYPE_RESOURCE, tenant_authorized};
+use crate::domain::authz::{event_type_resource, tenant_authorized};
 use crate::domain::backend::BackendResolver;
 use crate::domain::error::{DomainError, ErrorCode};
 use event_broker_sdk::models::EventType;
@@ -56,6 +56,7 @@ pub struct BatchResult {
 /// newly admitted or matched an idempotent duplicate - a lost-ack retry of the
 /// producer chain's current head - which the REST layer answers `200` (no new
 /// row written) rather than `202`.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub enum PublishAck {
     Accepted(Event),
@@ -157,6 +158,7 @@ pub enum ProducerResetScope {
 /// REST layer can hand it over without making the decision itself: the choice -
 /// and the rejection of an ambiguous shape - lives here in the domain, not in
 /// the request DTO.
+#[domain_model]
 #[derive(Debug)]
 pub struct ProducerResetSelector {
     pub topic: Option<String>,
@@ -305,6 +307,7 @@ pub trait ProducerRegistry: Send + Sync {
 /// `BackendResolver` (D3). Generic over one repo type implementing the traits
 /// it needs (idempotency, producer registry - neither topics nor events have
 /// a repo contract).
+#[domain_model]
 pub struct IngestServiceImpl<R> {
     repo: std::sync::Arc<R>,
     policy_enforcer: PolicyEnforcer,
@@ -363,13 +366,13 @@ where
     ) -> Result<PublishAck, DomainError> {
         use crate::domain::idempotency::ProducerIdempotencyOutcome;
 
-        // Authz/tenant-scope enforcement (`gears-rust#4516`,
-        // `eb-authz-enforcement`) - before topic/schema validation, per
-        // `DESIGN.md`'s Validation Pipeline step 1 ordering.
+        // Reject non-event types, then authorize before topic/schema validation
+        // (`docs/DESIGN.md`, Validation Pipeline step 1 and §3.3).
+        let event_type_resource = event_type_resource(&request.r#type)?;
         self.policy_enforcer
             .access_scope_with(
                 ctx,
-                &EVENT_TYPE_RESOURCE,
+                &event_type_resource,
                 "produce",
                 None,
                 &AccessRequest::new()

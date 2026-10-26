@@ -17,7 +17,7 @@ use toolkit_gts::gts_id;
 use common::{PausePoint, TestStores, await_delivery, metrics, provider_for_with_outbox, stores};
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::{Candidate, OperationDispatch, SubmitRequest};
-use types_registry::domain::enums::{OperationItemStatus, OperationKind, OperationStatus};
+use types_registry::domain::enums::{OperationItemStatus, OperationStatus};
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::registry_service::{EntityKey, RegistryService};
 use types_registry::infra::outbox::OutboxDispatch;
@@ -56,7 +56,6 @@ async fn assert_delivery(db: &Arc<DBProvider<DbError>>, backend: &str) {
 
     let request = SubmitRequest {
         idempotency_key: Some("backends-key".to_owned()),
-        kind: OperationKind::Registration,
         dry_run: false,
         candidates: vec![Candidate {
             gts_id: TARGET.to_owned(),
@@ -66,7 +65,7 @@ async fn assert_delivery(db: &Arc<DBProvider<DbError>>, backend: &str) {
         }],
     };
     let accepted = registry
-        .submit(&request, NOW)
+        .submit(common::caller(), &request, NOW)
         .await
         .unwrap_or_else(|e| panic!("{backend}: accept: {e}"));
     assert_eq!(
@@ -77,7 +76,7 @@ async fn assert_delivery(db: &Arc<DBProvider<DbError>>, backend: &str) {
 
     let operation = await_delivery(&format!("{backend}: registration"), || async {
         let record = registry
-            .operation(accepted.operation_id)
+            .operation(common::caller(), accepted.operation_id)
             .await
             .unwrap_or_else(|e| panic!("{backend}: read the operation: {e}"))
             .unwrap_or_else(|| panic!("{backend}: the operation exists"));
@@ -95,7 +94,11 @@ async fn assert_delivery(db: &Arc<DBProvider<DbError>>, backend: &str) {
         operation.items,
     );
     let entity = registry
-        .entity(&EntityKey::GtsId(TARGET.to_owned()), FieldSelection::full())
+        .entity(
+            common::caller(),
+            &EntityKey::GtsId(TARGET.to_owned()),
+            FieldSelection::full(),
+        )
         .await
         .unwrap_or_else(|e| panic!("{backend}: read the entity: {e}"))
         .unwrap_or_else(|| panic!("{backend}: the admitted entity is readable"));
@@ -139,9 +142,9 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
 
     let warmup = second
         .submit(
+            common::caller(),
             &SubmitRequest {
                 idempotency_key: Some("warmup-key".to_owned()),
-                kind: OperationKind::Registration,
                 dry_run: false,
                 candidates: vec![Candidate {
                     gts_id: WARMUP.to_owned(),
@@ -158,7 +161,7 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         &format!("{backend}: the second pipeline delivers"),
         || async {
             let record = second
-                .operation(warmup.operation_id)
+                .operation(common::caller(), warmup.operation_id)
                 .await
                 .unwrap_or_else(|e| panic!("{backend}: read the warm-up operation: {e}"))
                 .unwrap_or_else(|| panic!("{backend}: the warm-up operation exists"));
@@ -192,9 +195,9 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
 
     let accepted = submitter
         .submit(
+            common::caller(),
             &SubmitRequest {
                 idempotency_key: Some("contended-key".to_owned()),
-                kind: OperationKind::Registration,
                 dry_run: false,
                 candidates: vec![Candidate {
                     gts_id: gts_id.to_owned(),
@@ -245,7 +248,7 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
 
     let operation = await_delivery(&format!("{backend}: contended registration"), || async {
         let record = submitter
-            .operation(accepted.operation_id)
+            .operation(common::caller(), accepted.operation_id)
             .await
             .unwrap_or_else(|e| panic!("{backend}: read the operation: {e}"))
             .unwrap_or_else(|| panic!("{backend}: the operation exists"));
@@ -269,7 +272,11 @@ async fn assert_single_admission_under_two_pipelines(db: &Arc<DBProvider<DbError
         operation.items,
     );
     let entity = submitter
-        .entity(&EntityKey::GtsId(gts_id.to_owned()), FieldSelection::full())
+        .entity(
+            common::caller(),
+            &EntityKey::GtsId(gts_id.to_owned()),
+            FieldSelection::full(),
+        )
         .await
         .unwrap_or_else(|e| panic!("{backend}: read the entity: {e}"))
         .unwrap_or_else(|| panic!("{backend}: the admitted entity is readable"));

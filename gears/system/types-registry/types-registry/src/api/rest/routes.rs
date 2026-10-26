@@ -41,24 +41,10 @@ pub fn register_routes(
     service: Arc<TypesRegistryService>,
     registry: Option<Arc<RegistryService>>,
 ) -> Router {
-    // ponytail: ceiling C8 — every P0 operation is platform-plane (`plane = 1`),
-    // but the plane is expressed by the contract and the data, **not enforced by
-    // the transport**: an in-process gear has no inbound platform-identity
-    // validator, api-gateway has no platform listener, and `OperationBuilder`
-    // cannot mark a route platform-only. Mutation routes therefore stay
-    // internal-only (`exposed = false`) until a platform listener can authenticate
-    // a platform principal and a PDP decision is enforced before dispatch.
-    // `.anonymous()` is deliberately **not** used — without a platform identity to
-    // replace the current gate it would be a regression. The upgrade path is a
-    // platform listener with `X-ToolKit-Internal-Token` / `PlatformIdentity` plus a
-    // declarative route marker: toolkit/api-gateway work outside this gear
-    // (SPEC §9 C8, §8.4).
-    //
-    // The v2 routes below are internal-only for a second reason too: v2 is an
-    // interim surface until T24a promotes it onto `V1`. They still register in the
-    // `OpenAPI` document — `exposed` gates gateway visibility, not spec inclusion —
-    // so the contract check sees them. T24a changes the path constant only; it must
-    // not expose mutation routes while ceiling C8 remains open.
+    // C8 remains open: v2 accepts tenant bearers; exposed=false only controls proxy discovery.
+    // T34 moves routes, credentials, fixtures and e2e callers to platform auth atomically.
+    // Platform bypasses the tenant PDP (ADR-0006/0008). Routes remain in OpenAPI; T38 promotes
+    // the tenant reads to V1 and keeps mutations unexposed while C8 remains open.
 
     router = register_v1(router, openapi);
     router = register_submit(router, openapi);
@@ -87,19 +73,19 @@ fn idempotency_key_param() -> ParamSpec {
         )
 }
 
+/// The exact read's validator (SPEC §8.5), on its `200` and its `304`.
+fn etag_header() -> ResponseHeaderSpec {
+    ResponseHeaderSpec::new(
+        "ETag",
+        "The validator of this key under this `$select`",
+        ResponseHeaderType::String,
+    )
+}
+
 /// The pre-database v1 contract, verbatim from `main` (T9a).
 fn register_v1(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
-    // -----------------------------------------------------------------------
-    // v1 — the pre-database contract, unchanged from `main`
-    // -----------------------------------------------------------------------
-    //
-    // Every v1 route is served by `TypesRegistryService` from the in-memory
-    // repository, and no v1 route touches `RegistryService`. That separation is
-    // the point of T9a rather than an implementation detail: T9 repointed these
-    // two routes at the database, which changed `POST /v1/entities`'s request
-    // body under its existing callers and left `oagw` and `account-management`
-    // writing to the database while resolving from process memory. The database
-    // path has no consumer until T24 (SPEC §10.2, `plan.md` P12).
+    // Legacy v1 uses only the in-memory TypesRegistryService. Until T38, consumers must read
+    // and write the same store; routing v1 writes to RegistryService would break that invariant.
 
     // POST /types-registry/v1/entities - Register GTS entities
     router = OperationBuilder::post(format!("{V1}/entities"))
@@ -169,14 +155,8 @@ fn register_v1(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router
 }
 
-// -----------------------------------------------------------------------
-// v2 — the database-backed async surface (T9)
-// -----------------------------------------------------------------------
-//
-// Interim: T24a promotes these onto v1 once the in-memory path is deleted.
-// They are internal-only — no `.exposed()`, so the gateway does not publish
-// the surface (see the ceiling-C8 note above). The path promotion does not
-// change that posture for mutations.
+// Database-backed v2 (T9); T38 promotes the tenant reads to v1. No .exposed(): gateway discovery
+// excludes it, including mutations after promotion (see C8 above).
 
 /// `POST {V2}/entities` (D10).
 fn register_submit(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
@@ -286,11 +266,13 @@ fn register_reads(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
              the document-free default `gts_id,gts_uuid,kind,origin,lifecycle_status`; \
              documents are selected individually from `content`, \
              `resolved_schema`, `effective_traits` and `effective_traits_schema` (the last \
-             three Type Schemas only), plus the `provenance` group. Names are \
+             three Type Schemas only), plus the `provenance` group of a Type Schema \
+             (omitted on an Instance). Names are \
              case-insensitive; an empty, duplicate, unknown or nested name is a 400. \
              `gts_id`, `gts_uuid`, `kind` and `lifecycle_status` are always returned, \
              whether or not `$select` names them, so a deleted entity is still readable and \
-             reports it. No other query parameter is accepted.",
+             reports it. No other query parameter is accepted. The `ETag` is scoped to the \
+             `$select`; `If-None-Match` with a current one returns a bodyless 304.",
         )
         .tag(API_TAG)
         .authenticated()
@@ -300,9 +282,20 @@ fn register_reads(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
             "A GTS identifier (e.g. gts.acme.core.events.user_created.v1~) or a Registry \
              Reference UUID",
         )
+        .param(
+            ParamSpec::header("If-None-Match")
+                .required(false)
+                .description("An earlier `ETag` of this key under the same `$select`, or `*`"),
+        )
         .with_odata_select()
         .handler(handlers::get_entity_by_key)
         .json_response_with_schema::<EntityDto>(openapi, StatusCode::OK, "The requested entity")
+        .response_header(etag_header())
+        .no_content_response(
+            StatusCode::NOT_MODIFIED,
+            "The If-None-Match validator is current",
+        )
+        .response_header(etag_header())
         .problem_response(openapi, StatusCode::NOT_FOUND, "Entity not found")
         .standard_errors(openapi)
         .error_503(openapi)
@@ -320,15 +313,21 @@ fn register_batch_get(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rout
         .operation_id("types_registry.batch_get_entities")
         .summary("Read a set of GTS entities by key")
         .description(
-            "Read up to 100 entities in one round trip. Each item names one entity in `key` \
+            "Read up to 100 entities in one round trip. Each item names one entity in `entity_key` \
              (a canonical GTS identifier or the Registry Reference UUID derived from it), \
              resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves it. \
              A top-level `$select` string applies to every key and follows that route's \
              `$select` rules; absent, the document-free default. Tombstones are `found`. Returns 200 with one result \
-             per requested key, in request order and echoing the key it was asked by: `found` \
+             per distinct requested key, in no contractual order, echoing the key it was asked by, a Registry \
+             Reference in canonical lowercase hyphenated form: `found` \
              with the selected fields, exactly as the exact read returns them and always \
-             including `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`, or `not_found`. Query parameters are refused, `$select` included. A key \
-             named twice collapses onto its first mention; the two spellings of one entity are \
+             including `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`, or `not_found`. \
+             Every result but `not_found` carries the key's `etag`; an item whose \
+             `if_none_match` is still current answers `unchanged` without the entity. \
+             Query parameters are refused, `$select` included. A key \
+             named twice, in any UUID spelling, collapses onto its first mention and its \
+             condition; the identifier \
+             and the Registry Reference of one entity are \
              two keys and get two results. An absent key is not a 404: one missing key must \
              not lose the answers for the others. The If-None-Match header is refused rather \
              than ignored: validators are per key and belong in each item's `if_none_match`.",
@@ -457,14 +456,16 @@ fn register_batch_delete(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         .operation_id("types_registry.batch_delete_entities")
         .summary("Submit GTS entities for deletion")
         .description(
-            "Submit one or more entities for deletion. Each item names its target in `key` \
+            "Submit one or more entities for deletion. Each item names its target in `entity_key` \
              (a canonical GTS identifier or the Registry Reference UUID derived from it) and \
              carries a required positive `expected_resource_version`. Returns 202 with the \
              operation's Location; poll GET /types-registry/v2/operations/{operation_id} for \
-             the per-item outcome. Outcomes are keyed by GTS identifier and reported in \
-             request order, so a caller that deleted by Registry Reference matches results to \
-             requests by position. A stale version is not a 412: it is reported as a terminal \
-             `precondition_failed` item on the operation.",
+             the per-item outcome. Outcomes are reported in request order and echo each key as \
+             `entity_key`, a Registry Reference in canonical lowercase hyphenated form; a \
+             Registry Reference naming no entity fails only its own item. A \
+             stale version is not a 412: \
+             it is reported as a terminal `precondition_failed` item on the operation, and \
+             If-Match is refused rather than ignored.",
         )
         .param(idempotency_key_param())
         .tag(API_TAG)
@@ -509,11 +510,6 @@ fn register_batch_delete(mut router: Router, openapi: &dyn OpenApiRegistry) -> R
         ))
         .problem_response(
             openapi,
-            StatusCode::NOT_FOUND,
-            "An item names a Registry Reference that resolves to no entity",
-        )
-        .problem_response(
-            openapi,
             StatusCode::CONFLICT,
             "The Idempotency-Key is bound to a different request",
         )
@@ -533,8 +529,8 @@ fn register_delete_entity(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
         .summary("Delete one GTS entity")
         .description(
             "Delete a single entity named by canonical GTS identifier or Registry Reference \
-             UUID, resolved exactly as GET /types-registry/v2/entities/{entity_key} resolves \
-             it. One item's worth of :batchDelete. Returns 202 with the operation's Location; \
+             UUID, spelled as GET /types-registry/v2/entities/{entity_key} takes it and \
+             resolved by the worker. One item's worth of :batchDelete. Returns 202 with the operation's Location; \
              a stale version is reported as a terminal `precondition_failed` item rather than \
              a 412, and If-Match is refused rather than ignored.",
         )
@@ -605,11 +601,6 @@ fn register_delete_entity(mut router: Router, openapi: &dyn OpenApiRegistry) -> 
             "Whether this submission replayed an existing operation",
             ResponseHeaderType::Boolean,
         ))
-        .problem_response(
-            openapi,
-            StatusCode::NOT_FOUND,
-            "The entity_key is a Registry Reference that resolves to no entity",
-        )
         .problem_response(
             openapi,
             StatusCode::CONFLICT,

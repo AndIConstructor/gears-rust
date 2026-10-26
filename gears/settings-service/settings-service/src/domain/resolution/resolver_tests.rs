@@ -1,4 +1,3 @@
-// Created: 2026-09-07 by Virtuozzo International GmbH
 //! The resolver over the real repositories and an in-memory database.
 //!
 //! The tree is `root → a → b`, with `c` a sibling of `a` and `s` a standalone
@@ -552,6 +551,29 @@ mod access {
     }
 }
 
+/// The review listing's rows over `tenants`, under an unrestricted caller.
+async fn review_rows(h: &Harness, tenants: &[Uuid]) -> Vec<crate::domain::value::StoredValue> {
+    use crate::domain::category::visibility::DomainVisibility;
+    use crate::domain::value::ReviewRequest;
+    let conn = h.db.conn().expect("connection");
+    let query = toolkit_odata::ODataQuery::default();
+    h.resolver
+        .review_page(
+            &conn,
+            &ReviewRequest {
+                scope: &AccessScope::allow_all(),
+                visibility: &DomainVisibility::Unrestricted,
+                hidden_for: &[],
+                tenant_ids: tenants,
+                declarations: None,
+                query: &query,
+            },
+        )
+        .await
+        .expect("listing")
+        .items
+}
+
 #[tokio::test]
 async fn a_flagged_override_stays_in_storage_and_is_what_the_administrative_listing_shows() {
     let h = Harness::new().await;
@@ -576,18 +598,13 @@ async fn a_flagged_override_stays_in_storage_and_is_what_the_administrative_list
     // The administrative listing is the other half: it reads rows rather than
     // resolved values, so the flagged one is exactly what it reports, with the
     // detail that explains it.
-    let conn = h.db.conn().expect("connection");
     let (mut tenants, _) = h
         .hierarchy
         .descendants_bfs(t.root, 100)
         .await
         .expect("descendants");
     tenants.push(t.root);
-    let flagged = h
-        .resolver
-        .flagged_overrides(&conn, &[d], &tenants, 1_000)
-        .await
-        .expect("listing");
+    let flagged = review_rows(&h, &tenants).await;
     assert_eq!(flagged.len(), 1);
     assert_eq!(flagged[0].tenant_id, t.a);
     assert_eq!(flagged[0].value, Some(json!("no longer a boolean")));
@@ -609,7 +626,6 @@ async fn the_flagged_listing_stops_at_a_standalone_descendant() {
 
     // The listing walks the caller's subtree as the hierarchy reports it, and
     // the hierarchy does not traverse into a standalone tenant from above.
-    let conn = h.db.conn().expect("connection");
     let (mut tenants, _) = h
         .hierarchy
         .descendants_bfs(t.root, 100)
@@ -617,21 +633,13 @@ async fn the_flagged_listing_stops_at_a_standalone_descendant() {
         .expect("descendants");
     tenants.push(t.root);
     assert!(!tenants.contains(&t.s), "the subtree stops at the seam");
-    let flagged = h
-        .resolver
-        .flagged_overrides(&conn, &[d], &tenants, 1_000)
-        .await
-        .expect("listing");
+    let flagged = review_rows(&h, &tenants).await;
     let listed: Vec<uuid::Uuid> = flagged.iter().map(|r| r.tenant_id).collect();
     assert_eq!(listed, vec![t.a]);
 
     // The row is there; it is simply not this caller's to see. Asked for
     // directly, the standalone tenant's own listing reports it.
-    let own = h
-        .resolver
-        .flagged_overrides(&conn, &[d], &[t.s], 1_000)
-        .await
-        .expect("listing");
+    let own = review_rows(&h, &[t.s]).await;
     assert_eq!(own.len(), 1);
     assert_eq!(own[0].value, Some(json!("bad at s")));
 }
@@ -941,4 +949,275 @@ async fn the_bulk_read_carries_the_same_fallback_as_the_single_read() {
     }
     assert_eq!(by_key[&h.key("strict").to_string()].fallback, json!(true));
     assert_eq!(by_key[&h.key("other").to_string()].fallback, json!(true));
+}
+
+#[tokio::test]
+async fn a_subtree_is_resolved_in_one_pass_under_the_same_fallthrough_as_a_read() {
+    // One key at many tenants: the target's chain once, one set query, each
+    // descendant's chain from the walk's links — and the same answer a read
+    // of each descendant gives, flagged rows skipped and secrets as tokens.
+    let h = Harness::new().await;
+    let d = h
+        .declare("strict", scope_class::CASCADING, json!("default"))
+        .await;
+    let t = &h.tree;
+    h.set(d, t.root, json!("root")).await;
+    // Flagged at `a`: `a` and `b` fall through to the root's row.
+    h.set_flagged(d, t.a, json!("bad at a")).await;
+    h.set(d, t.c, json!("at c")).await;
+    let conn = h.db.conn().expect("connection");
+    let declaration = h
+        .resolver
+        .find_declaration(&conn, &h.key("strict"))
+        .await
+        .expect("lookup")
+        .expect("declared");
+
+    let subtree = h.hierarchy.subtree(t.root, 100).await.expect("subtree");
+    let asked = h.hierarchy.chain_calls();
+    let values = h
+        .resolver
+        .resolve_subtree(&conn, &declaration, ScopeTarget::Platform, &subtree)
+        .await
+        .expect("resolves");
+    assert_eq!(
+        h.hierarchy.chain_calls(),
+        asked,
+        "the root's chain is known; nothing else is asked per descendant"
+    );
+    assert_eq!(
+        values.iter().map(|v| v.tenant_id).collect::<Vec<_>>(),
+        subtree.order,
+        "one value per descendant, in walk order"
+    );
+    let by_tenant: std::collections::HashMap<Uuid, &super::SubtreeValue> =
+        values.iter().map(|v| (v.tenant_id, v)).collect();
+    assert!(
+        !by_tenant.contains_key(&t.s),
+        "a standalone descendant was not walked, so it is not resolved"
+    );
+    assert_eq!(
+        (by_tenant[&t.a].value.clone(), by_tenant[&t.a].source_tenant),
+        (json!("root"), Some(t.root))
+    );
+    assert_eq!(by_tenant[&t.b].source_tenant, Some(t.root));
+    assert_eq!(
+        (by_tenant[&t.c].value.clone(), by_tenant[&t.c].source_tenant),
+        (json!("at c"), Some(t.c))
+    );
+    assert_eq!(by_tenant[&t.b].scope, format!("/tenants/{}", t.b));
+    for value in &values {
+        let read = h
+            .resolver
+            .resolve(
+                &conn,
+                &h.key("strict"),
+                ScopeTarget::Tenant(value.tenant_id),
+            )
+            .await
+            .expect("reads");
+        assert_eq!(read.value, value.value, "{}", value.tenant_id);
+        assert_eq!(
+            read.source_scope,
+            value
+                .source_tenant
+                .map(|source| crate::domain::resolution::scope_path(source, t.root)),
+            "{}",
+            value.tenant_id
+        );
+    }
+
+    // From a tenant: the chain above it is fetched once, the rest is the links'.
+    let below = h.hierarchy.subtree(t.a, 100).await.expect("subtree");
+    let asked = h.hierarchy.chain_calls();
+    let values = h
+        .resolver
+        .resolve_subtree(&conn, &declaration, ScopeTarget::Tenant(t.a), &below)
+        .await
+        .expect("resolves");
+    assert_eq!(
+        h.hierarchy.chain_calls(),
+        asked + 1,
+        "the target's chain, once"
+    );
+    assert_eq!(values.len(), 1);
+    assert_eq!(
+        (values[0].tenant_id, values[0].source_tenant),
+        (t.b, Some(t.root))
+    );
+}
+
+#[tokio::test]
+async fn a_subtree_walk_reads_each_class_the_way_a_read_does() {
+    let h = Harness::new().await;
+    let t = &h.tree;
+    let everywhere = h
+        .declare("everywhere", scope_class::GLOBAL, json!("default"))
+        .await;
+    h.set(everywhere, t.root, json!("platform")).await;
+    let here = h
+        .declare("here", scope_class::LOCAL, json!("default"))
+        .await;
+    h.set(here, t.b, json!("b's own")).await;
+    let conn = h.db.conn().expect("connection");
+    let subtree = h.hierarchy.subtree(t.root, 100).await.expect("subtree");
+
+    let global = h
+        .resolver
+        .find_declaration(&conn, &h.key("everywhere"))
+        .await
+        .expect("lookup")
+        .expect("declared");
+    let values = h
+        .resolver
+        .resolve_subtree(&conn, &global, ScopeTarget::Platform, &subtree)
+        .await
+        .expect("resolves");
+    assert!(
+        values
+            .iter()
+            .all(|v| v.value == json!("platform") && v.source_tenant == Some(t.root)),
+        "a global setting is the platform row everywhere: {values:?}"
+    );
+
+    let local = h
+        .resolver
+        .find_declaration(&conn, &h.key("here"))
+        .await
+        .expect("lookup")
+        .expect("declared");
+    let values = h
+        .resolver
+        .resolve_subtree(&conn, &local, ScopeTarget::Platform, &subtree)
+        .await
+        .expect("resolves");
+    for value in &values {
+        if value.tenant_id == t.b {
+            assert_eq!(
+                (value.value.clone(), value.source_tenant),
+                (json!("b's own"), Some(t.b))
+            );
+        } else {
+            assert_eq!(
+                (value.value.clone(), value.source_tenant),
+                (json!("default"), None),
+                "a local setting is never inherited: {}",
+                value.tenant_id
+            );
+        }
+    }
+
+    // A retired declaration is the distinct retired outcome, as on a read.
+    h.retire(here).await;
+    let retired = h
+        .resolver
+        .find_declaration(&conn, &h.key("here"))
+        .await
+        .expect("lookup")
+        .expect("declared");
+    assert!(matches!(
+        h.resolver
+            .resolve_subtree(&conn, &retired, ScopeTarget::Platform, &subtree)
+            .await,
+        Err(DomainError::Retired { .. })
+    ));
+}
+
+#[tokio::test]
+async fn the_named_keys_a_caller_may_see_come_from_one_read_through_the_pages_own_gates() {
+    use crate::domain::access::TenantAccess;
+    use crate::domain::category::visibility::DomainVisibility;
+    use crate::domain::declaration::repo::DeclarationRepository as _;
+    use crate::infra::storage::declaration_repo::DeclarationRepo;
+
+    let h = Harness::new().await;
+    let open = h.declare("open", scope_class::CASCADING, json!(1)).await;
+    let walled = h.declare("walled", scope_class::CASCADING, json!(1)).await;
+    let concealed = h
+        .declare("concealed", scope_class::CASCADING, json!(1))
+        .await;
+    h.bind_domain(walled, "commercial").await;
+    {
+        use crate::domain::access::AccessRepository as _;
+        let conn = h.db.conn().expect("connection");
+        crate::infra::storage::access_repo::AccessRepo
+            .upsert(
+                &conn,
+                &AccessScope::allow_all(),
+                crate::domain::access::RestrictionDraft {
+                    declaration_id: concealed,
+                    tenant_id: h.tree.a,
+                    access: TenantAccess::Hidden,
+                    set_by: "test".to_owned(),
+                },
+                None,
+            )
+            .await
+            .expect("restriction");
+    }
+    let named: Vec<String> = ["open", "walled", "concealed", "never_declared"]
+        .iter()
+        .map(|n| h.key(n).to_string())
+        .collect();
+    let conn = h.db.conn().expect("connection");
+    let chain = vec![h.tree.root, h.tree.a];
+    let seen = |visibility: DomainVisibility, scope: AccessScope, chain: Vec<Uuid>| {
+        let (conn, named) = (&conn, &named);
+        async move {
+            let mut keys = DeclarationRepo
+                .visible_keys(conn, &scope, &visibility, &chain, named)
+                .await
+                .expect("keys");
+            keys.sort();
+            keys
+        }
+    };
+    let key = |n: &str| h.key(n).to_string();
+
+    // Another domain's administrator, on a chain that hides one setting: only
+    // the undomained, unhidden one; a key never declared is not an answer.
+    assert_eq!(
+        seen(
+            DomainVisibility::Restricted(vec!["infra".to_owned()]),
+            AccessScope::allow_all(),
+            chain.clone()
+        )
+        .await,
+        vec![key("open")]
+    );
+    // The domain's own administrator sees its setting too, still not the hidden.
+    assert_eq!(
+        seen(
+            DomainVisibility::Restricted(vec!["commercial".to_owned()]),
+            AccessScope::allow_all(),
+            chain.clone()
+        )
+        .await,
+        {
+            let mut v = vec![key("open"), key("walled")];
+            v.sort();
+            v
+        }
+    );
+    // A chain with no restriction on it hides nothing.
+    assert_eq!(
+        seen(
+            DomainVisibility::Unrestricted,
+            AccessScope::allow_all(),
+            vec![h.tree.root]
+        )
+        .await
+        .len(),
+        3
+    );
+    // A grant on one declaration leaves the others unseen.
+    assert_eq!(
+        seen(
+            DomainVisibility::Unrestricted,
+            AccessScope::for_resource(open),
+            Vec::new()
+        )
+        .await,
+        vec![key("open")]
+    );
 }

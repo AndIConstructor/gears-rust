@@ -299,7 +299,8 @@ impl AdmissionHandler {
         deadline: tokio::time::Instant,
         envelope: Option<Envelope<'_>>,
     ) -> MessageResult {
-        let status = tokio::time::timeout_at(deadline, self.registry.operation(operation_id)).await;
+        let status =
+            tokio::time::timeout_at(deadline, self.registry.operation_record(operation_id)).await;
         match status {
             Ok(Ok(Some(op))) if op.status == OperationStatus::Completed => {
                 info!(
@@ -519,8 +520,8 @@ impl LeasedHandler for AdmissionHandler {
                 MessageResult::Reject(reason) => batch.reject(reason),
             }
 
-            // Do not start work on an expired lease.
-            if batch.remaining().is_zero() {
+            // Do not start work on an expired lease or during shutdown.
+            if batch.should_stop() {
                 break;
             }
         }

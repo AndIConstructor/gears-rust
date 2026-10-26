@@ -616,7 +616,7 @@ Large features start with **specs that live alongside the code**:
 - **FEATURE** — flows, algorithms, states, requirements
 - **UPSTREAM_REQS** — incoming technical requirements from other gears
 
-> Templates in `docs/spec-templates/`. Every gear is well documented.
+> Templates in `studio-kit-gears/artifacts/`. Every gear is well documented.
 
 ---
 
@@ -698,7 +698,7 @@ make check           # full quality gate: fmt + clippy + test + security
 make all             # build + check + SQLite integration + E2E + OpenAPI
 make test            # unit tests (workspace)
 make test GEAR=file-parser  # unit tests for one gear + SDK scope
-make test-sqlite     # integration tests (SQLite, no external DB)
+make test-integration LANE=toolkit-db-sqlite  # integration tests (SQLite, no external DB)
 make e2e-local       # E2E — builds + starts server automatically
 make e2e-local SUITE=file-parser  # suite E2E scope + default E2E target
 make coverage-unit   # unit-test coverage

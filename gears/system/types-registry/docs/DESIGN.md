@@ -52,10 +52,10 @@ Registration and deletion use one asynchronous read/reconcile/conditional-write 
 | `cpt-cf-types-registry-fr-register-schemas`, `cpt-cf-types-registry-fr-register-instances` | Always-asynchronous read/reconcile/conditional-write with request idempotency, per-candidate outcomes, and dependency-aware partial admission. See *Admission Pipeline* in §3.2 and *Batch admission* in §3.6. |
 | `cpt-cf-types-registry-fr-dry-run` | A mode of the same admission operation that runs every check and suppresses the commit. See *Admission Pipeline* in §3.2. |
 | `cpt-cf-types-registry-fr-validate-schema-compat` | `BACKWARD` comparison of resolved effective schemas against one baseline, with checker provenance recorded; major 0 and explicit cross-minor waivers follow their separate profiles. See *Compatibility & Evolution Policy* in §3.2. |
-| `cpt-cf-types-registry-fr-minor-version-profile` | Per-major choice between mutable major-only identity and a gap-free immutable minor sequence opening at `M.0`; `force` waives one cross-minor check and is recorded. See *Compatibility & Evolution Policy* and *Dependency-aware partial admission* in §3.2. |
+| `cpt-cf-types-registry-fr-minor-version-profile` | Per-major choice between mutable major-only identity and a gap-free immutable minor sequence opening at `M.0`; `skip_compatibility_check` waives one cross-minor check and is recorded. See *Compatibility & Evolution Policy* and *Dependency-aware partial admission* in §3.2. |
 | `cpt-cf-types-registry-fr-validate-type-derivation` | Identifier-derived chain validation against every managed base under one resolution-closure dialect. See *Compatibility & Evolution Policy* in §3.2. |
 | `cpt-cf-types-registry-fr-gts-validation` | All GTS semantics come from `gts-rust`; the managed profile adds Draft-07 and identifier restrictions, while federation does not reinterpret source content. See §2.2, *Admission Pipeline*, and *Compatibility & Evolution Policy* in §3.2. |
-| `cpt-cf-types-registry-fr-ref-tracking` | Flat managed dependency edges for derivation, `$ref`, and Instance-to-schema relationships; used for deletion safety and impact analysis. `x-gts-ref` creates no edge. See *Dependency Graph & Deletion Safety* in §3.2. |
+| `cpt-cf-types-registry-fr-ref-tracking` | Flat managed dependency edges for derivation, `$ref`, and Instance-to-schema relationships; used for deletion safety and impact analysis. An entity reference (`x-gts-type-ref` / `x-gts-instance-ref`) creates no edge. See *Dependency Graph & Deletion Safety* in §3.2. |
 | `cpt-cf-types-registry-fr-type-query-assistance` | Exact managed matching in SQL over stored parsed segments, GTS matcher confirmation of external results, source-major federation, and a bounded complete Registry Reference set. See *Query Assistance & Discovery* in §3.2. |
 | `cpt-cf-types-registry-fr-tenant-ownership` | Global or tenant ownership stored on each Managed Entity; tenant visibility follows the directed descendant relation, computed from the subject tenant; boolean `read`/`list` grants gate the operation without altering that relation. See *Visibility Resolver* and *Read authorization* in §3.2. |
 | `cpt-cf-types-registry-fr-registration-authority` | Global writes use `PlatformSecurityContext`; tenant writes use PDP grants over the candidate identifier, evaluated before identifier availability. See *Tenant-plane authorization* and *Platform-plane authorization* in §3.2. |
@@ -64,7 +64,7 @@ Registration and deletion use one asynchronous read/reconcile/conditional-write 
 | `cpt-cf-types-registry-fr-lifecycle` | Managed `ACTIVE`/`DELETED` lifecycle, exact family enumeration, and deletion blocked by registered dependents. See *Dependency Graph & Deletion Safety* in §3.2. |
 | `cpt-cf-types-registry-fr-externally-managed-entities` | Live, non-persisted source results validated at the managed–external boundary; typed origin data exposes no external write precondition. See *Federation Router* in §3.2 and *Registry Source Plugin contract* in §3.3. |
 | `cpt-cf-types-registry-fr-registry-federation`, `cpt-cf-types-registry-fr-registry-source-routing` | Managed-first resolution followed by deterministic, non-overlapping Source Claims; plugins are read-only and bound to the total federation contract. See *Federation Router* and *Registry Source Plugin registration* in §3.2. |
-| `cpt-cf-types-registry-fr-cache-freshness-metadata` | Per-request opaque validators scoped to origin, Context Tenant, and normalized projection for exact reads, never discovery pages. See *What a validator is made of* in §3.3. |
+| `cpt-cf-types-registry-fr-cache-freshness-metadata` | Per-request opaque validators for exact reads, never discovery pages; inputs in §3.3, *What a validator is made of*. |
 | `cpt-cf-types-registry-fr-client-cache` | Bounded per-client representation cache with batched conditional revalidation and fail-closed expiry handling. See *The client-side cache* in §3.3. |
 | `cpt-cf-types-registry-fr-two-phase-init` | Caller-side inventory reconciliation, dependency-aware batches, and per-registrant readiness without a global startup barrier. See *Inventory and startup reconciliation* in §3.3. |
 | `cpt-cf-types-registry-fr-validation-hooks` | P2 hook execution and declaration semantics remain open; D1 records the required control-plane type decision. |
@@ -88,7 +88,7 @@ Registration and deletion use one asynchronous read/reconcile/conditional-write 
 | `cpt-cf-types-registry-adr-storage-identity-query-model` | Domain gears persist an opaque Registry Reference UUID derived deterministically from the exact client-supplied GTS Identifier. |
 | `cpt-cf-types-registry-adr-external-source-live-delegation` | Externally managed definitions and tenant state are delegated live to the owning Registry Source Plugin, never projected. |
 | `cpt-cf-types-registry-adr-type-schema-evolution-compatibility` | Managed Type Schemas evolve under `BACKWARD` compatibility, compared against one baseline rather than against history, and the guarantee that follows is a statement about a major. |
-| `cpt-cf-types-registry-adr-gts-minor-version-identity-evolution` | A major is either one mutable major-only entity or a gap-free sequence of immutable minors opening at `M.0`, chosen by its first member; a minor is the boundary at which references stop floating, and `force` waives the cross-minor check. |
+| `cpt-cf-types-registry-adr-gts-minor-version-identity-evolution` | A major is either one mutable major-only entity or a gap-free sequence of immutable minors opening at `M.0`, chosen by its first member; a minor is the boundary at which references stop floating, and `skip_compatibility_check` waives the cross-minor check. |
 | `cpt-cf-types-registry-adr-type-schema-revisions` | Every admitted Type Schema definition is an immutable retained revision with optimistic concurrency on the logical entity. |
 | `cpt-cf-types-registry-adr-registered-instance-revisions` | A registered Instance is a mutable logical entity whose every admitted value is an immutable revision bound to the Type Schema revision that validated it. |
 | `cpt-cf-types-registry-adr-federated-source-routing-query` | Ordered resolver chain over non-overlapping Source Claims, managed storage first, source-major federated traversal. |
@@ -145,7 +145,7 @@ The gear follows the canonical DDD-light layout of [`02_gear_layout_and_sdk_patt
 
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
-| SDK (`types-registry-sdk/`) | The public API surface consumers link and resolve through the typed ClientHub: `TypesRegistryClient` and `PlatformTypesRegistryClient`, transport-agnostic models, canonical errors. A separate crate rather than a layer of the gear, which is what lets a consumer depend on the contract without depending on the implementation | Rust traits and plain models; no serde, no HTTP types, no REST DTOs |
+| SDK (`types-registry-sdk/`) | Public ClientHub contracts (`TypesRegistryApi`, `PlatformTypesRegistryApi`), `…Ext` helpers, models and canonical errors; consumers depend on the contract without the implementation | Rust traits and plain models; no serde, HTTP types or REST DTOs |
 | Presentation (`api/rest/`) | Authenticated REST surface for management, discovery, resolution, validation, and operations; DTOs with OpenAPI schemas | Axum via ToolKit `OperationBuilder`, utoipa, RFC-9457 problem details |
 | Domain (`domain/`) | Admission and compatibility, revision and concurrency control, identity and reference resolution, dependency and deletion safety, availability evaluation, federation routing, query assistance, built-in control-plane validators | Rust, `gts-rust` for all GTS semantics |
 | Infrastructure (`infra/`) | Authoritative persistence, operation and idempotency store, tenant hierarchy client, Registry Source Plugin clients | SeaORM through the secure ORM layer over SQLite / PostgreSQL / MySQL, ToolKit scoped ClientHub, `tenant-resolver` SDK |
@@ -230,7 +230,7 @@ Managed Type Schemas MUST declare JSON Schema Draft-07 in P1. The dialect is fix
 
 This is a correctness constraint rather than a format preference: `resolve_schema_refs` strips non-root `$schema`, and JSON Schema ignores unrecognised keywords, so a mixed-dialect closure can silently lose constraints instead of failing.
 
-Any future widening preserves dialect uniformity across the managed resolution closure: the `$id` chain and `$ref` targets, including references inside `x-gts-traits-schema`, but excluding `x-gts-ref` targets because they are not inlined. Externally Managed Entities are outside this profile, cannot enter a managed closure, and their returned content is never parsed by the registry.
+Any future widening preserves dialect uniformity across the managed resolution closure: the `$id` chain and `$ref` targets, including references inside `x-gts-traits-schema`, but excluding entity-reference (`x-gts-type-ref` / `x-gts-instance-ref`) targets because they are not inlined. Externally Managed Entities are outside this profile, cannot enter a managed closure, and their returned content is never parsed by the registry.
 
 **ADRs**: `cpt-cf-types-registry-adr-managed-type-schema-dialect-profile`, `cpt-cf-types-registry-adr-type-schema-evolution-compatibility`, `cpt-cf-types-registry-adr-managed-external-boundary`
 
@@ -256,7 +256,7 @@ Reverse-impact queries use a repository-owned recursive CTE over `dependency`, b
 
 - [ ] `p2` - **ID**: `cpt-cf-types-registry-constraint-boot-path`
 
-Because every other gear may depend on it, anything Types Registry waits for during startup is something the platform waits for. It publishes ready when its own storage is ready and its own seed set has been admitted, has no notion of an expected registration set, and never blocks on a registrant. Registrants retry and gate their own readiness.
+Types Registry becomes ready when its storage and seed set are ready; it never waits for registrants or an expected registration set. Registrants retry in the background and gate only their own readiness (§3.3, *Inventory and startup reconciliation*). Standalone deployments require high availability (§4); replicas share only the database.
 
 **ADRs**: `cpt-cf-types-registry-adr-write-path-admission-protocol`
 
@@ -264,7 +264,7 @@ Because every other gear may depend on it, anything Types Registry waits for dur
 
 - [ ] `p2` - **ID**: `cpt-cf-types-registry-constraint-tenant-hierarchy`
 
-Visibility of a tenant-owned entity is the directed descendant relation, so most reads require the requesting subject tenant's ancestor chain. It is obtained from `tenant-resolver` with barrier traversal disabled, cached within the 10 ms lookup budget, and versioned into the resolution validator.
+Visibility of a tenant-owned entity is the directed descendant relation, so most reads require the requesting subject tenant's ancestor chain. It is obtained from `tenant-resolver` with barrier traversal disabled, cached within the 10 ms lookup budget, and versioned into the freshness validator.
 
 The tenant PDP is the second read-path dependency, added by `cpt-cf-types-registry-tech-read-authorization`: an unreachable one fails a read closed exactly as it fails a registration, and because this gear precedes every registrant, that outage is platform-wide rather than local. Both dependencies are cached, and neither is consulted on the platform plane.
 
@@ -296,10 +296,10 @@ A managed GTS Identifier names a logical entity that is mutable when major-only 
 
 | Entity | Description | Schema |
 |---|---|---|
-| Registry Entity | One admitted managed GTS Identifier, of kind Type Schema or registered Instance. Carries identity, ownership, the owning gear, lifecycle, and the `resource_version` that write preconditions test. Survives deletion as the tombstone that keeps a previously issued reference resolvable | `entity`, plus the kind-specific current-state row `type_schema` or `instance` |
+| Registry Entity | One admitted managed GTS Identifier, of kind Type Schema or registered Instance. Carries identity, ownership, the publisher, lifecycle, and the `resource_version` that write preconditions test. Survives deletion as the tombstone that keeps a previously issued reference resolvable | `entity`, plus the kind-specific current-state row `type_schema` or `instance` |
 | Revision | One immutable admitted definition or value, with the specification and implementation versions in force at its admission | `type_schema_revision`, `instance_revision` |
 | Version Family | The set of Version Successors of one another, named by the family key of ADR-0004. Holds an ownership scope and nothing else | `version_family` |
-| Dependency | A direct edge between two Registry Entities: `$ref`, immediate derivation base, or Instance conformance. An `x-gts-ref` target is not one. Nothing transitive is stored | `dependency` |
+| Dependency | A direct edge between two Registry Entities: `$ref`, immediate derivation base, or Instance conformance. An entity-reference (`x-gts-type-ref` / `x-gts-instance-ref`) target is not one. Nothing transitive is stored | `dependency` |
 | Operation | One accepted mutation: its scoped request identity, its client-visible progress, and one durable outcome per candidate identifier | `operation`, `operation_item` |
 | Registry Source | Where an identifier is authoritative — managed storage, or an External Registry Source behind a claim. Managed storage is implicit; a claim is a projection of a plugin's registered Instance and outlives it as a reservation | `source_claim`, plus the `routing` state row of `coordination_state` |
 
@@ -307,13 +307,19 @@ A managed GTS Identifier names a logical entity that is mutable when major-only 
 
 `type_schema_revision` holds the immutable authored admission snapshot and retains neither effective artifacts nor a dependency-revision vector. `type_schema` holds the artifacts resolved against dependencies current now; a floating dependency may therefore update it without creating a revision or changing `resource_version`. An Instance has no such artifact, so `instance` is the current-revision pointer and nothing more.
 
+Three stored values track change, and each answers a different question:
+
+- `revision_no` starts at 1 for each entity and advances only on a succeeded, non-Dry-Run content update; a minor-bearing Type Schema accepts no update. It keys revision history and binds an Instance revision to the Type Schema revision that validated it. No public operation accepts it (ADR-0005).
+- `entity.resource_version` is the write precondition: `1` at creation, incremented by each committed content revision or lifecycle transition — not by `unchanged`, Dry Run, or a dependency refresh. `revision_no` could not serve: a deletion leaves a stale writer's revision number current.
+- `type_schema.resolution_fingerprint` is an equality-only SHA-256 digest of the three canonical effective artifacts, and the only one of these values a dependency refresh moves: the dependant's owner keeps a valid precondition while readers and the worker's drift check still see the change. Being a digest, it stays put when a recomputation reproduces the same bytes.
+
 #### Derived values and projections
 
 | Value | Derivation and storage rule |
 |---|---|
 | Registry Reference (`gts_uuid`) | Derived deterministically from the canonical identifier. A persisted indexed copy supports reverse resolution, and its unique constraint detects identity collisions (ADR-0001). |
 | Tenant Availability State | Computed per request from lifecycle, visibility, the Context Tenant's ancestor chain, and live source state where applicable; no single per-entity value exists to store. |
-| Freshness validator | Computed from entity, tenant, origin, and projection state as specified in §3.3; issued validators are never stored. |
+| Freshness validator | Computed per read, never stored server-side; inputs in §3.3, *What a validator is made of*. |
 | Per-level content model | Computed from the resolved effective schema during admission as an unpersisted compatibility input; Dry Run reports the level that prevents admission (ADR-0003). |
 | Derivation chain | Reconstructed with `chain_ids()`; only the immediate base is projected as a dependency edge so recursive queries can span every edge kind. |
 | Unstable profile | Derived from major 0 in the identifier's last segment; no `stability` column is stored, and immutable identity preserves the admission-time quarantine. |
@@ -345,7 +351,7 @@ erDiagram
 
 Four of these carry an invariant worth stating outright, because none of them is enforced by the relationship alone.
 
-**A Version Family fixes ownership before its first member.** Admission creates or locks the family row before admitting a member, preventing concurrent first registrations under different owners. Entity owner columns are a SecureORM projection maintained under that lock because a composite foreign key would not cover the nullable global scope. `owning_gear` remains mutable per-entity attribution; family ownership is write-once and controls visibility.
+**A Version Family fixes ownership before its first member.** Admission creates or locks the family row before admitting a member, preventing concurrent first registrations under different owners. Entity owner columns are a SecureORM projection maintained under that lock because a composite foreign key would not cover the nullable global scope. `publisher_name` is per-entity attribution, fixed once claimed (§3.2, *Publication ordering*); family ownership is write-once and controls visibility.
 
 **An Instance records one Type Schema revision:** the exact revision that admitted its value, on the immutable revision row. The number is not public. Which revision last revalidated the value is not stored, because a schema revision cannot become current while an affected Instance would become invalid (ADR-0005, ADR-0006) and ADR-0015 forbids an Instance on a v0 schema, so a current value is valid against its schema's current revision by invariant rather than by record.
 
@@ -426,7 +432,9 @@ The endpoint has one successful acceptance shape: `202 Accepted` with an operati
 
 Separate operations, including requests accepted in sequence, have no execution or completion ordering guarantee. Dependency ordering applies within one batch. Callers needing a dependency across requests must await and inspect the prerequisite operation's results before submitting the dependent request.
 
-Acceptance reads no registry entity state. It decides only from the request, plane, and startup configuration, so the following failures are synchronous:
+Acceptance reads no registry entity state. It decides only from the request,
+plane, and startup configuration, so the following checks and refusals are
+synchronous:
 
 1. **Envelope and batch size** — refuses more than 100 candidates.
 2. **Candidate identifiers** — refuses a non-canonical GTS Identifier, or a duplicate within the batch.
@@ -434,21 +442,33 @@ Acceptance reads no registry entity state. It decides only from the request, pla
 4. **Registration authority** — refuses a batch mixing planes, actions, or ownership scopes, a global candidate off the platform plane, and any tenant-plane candidate not covered by a grant. Authorization is evaluated for every distinct identifier; one successful check never authorizes its batch neighbours.
 5. **Managed identifier profile** — refuses an explicit UUID tail on any candidate (ADR-0001), and a minor or major 0 in the **last segment** of a registered Instance identifier (ADR-0004, ADR-0015). A minor on a Type Schema identifier is admissible under any prefix.
 6. **Declared identity and dialect, Type Schema candidates** — refuses a top-level `$id` that is not exactly the `gts://` URI of the candidate's GTS Identifier (absent, non-string, malformed, or naming another entity), then an absent top-level `$schema`, a value outside the closed Draft-07 spelling set, and a `$schema` below the document root that differs from it (ADR-0014). The set is canonical `http://json-schema.org/draft-07/schema#`, that URI without `#`, and either form under `https`; every accepted form normalizes to the canonical one.
-7. **`force`, per candidate** — refuses the flag where `allow_compatibility_force` is off, and where the candidate has no cross-minor check to waive: major-only, the first minor of its major, or major 0 (ADR-0004).
-8. **ADR-0015 quarantine** — refuses a stable candidate whose immediate derivation base or `$ref` targets include a major-0 identifier. `x-gts-ref` is an instance-value constraint and is outside the quarantine in every form.
-9. **Canonicalization and request identity** — canonicalizes each authored schema or Instance value through `gts-rust`, computes the request fingerprint, and resolves the mandatory `Idempotency-Key`.
+7. **`skip_compatibility_check`, per candidate** — refuses the flag where `allow_compatibility_force` is off, and where the candidate has no cross-minor check to waive: major-only, the first minor of its major, or major 0 (ADR-0004).
+8. **Canonicalization and request identity** — canonicalizes each authored schema or Instance value through `gts-rust`, computes the request fingerprint, and resolves the mandatory `Idempotency-Key`.
+
+After acceptance creates the operation, the worker extracts the candidate's
+dependency edges and checks ADR-0015 quarantine before loading target
+documents. A stable candidate whose immediate derivation base or `$ref`
+targets include a major-0 identifier fails as an operation item with
+`stable_derives_from_major_zero` or `stable_refs_major_zero`. Independent
+batch candidates remain eligible to commit. An entity reference (`x-gts-type-ref` / `x-gts-instance-ref`) is an
+instance-value constraint and is outside quarantine in every form. Reusing the extracted
+edges keeps this check consistent with dependency ordering and
+malformed-reference failures (P0 SPEC §8.1).
 
 Three ordering invariants are load-bearing:
 
 - Steps 3 and 4 precede existence lookup, preventing namespace probing; policy precedes the PDP because a grant cannot open a closed region.
 - Steps 5 and 7 are request-static. Family shape and whether a waived comparison would fail remain worker decisions under the version-family lock.
-- Step 8 checks direct references. The closure property follows inductively, with the base case coming from the release boundary: the release that introduces the check is the release that first persists an entity, so no stored edge predates it (ADR-0015).
+- The worker's quarantine check covers direct references. The closure
+  property follows inductively, with the base case coming from the
+  release boundary: the release that introduces the check is the first
+  to persist an entity, so no stored edge predates it (ADR-0015).
 
-The request fingerprint covers the canonical body, operation kind, authorization scope, owner, optimistic preconditions, and each `force` flag. The key identifies that request and is scoped to authorization scope, owning tenant, and principal. A matching replay returns the stored operation without reading entity state (`202` while active, `200` when terminal); another fingerprint under the same key returns `409 Conflict`. A new reconciliation uses a new key.
+The request fingerprint covers the canonical body, operation kind, authorization scope, owner, optimistic preconditions, each `skip_compatibility_check` flag and the request-level `publisher`. The key identifies that request and is scoped to authorization scope, owning tenant, and principal. A matching replay returns the stored operation without reading entity state (`202` while active, `200` when terminal); another fingerprint under the same key returns `409 Conflict`. A new reconciliation uses a new key.
 
-A dry run applies the same checks to the whole batch over one read snapshot and an overlay of prior successful candidates' changes. Entity writes and write-order claims stay virtual. After releasing the snapshot, the worker publishes outcomes in a short transaction. The mode participates in the fingerprint and is stored on candidate rows for `ck_tr_operation_item_state`. Predictions reserve nothing; §3.3 defines their result fields.
+A dry run applies the same checks to the whole batch over one read snapshot and an overlay of prior successful candidates' changes. Entity writes and write-order claims stay virtual. After releasing the snapshot, the worker publishes outcomes in a short transaction. The mode participates in the request fingerprint and is stored on candidate rows for `ck_tr_operation_item_state`. Predictions reserve nothing; §3.3 defines their result fields.
 
-The acceptance transaction inserts the operation and candidates and enqueues an outbox message containing only the operation UUID. Candidate content never enters outbox or dead-letter payloads. Atomic enqueue prevents an undispatchable operation or an orphan message; uniqueness on `(idempotency_scope_hash, idempotency_key)` resolves concurrent acceptance, with the loser returning the winner after fingerprint verification.
+The acceptance transaction inserts the operation and candidates and enqueues an outbox message containing only the operation UUID. Candidate content never enters outbox or dead-letter payloads. Atomic enqueue prevents an undispatchable operation or an orphan message; uniqueness on `(idempotency_scope_hash, idempotency_key)` resolves concurrent acceptance, with the loser returning the winner after request-fingerprint verification.
 
 Authored-content equality is established once by the worker per candidate, by exact comparison of canonical bytes; no content digest is stored. Effective artifacts are excluded because they are projections over current dependencies.
 
@@ -473,7 +493,7 @@ The end-to-end flow this pipeline drives — read, reconcile, submit, dispatch, 
 
 Operation status reports progress only: `pending`, `running`, or `completed`, with `completed` meaning every item is terminal. Per-candidate status carries the outcome: `pending`, `running`, `succeeded`, `unchanged`, or `failed`, keyed by exact GTS Identifier. Outcomes are not aggregated onto the operation (`cpt-cf-types-registry-principle-derive-not-store`).
 
-A status distinguishes effects; a structured reason distinguishes causes. `succeeded` committed an entity-state change, or in Dry Run passed every check and predicts one; `unchanged` proved an update equal to current authored content without a revision or `resource_version` increment; `failed` produced no change. `unchanged` is valid only for an update; create and delete have no redundant-success branch, as constrained in the candidate row and enforced by the worker.
+`succeeded` commits a change (or predicts one in Dry Run); `unchanged` confirms equal authored content without a revision or `resource_version` increment, possibly advancing the publisher stamp; `failed` changes nothing. `superseded` is a failure reason, not a status. Only updates can be `unchanged`; create and delete have no redundant-success branch.
 
 The vocabulary has no cancellation or expiry state. Leases are redelivered, and a stalled operation past its timeout completes with unfinished items `failed`. A dependency-blocked candidate is likewise `failed`, with `blocked_by_dependency` or `blocked_by_predecessor` identifying the cause rather than adding a `blocked` status.
 
@@ -489,7 +509,7 @@ Deletion cascades to operation items and releases `(idempotency_scope_hash, idem
 |---|---|---|
 | Dry run | wrote nothing, by construction | nothing, by definition |
 | No candidate succeeded | admitted nothing | fails again, or succeeds because the world has since changed |
-| Successful deletion | a lifecycle transition creates no content revision | fails `precondition_failed`: the entity is already `DELETED` and `resource_version` has moved past what the replay carries |
+| Successful deletion | a lifecycle transition creates no content revision | fails `not_active`: it is now a new deletion of a tombstone, refused whichever version it names |
 | Revisions removed by a purge | ADR-0013 leaves operation items in place, subject to this ordinary sweep once their revisions no longer pin them | registers a new logical entity under a name purge freed — not a restore of what was released |
 
 The sweep reaches no admitted content, identity, or tombstone and therefore does not weaken ADR-0013. Extending retention to revisions and their pinned operations is D4 in §4.
@@ -527,9 +547,9 @@ For determinism, the graph adds an implicit edge `vM.(n-1)~` → `vM.n~`. It mak
 
 **Committing one admission unit**
 
-Outside the transaction, the worker runs parsing, resolution, compatibility, derivation, reference, and dependent-revalidation checks through `gts-rust`, recording the target revision, the complete reverse-impact identifier set for each updated schema, and a revision vector for every correctness-relevant dependency or dependant. That vector contains each entity's `resource_version` and, where effective Type Schema content was consumed, its `resolution_fingerprint`.
+Outside the transaction, the worker runs parsing, resolution, compatibility, derivation, reference, and dependent-revalidation checks through `gts-rust`, recording the complete reverse-impact identifier set for each updated schema and a revision vector for every correctness-relevant dependency or dependant. That vector contains each entity's `resource_version` and, where effective Type Schema content was consumed, its `resolution_fingerprint`.
 
-For the managed–external boundary, the worker classifies entity-naming `x-gts-ref` values and rejects targets covered by active or retired Source Claims. It loads no target and creates no dependency edge; the commit rechecks the relevant claims.
+For the managed–external boundary, the worker classifies entity-naming `x-gts-type-ref` and `x-gts-instance-ref` values and rejects targets covered by active or retired Source Claims. It loads no target and creates no dependency edge; the commit rechecks the relevant claims.
 
 A registered Instance is rejected when its conforming Type Schema is in the major-0 unstable profile, even though the minor or major marker is in a preceding identifier segment rather than the Instance's own last segment. This is distinct from the stable-reference quarantine: an unstable schema cannot carry a registered Instance because later unchecked evolution would make its current validation record untruthful (ADR-0006, ADR-0015).
 
@@ -538,7 +558,7 @@ The registration commit transaction then:
 1. advances the `entity_write_order` row of `types_registry__coordination_state` as its first statement, thereby claiming it for the transaction before any read;
 2. enforces the caller precondition and acquires any family and entity locks in canonical order;
 3. rebuilds the affected committed-plus-candidate graph, rechecks acyclicity, and compares the reverse-impact set and revision vector, retrying boundedly on drift;
-4. rechecks active and retired Source Claims for a new managed identifier and any entity-naming `x-gts-ref` target;
+4. rechecks active and retired Source Claims for a new managed identifier and any entity-naming `x-gts-type-ref` or `x-gts-instance-ref` target;
 5. repeats the predecessor test for each minor-bearing candidate;
 6. inserts the immutable revision, replaces the current-state projection, and replaces the entity's dependency edges;
 7. refreshes the affected current effective schemas;
@@ -546,14 +566,19 @@ The registration commit transaction then:
 
 The three guards cover distinct races:
 
-- The caller precondition detects target movement since the caller's read; mismatch is terminal per-item `precondition_failed`, with no silent rebase.
+- The caller's version precondition detects movement of an active target since
+  its read; mismatch is terminal per-item `precondition_failed`, with no silent
+  rebase. A deleted target instead fails `entity_deleted` before comparing
+  versions.
+  A creation whose identifier is already occupied instead fails per item
+  as `already_exists`, including when the existing entity is deleted.
 - The reverse-impact set and revision vector detect movement since validation; the worker reloads and revalidates within a bounded retry policy.
 - Updating `entity_write_order` serializes every entity-state commit, preventing a dependency edge from appearing between graph validation and commit. A database row binds exclusion to the transaction, unlike a session-scoped advisory lock.
 - Canonical family and entity lock ordering prevents deadlocks. Source Claim mutations follow those locks, and the `routing` generation advances last.
 
 Only commit transactions are serialized; validation remains concurrent and outside the transaction. Impact refresh is bounded by `limits.activation_write_set`, and lock timeout is treated as retryable contention. A future graph-generation compare-and-swap may restore parallel commits if measurements justify it.
 
-Deletion follows the same writer order. It rechecks the positive `expected_resource_version`, `ACTIVE` status, and absence of direct registered dependants before atomically marking the entity `DELETED` and recording the outcome. Deleting a Registry Source Plugin also stamps `retired_at` on active claims and advances the `routing` generation last; source unreachability never triggers deletion.
+Deletion follows the same writer order. It rechecks the positive `expected_resource_version`, `ACTIVE` status, and absence of direct registered dependants before atomically marking the entity `DELETED`, incrementing `resource_version`, and recording the outcome. A new deletion of a tombstone fails `not_active` whichever version it names, because lifecycle is checked first; replaying the request that deleted it returns that operation instead. A new `$ref`, derivation or conformance edge to a tombstone fails `dependency_deleted`, naming the target; a deleted predecessor still serves as a cross-minor baseline, which is no edge. Deleting a Registry Source Plugin also stamps `retired_at` on active claims and advances the `routing` generation last; source unreachability never triggers deletion.
 
 The unique family row is the ownership authority. Creation uses backend-specific insert-if-absent followed by a locked read; admission requires the requested owner to equal the stored one. The entity's owner is only a SecureORM projection and changes while this lock is held.
 
@@ -566,6 +591,34 @@ Under the same lock, ADR-0004's version-stripped family key (`v1~`, `v1.4~`, and
 Shape and contiguity are keyed lookups, not scans. There is no revision-reservation rule: a minor-bearing entity accepts no content revision.
 
 The commit-time predecessor recheck handles concurrent delete-and-purge: during validation the new candidate does not yet pin its baseline. Absence is retryable, like a not-yet-registered base, and is not a caller-precondition failure. The predecessor is excluded from both the dependency vector and `dependency`; storing that edge would forbid deletion of `v1.0~` while `v1.1~` exists, contrary to ADR-0008.
+
+##### Publication ordering
+
+- [ ] `p1` - **ID**: `cpt-cf-types-registry-tech-publication-ordering`
+
+Compare-and-swap orders writes, not releases. Publication ordering prevents an older release, restart or queued operation from restoring content published by a newer release.
+
+Each global entity stores the registrant's **publisher stamp**: opaque `publisher_name` and SemVer `publisher_version` (gear name/crate version for ToolKit gears). Platform mutations require `publisher { name, version }`, stored on the operation, included in its fingerprint and read for every candidate. Missing publisher is refused before acceptance. Tenant mutations reject publisher input and store no stamp.
+
+Inside the commit transaction, after the `entity_write_order` claim and **before** the caller's precondition, the stored stamp decides:
+
+| Incoming `publisher_version` vs stored | Authored content | Outcome |
+|---|---|---|
+| Lower | any | `failed` with reason `superseded`; nothing written |
+| Equal | identical | `unchanged` |
+| Equal | different | ordinary admission, CAS and compatibility; content and stamp commit together |
+| Higher | identical | `unchanged` plus a metadata-only confirmation of the stamp |
+| Higher | different | ordinary admission; content and stamp commit together |
+
+`superseded` carries `stored_version` and `offered_version`. Comparison uses SemVer precedence (prerelease counts, build metadata does not); a different publisher yields `publisher_mismatch`. Under the write-order claim, check the stamp before preconditions and any final refusal, including compatibility or tombstone refusal, and on both `unchanged` paths. Metadata-only confirmation changes no revision, `resource_version`, `updated_at`, artifact or validator, including for minor-bearing Type Schemas (ADR-0004). Failed, refused and dry-run candidates never advance the stamp; deletion commits tombstone and stamp together.
+
+Required publisher metadata prevents unversioned bypasses. Equal-version updates support configuration-built Instances without a rebuild, but differently configured replicas of one release may overwrite each other. Per-entity stamps allow partial admission; older releases may still create identifiers absent from newer publications. Manifest omissions never delete entities.
+
+There is no override of `publisher_version`. Reverting content takes a newer release; a hotfix on an older line is released above the last published version. A rolled-back binary is `superseded`, and the registry is not rewound.
+
+The stamp is declared, not attested; it coordinates cooperating publishers and grants no authority. P1 binds names through a deployment allow-list over the full validated `PlatformIdentity`; `peer_name()` loses service-account namespace. Unauthorized names are refused before acceptance; one identity may host several publishers, and SPIFFE can attest versions. Pre-stamp rows (empty version, placeholder name) remain **unclaimed** until successful publication or confirmation, without inferring ownership from GTS namespaces. Every database writer must check the stamp.
+
+**Schema authority.** Global validation uses current major-only registry content within cache freshness rules; decoding and serialization remain the consumer’s code. BACKWARD compatibility protects older writers; supporting older readers is the publisher’s release obligation. Pinning a release requires revision-addressed reads or resolved snapshots: immutable authored minors may still resolve moving major-only references.
 
 ##### Tenant-plane authorization
 
@@ -585,11 +638,11 @@ The actions are `register` and `delete`. `register` covers creation and revision
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-tech-pdp-resource-shape`
 
-Every registry evaluation, under either action set, names one resource type — `gts.cf.toolkit.types_registry.entity.v1~` — and carries the identifier or pattern under discussion in the `gts_id` resource property, as `cpt-cf-types-registry-fr-registration-authority` already requires of writes.
+Every registry evaluation, under either action set, names one resource type — `gts.cf.core.types_registry.entity.v1~` — and carries the identifier or pattern under discussion in the `gts_id` resource property, as `cpt-cf-types-registry-fr-registration-authority` already requires of writes.
 
 The metatype is load-bearing rather than a formality. A request naming `gts.acme.billing.invoice.v1~` as its resource type would be indistinguishable from the billing gear asking about an invoice object, so one grant would cover both the contract and the objects governed by it. Registry-specific verbs hid this: `register` and `delete` collide with nothing, while `read` and `list` are verbs every gear uses.
 
-A GTS Identifier Region therefore constrains that property rather than appearing as a wildcard in `resource_type`. It is the same notion registration policy and Source Claims use — one trailing wildcard on a token boundary, so any two Regions are nested or disjoint — applied here to a grant. Every declared permission carries the bare metatype, and the Region belongs to the grant binding an identity to one. Its form is a [GTS](https://github.com/GlobalTypeSystem/gts-spec/blob/main/README.md) §3.3 predicate over the property, `gts.cf.toolkit.types_registry.entity.v1~[gts_id="gts.acme.*"]`: §3.5 gives exactly that shape for access control, and §3.3 admits predicates in policy evaluation while keeping them out of stored identifiers. One property name serves all four actions; a second name for the pattern case would force one grant per action.
+A GTS Identifier Region therefore constrains that property rather than appearing as a wildcard in `resource_type`. It is the same notion registration policy and Source Claims use — one trailing wildcard on a token boundary, so any two Regions are nested or disjoint — applied here to a grant. Every declared permission carries the bare metatype, and the Region belongs to the grant binding an identity to one. Its form is a [GTS](https://github.com/GlobalTypeSystem/gts-spec/blob/main/README.md) §3.3 predicate over the property, `gts.cf.core.types_registry.entity.v1~[gts_id="gts.acme.*"]`: §3.5 gives exactly that shape for access control, and §3.3 admits predicates in policy evaluation while keeping them out of stored identifiers. One property name serves all four actions; a second name for the pattern case would force one grant per action.
 
 Two obligations on the PDP follow. Both belong to the §4 binding prerequisite, because [`PERMISSION_GTS_TYPE.md`](../../../../docs/arch/authorization/PERMISSION_GTS_TYPE.md) settles neither today:
 
@@ -616,7 +669,7 @@ A read decision is a bare boolean: `require_constraints` is `false`, and `capabi
 ownership_scope = GLOBAL OR owner_tenant_id IN ancestors_inclusive(subject_tenant)
 ```
 
-The block is schematic over logical values; `database.sql` encodes the scope as a smallint and forces `owner_tenant_id` NULL for a global row. The chain comes from the Tenant Hierarchy Client of §3.2 — cached, barrier traversal disabled, its version in the resolution validator — and the predicate rides `idx_tr_entity_visibility` on `(ownership_scope, owner_tenant_id, lifecycle_status, gts_id)`, whose chunking that file already describes as one global range plus one range per ancestor. Lifecycle is not part of visibility: a deleted entity still resolves, carrying deleted state.
+The block is schematic over logical values; `database.sql` encodes the scope as a smallint and forces `owner_tenant_id` NULL for a global row. The chain comes from the Tenant Hierarchy Client of §3.2 — cached, barrier traversal disabled, its version in the freshness validator — and the predicate rides `idx_tr_entity_visibility` on `(ownership_scope, owner_tenant_id, lifecycle_status, gts_id)`, whose chunking that file already describes as one global range plus one range per ancestor. Lifecycle is not part of visibility: a deleted entity still resolves, carrying deleted state.
 
 **The chain is the subject's, never the Context Tenant's**, which `cpt-cf-types-registry-fr-tenant-ownership` states as a requirement rather than leaving to design. The two coincide by default on this plane, so the difference surfaces only when a caller names a descendant — and there, using the Context Tenant would hand an ancestor that descendant's private contracts for the asking. A boolean decision cannot express a tenant restriction to compensate, which is exactly why the rule lives here rather than in policy. The Context Tenant's chain is fetched only when one is named and availability is selected, cached separately, and used for availability alone (ADR-0010).
 
@@ -651,7 +704,7 @@ Three absences are deliberate. `purge` has no permission because the grant-free 
 
 Under `cpt-cf-adr-two-plane-auth`, `PlatformSecurityContext` never reaches the tenant `PolicyEnforcer`; `cpt-cf-adr-platform-plane-auth` makes these handlers AuthZ-exempt. `InternalAuthMiddleware` authenticates the workload using an `X-ToolKit-Internal-Token` service-account token initially and mTLS SPIFFE identity later, producing `PlatformIdentity`.
 
-Consequently, any authenticated platform workload may author, revise, or delete any global entity. `owning_gear` is attribution, not authority. Per-gear narrowing belongs to external workload policy over `PlatformIdentity`; mutations remain audited. Purge additionally exists only where deployment policy enables it (ADR-0013).
+Consequently, any authenticated platform workload may author, revise, or delete any global entity. `publisher_name` is attribution, not authority. Per-publisher narrowing is registry-side workload policy over the validated `PlatformIdentity` — the allow-list from identity to permitted `publisher_name` values (*Publication ordering*) — never a PDP decision; mutations remain audited. Purge additionally exists only where deployment policy enables it (ADR-0013).
 
 ##### Registration policy
 
@@ -741,7 +794,7 @@ It sequences checks; it does not implement them. Compatibility verdicts come fro
 
 Selects the baseline from the identifier: the entity's current revision for a major-only candidate, or the `ACTIVE` or `DELETED` definition of `vM.(n-1)~` for a minor-bearing one. ADR-0004 contiguity makes the latter a keyed name, not a search, so concurrent admission cannot move it. It compares resolved effective schemas through the document-level compatibility entry point and rejects an indeterminate verdict.
 
-Each admitted revision records the specification version, implementation version, and whether `force` waived cross-minor compatibility. Per-level content-model classification is an input to the verdict. ADR-0003 defers reinterpretation if compatibility semantics later change; this component stores those versions but does not read them back.
+Each admitted revision records the specification version, implementation version, and whether `skip_compatibility_check` waived cross-minor compatibility. Per-level content-model classification is an input to the verdict. ADR-0003 defers reinterpretation if compatibility semantics later change; this component stores those versions but does not read them back, and reads do not publish them. Only the waiver is published, as `provenance.compatibility_check_skipped` on a managed Type Schema.
 
 ADR-0015 exempts candidates whose final segment has major 0: they get no baseline or verdict, although per-level classification is still computed for use when stable dependants are evaluated.
 
@@ -815,7 +868,7 @@ It computes and returns; it does not act. It never mutates an entity, filters ge
 
 Maintains every direct managed-to-managed dependency: `$ref`, Instance conformance, and immediate derivation base.
 
-**`x-gts-ref` is classified, not stored.** It constrains an Instance value without resolving an entity, so it creates no dependency and does not affect compatibility, quarantine, refresh, availability, or deletion. Managed admission classifies the candidate; Source Claim activation reclassifies current schemas. Both use an exact identifier or a pattern's longest valid identifier prefix only to enforce the managed–external boundary; `gts.*` and relative JSON pointers name no entity.
+**Entity references (`x-gts-type-ref` / `x-gts-instance-ref`) are classified, not stored.** Each constrains an Instance value without resolving an entity, so it creates no dependency and does not affect compatibility, quarantine, refresh, availability, or deletion. Managed admission classifies the candidate; Source Claim activation reclassifies current schemas. Both use an exact identifier or a pattern's longest valid identifier prefix only to enforce the managed–external boundary; `gts.*` and the `/$id` pointer name no entity.
 
 Both endpoints are always Managed Entities. Direct rows decide deletion safety. A recursive CTE finds the reverse impact set for a revision; a second edge read supplies the worker's topological ordering, which needs no condensation step because the relation is acyclic (ADR-0012). Dry Run exposes the resulting mutation verdict, so no separate graph API is provided.
 
@@ -869,7 +922,7 @@ Expansion returns concrete references, never a normalized predicate or an execut
 
 ##### Responsibility scope
 
-A closed, in-process validator set for platform-defined control-plane types. It enforces Source Claim pattern grammar and non-overlap, including against `x-gts-ref` authority identifiers reclassified from current Managed Type Schemas. It also rejects tenant-scoped control-plane types and instances and claims overlapping retired reservations.
+A closed, in-process validator set for platform-defined control-plane types. It enforces Source Claim pattern grammar and non-overlap, including against entity-reference (`x-gts-type-ref` / `x-gts-instance-ref`) authority identifiers reclassified from current Managed Type Schemas. It also rejects tenant-scoped control-plane types and instances and claims overlapping retired reservations.
 
 ##### Responsibility boundaries
 
@@ -888,7 +941,7 @@ A Registry Source Plugin registers as a well-known GTS Instance of a Types Regis
 
 The base schema provides the plugin `id`, `vendor`, lower-wins `priority`, and generic `properties`. The derived schema adds one thing: a set of Source Claims, each a GTS Identifier pattern. Nothing else is declared — the federation contract is total, so implementing the trait is the whole obligation and there is no profile to state or check, and entity kind is not declared either because the trailing `~` of each identifier already carries it (ADR-0007). `source_claim.priority` and `source_claim.plugin_entity_gts_id` project the base `priority` and `id`.
 
-Registration is ordinary platform-plane Instance admission under ADR-0012, including operation, idempotency, and audit; there is no separate plugin API. Outside the transaction, the Control-Plane Validator rejects malformed claims and overlap with active claims, retired reservations, managed identifier ranges, or `x-gts-ref` authority identifiers reclassified from current Managed Type Schemas.
+Registration is ordinary platform-plane Instance admission under ADR-0012, including operation, idempotency, and audit; there is no separate plugin API. Outside the transaction, the Control-Plane Validator rejects malformed claims and overlap with active claims, retired reservations, managed identifier ranges, or entity-reference authority identifiers reclassified from current Managed Type Schemas.
 
 The commit transaction atomically:
 
@@ -916,8 +969,8 @@ These policy-free adapters and maintenance job are defined together to avoid emp
 | Component | ID | Responsibility | Boundary |
 |---|---|---|---|
 | Registry Storage | `cpt-cf-types-registry-component-registry-storage` | SeaORM repositories over the authoritative database; owns backend-portable range predicates, UUID representation, set-membership chunking, and compare-and-swap | Contains no domain rules; never consulted as a cache |
-| Operation Store | `cpt-cf-types-registry-component-operation-store` | Public async operations with scoped key/fingerprint, per-ID preconditions, state, results, and diagnostics; atomically enqueues operation UUIDs through dedicated `toolkit-db` outbox tables. Times out stalled operations and sweeps retained, unpinned terminal ones | The operation is the request receipt. Outbox tables own leases, attempts, retries, and dead letters; registry tables own client-visible state. Payloads contain no candidate content. Sweeping touches neither admitted content nor identity and is not ADR-0013 purge |
-| Tenant Hierarchy Client | `cpt-cf-types-registry-component-tenant-hierarchy-client` | Ancestor chain of a tenant from `tenant-resolver` with barrier traversal disabled, cached with a version participating in the resolution validator | Does not interpret tenancy semantics; supplies the chain only |
+| Operation Store | `cpt-cf-types-registry-component-operation-store` | Public async operations with scoped key and request fingerprint, per-ID preconditions, state, results, and diagnostics; atomically enqueues operation UUIDs through dedicated `toolkit-db` outbox tables. Times out stalled operations and sweeps retained, unpinned terminal ones | The operation is the request receipt. Outbox tables own leases, attempts, retries, and dead letters; registry tables own client-visible state. Payloads contain no candidate content. Sweeping touches neither admitted content nor identity and is not ADR-0013 purge |
+| Tenant Hierarchy Client | `cpt-cf-types-registry-component-tenant-hierarchy-client` | Ancestor chain of a tenant from `tenant-resolver` with barrier traversal disabled, cached with a version participating in the freshness validator | Does not interpret tenancy semantics; supplies the chain only |
 | Plugin Client Adapter | `cpt-cf-types-registry-component-plugin-client-adapter` | Scoped ClientHub access to Registry Source Plugins, timeouts, concurrency limits, and per-source failure classification | Applies no platform policy to responses; conformance validation belongs to the federation router |
 | Purge Job | `cpt-cf-types-registry-component-purge-job` | Synchronous operator purge/dry run by GTS pattern. Follows the common writer order; removes Source Claims before referenced plugin revisions, Instances before Type Schemas, then empty families; advances the routing generation last; and returns a per-ID report. Operation history remains subject to ordinary retention | Never scheduled; disabled by default. Rechecks deletion and minor-suffix preconditions (ADR-0013). Creates no operation, candidate, or request-identity row: the sole mutation outside ADR-0012's async path |
 
@@ -973,7 +1026,7 @@ The third row is a decision, not a gap. A discovery page is a changing, paginate
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-tech-freshness-validator`
 
-Per `cpt-cf-types-registry-principle-derive-not-store`, validators are computed per request from entity, tenant, and projection. Managed inputs are locally digestible. ADR-0002 forbids storing external revisions, so an external validator carries the source token **verbatim and recoverably** for delegation back to the plugin.
+Per `cpt-cf-types-registry-principle-derive-not-store`, validators are computed per request from the inputs below. Managed inputs are locally digestible. ADR-0002 forbids storing external revisions, so an external validator carries the source token **verbatim and recoverably** for delegation back to the plugin.
 
 | | Managed | Externally managed |
 |---|---|---|
@@ -991,28 +1044,29 @@ The plugin token must be scoped to `(entity, tenant)` and change whenever any so
 
 ##### Projection as a validator input
 
-Projection prevents a narrow `$select` token from producing false `unchanged` for a wider representation, consistent with [RFC 9110 §8.8.3](https://www.rfc-editor.org/rfc/rfc9110#name-etag). The digest uses the normalized field set, not the query string: field order is irrelevant, and absent `$select` equals an explicit default set.
+Projection prevents a narrow `$select` token from producing false `unchanged` for a wider representation, consistent with [RFC 9110 §8.8.3](https://www.rfc-editor.org/rfc/rfc9110#name-etag). The digest uses the normalized field set, not the query string: field order is irrelevant, and absent `$select` equals an explicit default set. A Type Schema's fingerprint enters every projection, so a dependency refresh can also cost an extra transfer for `$select=content`.
 
 ##### Wire form
 
-A validator is base64url of a versioned JSON object, with identical bytes in `ETag` and batch bodies. JSON keeps variable-length external revisions inspectable and avoids custom binary framing; its roughly 2× overhead remains small relative to a snapshot.
+A validator is base64url of `version || digest` for a Managed Entity and `version || digest || external_revision` for an external one, with identical bytes in `ETag` and batch bodies. The version is one byte and the digest 128 bits over every input in the table above except `external_revision`, which follows it as the source's verbatim UTF-8 bytes. The registry owns the envelope and the digest; the plugin owns `external_revision`, which the registry never parses.
 
 | | Typical length |
 |---|---|
-| Managed, 128-bit digest | 48 characters |
-| Externally managed, ~32-character source revision | 152 characters |
-| Externally managed, source revision at its cap | 792 characters |
+| Managed | 23 characters |
+| Externally managed, 32-byte source revision | 66 characters |
+| Externally managed, source revision at its 256-byte cap | 364 characters |
 
-A 128-bit managed digest has a 2⁶⁴-state birthday bound; a collision can only produce false `unchanged`, not disclosure.
+A 128-bit digest has a 2⁶⁴-state birthday bound; a collision can only produce false `unchanged`, not disclosure.
 
 Wire rules:
 
-- Compare decoded fields, not serialization-sensitive encoded strings.
-- Unrecognized or superseded versions return a full result, never an error.
-- Tokens are unauthenticated because authorization, visibility, and availability all run first; plugins must still treat decoded source tokens as untrusted input.
+- The version identifies both the layout and the digest-input scheme, and is itself digested; adding a digest input advances it. It is decoded first, and an unknown-version token is never passed to a plugin.
+- An unknown version, an invalid length or UTF-8, or a digest mismatch makes the condition unusable: the read proceeds unconditionally.
+- An external token's recovered revision reaches the plugin only after the platform digest matches, as an untrusted conditional hint.
+- Tokens are unauthenticated because authorization, visibility, and availability are checked before any `304` or `unchanged` — for an external entity, against the returned `SourceMetadata`.
 - The plugin contract caps opaque `external_revision`, thereby bounding the validator.
 
-The schema is internal: callers only retain and compare opaque values. Its version lets old shapes fall back to a full result.
+Callers only retain and compare opaque values; the layout is not a contract.
 
 ##### `batchGet`
 
@@ -1024,33 +1078,69 @@ Its body field is `items`, the same name registration and `:batchDelete` use, so
 
 Optional `dry_run` defaults false and preserves the `202` operation shape. It runs full admission through the commit boundary, so it is not cheaper validation.
 
-`items` is non-empty and synchronously capped by `limits.batch_candidates` (default 100). Splitting removes the candidate overlay between batches, which costs a retry rather than correctness: dependencies converge through the reconciliation loop `cpt-cf-types-registry-fr-two-phase-init` already requires, and since the graph is acyclic (ADR-0012) no group of candidates has to travel together.
+`items` is non-empty and synchronously capped by `limits.batch_candidates` (default 100). Reconciliation forms batches using a `batch_size` within that limit. A permanent submission refusal stops reconciliation and returns its structured error report; `ResourceExhausted` with a quota retry hint is throttling, waited out and resent under the same key within the deadline. The canonical category and context decide, the same for local and remote clients, never the HTTP status. Each batch has its own admission overlay; candidates awaiting dependencies in other batches can retry on later reconciliation passes.
 
-Each item contains its GTS Identifier, authored GTS JSON and optional `expected_resource_version`: present requires that version; absent requires nonexistence. The identifier is authoritative; a Type Schema's `$id` must spell the same identity as `gts://<gts_id>` or acceptance refuses the request. Literal `0` is invalid because absence already expresses creation and versions never equal zero.
+Each item contains its GTS Identifier, authored GTS JSON and optional
+`expected_resource_version`: present requires that version; absent requires
+nonexistence. A creation colliding with an existing ID, including a
+tombstone, is accepted as an operation whose item fails `already_exists`.
+An update with an absent target or a mismatched version on an active target
+instead fails `precondition_failed`; a deleted target fails `entity_deleted`.
+The identifier is authoritative; a Type Schema's
+`$id` must spell the same identity as `gts://<gts_id>` or acceptance
+refuses the request. Literal `0` is invalid because absence already
+expresses creation and versions never equal zero.
 
-Registration has one operation model:
+Registration and deletion share one operation model; `kind` selects the item shape:
 
 ```text
-RegistrationOperation {
+Operation {
     operation_id: UUID,
+    kind: registration | deletion,
     status: pending | running | completed,   // progress; the outcome is in items
-    items: [RegistrationItemResult]
+    items: [RegistrationItemResult] | [DeletionItemResult]
 }
 
 RegistrationItemResult {
-    gts_id,
+    gts_id,                // the submitted identifier: registration names nothing else
     status: pending | running | succeeded | unchanged | failed,
-    gts_uuid?,
     resource_version?,
-    error?                 // structured canonical error, including precondition_failed
+    error?: ItemError      // including already_exists and precondition_failed
+}
+
+DeletionItemResult {
+    entity_key,            // the key in canonical form: a GTS Identifier, or a lowercase hyphenated gts_uuid
+    status: pending | running | succeeded | failed,
+    resource_version?,
+    error?: ItemError
+}
+
+ItemError {
+    reason,                // stable code, open set
+    message,               // for humans, not parsed
+    context                // reason-specific object, {} when none; unknown keys are ignored
 }
 ```
 
-Results preserve request order but remain keyed by `gts_id`. Real `succeeded` and `unchanged` results contain `gts_uuid` and `resource_version`.
+| `reason` | `context` keys |
+|---|---|
+| `dependency_not_found`, `dependency_deleted` | `dependency_id`, `dependency_kind` (`base`, `conforming_type`, `ref`; open set) |
+| `system_failure` | `diagnostic_code` (open set) |
+| `superseded` | `stored_version`, `offered_version` — a newer `publisher_version` already holds the entity, so nothing was written (§3.2, *Publication ordering*) |
+| `publisher_mismatch` | `stored_publisher`, `offered_publisher` — another `publisher_name` holds the entity, so nothing was written (§3.2, *Publication ordering*) |
+| other current reasons | `{}` (currently) |
 
-Dry-run `succeeded` omits `resource_version` because none was allocated; dry-run `unchanged` returns the existing version because the real operation would also write nothing. Both return identifier-derived `gts_uuid`. `ck_tr_operation_item_state` enforces the stored `result_revision_no` and `result_resource_version` states. Public results omit revision number; future writes precondition on `resource_version`.
+Results preserve request order. A registration result names its identifier; a deletion result echoes its key, a GTS Identifier or a `gts_uuid`, whether or not it named an entity. A `gts_uuid` accepted in any UUID spelling is echoed lowercase and hyphenated: the operation stores the classified key, and a replay under another spelling of it is the same operation. `:batchGet` echoes a `gts_uuid` the same way, so every `entity_key` a response carries follows one rule. Real `succeeded` and `unchanged` results also contain `resource_version`.
 
-Errors use canonical RFC-9457 vocabulary and stable reasons. Optimistic-lock failure is an async item result, not HTTP `412`; envelope, authorization, malformed precondition, batch limit, and idempotency failures are synchronous. Reusing a scoped key with another fingerprint returns `409`.
+Dry-run `succeeded` omits `resource_version` because none was allocated; dry-run `unchanged` returns the existing version because the real operation would also write nothing. `ck_tr_operation_item_state` enforces the stored `result_revision_no` and `result_resource_version` states. Public results omit revision number; future writes precondition on `resource_version`.
+
+Errors use canonical RFC-9457 vocabulary and stable reasons. Optimistic-lock failure is an async item result, not HTTP `412`; envelope, authorization, malformed precondition, batch limit, and idempotency failures are synchronous. Reusing a scoped key with another request fingerprint returns `409`.
+Resource-scoped errors name one of two GTS resource types:
+
+| `resource_type` | Names | `resource_name` |
+|---|---|---|
+| `gts.cf.core.types_registry.entity.v1~` | a registry entity — the same resource type the PDP evaluates | the requested GTS Identifier or Registry Reference |
+| `gts.cf.core.types_registry.operation.v1~` | an admission operation: `404` for an unknown operation, and the `409` for a key bound to another request | the operation UUID |
 
 `202` returns operation `Location` and advisory `Retry-After`. Same-key replay returns the immutable stored operation (`202` non-terminal, `200` terminal), independent of current content. Scope includes authorization scope, owning tenant, and principal, preventing cross-principal receipt reuse.
 
@@ -1081,9 +1171,9 @@ Plane-specific parameters are rejected on the other plane, never ignored. Regist
 
 ##### Naming a single entity in a batch
 
-Every batch item names its entity in one `key` field, exactly as `GET /entities/{entity_key}` names it in one path segment. `EntityKey` is an enum over a *single* value, so one field is its faithful wire form; two exclusive fields would encode one value twice and buy an envelope rule — both-or-neither — that has no reason to exist.
+Every batch item names its entity in one `entity_key` field, exactly as `GET /entities/{entity_key}` names it in one path segment. `EntityKey` is an enum over a *single* value, so one field is its faithful wire form; two exclusive fields would encode one value twice and buy an envelope rule — both-or-neither — that has no reason to exist.
 
-Classification is by shape and is total: a value that parses as a UUID is a Registry Reference, and anything else is an identifier. The two vocabularies cannot collide, because every GTS identifier segment carries dots and a version and no UUID does. A syntactically impossible identifier is therefore answered exactly as the single read answers it, on purpose — one classifier, one behaviour, and no way for the batch and the exact read to disagree about the same string.
+Classification is by shape and is total: a value that parses as a UUID is a Registry Reference, and anything else is an identifier. The two vocabularies cannot collide, because every GTS identifier segment carries dots and a version and no UUID does. A syntactically impossible identifier is therefore answered exactly as the single read answers it, on purpose — one classifier, one behaviour, and no way for the batch and the exact read to disagree about the same string. Reads and deletions share the classifier but not the answer: a read answers such an identifier `not_found`, while a deletion validates every target before it becomes an operation and refuses the whole request with `400`. A key over 1024 bytes is `400` on both, without echoing it.
 
 The batch arrays are all named `items`, matching the operation result, the discovery page, and the platform's `Page<T>`: the surfaces differ in what an item carries, never in what the array is called.
 
@@ -1100,33 +1190,33 @@ The batch arrays are all named `items`, matching the operation result, the disco
 
 | Parameter | Where | Meaning |
 |---|---|---|
-| `items[]` | body | Non-empty, at most 500 items. Each names one entity in `key` and may carry `if_none_match`, the validator from an earlier read of that key. The higher-than-write limit lets reconciliation read every potential write before selecting its ≤100 candidates |
+| `items[]` | body | Non-empty, at most 500 items. Each names one entity in `entity_key` and may carry `if_none_match`, the validator from an earlier read of that key. The higher-than-write limit lets reconciliation read every potential write before selecting its ≤100 candidates |
 | `$select` | body | As above, applied to every key in the batch |
 | `tenant_id` | body | The Context Tenant, as above |
 
 ```jsonc
 {
   "items": [
-    { "key": "gts.acme.core.events.user_created.v1~", "if_none_match": "…" },
-    { "key": "3f2a…" }                         // a UUID key; unconditional
+    { "entity_key": "gts.acme.core.events.user_created.v1~", "if_none_match": "…" },
+    { "entity_key": "3f2a…" }                         // a UUID key; unconditional
   ]
 }
 ```
 
-Each result echoes the `key` it was asked by and carries the next validator in the same position, so a caller copies it straight back into `if_none_match` on the following poll:
+Each result echoes the `entity_key` it was asked by — a `gts_uuid` lowercase and hyphenated, whatever UUID spelling was sent, and an identifier as sent — and carries the next validator in the same result, so a caller that matches results by key copies it straight back into `if_none_match` on the following poll:
 
 ```jsonc
 {
   "items": [
-    { "key": "…", "status": "unchanged", "etag": "…" },   // validator, no snapshot
-    { "key": "3f2a…", "status": "found",
+    { "entity_key": "…", "status": "unchanged", "etag": "…" },   // validator, no snapshot
+    { "entity_key": "3f2a…", "status": "found",
       "etag": "…", "entity": { /* the selected fields */ } },
-    { "key": "…", "status": "not_found" }
+    { "entity_key": "…", "status": "not_found" }
   ]
 }
 ```
 
-The `If-None-Match` **header** is unavailable here, and refused rather than ignored, because validators and `unchanged` results are per key and one header cannot carry them. A key with no `if_none_match` is read unconditionally, which is how a caller mixes cached and uncached keys in one round trip. An `unchanged` result **does** carry its `etag`, matching [RFC 9110 §15.4.5](https://www.rfc-editor.org/rfc/rfc9110#name-304-not-modified), which has a `304` send the validator a `200` would have sent. Every result but `not_found` therefore has one, so a caller's refresh loop reads the same field in every branch instead of remembering which token it sent for which key.
+The `If-None-Match` **header** is unavailable here, and refused rather than ignored, because validators and `unchanged` results are per key and one header cannot carry them. A key with no `if_none_match` is read unconditionally, which is how a caller mixes cached and uncached keys in one round trip. A present `if_none_match` is exactly one entity-tag — the `etag` of an earlier read, weak or strong — and `*`, an unquoted value or a list is refused with `400`; the exact read's `If-None-Match` header is `*` or a list of entity-tags, and a header that is neither, holds a non-ASCII byte, or mixes `*` with tags is refused with `400` on that header. Neither surface reads an unusable condition as no condition, because a caller that sent one believes the read is conditional. An `unchanged` result **does** carry its `etag`, matching [RFC 9110 §15.4.5](https://www.rfc-editor.org/rfc/rfc9110#name-304-not-modified), which has a `304` send the validator a `200` would have sent. Every result but `not_found` therefore has one, so a caller's refresh loop reads the same field in every branch instead of remembering which token it sent for which key.
 
 ##### `GET /entities`
 
@@ -1148,15 +1238,16 @@ The cursor binds query, subject visibility context, Context Tenant, authorizatio
 The `fr-type-query-assistance` filter forms map as follows:
 
 - **Derivation hierarchy:** normalize the supplied base to explicit `~*`, then apply `pattern` plus `max_chain_depth`. This is platform normalization, not generic GTS matching; a bare identifier remains literal elsewhere. Bases need no query because `chain_ids()` reconstructs them from the identifier.
-- **Version membership:** the same parameters collect every major/minor member, not only compatible or upward versions. Upgrade safety requires reading `provenance` for `compat_forced` across intervening minors; major-0 establishes no compatibility, and ADR-0004 forbids interpreting external version order.
+- **Version membership:** the same parameters collect every major/minor member, not only compatible or upward versions. Upgrade safety requires reading `provenance.compatibility_check_skipped` across intervening managed minors; major-0 establishes no compatibility, and ADR-0004 forbids interpreting external version order.
 - **Exact identifiers:** use non-paginated `:batchGet`, since repeatable query parameters cannot safely carry up to 1024-character identifiers. Combine pattern and exact results client-side when needed.
 
 ##### `POST /entities`
 
 | Parameter | Where | Meaning |
 |---|---|---|
-| `items[]` | body | Each the authored GTS JSON plus an optional `expected_resource_version` — present, the entity must still be at that version; absent, it must not exist, and `0` is rejected — and an optional `force` waiving the cross-minor compatibility check for that candidate alone (ADR-0004), rejected where the deployment has not enabled the waiver (§3.8) or where the candidate has no such check to waive. Non-empty, at most 100 |
+| `items[]` | body | Each the authored GTS JSON plus an optional `expected_resource_version` — present, the entity must still be at that version; absent, it must not exist, and `0` is rejected — and an optional `skip_compatibility_check` waiving the cross-minor compatibility check for that candidate alone (ADR-0004), rejected where the deployment has not enabled the waiver (§3.8) or where the candidate has no such check to waive. Non-empty, at most 100 |
 | `dry_run` | body | Runs the whole check sequence and commits nothing. Defaults to false |
+| `publisher` | body | Required on the platform plane: `{ "name", "version" }` — the actual registrant and its own SemVer version, applying to every item. It orders publications per entity (§3.2, *Publication ordering*). Refused on the tenant plane |
 
 On the tenant plane the owner is derived from the `SecurityContext` and is never a body field; on the platform plane every candidate is global, because there is no tenant context to derive an owner from.
 
@@ -1164,19 +1255,20 @@ On the tenant plane the owner is derived from the `SecurityContext` and is never
 
 | Parameter | Where | Meaning |
 |---|---|---|
-| `items[]` | body | Each names one entity in `key` and carries a required positive `expected_resource_version`; deletion only targets an entity the caller read, so `must_not_exist` has no meaningful delete case |
+| `items[]` | body | Each names one entity in `entity_key` and carries a required positive `expected_resource_version`; deletion only targets an entity the caller read, so `must_not_exist` has no meaningful delete case |
 | `dry_run` | body | As above. Defaults to false |
+| `publisher` | body | As on `POST /entities`; the version must be no lower than the stamp |
 
 ```jsonc
 {
   "items": [
-    { "key": "gts.acme.core.events.user_created.v1~", "expected_resource_version": 7 },
-    { "key": "3f2a…", "expected_resource_version": 2 }
+    { "entity_key": "gts.acme.core.events.user_created.v1~", "expected_resource_version": 7 },
+    { "entity_key": "3f2a…", "expected_resource_version": 2 }
   ]
 }
 ```
 
-The operation this returns keys its items by `gts_id`, as every operation does, so a caller that deleted by UUID matches results to requests by position — which is why request order is preserved and said to be.
+The operation this returns echoes each target's key as `entity_key`, in request order, a `gts_uuid` in canonical lowercase hyphenated form. Acceptance reads no entity state, so a UUID is resolved by the worker under its write claim: a key naming no entity is still accepted, and only its item fails `precondition_failed`. A caller that deleted by UUID reads the tombstone by the same key when it needs the identifier. The request fingerprint covers each target's `gts_uuid`, which an identifier determines, so both spellings of one entity are one duplicate and one replay whether or not it exists; the duplicate refusal names the two item positions, since the two keys need not share a string.
 
 The precondition is in the body and not in `If-Match` for the reason the name gives: one header cannot express several preconditions, and a batch has one per item. `:batchDelete` rather than `:delete` because the name should say what a reader will find in the body — an array — and because it then reads as the sibling of `:batchGet` that it is.
 
@@ -1186,12 +1278,14 @@ The single-entity spelling: one item's worth of `:batchDelete`, with the item sp
 
 | Parameter | Where | Meaning |
 |---|---|---|
-| `entity_key` | path | A GTS Identifier or a `gts_uuid`, resolved exactly as `GET /entities/{entity_key}` resolves it. The two-field mutual exclusion does not arise: a path segment is one value |
+| `entity_key` | path | A GTS Identifier or a `gts_uuid`, spelled exactly as `GET /entities/{entity_key}` takes it and resolved by the worker. The two-field mutual exclusion does not arise: a path segment is one value |
 | `expected_resource_version` | query | Required and positive, the same field the batch item carries and with the same meaning |
 | `dry_run` | query | As above. Defaults to false |
 | `Idempotency-Key` | request header | Required, exactly as on the batch routes |
 
-**The precondition is not `If-Match`,** even though one entity would fit in one header. `If-None-Match` on the read of this same resource already carries a *validator* — projection-scoped, and including `resolution_fingerprint`, which optimistic concurrency deliberately excludes. Putting a `resource_version` in `If-Match` would give one resource two unrelated token vocabularies in two conditional headers, and a caller that reasonably fed the `ETag` back into `If-Match` would be refused for a reason the shape does not explain. So `If-Match` is not merely unused here: it is **refused** if sent, rather than ignored, because a caller that sent one believes the request is conditional in the RFC 9110 §13.1.1 sense — and it is not, per the next paragraph. `expected_resource_version` is the same name the batch body uses, taken from the entity body rather than from any response header.
+This spelling carries no `publisher`, so it is a tenant-plane route only; on the platform plane a deletion goes through `:batchDelete`.
+
+**The precondition is not `If-Match`,** even though one entity would fit in one header. `If-None-Match` on the read of this same resource already carries a *validator* — projection-scoped, and including `resolution_fingerprint`, which the caller's write precondition deliberately excludes (the worker's drift check includes it). Putting a `resource_version` in `If-Match` would give one resource two unrelated token vocabularies in two conditional headers, and a caller that reasonably fed the `ETag` back into `If-Match` would be refused for a reason the shape does not explain. So `If-Match` is not merely unused here: it is **refused** if sent on either deletion route, rather than ignored, because a caller that sent one believes the request is conditional in the RFC 9110 §13.1.1 sense — and it is not, per the next paragraph. `expected_resource_version` is the same name the batch body uses, taken from the entity body rather than from any response header.
 
 **A precondition failure stays asynchronous.** The split is by mistake class, not by route:
 
@@ -1199,6 +1293,7 @@ The single-entity spelling: one item's worth of `:batchDelete`, with the item sp
 |---|---|
 | `expected_resource_version` absent, non-numeric, or `0` | synchronous `400` — a malformed precondition is an envelope error, and `0` expresses creation, which has no delete meaning |
 | The version does not match at admission | `202`, then the operation item reports `precondition_failed` |
+| The key names no entity, including a `gts_uuid` nothing resolves | `202`, then the operation item reports `precondition_failed` |
 
 Answering `412` would mean checking the version twice — once synchronously and again at admission, where it is the only check that can be authoritative — and would give one logical failure two shapes depending on which of the two deletion routes the caller used.
 
@@ -1208,7 +1303,7 @@ No parameters. The operation is returned with every per-candidate result known s
 
 #### Operator purge job contract
 
-Purge is a platform maintenance-job entry point outside both OpenAPI documents and outside `PlatformTypesRegistryClient`. The deployment's operator/job mechanism authenticates a `PlatformSecurityContext` and invokes the Purge Job component directly; ordinary gears cannot link or call this contract.
+Purge is a platform maintenance-job entry point outside both OpenAPI documents and outside `PlatformTypesRegistryApi`. The deployment's operator/job mechanism authenticates a `PlatformSecurityContext` and invokes the Purge Job component directly; ordinary gears cannot link or call this contract.
 
 The input is a GTS `pattern` and `dry_run`, which defaults to **true**. Selecting a Type Schema necessarily selects every conforming Instance because the Instance identifier begins with its schema's, allowing the job to remove Instances first. The synchronous report gives matched, eligible, and skipped counts satisfying `matched = eligible + skipped` and, for each identifier, `gts_id`, `gts_uuid`, owner on Dry Run, and either `released` or a skip reason: not `DELETED`, registered dependent, or higher minor still admitted. ADR-0013 permits releasing only a suffix of a major's minors; exact middle purges name the blocking higher minors.
 
@@ -1219,9 +1314,9 @@ The job performs local database work only: no hook, resolution, plugin call, ope
 The SDK is the transport-agnostic contract crate. It exposes plain Rust models and canonical errors, contains no Axum, HTTP status, or REST DTO types, and keeps the security context as the first argument. Tenant and platform authority remain distinct at the type level:
 
 ```rust
-#[async_trait]
-pub trait TypesRegistryClient: Send + Sync {
-    /// The one required read. Single and kind-narrowed reads are provided
+#[toolkit::contract(gear = "types-registry", version = "v1")]
+pub trait TypesRegistryApi: Send + Sync {
+    /// The one required read. Single and kind-narrowed reads are extension
     /// methods over it, so the trait stays object-safe for `ClientHub`.
     /// `tenant_id` is the Context Tenant the availability verdict is
     /// evaluated for; `None` means the subject's own tenant. Naming a
@@ -1230,77 +1325,54 @@ pub trait TypesRegistryClient: Send + Sync {
         &self,
         ctx: &SecurityContext,
         tenant_id: Option<TenantId>,
-        request: BatchGet,
-    ) -> Result<EntityLookups, CanonicalError>;
+        request: BatchGetEntitiesRequest,
+    ) -> Result<BatchGetEntitiesResponse, CanonicalError>;
 
     async fn list_entities(
         &self,
         ctx: &SecurityContext,
         tenant_id: Option<TenantId>,
-        query: EntityQuery,
-    ) -> Result<EntityPage, CanonicalError>;
-
-    /// Provided, not required: pages `list_entities` under `$select=gts_uuid`,
-    /// `lifecycle_status=active` and `availability=available`, which `ExpansionFilter` fixes rather than
-    /// accepting from the caller, until the continuation is absent. More than 1000
-    /// distinct references fails with `QUERY_EXPANSION_LIMIT_EXCEEDED`; that or
-    /// any page failure exposes no partial set. The result is complete with
-    /// respect to the traversal, not to an instant.
-    async fn expand_type_filter(
-        &self,
-        ctx: &SecurityContext,
-        tenant_id: Option<TenantId>,
-        filter: ExpansionFilter,
-    ) -> Result<ConcreteReferenceSet, CanonicalError> { /* … */ }
+        request: ListEntitiesRequest,
+    ) -> Result<ListEntitiesResponse, CanonicalError>;
 
     async fn register_entities(
         &self,
         ctx: &SecurityContext,
         key: IdempotencyKey,
-        request: RegisterEntities,
+        request: RegisterEntitiesRequest,
     ) -> Result<RegistrationOperation, CanonicalError>;
 
     async fn delete_entities(
         &self,
         ctx: &SecurityContext,
         key: IdempotencyKey,
-        request: DeleteEntities,
-    ) -> Result<RegistrationOperation, CanonicalError>;
-
-    /// Provided, not required: a one-item `delete_entities`, mirroring
-    /// `DELETE /entities/{entity_key}`. One deletion model, two spellings.
-    async fn delete_entity(
-        &self,
-        ctx: &SecurityContext,
-        key: IdempotencyKey,
-        entity: DeleteItem,
-        dry_run: bool,
-    ) -> Result<RegistrationOperation, CanonicalError> { /* … */ }
+        request: DeleteEntitiesRequest,
+    ) -> Result<DeletionOperation, CanonicalError>;
 
     async fn get_operation(
         &self,
         ctx: &SecurityContext,
         operation_id: Uuid,
-    ) -> Result<RegistrationOperation, CanonicalError>;
+    ) -> Result<Operation, CanonicalError>;
 }
 
-#[async_trait]
-pub trait PlatformTypesRegistryClient: Send + Sync {
+#[toolkit::contract(gear = "types-registry", version = "v1")]
+pub trait PlatformTypesRegistryApi: Send + Sync {
     // Reads span every tenant. `tenant_id` names the Context Tenant an
     // availability verdict is evaluated for; there is no default here.
     async fn batch_get_entities(
         &self,
         ctx: &PlatformSecurityContext,
         tenant_id: Option<TenantId>,
-        request: BatchGet,
-    ) -> Result<EntityLookups, CanonicalError>;
+        request: BatchGetEntitiesRequest,
+    ) -> Result<BatchGetEntitiesResponse, CanonicalError>;
 
     async fn list_entities(
         &self,
         ctx: &PlatformSecurityContext,
         tenant_id: Option<TenantId>,
-        query: EntityQuery,
-    ) -> Result<EntityPage, CanonicalError>;
+        request: ListEntitiesRequest,
+    ) -> Result<ListEntitiesResponse, CanonicalError>;
 
     // Creates global entities only — a consequence of the plane, not a
     // separate rule, so the name does not repeat it.
@@ -1308,31 +1380,50 @@ pub trait PlatformTypesRegistryClient: Send + Sync {
         &self,
         ctx: &PlatformSecurityContext,
         key: IdempotencyKey,
-        request: RegisterEntities,
+        request: RegisterEntitiesRequest,
     ) -> Result<RegistrationOperation, CanonicalError>;
 
     async fn delete_entities(
         &self,
         ctx: &PlatformSecurityContext,
         key: IdempotencyKey,
-        request: DeleteEntities,
-    ) -> Result<RegistrationOperation, CanonicalError>;
-
-    /// Provided, as on the tenant trait.
-    async fn delete_entity(
-        &self,
-        ctx: &PlatformSecurityContext,
-        key: IdempotencyKey,
-        entity: DeleteItem,
-        dry_run: bool,
-    ) -> Result<RegistrationOperation, CanonicalError> { /* … */ }
+        request: DeleteEntitiesRequest,
+    ) -> Result<DeletionOperation, CanonicalError>;
 
     async fn get_operation(
         &self,
         ctx: &PlatformSecurityContext,
         operation_id: Uuid,
-    ) -> Result<RegistrationOperation, CanonicalError>;
+    ) -> Result<Operation, CanonicalError>;
 }
+
+/// Blanket-implemented for every `T: TypesRegistryApi + ?Sized`, `dyn` included.
+/// Not part of the contract, so not part of its IR: a default body on the
+/// contract trait would make the method optional.
+#[async_trait]
+pub trait TypesRegistryApiExt: TypesRegistryApi {
+    /// Pages `list_entities` under `$select=gts_uuid`, `lifecycle_status=active`
+    /// and `availability=available`, which `ExpansionFilter` fixes rather than
+    /// accepting from the caller, until the continuation is absent. More than 1000
+    /// distinct references fails with `QUERY_EXPANSION_LIMIT_EXCEEDED`; that or
+    /// any page failure exposes no partial set. The result is complete with
+    /// respect to the traversal, not to an instant.
+    async fn expand_type_filter(&self, ctx: &SecurityContext, tenant_id: Option<TenantId>,
+        filter: ExpansionFilter) -> Result<ConcreteReferenceSet, CanonicalError>;
+
+    /// A one-item `delete_entities`, mirroring `DELETE /entities/{entity_key}`.
+    /// One deletion model, two spellings.
+    async fn delete_entity(&self, ctx: &SecurityContext, key: IdempotencyKey,
+        entity: DeleteItem, dry_run: bool) -> Result<DeletionOperation, CanonicalError>;
+
+    // get_type_schema, get_instance and the other single and kind-narrowed reads.
+}
+
+/// The platform counterpart, blanket-implemented the same way; it adds
+/// `reconcile_entities_and_await`, the method form of the reconciliation helper
+/// that `publish_gts` runs.
+#[async_trait]
+pub trait PlatformTypesRegistryApiExt: PlatformTypesRegistryApi { /* … */ }
 ```
 
 ##### Models
@@ -1342,7 +1433,7 @@ pub trait PlatformTypesRegistryClient: Send + Sync {
 
 pub enum EntityKey { GtsId(GtsId), GtsUuid(Uuid) }
 
-pub struct BatchGet {
+pub struct BatchGetEntitiesRequest {
     pub items: Vec<BatchGetItem>,
     pub projection: Projection,
     /// SDK-only: bypasses the cache window and revalidates every key.
@@ -1351,7 +1442,7 @@ pub struct BatchGet {
 
 pub struct BatchGetItem {
     /// One value, one field — `EntityKey` is an enum, and the wire spells it
-    /// as the single string `key`, classified exactly as the path segment is.
+    /// as the single string `entity_key`, classified exactly as the path segment is.
     pub key: EntityKey,
     /// A validator makes the read conditional for that key alone; `None`
     /// reads it unconditionally.
@@ -1366,7 +1457,7 @@ pub enum Projection {
 
 // ---- results ------------------------------------------------------------
 
-pub struct EntityLookups(pub HashMap<EntityKey, EntityLookup>);
+pub struct BatchGetEntitiesResponse(pub HashMap<EntityKey, EntityLookup>);
 
 pub enum EntityLookup {
     /// `etag` is metadata outside `$select`, but is scoped to the normalized
@@ -1416,8 +1507,9 @@ pub struct EntitySnapshot {
     pub effective_traits: Option<JsonDocument>,
     pub effective_traits_schema: Option<JsonDocument>,
 
-    /// The one surviving group: three small fields that always travel together
-    /// and have one consumer.
+    /// Admission metadata of the current revision, selected as one group. It
+    /// has fields only for a managed Type Schema; absent for an Instance and for
+    /// an external entity even when selected, never an empty group.
     pub provenance: Option<Provenance>,
 }
 
@@ -1438,26 +1530,15 @@ pub enum AvailabilityState { Available, Unavailable }
 /// Opaque. Equality is the only operation; it carries no order.
 pub struct Validator(Vec<u8>);
 
-// ---- selectable groups --------------------------------------------------
-
-/// Type Schemas only, and grouped **here alone**: the plugin contract below
-/// selects by what a source must produce, and a source derives the three as
-/// one unit, whereas `EntitySnapshot` selects by what crosses the wire. The
-/// two boundaries have different costs, so they granulate differently.
-pub struct EffectiveArtifacts {
-    pub resolved_schema: JsonDocument,
-    pub effective_traits: JsonDocument,
-    pub effective_traits_schema: JsonDocument,
-}
-
-/// Managed-only admission provenance: how the current revision was admitted.
-/// `compat_forced`: false when no waiver applied, true when it did, and None
-/// only for Instances. Safe multi-minor upgrades inspect every crossed minor.
-/// The internal `owning_gear` attribution is not a member (see `owning_gear`).
+/// How the current revision was admitted. Distinct from `origin`, which says
+/// whether the entity is managed or external.
 pub struct Provenance {
-    pub gts_spec_version: String,
-    pub gts_impl_version: String,
-    pub compat_forced: Option<bool>,
+    /// `true`: an applicable cross-minor compatibility check was deliberately
+    /// waived with ADR-0004 `skip_compatibility_check`. `false`: no such waiver —
+    /// not a claim that a check ran (a first minor or a major-0 version has none
+    /// to run). Derivation and every other admission check apply either way. Safe
+    /// multi-minor upgrades inspect every crossed minor.
+    pub compatibility_check_skipped: bool,
 }
 
 // ---- discovery ----------------------------------------------------------
@@ -1465,7 +1546,7 @@ pub struct Provenance {
 /// Shared discovery filter; pattern plus depth expresses hierarchy and family.
 pub struct EntityFilter {
     pub pattern: Option<GtsIdPattern>,
-    pub max_chain_depth: Option<u8>,
+    pub max_chain_depth: Option<NonZeroU8>,
     pub kind: Option<EntityKind>,
     pub lifecycle: LifecycleFilter,
     pub origin: Option<OriginFilter>,        // Managed | External
@@ -1482,29 +1563,42 @@ pub enum LifecycleFilter { #[default] Active, Deleted, All }
 /// Available, and is tenant-only; therefore it exposes no lifecycle, availability or scope.
 pub struct ExpansionFilter {
     pub pattern: GtsIdPattern,
-    pub max_chain_depth: Option<u8>,
+    pub max_chain_depth: Option<NonZeroU8>,
     pub kind: Option<EntityKind>,
     pub origin: Option<OriginFilter>,
 }
 
-pub struct EntityQuery {
+pub struct ListEntitiesRequest {
     pub filter: EntityFilter,
     pub projection: Projection,
     pub page: PageRequest,
 }
 
-pub struct EntityPage { pub items: Vec<EntitySnapshot>, pub next: Option<Cursor> }
+pub struct ListEntitiesResponse { pub items: Vec<EntitySnapshot>, pub next: Option<Cursor> }
 
 /// Deduplicated, unordered, complete, ≤1000; never truncated or cached.
 pub struct ConcreteReferenceSet { pub references: Vec<Uuid> }
 
 // ---- write path ---------------------------------------------------------
 
-pub struct RegisterEntities { pub items: Vec<RegisterItem>, pub dry_run: bool }
+/// The actual registrant and its own version — never the crate that declares
+/// the Rust struct, never the SDK's version. Captured at the call site or by the
+/// gear attribute; a shared helper only forwards it. No override.
+pub struct PublisherContext { pub name: String, pub version: PublisherVersion /* SemVer */ }
 
-pub struct DeleteEntities {
+/// `publisher` is request-level: one publisher and one version per request,
+/// required on the platform plane (see *Publication ordering*). The tenant-plane
+/// trait has its own request types without it.
+pub struct RegisterEntitiesRequest {
+    pub items: Vec<RegisterItem>,
+    pub dry_run: bool,
+    pub publisher: PublisherContext,
+}
+
+pub struct DeleteEntitiesRequest {
     pub items: Vec<DeleteItem>,
     pub dry_run: bool,
+    pub publisher: PublisherContext,
 }
 
 /// `EntityKey` rather than `GtsId`: deletion names an entity the same way a
@@ -1524,9 +1618,19 @@ pub struct RegisterItem {
     pub expected_resource_version: Option<u64>,
     /// Per-item ADR-0004 cross-minor waiver only. Requires deployment enablement
     /// and an applicable stable successor; participates in request fingerprint.
-    pub force: bool,
+    pub skip_compatibility_check: bool,
 }
 
+pub enum Operation {
+    Registration(RegistrationOperation),
+    Deletion(DeletionOperation),
+}
+
+/// `register_entities` / `delete_entities` return the operation **as read**:
+/// an adapter submits, then calls `get_operation`. The `202`/`200` receipt has
+/// no items, and a terminal replay has a terminal status with none, so an
+/// operation built from a receipt would report vacuous success. A failed read
+/// after an accepted submit carries the `operation_id`; a same-key retry replays.
 pub struct RegistrationOperation {
     pub operation_id: Uuid,
     pub status: OperationStatus,
@@ -1536,7 +1640,20 @@ pub struct RegistrationOperation {
 pub struct RegistrationItemResult {
     pub gts_id: GtsId,
     pub status: CandidateStatus,
-    pub gts_uuid: Option<Uuid>,
+    pub resource_version: Option<u64>,
+    pub error: Option<CanonicalError>,
+}
+
+pub struct DeletionOperation {
+    pub operation_id: Uuid,
+    pub status: OperationStatus,
+    pub items: Vec<DeletionItemResult>,
+}
+
+pub struct DeletionItemResult {
+    /// The target's key; a Registry Reference in canonical form.
+    pub entity_key: EntityKey,
+    pub status: CandidateStatus,
     pub resource_version: Option<u64>,
     pub error: Option<CanonicalError>,
 }
@@ -1548,13 +1665,13 @@ pub struct RegistrationItemResult {
 
 Platform reads cross tenant visibility for diagnostics; the PDP is not substituted. Both planes use `EntitySnapshot`: `owned_by_context_tenant` exists only with a Context Tenant, while owning tenant is absent from SDK snapshots and appears only in the separate operator purge report defined by ADR-0013. Platform availability is present only when `tenant_id` is supplied; tenant calls default it to the subject tenant.
 
-`cpt-cf-types-registry-fr-registration-authority` and `cpt-cf-adr-platform-plane-auth` separate planes by listener and context type, not path prefix. The same `PlatformTypesRegistryClient` signature supports embedded or remote use without exposing credentials. Callers are authenticated workloads; humans act through jobs.
+`cpt-cf-types-registry-fr-registration-authority` and `cpt-cf-adr-platform-plane-auth` separate planes by listener and context type, not path prefix. The same `PlatformTypesRegistryApi` signature supports embedded or remote use without exposing credentials. Callers are authenticated workloads; humans act through jobs.
 
 ##### Read results
 
 - [ ] `p1` - **ID**: `cpt-cf-types-registry-tech-read-result`
 
-A mixed batch accepts canonical GTS Identifiers and `gts_uuid` references as one `EntityKey`, implementing both directions of `cpt-cf-types-registry-fr-id-resolution`. Each key maps to `found`, `unchanged`, `not_found`, or per-key `failed`; ADR-0002 forbids mapping source failure to absence. Duplicate keys collapse and order is not contractual.
+A mixed batch accepts canonical GTS Identifiers and `gts_uuid` references as one `EntityKey`, implementing both directions of `cpt-cf-types-registry-fr-id-resolution`. Each key maps to `found`, `unchanged`, `not_found`, or per-key `failed`; ADR-0002 forbids mapping source failure to absence. Duplicate keys collapse — every UUID spelling of one `gts_uuid` is one key, echoed in canonical form — and order is not contractual, so a caller matches results by key after normalizing its own UUID keys.
 
 That gives three read operations with three different completeness contracts:
 
@@ -1578,7 +1695,7 @@ Authorization runs first, then visibility, so a denial is uniform and out-of-sco
 
 `$select` returns the named fields plus the mandatory `gts_id`, `gts_uuid`, `kind` and `lifecycle_status`. Its document-free default is `gts_id`, `gts_uuid`, `kind`, `origin`, `lifecycle_status`, `availability` and reason, ownership view, plus managed `resource_version` and timestamps. Callers may narrow further, for example to `availability` plus the mandatory fields.
 
-**Selectable documents are flat, with one group left**, cut by transfer cost rather than by consumer:
+**Selectable documents are flat, with one group**, cut by transfer cost rather than by consumer:
 
 | Selectable | Kind | Asked for by |
 |---|---|---|
@@ -1586,21 +1703,21 @@ Authorization runs first, then visibility, so a denial is uniform and out-of-sco
 | `resolved_schema` | Type Schemas | validating data against the type |
 | `effective_traits` | Type Schemas | reading trait values without the schema they came from |
 | `effective_traits_schema` | Type Schemas | validating those trait values |
-| `provenance` — a group, managed only | either; `compat_forced` Type Schemas only | diagnostics, a catalogue view, a caller deciding whether a minor step was checked |
+| `provenance` — a group, managed only | managed Type Schemas | a caller deciding whether a minor step skipped its compatibility check |
 
 `resolved_schema` is bounded at 1 MB (§3.6) while the two trait documents are small, so an `effective` group would make every caller that wants traits pay for the schema — across a 500-key `batchGet` that is the difference between kilobytes and hundreds of megabytes. The group also bought nothing that flatness does not: per-field selection inside it was already spelled `$select=effective/resolved_schema`, so all the group contributed was a path segment.
 
 `content` is not a group and never was: a schema and an Instance value are both exactly one document, and a two-variant wrapper would only restate `kind`, which the trailing `~` already gives for free.
 
-`provenance` stays grouped because its fields are small, always travel together, and serve one consumer — the case that justifies a group, and the only one here that does. Names are kind-independent for mixed batches; the three Type Schema documents are absent for an Instance.
+`provenance` is the admission metadata of the current revision, selected only whole: `$select=provenance`, never a member or a path inside it. It is a group because its members describe one thing — how the revision was admitted — apart from `origin`, which says where the entity comes from. Its one member, `compatibility_check_skipped`, is `true` only when an applicable cross-minor compatibility check was deliberately waived with ADR-0004 `skip_compatibility_check`. `false` says no such waiver happened; it does not say a check ran, since a first minor or a major-0 version has none, and derivation and every other admission check apply either way. A selected `false` is present inside the group, never omitted. The read carries the stored `type_schema_revision.compat_forced`, nothing recomputed. The GTS specification and implementation versions recorded on every revision stay internal audit, not read fields. A group with no applicable member is absent rather than empty or `null`: an Instance has none, and an external Type Schema was not admitted here, so no waiver of this registry's check can apply to it. Names are kind-independent for mixed batches; the three Type Schema documents and `provenance` are absent for an Instance, selected or not.
 
 The freshness validator is mandatory read metadata, outside `$select`: single-read `ETag` or batch result envelope.
 
-Callers needing platform guarantees should select `origin` with the effective documents; unlike the mandatory `kind`, origin is not returned unless selected and is not derivable from the identifier. The server does not enforce the pairing.
+Callers selecting effective documents should also select `origin` to see whether platform guarantees apply; the server does not enforce that pairing.
 
 No authored-content digest is selectable: reconciliation selects `content` and compares canonical bytes. Caller/registry `gts-rust` skew may cause a benign false mismatch; submission then terminates `unchanged`.
 
-SDK selection uses field constants and a value projection with `light()`, `with(&[…])`, and `full()`. A type parameter would break object-safe `hub.get::<dyn TypesRegistryClient>()`.
+SDK selection uses field constants and a value projection with `light()`, `with(&[…])`, and `full()`. A type parameter would break object-safe `hub.get::<dyn TypesRegistryApi>()`.
 
 Projection changes naturally cause validator mismatch and a full result. Inapplicable fields are absent; `kind` disambiguates them.
 
@@ -1614,9 +1731,9 @@ Availability is also a read and is in the default set. Tenant-plane `tenant_id` 
 
 Visibility always uses the subject; availability uses the Context Tenant. Mixing them would let an ancestor disclose a descendant's private contracts by naming it.
 
-##### Provided methods
+##### Extension methods
 
-`batch_get_entities` is the only required exact-read primitive; single reads and the kind-narrowed `get_type_schema` / `get_instance` are provided methods over it, which keeps the trait object-safe for `hub.get::<dyn TypesRegistryClient>()`. `delete_entity` stands in the same relation to `delete_entities`, for the same reason and with the same consequence: one implementation to get right per plane.
+Single and kind-narrowed reads compose `batch_get_entities`; `delete_entity` composes `delete_entities`. Helpers live on `…Ext` traits because contract default bodies denote optional methods. The API stays object-safe for `hub.get::<dyn TypesRegistryApi>()`, with one primitive implementation per plane.
 
 Kind narrowing costs no round trip: the kind is the trailing `~` of the identifier, so `get_type_schema` given an Instance identifier fails locally. Callers compare only canonical authored content when deciding whether a definition needs registration; dependency-derived effective content is not part of content equality.
 
@@ -1632,7 +1749,7 @@ Found entries are indexed by both identifier and UUID so either resolution direc
 
 ##### Freshness window
 
-Within the window, reads use the entry; afterward, conditional revalidation must confirm it. Cache terminology follows the PRD NFR: a client observes a mutation when polling or a reconciliation helper returns a terminal successful candidate outcome—not when the POST is merely accepted—when a conditional/fresh read returns a newer validator, or when a future invalidation channel delivers it. At that point every local entry for the affected entity is **invalidated** across identifier/UUID keys, projections, visibility contexts, and Context Tenants; a remote mutation not yet observed may produce a stale snapshot within the bounded window but is not described as an invalidated entry accepted as current.
+Within the window, reads use the entry; afterward, conditional revalidation must confirm it. Cache terminology follows the PRD NFR: a client observes a mutation when polling or a reconciliation helper returns a terminal successful candidate outcome—not when the POST is merely accepted—when a conditional/fresh read returns a different validator, or when a future invalidation channel delivers it. At that point every local entry for the affected entity is **invalidated** across identifier/UUID keys, projections, visibility contexts, and Context Tenants; a remote mutation not yet observed may produce a stale snapshot within the bounded window but is not described as an invalidated entry accepted as current.
 
 For stable content, ADR-0003 gives `Valid(old) ⊆ Valid(current)`, so stale validation may reject newly valid data but cannot admit newly invalid data.
 
@@ -1662,7 +1779,7 @@ Revalidation is demand-driven, with no timer. One batch serves fresh entries loc
 
 Failed revalidation propagates the error and never extends the window (`cpt-cf-types-registry-principle-fail-closed`).
 
-When registration or deletion terminates successfully, each returned identifier/UUID pair invalidates all local variants of that entity, not only the projection used by the mutation workflow. A mutation may also refresh effective projections of dependants that are absent from the operation result; their SDK entries remain bounded by the ordinary window, and callers requiring an authoritative dependent projection use `fresh`. No claim is made that a client can infer those indirect keys from a target-only mutation result.
+Successful terminal mutations invalidate every cached projection of each returned identifier/UUID pair. A per-entity generation prevents earlier reads from refilling invalidated entries. Metadata-only publisher confirmation invalidates nothing. Indirect dependants absent from the result retain the normal freshness window; use `fresh` for an authoritative dependent projection.
 
 ##### Known ceiling
 
@@ -1677,6 +1794,7 @@ Content duplicates across Context Tenants even when only availability and owners
 - a deleted entity is not served as available past the window;
 - an expired entry whose revalidation fails is not served at all;
 - a terminal `register_entities` or `delete_entities` drops the affected entries, so the next read reflects the mutation with no window elapsing;
+- a read that started before that terminal outcome does not refill the entry when it completes;
 - a batch read of cached and expired keys issues exactly one conditional `batchGet`, carrying validators only for the expired ones;
 - a validator or snapshot obtained under one projection, subject visibility context, or Context Tenant is never presented under another.
 
@@ -1684,29 +1802,27 @@ Content duplicates across Context Tenants even when only availability and owners
 
 - [ ] `p2` - **ID**: `cpt-cf-types-registry-tech-inventory-registration`
 
-A gear declares Type Schemas and well-known Instances through `#[gts_type_schema(...)]` and `gts_instance!` link-time inventory. The SDK filters records by `owning_gear` and reconciles them, replacing the current registry-side process-wide pull with a per-gear push that works across processes. Types Registry's own control-plane types use the same admission path, without privileged seeding.
+Declaring crates use `#[gts_type_schema(...)]` / `gts_instance!` and call `toolkit_gts::declare_gts_inventory!()` once to expose plain-data `gts_declarations()`. The owning gear lists its crates and publisher in `#[toolkit::gear(…, gts(crates = [crate, some_sdk], publisher = types_registry_sdk::publish_gts))]`. The macro records ownership and publishes those declarations after wiring with the gear’s `PublisherContext`; configuration-built Instances use the same hook. Linking a crate publishes nothing, and incompatible `toolkit-gts` versions cannot hide declarations.
 
 The SDK provides the reconciliation workflow for gear startup:
 
 1. batch-get every desired exact identifier;
-2. omit authored content equal to the corresponding current snapshot;
+2. omit authored content equal to the corresponding current snapshot — **except on the platform plane**, where every call carries a `PublisherContext` and every document is submitted so that a higher version can be confirmed (§3.2, *Publication ordering*);
 3. leave `expected_resource_version` unset for missing entities and set it from the read for differing ones;
 4. return `UpToDate` without a POST when no candidates remain — this, and not a server-side inline response, is where the no-op is handled;
 5. otherwise submit once with one idempotency key, poll the operation, and return the terminal per-GTS-ID result.
 
-One generated idempotency key spans retries and polling for an invocation. Cross-process-loss resumption requires the caller to persist it; a new cycle rereads and generates another. Each gear gates only its own readiness.
+One generated idempotency key spans retries and polling for an invocation. Cross-process-loss resumption requires the caller to persist it; a new cycle rereads and generates another. A `superseded` or permanently rejected candidate stops retrying; a new cycle never raises its own version.
 
-vNext replaces `register(Vec<Value>) -> Vec<RegisterResult>` without compatibility adapters, sequential local loops, or kind-specific duplicates. It removes internal-service inventory seeding and **ready mode**, whose `post_init` global barrier conflicts with `cpt-cf-types-registry-fr-two-phase-init` and `cpt-cf-types-registry-constraint-boot-path`.
+Publication is supervised, starts after wiring and never blocks startup. Per-identifier status is *pending*, *admitted*, *rejected* or *superseded*. P0 readiness is `Required`: admitted and superseded-live satisfy it; superseded-deleted holds it. Admitted is sticky. Supersession emits a warning and metric; supporting newer contracts on older readers is the release’s N−1 obligation. `ReportOnly` and runtime overrides are P1. Registry-dependent work in `init`, `post_init`, `start` and bootstrap runs in supervised tasks awaiting prerequisites. Plugin selection is not cached while a locally registered instance of the same contract/vendor remains invisible.
 
-##### `owning_gear`
+vNext replaces `register(Vec<Value>) -> Vec<RegisterResult>` without compatibility adapters, sequential local loops or kind-specific duplicates, and removes internal inventory seeding and **ready mode** (`cpt-cf-types-registry-fr-two-phase-init`, `cpt-cf-types-registry-constraint-boot-path`). Inline seeds contain only registry control-plane types, `toolkit-gts` bases and configured entities whose dependencies are in that set. Configured entities depending on other gears publish after wiring to avoid a cold-database bootstrap cycle.
 
-Each gear submits only inventory records whose `owning_gear` matches its generated `MODULE_NAME`. This prevents process-global collectors—including linked `toolkit-gts` base types—from causing unauthorized submissions. The value is persisted on the entity.
+##### `publisher_name`
 
-`toolkit-gts` base types default to `types-registry` ownership, allowing its federation control-plane type and base to be dependency-ordered in one batch. `owning_gear` is mutable across revisions, so a later dedicated owner can replace the default.
+`publisher_name` is the actual registrant, taken from `publisher.name` on first claim and fixed thereafter; another publisher gets `publisher_mismatch`. Together with `publisher_version` it forms the stamp (§3.2). Types Registry publishes its own types, seeds and configured entities under its own name/version. GTS namespaces never imply an owner.
 
-`owning_gear` is unverifiable caller-declared attribution, never authorization, visibility, or a second ownership axis. It is required globally, optional for tenant-owned entities, absent externally, and answers whom to contact about a contract.
-
-The REST input and enforcement of `owning_gear` are P1 work alongside platform-plane authorization; P0 accepts no `owning_gear` field. Exposing it on reads is P1 work too, designed together with the ownership view: P0 persists the attribution on the entity for that upgrade, but no P0 read, SDK snapshot or `provenance` group returns it, and P0 defines no ownership group.
+`publisher_name` is attribution, not authorization or visibility, until workload policy binds it to identity. It is required globally, unused for tenant-owned entities and absent externally. Publisher name/version remain absent from reads and SDK snapshots until the ownership view is designed.
 
 ##### Platform identifiers and the lint
 
@@ -1724,7 +1840,7 @@ Although P1 plugins are in-process, this contract is remote-ready: batched calls
 
 ##### The trait
 
-The contract is total: both operations are mandatory across the whole claimed identifier space, nothing in it is optional, and implementing this trait is therefore the whole obligation — there is nothing to declare at registration. Kind-dependent requirements, such as the effective artifacts a Type Schema result must carry, follow from each identifier's trailing `~` and are enforced on every response as `INVALID_SOURCE_RESPONSE`; behavioral ones are covered by conformance tests. A source holding no entity of one kind in its space answers `NotFound` for it, exactly as for any other absent identifier. Tenant enablement travels with the entity result rather than through a race-prone second call.
+The contract is total: both operations are mandatory across the whole claimed identifier space, nothing in it is optional, and implementing this trait is therefore the whole obligation — there is nothing to declare at registration. Kind-dependent requirements, such as the effective artifacts a `Found` Type Schema result must carry when requested, follow from each identifier's trailing `~` and are enforced on every response as `INVALID_SOURCE_RESPONSE`; behavioral ones are covered by conformance tests. A source holding no entity of one kind in its space answers `NotFound` for it, exactly as for any other absent identifier. Tenant enablement travels with the entity result rather than through a race-prone second call.
 
 `TenantEnablement` is a state-only input and carries no source reason or expiry. The Availability Evaluator maps `NotInitialized` and `Disabled` to platform-owned reasons; a source with time-based policy returns the state effective at call time, and any state change changes its token for that `(entity, tenant)`.
 
@@ -1775,31 +1891,34 @@ pub struct SourceCall {
     pub tenant_id: Option<TenantId>,
     /// Absolute deadline, never a per-hop restarted budget.
     pub deadline: Timestamp,
-    /// Caller projection widened by registry-required document groups.
+    /// The documents the caller selected.
     pub projection: SourceProjection,
 }
 
-/// Only document groups are selectable. Missing a requested group is
-/// INVALID_SOURCE_RESPONSE; extra groups are dropped.
+/// Only documents are selectable; the three Type Schema documents are ignored
+/// for an Instance, which has no derived form. Missing a requested applicable
+/// document is INVALID_SOURCE_RESPONSE; extra documents are dropped.
 pub struct SourceProjection {
     pub content: bool,
-    /// Type Schemas only; ignored for an Instance, which has no derived form.
-    pub effective: bool,
+    pub resolved_schema: bool,
+    pub effective_traits: bool,
+    pub effective_traits_schema: bool,
 }
 
 // ---- results ------------------------------------------------------------
 
 pub enum SourceLookup {
     Found(Box<SourceEntity>),
-    /// Token still covers every source-owned field for this (entity, tenant):
-    /// content, effective artifacts, lifecycle, ownership and enablement.
-    Unchanged,
+    /// Token still covers every source-owned field for this (entity, tenant).
+    /// No document is transferred; metadata is, so visibility and availability
+    /// still run before `unchanged`.
+    Unchanged(SourceMetadata),
     /// Definitively absent in this source; inability to answer is SourceError.
     NotFound,
 }
 
-/// Metadata through `revision` is mandatory for filtering and validation.
-pub struct SourceEntity {
+/// Mandatory on `Found` and `Unchanged`, for filtering and validation.
+pub struct SourceMetadata {
     pub gts_id: GtsId,
     /// Must agree with the trailing `~` of `gts_id`; disagreement is
     /// INVALID_SOURCE_RESPONSE. No claim declares which kinds a source serves.
@@ -1812,16 +1931,22 @@ pub struct SourceEntity {
     pub lifecycle: LifecycleStatus,
     /// Present exactly when `SourceCall::tenant_id` was.
     pub tenant_enablement: Option<TenantEnablement>,
-    /// Changes whenever a source-owned field above or below changes: canonical
-    /// content, effective artifacts, lifecycle, ownership or tenant enablement.
+    /// Changes whenever a source-owned field changes: canonical content,
+    /// effective artifacts, lifecycle, ownership or tenant enablement.
     /// Platform-owned availability and visibility are separate validator
     /// inputs. Conditional reads compare it in the plugin, not here.
     pub revision: SourceRevision,
+}
 
-    // Selected by SourceProjection.
+pub struct SourceEntity {
+    pub metadata: SourceMetadata,
+
+    // Selected by SourceProjection; the Type Schema documents are always
+    // absent for an Instance.
     pub content: Option<JsonDocument>,
-    /// Required when selected for Type Schemas; always absent for Instances.
-    pub effective: Option<EffectiveArtifacts>,
+    pub resolved_schema: Option<JsonDocument>,
+    pub effective_traits: Option<JsonDocument>,
+    pub effective_traits_schema: Option<JsonDocument>,
 }
 
 pub enum TenantEnablement {
@@ -1864,7 +1989,7 @@ pub enum SourceError {
 }
 ```
 
-Only document groups are projected; all metadata is required for registry filtering and validation. `list_entities` returns a candidate feed: over-returning is expected, and the registry wraps opaque `SourceCursor` state in its routing-generation-bound cursor.
+`list_entities` returns a candidate feed: over-returning is expected, and the registry wraps opaque `SourceCursor` state in its routing-generation-bound cursor.
 
 `SourceQuery` omits platform-owned predicates: availability, descendant scope, origin, and derivation depth are applied by the registry. Nothing about the contract is negotiated per call or declared at registration: its version is the version of the SDK crate the plugin compiles against. `INVALID_SOURCE_RESPONSE` is a registry verdict and therefore is not a `SourceError`.
 
@@ -2033,7 +2158,7 @@ sequenceDiagram
             Note over R: A reference encodes no source, so the chain is walked<br/>until one answers or all answer NOT_FOUND
         end
         R->>P: One batch call per plugin, never one per key
-        P-->>R: Authored + effective content, ownership scope,<br/>lifecycle, tenant enablement, external_revision
+        P-->>R: Selected documents, ownership scope,<br/>lifecycle, tenant enablement, external_revision
         R->>G: Derive gts_uuid from the returned identifier
         R->>R: Validate reference equality, claim conformance, kind against<br/>trailing `~`, ownership scope, external_revision present
         alt SOURCE_UNAVAILABLE or INVALID_SOURCE_RESPONSE
@@ -2140,9 +2265,10 @@ The reference schema supports the write protocol without reading revision histor
 | Kind exclusivity | the same locked read, over `entity.gts_id` of any one family member through `idx_tr_entity_family` |
 | Per-major shape, and contiguity of a candidate minor | keyed lookups on `uq_tr_entity_gts_id` for `vM~`, `vM.0~`, and `vM.(n-1)~`; no column stores any of them, and the last is re-asked inside the commit transaction |
 | A waived cross-minor compatibility check | `type_schema_revision.compat_forced`, the one fact of ADR-0004's profile that is not derivable |
+| Publication order per entity | `entity.publisher_name` + `entity.publisher_version` (canonical SemVer text, compared in the domain by SemVer precedence under the `entity_write_order` claim, never by string order); the request's publisher on `operation.publisher_name` / `operation.publisher_version`, read back by the worker; a superseded candidate's versions in its `error_payload` context |
 | Durable at-least-once dispatch and multi-pod lease | ToolKit outbox tables, linked by an operation-UUID-only message |
 
-Update commit compares `entity.resource_version` with `expected_resource_version` and atomically increments it with revision insert, projection/dependency refresh, and item completion. Create requires unique canonical identifier and absent precondition; deletion requires a positive version. Database checks constrain result-field combinations, but cannot prove cross-table meaning. The application transaction therefore enforces that a revision row exists only for a non-Dry-Run `succeeded` registration item, belongs to that item, and matches its reported revision. The `instance` current pointer needs no such rule, because it carries no second reference to reconcile with the pointed `instance_revision`. Repository-specific code implements these invariants, compare-and-swap, and lock ordering consistently across SQLite, PostgreSQL, and MySQL.
+Update commit compares `entity.resource_version` with `expected_resource_version` and increments it atomically with revision insertion, current-state and dependency updates, dependant refreshes, and item completion. Those dependant refreshes change effective artifacts and fingerprints without advancing the dependants' `resource_version`. Create requires unique canonical identifier and absent precondition; deletion requires a positive version. Database checks constrain result-field combinations, but cannot prove cross-table meaning. The application transaction therefore enforces that a revision row exists only for a non-Dry-Run `succeeded` registration item, belongs to that item, and matches its reported revision. The `instance` current pointer needs no such rule, because it carries no second reference to reconcile with the pointed `instance_revision`. Repository-specific code implements these invariants, compare-and-swap, and lock ordering consistently across SQLite, PostgreSQL, and MySQL.
 
 ### 3.8 Deployment Topology
 
@@ -2153,6 +2279,10 @@ Types Registry scales as identical replicas over one authoritative database per 
 Each replica exposes tenant REST on the authenticated business listener and workload-authenticated platform REST on a separate listener (`cpt-cf-adr-platform-plane-auth`: service-account token initially, mTLS SPIFFE later). Listener separation makes `cpt-cf-types-registry-fr-registration-authority` structural.
 
 The leased ToolKit outbox gives multi-pod exclusion without leader election. Database-only authority makes each committed mutation visible on every replica's first post-commit read (`cpt-cf-types-registry-nfr-multi-pod-correctness`).
+
+Standalone registry deployments require **at least two replicas with a disruption budget** (`cpt-cf-types-registry-constraint-boot-path`); replicas share the database. Consumers need a reachable registry to become ready, and in-memory SDK caches fail closed after their freshness window, so offline restart is unsupported.
+
+Publication ordering (§3.2) binds only replicas that run it. A rollout that introduces it, or any later change to its semantics, upgrades and drains every replica writing to the database before it takes effect; rolling the registry back below that release is not supported.
 
 #### Gear configuration
 
@@ -2188,11 +2318,11 @@ gears:
           allowed_vendors: [acme]
 ```
 
-`ctx.config_or_default()` makes absent configuration and `config: {}` equivalent to these defaults; stock deployments start with `force` and purge disabled.
+`ctx.config_or_default()` makes absent configuration and `config: {}` equivalent to these defaults; stock deployments start with `skip_compatibility_check` requests and purge disabled.
 
 | Value | Type | Default | Governs |
 |---|---|---|---|
-| `allow_compatibility_force` | bool | `false` | Enables candidate `force`. When disabled, real and Dry Run requests receive a deployment-configuration refusal rather than silent ignore |
+| `allow_compatibility_force` | bool | `false` | Enables candidate `skip_compatibility_check`. When disabled, real and Dry Run requests receive a deployment-configuration refusal rather than silent ignore |
 | `allow_purge` | bool | `false` | Whether the operator purge-job entry point exists in this deployment. Where false the job refuses execution before scanning |
 | `operation_retention` | duration | `30d` | How long a terminal, unpinned operation is kept before the sweep may remove it |
 | `limits.*` | size or count | §3.2 | Besides the page size below, the five server-owned bounds of §3.2, *Bounded inputs*, which records what each default is derived from |
@@ -2206,12 +2336,12 @@ On `MySQL`, operators must configure `@@SESSION.cte_max_recursion_depth >= limit
 Configuration is read at process start and requires restart to change. Disabled controls are explicit:
 
 - purge has no gear-facing route or OpenAPI operation in any configuration; when disabled, its operator-job entry point refuses execution before scanning;
-- `force` is rejected with a deployment-configuration reason, including on Dry Run;
+- `skip_compatibility_check` is rejected with a deployment-configuration reason, including on Dry Run;
 - registration policy refusal names the region and parameter. The full policy is not exposed on the tenant plane because it discloses served vendors.
 
-Acceptance checks `allow_compatibility_force` and stores the waiver request. Each worker pass, including retries and revalidation, rechecks its process configuration and the cross-minor baseline eligibility. If either disallows the waiver, the worker clears it and applies the ordinary compatibility verdict. `operation_item.compat_forced` records the accepted request; `type_schema_revision.compat_forced` records the effective waiver. The purge job checks `allow_purge` at invocation. Configuration changes require restart; drain replicas for a hard cutover because they may disagree during a rolling restart. No shared per-request configuration or persisted generation is introduced.
+Acceptance checks `allow_compatibility_force` and stores the waiver request. Each worker pass, including retries and revalidation, rechecks its process configuration and the cross-minor baseline eligibility. If either disallows the waiver, the worker clears it and applies the ordinary compatibility verdict. `operation_item.compat_forced` records the accepted request; `type_schema_revision.compat_forced` records the effective waiver, which reads report as `provenance.compatibility_check_skipped`. The purge job checks `allow_purge` at invocation. Configuration changes require restart; drain replicas for a hard cutover because they may disagree during a rolling restart. No shared per-request configuration or persisted generation is introduced.
 
-Configuration values themselves are not stored: the waiver outcome, purge effect, policy refusal or admitted ownership, and operation retention state already record the relevant facts. Registration policy alone is region-scoped; ADR-0004 keeps `force` global and leaves any future regional authority to grants.
+Configuration values themselves are not stored: the waiver outcome, purge effect, policy refusal or admitted ownership, and operation retention state already record the relevant facts. Registration policy alone is region-scoped; ADR-0004 keeps `skip_compatibility_check` global and leaves any future regional authority to grants.
 
 SDK cache settings belong to each consuming process. P1 plugins are in the same binary; moving them out later changes topology, not the contract or ADR-0011 boundary.
 

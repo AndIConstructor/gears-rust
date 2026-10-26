@@ -1,4 +1,3 @@
-// Created: 2026-09-17 by Virtuozzo International GmbH
 //! Move stored `value_type_id`s into the gear's own namespace.
 //!
 //! The value-type catalogue moved from `gts.cf.toolkit.settings.type_*~` to
@@ -18,17 +17,23 @@
 
 use sea_orm_migration::prelude::*;
 
-// Prefixes, not identifiers: DE0901 reads any `gts.`-prefixed literal as a
-// whole id and counts four tokens where a complete one has five.
+// Prefixes, not identifiers: `gts_id!` validates a complete id, and these stop
+// at `type_`, so they are built from `GTS_ID_PREFIX` and the namespace tail.
 //
 // Written out rather than taken from `settings-service-sdk`: a migration is a
 // record of one move that already happened. If the catalogue is ever renamed
 // again, this must still rewrite `toolkit` to `core` on the databases that
 // stopped there, not chase whatever the constant then holds.
-#[allow(unknown_lints, de0901_gts_string_pattern)]
-const OLD: &str = "gts.cf.toolkit.settings.type_";
-#[allow(unknown_lints, de0901_gts_string_pattern)]
-const NEW: &str = "gts.cf.core.settings.type_";
+
+/// The value-type prefix before the move, in the `toolkit` namespace.
+fn old_prefix() -> String {
+    format!("{}cf.toolkit.settings.type_", toolkit_gts::GTS_ID_PREFIX)
+}
+
+/// The value-type prefix after the move, in the gear's own `core` namespace.
+fn new_prefix() -> String {
+    format!("{}cf.core.settings.type_", toolkit_gts::GTS_ID_PREFIX)
+}
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -37,11 +42,11 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        rewrite(manager, OLD, NEW).await
+        rewrite(manager, &old_prefix(), &new_prefix()).await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        rewrite(manager, NEW, OLD).await
+        rewrite(manager, &new_prefix(), &old_prefix()).await
     }
 }
 
@@ -54,23 +59,36 @@ impl MigrationTrait for Migration {
 /// database as a bound value, never as SQL text. Idempotent: a second run
 /// matches nothing.
 async fn rewrite(manager: &SchemaManager<'_>, from: &str, to: &str) -> Result<(), DbErr> {
+    manager.exec_stmt(statement(from, to)?).await
+}
+
+/// The rewrite as a statement, built from primitives the query builder
+/// renders for each backend: `to || SUBSTR(value_type_id, start)`, where `||`
+/// and `SUBSTR(text, int)` exist on PostgreSQL and SQLite alike, and every
+/// input is a bound value in the backend's own placeholder. A custom SQL
+/// fragment is not: its placeholder is spelt one way, and a backend that
+/// spells it another passes the text through — PostgreSQL read SQLite's `?`
+/// as an operator, failed the statement with a syntax error, and dropped the
+/// values bound to it on the way.
+fn statement(from: &str, to: &str) -> Result<UpdateStatement, DbErr> {
     let start = <i32 as std::convert::TryFrom<usize>>::try_from(from.len() + 1)
         .map_err(|_| DbErr::Custom("value type prefix longer than any id".to_owned()))?;
-    let statement = Query::update()
+    Ok(Query::update()
         .table(Alias::new("setting_declarations"))
         .value(
             Alias::new("value_type_id"),
-            Expr::cust_with_values(
-                "? || SUBSTR(value_type_id, ?)",
-                [Value::from(to.to_owned()), Value::from(start)],
+            Expr::val(to).binary(
+                BinOper::Custom("||"),
+                Func::cust(Alias::new("SUBSTR"))
+                    .arg(Expr::col(Alias::new("value_type_id")))
+                    .arg(Expr::val(start)),
             ),
         )
         .and_where(
             Expr::col(Alias::new("value_type_id"))
                 .like(LikeExpr::new(format!("{}%", like_literal(from))).escape('\\')),
         )
-        .to_owned();
-    manager.exec_stmt(statement).await
+        .to_owned())
 }
 
 /// `text` as a `LIKE` pattern that matches it and nothing else: the wildcards

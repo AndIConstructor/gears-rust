@@ -1,5 +1,5 @@
 //! The one normalized field set of all three reads (SPEC §10.2). Storage fetches
-//! only what it names; cursors and T29 validators use [`FieldSelection::canonical`].
+//! only what it names; cursors and T22d validators use [`FieldSelection::canonical`].
 
 use toolkit_macros::domain_model;
 
@@ -107,6 +107,16 @@ impl FieldSelection {
     #[must_use]
     pub fn full() -> Self {
         Self::of(&EntityField::ALL)
+    }
+
+    /// Build from validated typed fields plus mandatory fields; no parsing needed.
+    #[must_use]
+    pub fn from_fields(fields: impl IntoIterator<Item = EntityField>) -> Self {
+        Self(
+            fields
+                .into_iter()
+                .fold(Self::of(&[]).0, |bits, field| bits | field.bit()),
+        )
     }
 
     fn of(fields: &[EntityField]) -> Self {

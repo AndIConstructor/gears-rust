@@ -1,9 +1,8 @@
-// Created: 2026-09-17 by Virtuozzo International GmbH
 //! Cross-field search over the settings hub: what may be matched, and how.
 //!
 //! Search runs over **stored rows**, never resolved values (DESIGN §4.2
-//! *Search*): a declaration's key, description and category name, its Schema
-//! Default, and the overrides explicitly set inside the caller's visible
+//! *Search*): a declaration's key, display name, description and category
+//! name, its Schema Default, and the overrides explicitly set inside the caller's visible
 //! subtree. Authorization is applied to the **corpus** before matching, not to
 //! the output, because a match's existence, a count and a hit each disclose
 //! content on their own. This module holds the vocabulary that rule is stated
@@ -12,11 +11,12 @@
 pub mod service;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use toolkit_macros::domain_model;
 
 use async_trait::async_trait;
 use serde_json::Value;
 use toolkit_db::secure::DBRunner;
-use toolkit_odata::{ODataQuery, Page};
+use toolkit_odata::ODataQuery;
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -24,6 +24,7 @@ use crate::domain::category::Category;
 use crate::domain::category::visibility::DomainVisibility;
 use crate::domain::declaration::Declaration;
 use crate::domain::error::DomainError;
+use crate::domain::odata::Listing;
 use crate::domain::value::StoredValue;
 use crate::field;
 
@@ -36,6 +37,7 @@ pub const MIN_QUERY_CHARS: usize = 2;
 pub const MAX_QUERY_CHARS: usize = 200;
 
 /// A validated search query: trimmed, and within the bounds.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Needle(String);
 
@@ -110,6 +112,7 @@ pub fn like_escape(s: &str) -> String {
 
 /// Which stored values the caller may match against. Decided once, before any
 /// query runs; `secret` is in neither.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Corpus {
     /// `public` values only: every caller.
@@ -146,9 +149,11 @@ impl Corpus {
 }
 
 /// Which field of a hit matched, in the order a client is told about them.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MatchedField {
     Key,
+    DisplayName,
     Description,
     CategoryName,
     DefaultValue,
@@ -161,6 +166,7 @@ impl MatchedField {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Key => "key",
+            Self::DisplayName => "display_name",
             Self::Description => "description",
             Self::CategoryName => "category_name",
             Self::DefaultValue => "default_value",
@@ -182,21 +188,32 @@ pub fn text_projection(value: &Value) -> String {
     // @cpt-end:cpt-cf-settings-service-algo-search-discoverability-attribution:p2:inst-sd-attr-2
 }
 
-/// The token a search's pagination cursor is bound to: the same query, target
-/// and corpus mint the same token, and a cursor carrying another is refused.
-/// Not a security boundary — the corpus is re-decided on every request — only
-/// a guard against continuing one search with another's cursor.
+/// The token a search's pagination cursor is bound to: the same query, target,
+/// corpus and filter mint the same token, and a cursor carrying another is
+/// refused — a cursor minted under one filter would otherwise page on under
+/// another, silently. Not a security boundary — the corpus is re-decided on
+/// every request — only a guard against continuing one search with another's
+/// cursor.
 #[must_use]
-pub fn cursor_binding(needle: &Needle, tenant: Uuid, corpus: Corpus) -> String {
+pub fn cursor_binding(
+    needle: &Needle,
+    tenant: Uuid,
+    corpus: Corpus,
+    filter: Option<&toolkit_odata::ast::Expr>,
+) -> String {
     let mut hasher = DefaultHasher::new();
     needle.as_str().hash(&mut hasher);
     tenant.hash(&mut hasher);
     corpus.hash(&mut hasher);
+    // The parsed expression, so spelling and spacing do not tell two equal
+    // filters apart.
+    format!("{filter:?}").hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
 /// What a search is asked with, every decision already taken by the caller:
 /// the handler decides, the service and the binding only apply.
+#[domain_model]
 #[derive(Debug, Clone, Copy)]
 pub struct SearchRequest<'a> {
     /// The narrowed grant, pushed into the declarations query.
@@ -207,6 +224,8 @@ pub struct SearchRequest<'a> {
     pub needle: &'a Needle,
     /// The classifications the caller may match against.
     pub corpus: Corpus,
+    /// The tenant the search is made at: where `flagged_only` looks.
+    pub target: Uuid,
     /// The target and its non-standalone descendants: where an override may
     /// be matched.
     pub tenant_ids: &'a [Uuid],
@@ -216,7 +235,12 @@ pub struct SearchRequest<'a> {
     /// The most matching override rows a page fetches; more than that and the
     /// search is refused rather than cut short of its hits.
     pub override_limit: usize,
-    /// Page size, cursor and the binding the cursor must carry.
+    /// `needs_review eq true`: only settings whose own override at the target
+    /// (`target`) is flagged for review: a narrowing in the page query, the
+    /// one the browse applies.
+    pub flagged_only: bool,
+    /// Page size, cursor, the declaration-selecting `$filter` remainder and
+    /// the binding the cursor must carry.
     pub query: &'a ODataQuery,
 }
 
@@ -245,12 +269,14 @@ pub fn too_many_hits(limit: usize) -> DomainError {
 #[async_trait]
 pub trait SearchRepository: Send + Sync {
     /// A page of **active** declarations, ordered by key, that match the
-    /// request's needle on key, description, the name of their category, their
+    /// request's needle on key, display name, description, the name of their category, their
     /// Schema Default (within the corpus and not JSON `null`), or an override
     /// explicitly set at one of the request's tenants (within the corpus,
     /// never a secret row). The scope and visibility narrow the page as they
-    /// narrow browsing; the query carries `limit`, `cursor` and the
-    /// `filter_hash` the cursor is bound to.
+    /// narrow browsing; so do the query's `$filter` on `key` and
+    /// `category_id`, and `flagged_only`; the query carries `limit`, `cursor`
+    /// and the `filter_hash` the cursor is bound to. The listing carries how
+    /// many declarations match in all.
     ///
     /// # Errors
     /// [`DomainError::Validation`] for a cursor that does not decode or was
@@ -260,7 +286,7 @@ pub trait SearchRepository: Send + Sync {
         &self,
         conn: &C,
         request: &SearchRequest<'_>,
-    ) -> Result<Page<Declaration>, DomainError>;
+    ) -> Result<Listing<Declaration>, DomainError>;
 
     /// The overrides of `declaration_ids` set at `tenant_ids` whose text
     /// projection matches `needle`, within `corpus`; never a secret row and

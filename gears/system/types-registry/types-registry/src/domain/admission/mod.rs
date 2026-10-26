@@ -41,7 +41,8 @@ use toolkit_db::outbox::Wake;
 use toolkit_macros::domain_model;
 use uuid::Uuid;
 
-use crate::domain::enums::{OperationKind, OperationStatus};
+use crate::domain::enums::OperationStatus;
+use crate::domain::key::EntityKey;
 
 /// One candidate in a submitted request.
 #[domain_model]
@@ -57,7 +58,7 @@ pub struct Candidate {
     /// field and a literal `0` is more likely a serialization accident than an
     /// intent (`database.sql`).
     pub expected_resource_version: Option<i64>,
-    /// ADR-0004 `force`: waive one cross-minor compatibility check.
+    /// ADR-0004 `skip_compatibility_check`: waive one cross-minor compatibility check.
     pub force: bool,
 }
 
@@ -104,7 +105,9 @@ impl Precondition {
     }
 }
 
-/// A submitted request, before acceptance.
+/// A submitted registration, before acceptance. A deletion is a
+/// [`DeleteRequest`]: one type per kind, so neither carries fields the other
+/// would have to refuse.
 #[domain_model]
 #[derive(Clone, Debug)]
 pub struct SubmitRequest {
@@ -117,9 +120,28 @@ pub struct SubmitRequest {
     /// [`Validated::idempotency_key`] is a plain `String`, because by then the
     /// key exists and is non-empty.
     pub idempotency_key: Option<String>,
-    pub kind: OperationKind,
     pub dry_run: bool,
     pub candidates: Vec<Candidate>,
+}
+
+/// Deletion target shared by single and batch requests.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub struct DeleteTarget {
+    pub key: EntityKey,
+    /// Required positive version, validated during acceptance.
+    pub expected_resource_version: Option<i64>,
+}
+
+/// A submitted deletion. Keys stay unresolved: the worker resolves them under
+/// its write claim, so an unknown Registry Reference is an item outcome.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub struct DeleteRequest {
+    /// Required; optional only to share acceptance validation.
+    pub idempotency_key: Option<String>,
+    pub dry_run: bool,
+    pub targets: Vec<DeleteTarget>,
 }
 
 /// What acceptance decided.
@@ -155,6 +177,7 @@ impl Accepted {
 /// The port lives in the domain, so its error type does too; the outbox
 /// transport ([`OperationDispatch`]'s implementation) maps the underlying
 /// `toolkit_db` failure into [`Backend`](Self::Backend).
+#[domain_model]
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxError {
     /// The underlying outbox operation failed — starting it, building the record,

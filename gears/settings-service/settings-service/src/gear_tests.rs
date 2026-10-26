@@ -1,4 +1,3 @@
-// Created: 2026-08-12 by Virtuozzo International GmbH
 //! Tests for the gear scaffold's startup contract.
 //!
 //! `Gear::init` needs a live `GearCtx` (database capability, config provider),
@@ -813,6 +812,7 @@ async fn a_review_pass_counts_the_flagged_overrides_by_source_and_says_zero_wher
                     source: "admin_authored".to_owned(),
                     owner_module: None,
                     licence_feature: None,
+                    display_name: None,
                     description: None,
                     created_by: "test".to_owned(),
                 },

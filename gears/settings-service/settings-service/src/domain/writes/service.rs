@@ -1,4 +1,3 @@
-// Created: 2026-09-07 by Virtuozzo International GmbH
 // @cpt-dod:cpt-cf-settings-service-dod-value-writes-gates:p1
 // @cpt-dod:cpt-cf-settings-service-dod-value-writes-atomicity:p1
 // @cpt-dod:cpt-cf-settings-service-dod-value-writes-stale:p1
@@ -10,6 +9,8 @@
 //! The Value Writer: two gates in order, then one transaction per change.
 
 use std::sync::Arc;
+use std::time::Duration;
+use toolkit_macros::domain_model;
 
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
@@ -40,6 +41,7 @@ use crate::domain::value::{ValueDraft, ValueRepository};
 use crate::log_text::LogSafe;
 
 /// Who is writing, with what proof.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct WriteActor {
     /// The authenticated caller.
@@ -102,6 +104,7 @@ fn session_sub(bearer: &str) -> Option<String> {
 }
 
 /// What a change does to the scope's own row.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
     /// Store this value.
@@ -126,6 +129,7 @@ pub enum Change {
 /// stored before it opens, under a reference unique to this write. What the
 /// transaction then persists is the reference; the plaintext is gone from here.
 /// Whether a stage judges the caller's `If-Match` before the store leg.
+#[domain_model]
 #[derive(Debug, Clone, Copy)]
 pub enum StagePrecondition<'a> {
     /// A write: the tag the caller presented, judged against the current row
@@ -136,6 +140,7 @@ pub enum StagePrecondition<'a> {
     None,
 }
 
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Staged {
     /// A value to store: inline, or as the reference of an entry just created.
@@ -160,6 +165,7 @@ pub enum Staged {
 
 /// Whether step-up still has to be verified for this change, or was verified
 /// once for the whole request.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepUpPolicy {
     /// Verify here when the declaration requires it.
@@ -169,6 +175,7 @@ pub enum StepUpPolicy {
 }
 
 /// A change that passed every gate.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct Gated {
     /// The declaration written.
@@ -188,6 +195,7 @@ pub struct Gated {
 }
 
 /// A committed change.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Committed {
     /// The setting key.
@@ -215,7 +223,22 @@ pub struct Committed {
     pub released_secret: Option<String>,
 }
 
+/// Whether `validate` carries the impact report, and how long a page.
+///
+/// The report is advisory; a client that fetches it on its own time through
+/// `impact` — asynchronously, once the type check has answered — asks
+/// `validate` to skip it, and pays only for the type check.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImpactPage {
+    /// The report, with the page size `impact` takes.
+    Of(Option<usize>),
+    /// No report.
+    Skipped,
+}
+
 /// The read-only report of `validate`.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct ValidationReport {
     /// Field-level detail; empty when valid.
@@ -227,6 +250,7 @@ pub struct ValidationReport {
 }
 
 /// One descendant whose effective value would change.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImpactEntry {
     /// The descendant.
@@ -238,6 +262,7 @@ pub struct ImpactEntry {
 }
 
 /// The bounded impact report.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImpactReport {
     /// The first `limit` affected descendants in traversal order.
@@ -268,9 +293,17 @@ impl ImpactReport {
     pub const MAX_LIMIT: usize = 500;
     /// How many descendants a walk examines at most: the shared subtree budget.
     pub const NODE_BUDGET: usize = crate::domain::resolution::SUBTREE_BUDGET;
+    /// How long a walk may take to gather its subtree. The report is
+    /// advisory and `validate` — the check a field editor waits on before a
+    /// value can be entered at all — carries it, so a walk that cannot fetch
+    /// its subtree and resolve it within this is cut and reported as
+    /// truncated rather than waited on; the node budget bounds what is
+    /// examined, never how long a dependency may take to answer.
+    pub const TIME_BUDGET: Duration = Duration::from_secs(1);
 }
 
 /// The writer.
+#[domain_model]
 pub struct ValueWriter<D, V, A, S, P> {
     values: V,
     resolver: Arc<ValueResolver<D, V, A>>,
@@ -281,6 +314,10 @@ pub struct ValueWriter<D, V, A, S, P> {
     pending: P,
     publisher: Arc<dyn ChangePublisher>,
     metrics: Arc<dyn WriteMetrics>,
+    /// How long an impact walk may take to gather its subtree:
+    /// [`ImpactReport::TIME_BUDGET`], or shorter for a test that cannot wait
+    /// it out.
+    impact_budget: Duration,
 }
 
 fn denied() -> DomainError {
@@ -320,7 +357,16 @@ where
             pending,
             publisher,
             metrics,
+            impact_budget: ImpactReport::TIME_BUDGET,
         }
+    }
+
+    /// The same writer with a shorter time budget for the impact walk, for a
+    /// test that cannot wait the real one out.
+    #[cfg(test)]
+    pub(crate) fn with_impact_budget(mut self, budget: Duration) -> Self {
+        self.impact_budget = budget;
+        self
     }
 
     /// The resolver this writer reads through.
@@ -383,7 +429,7 @@ where
         }
         // @cpt-end:cpt-cf-settings-service-algo-value-writes-gates:p1:inst-vw-gate-2
         // @cpt-begin:cpt-cf-settings-service-algo-value-writes-gates:p1:inst-vw-gate-3
-        if declaration.status == "retired" {
+        if declaration.status.is_retired() {
             return Err(DomainError::Retired {
                 key: declaration.key.clone(),
             });
@@ -785,7 +831,7 @@ where
             .ok_or(DomainError::NotFound {
                 resource: "declaration",
             })?;
-        if live.status == "retired" {
+        if live.status.is_retired() {
             return Err(DomainError::Retired { key: live.key });
         }
         // From here on the declaration is the row as it is inside this
@@ -1078,8 +1124,9 @@ where
     }
 
     /// The read-only report: validity with field-level detail, the current
-    /// effective value, and the impact for a cascading setting. Stores nothing
-    /// and emits no record; the same answer for the same inputs.
+    /// effective value, and — unless the caller skips it — the impact for a
+    /// cascading setting. Stores nothing and emits no record; the same answer
+    /// for the same inputs.
     ///
     /// # Errors
     /// [`DomainError`] when the resolver or the walk cannot answer.
@@ -1089,7 +1136,7 @@ where
         declaration: &Declaration,
         target: ScopeTarget,
         value: &Value,
-        limit: Option<usize>,
+        page: ImpactPage,
     ) -> Result<ValidationReport, DomainError> {
         // @cpt-begin:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-5
         let violations = self
@@ -1105,10 +1152,11 @@ where
         let effective = self.resolver.resolve(conn, &key, target).await?;
         // @cpt-end:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-6
         // @cpt-begin:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-7
-        let impact = if declaration.scope_class == scope_class::CASCADING {
-            Some(self.impact(conn, declaration, target, value, limit).await?)
-        } else {
-            None
+        let impact = match page {
+            ImpactPage::Of(limit) if declaration.scope_class == scope_class::CASCADING => {
+                Some(self.impact(conn, declaration, target, value, limit).await?)
+            }
+            ImpactPage::Of(_) | ImpactPage::Skipped => None,
         };
         // @cpt-end:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-7
         Ok(ValidationReport {
@@ -1119,7 +1167,10 @@ where
     }
 
     /// The bounded impact walk: which descendants would see a different
-    /// effective value under `candidate` set at `target`.
+    /// effective value under `candidate` set at `target`. The subtree is
+    /// fetched and resolved in one pass and under [`ImpactReport::TIME_BUDGET`];
+    /// a walk cut by the node budget, by `limit` or by time is reported as
+    /// truncated.
     ///
     /// # Errors
     /// [`DomainError`] when the tenant resolver or the resolver cannot answer.
@@ -1141,60 +1192,69 @@ where
         // @cpt-end:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-1
         let root = self.resolver.root_tenant().await?;
         let target_tenant = target.tenant_id(root);
-        let key = SettingKey::parse(&declaration.key).map_err(|e| DomainError::Internal {
-            diagnostic: format!("stored key `{}` does not parse: {e}", declaration.key),
-        })?;
-        // @cpt-begin:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-2
-        // @cpt-begin:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-3
-        // Breadth-first, barriers respected: a standalone descendant and
-        // everything below it is never listed and never counted, since a bare
-        // count still says the tenant exists and differs.
-        let (descendants, budget_hit) = self
-            .resolver
-            .hierarchy()
-            .descendants_bfs(target_tenant, ImpactReport::NODE_BUDGET)
-            .await?;
-        // @cpt-end:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-3
-        // @cpt-end:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-2
         let mut report = ImpactReport::empty();
-        for descendant in descendants {
+        // @cpt-begin:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-6
+        // The subtree is fetched and resolved in one pass — a bounded walk
+        // through the tenant resolver whose parent links are kept, the
+        // target's chain once, one set query over the chain and the subtree,
+        // each descendant's chain built in memory — so the round trips are a
+        // fixed few whatever the subtree holds. They run under a time budget:
+        // a dependency that does not answer in time is not waited on, since
+        // the report is advisory and the type check that carries it is not.
+        let gathered = tokio::time::timeout(self.impact_budget, async {
+            // @cpt-begin:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-2
+            // @cpt-begin:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-3
+            // Breadth-first, barriers respected: a standalone descendant and
+            // everything below it is never listed and never counted, since a
+            // bare count still says the tenant exists and differs.
+            let subtree = self
+                .resolver
+                .hierarchy()
+                .subtree(target_tenant, ImpactReport::NODE_BUDGET)
+                .await?;
+            // @cpt-end:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-3
+            // @cpt-end:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-2
+            let values = self
+                .resolver
+                .resolve_subtree(conn, declaration, target, &subtree)
+                .await?;
+            Ok::<_, DomainError>((subtree, values))
+        })
+        .await;
+        let (subtree, values) = match gathered {
+            Ok(gathered) => gathered?,
+            Err(_elapsed) => {
+                // Nothing was scanned, and the report says so: "at least
+                // zero", truncated, rather than an answer that never comes.
+                report.truncated = true;
+                return Ok(report);
+            }
+        };
+        // @cpt-end:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-6
+        for current in values {
             report.scanned += 1;
             // @cpt-begin:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-4
             // A descendant keeps its value when a row at or below itself,
-            // deeper than the target, already supplies it; otherwise it takes
-            // the candidate and changes when the candidate differs.
-            let current = self
-                .resolver
-                .resolve(conn, &key, ScopeTarget::Tenant(descendant))
-                .await?;
-            let shielded = match current.source_scope.as_deref() {
-                None => false,
-                Some(source) => {
-                    let source_tenant = current
-                        .trail
-                        .iter()
-                        .find(|e| e.scope == source)
-                        .map(|e| e.tenant_id);
-                    let chain: Vec<Uuid> = current.trail.iter().map(|e| e.tenant_id).collect();
-                    let target_pos = chain.iter().position(|t| *t == target_tenant);
-                    let source_pos = source_tenant.and_then(|s| chain.iter().position(|t| *t == s));
-                    matches!((target_pos, source_pos), (Some(t), Some(s)) if s > t)
-                }
-            };
+            // deeper than the target, already supplies it — a row of a tenant
+            // in the walked subtree; otherwise it takes the candidate and
+            // changes when the candidate differs.
+            let shielded = current
+                .source_tenant
+                .is_some_and(|source| subtree.contains(source));
             if !shielded && current.value != *candidate {
                 report.total_changed += 1;
                 if report.changed.len() < limit {
                     report.changed.push(ImpactEntry {
-                        tenant_id: descendant,
-                        scope: current.scope.clone(),
-                        current: current.value.clone(),
+                        tenant_id: current.tenant_id,
+                        scope: current.scope,
+                        current: current.value,
                     });
                 }
             }
             // @cpt-end:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-4
         }
         // @cpt-begin:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-5
-        report.truncated = budget_hit || report.total_changed > report.changed.len();
+        report.truncated = subtree.truncated || report.total_changed > report.changed.len();
         Ok(report)
         // @cpt-end:cpt-cf-settings-service-algo-value-writes-impact:p1:inst-vw-imp-walk-5
     }

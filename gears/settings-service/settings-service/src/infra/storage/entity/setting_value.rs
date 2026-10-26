@@ -1,4 +1,3 @@
-// Created: 2026-09-06 by Virtuozzo International GmbH
 //! The `setting_values` table.
 
 use sea_orm::entity::prelude::*;
@@ -69,6 +68,7 @@ pub struct Model {
     pub set_by: String,
 }
 
+/// Relations of the `setting_value` entity (none).
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 

@@ -1,4 +1,3 @@
-// Created: 2026-09-08 by Virtuozzo International GmbH
 //! The coordinator: what survives a concurrent writer, what a batch does with
 //! one step-up verification, what a clone copies, and what the impact walk
 //! counts.
@@ -185,6 +184,7 @@ impl Harness {
                 id,
                 DeclarationMetadata {
                     mode: "standard".to_owned(),
+                    display_name: None,
                     description: None,
                     domain_affinity: None,
                     licence_feature: None,
@@ -211,6 +211,7 @@ impl Harness {
                 id,
                 DeclarationMetadata {
                     mode: "standard".to_owned(),
+                    display_name: None,
                     description: None,
                     domain_affinity: Some(domain.to_owned()),
                     licence_feature: None,
@@ -798,7 +799,13 @@ async fn a_declaration_outside_the_callers_domain_is_absent_to_its_writes() {
     assert!(is_absent(&err), "{err:?}");
     let err = h
         .coordinator
-        .validate(&outside, &h.base.key("flag"), None, &json!(true), None)
+        .validate(
+            &outside,
+            &h.base.key("flag"),
+            None,
+            &json!(true),
+            crate::domain::writes::ImpactPage::Of(None),
+        )
         .await
         .expect_err("a validate");
     assert!(is_absent(&err), "{err:?}");

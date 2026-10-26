@@ -16,7 +16,7 @@ use uuid::Uuid;
 use types_registry::api::rest::dto::OperationDto;
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::admission::{Candidate, SubmitRequest};
-use types_registry::domain::enums::{OperationItemStatus, OperationKind, OperationStatus};
+use types_registry::domain::enums::{OperationItemStatus, OperationStatus};
 use types_registry::domain::policy::RegistrationPolicy;
 use types_registry::domain::registry_service::{EntityKey, RegistryService};
 use types_registry::infra::outbox::AdmissionHandler;
@@ -71,9 +71,9 @@ async fn first_delivery_with_mode(
 ) -> Uuid {
     let receipt = registry
         .submit(
+            common::caller(),
             &SubmitRequest {
                 idempotency_key: Some("missing-dependency".to_owned()),
-                kind: OperationKind::Registration,
                 dry_run,
                 candidates,
             },
@@ -103,7 +103,7 @@ async fn assert_missing_dependency(
     dependency_kind: &str,
 ) {
     let operation = registry
-        .operation(operation_id)
+        .operation(common::caller(), operation_id)
         .await
         .expect("read operation")
         .expect("operation exists");
@@ -111,7 +111,7 @@ async fn assert_missing_dependency(
     let item = operation
         .items
         .iter()
-        .find(|item| item.gts_id == candidate_id)
+        .find(|item| item.key.gts_id() == Some(candidate_id))
         .expect("candidate has a result");
     assert_eq!(item.status, OperationItemStatus::Failed);
     assert_eq!(item.resource_version, None);
@@ -119,7 +119,7 @@ async fn assert_missing_dependency(
     let conn = db.conn().expect("connection");
     let stored = operation_item::Entity::find()
         .filter(operation_item::Column::OperationId.eq(operation_id))
-        .filter(operation_item::Column::GtsId.eq(candidate_id))
+        .filter(operation_item::Column::EntityKey.eq(candidate_id))
         .secure()
         .scope_with(&common::allow_all())
         .one(&conn)
@@ -152,12 +152,21 @@ async fn assert_missing_dependency(
         .find(|item| item["gts_id"] == candidate_id)
         .expect("candidate is exposed to the client");
     assert_eq!(
-        wire_item["error"], error,
-        "polling preserves the stored diagnostic fields"
+        wire_item["error"],
+        json!({
+            "reason": error["reason"],
+            "message": error["message"],
+            "context": {
+                "dependency_id": dependency_id,
+                "dependency_kind": dependency_kind,
+            },
+        }),
+        "polling carries the stored dependency in context"
     );
     assert!(
         registry
             .entity(
+                common::caller(),
                 &EntityKey::GtsId(candidate_id.to_owned()),
                 FieldSelection::full()
             )
@@ -231,14 +240,14 @@ async fn a_missing_dependency_does_not_prevent_an_independent_candidate_from_com
     )
     .await;
     let operation = registry
-        .operation(operation_id)
+        .operation(common::caller(), operation_id)
         .await
         .expect("read")
         .expect("operation");
     let independent = operation
         .items
         .iter()
-        .find(|item| item.gts_id == INDEPENDENT)
+        .find(|item| item.key.gts_id() == Some(INDEPENDENT))
         .expect("independent result");
     assert_eq!(independent.status, OperationItemStatus::Succeeded);
     assert_eq!(independent.resource_version, Some(1));
@@ -246,6 +255,7 @@ async fn a_missing_dependency_does_not_prevent_an_independent_candidate_from_com
     assert!(
         registry
             .entity(
+                common::caller(),
                 &EntityKey::GtsId(INDEPENDENT.to_owned()),
                 FieldSelection::full()
             )
@@ -288,7 +298,7 @@ async fn dry_run_missing_dependencies_keep_the_same_diagnostics_without_entity_w
         )
         .await;
         let operation = registry
-            .operation(operation_id)
+            .operation(common::caller(), operation_id)
             .await
             .expect("read dry-run operation")
             .expect("operation exists");
@@ -296,13 +306,14 @@ async fn dry_run_missing_dependencies_keep_the_same_diagnostics_without_entity_w
         let independent = operation
             .items
             .iter()
-            .find(|item| item.gts_id == INDEPENDENT)
+            .find(|item| item.key.gts_id() == Some(INDEPENDENT))
             .expect("independent candidate has a result");
         assert_eq!(independent.status, OperationItemStatus::Succeeded);
         assert_eq!(independent.resource_version, None);
         assert!(
             registry
                 .entity(
+                    common::caller(),
                     &EntityKey::GtsId(INDEPENDENT.to_owned()),
                     FieldSelection::full()
                 )
@@ -328,7 +339,7 @@ async fn an_instance_before_its_conforming_type_in_the_same_batch_succeeds() {
     .await;
 
     let operation = registry
-        .operation(operation_id)
+        .operation(common::caller(), operation_id)
         .await
         .expect("read operation")
         .expect("operation exists");
@@ -338,7 +349,7 @@ async fn an_instance_before_its_conforming_type_in_the_same_batch_succeeds() {
         let item = operation
             .items
             .iter()
-            .find(|item| item.gts_id == id)
+            .find(|item| item.key.gts_id() == Some(id))
             .expect("candidate has a result");
         assert_eq!(
             item.status,
@@ -349,7 +360,11 @@ async fn an_instance_before_its_conforming_type_in_the_same_batch_succeeds() {
         assert!(item.error.is_none());
         assert!(
             registry
-                .entity(&EntityKey::GtsId(id.to_owned()), FieldSelection::full())
+                .entity(
+                    common::caller(),
+                    &EntityKey::GtsId(id.to_owned()),
+                    FieldSelection::full()
+                )
                 .await
                 .expect("read registered entity")
                 .is_some(),

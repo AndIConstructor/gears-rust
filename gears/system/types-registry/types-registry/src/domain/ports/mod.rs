@@ -28,6 +28,7 @@ use crate::domain::enums::{
     OperationKind, OperationStatus, OwnershipScope, Plane,
 };
 use crate::domain::family::FamilyKey;
+use crate::domain::key::EntityKey;
 use crate::domain::selection::FieldSelection;
 
 // The output port the admission path's instruments cross (T16).
@@ -187,11 +188,13 @@ pub struct OperationItemRow {
     pub id: i64,
     pub operation_id: Uuid,
     pub item_no: i32,
-    pub gts_id: String,
+    /// Always an identifier for a registration — the repository refuses a row
+    /// that is not — and a deletion's key as its request named it.
+    pub key: EntityKey,
     pub dry_run: bool,
     pub kind: OperationKind,
     pub precondition: Precondition,
-    /// ADR-0004's accepted `force`, as acceptance recorded it.
+    /// ADR-0004's accepted `skip_compatibility_check`, as acceptance recorded it.
     pub compat_forced: bool,
     pub status: OperationItemStatus,
     pub request_payload: Option<String>,
@@ -257,7 +260,7 @@ pub struct CurrentDocument {
 }
 
 /// The revision row is always read, so the pointer is checked whatever the
-/// selection. Documents and `provenance` are `Some` only when selected.
+/// selection. Documents and `compat_forced` are `Some` only when selected.
 #[domain_model]
 #[derive(Clone, Debug)]
 pub struct CurrentReadRow {
@@ -267,15 +270,8 @@ pub struct CurrentReadRow {
     pub resolved_schema: Option<String>,
     pub effective_traits: Option<String>,
     pub effective_traits_schema: Option<String>,
-    pub provenance: Option<RevisionProvenance>,
-}
-
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RevisionProvenance {
-    pub gts_spec_version: String,
-    pub gts_impl_version: String,
-    /// `None` for an Instance, which has no compatibility check to waive.
+    /// The revision's recorded ADR-0004 waiver. Never set for an Instance, which has
+    /// no compatibility check to waive.
     pub compat_forced: Option<bool>,
 }
 
@@ -500,7 +496,7 @@ pub struct CurrentInstanceValue {
 /// An immutable Instance revision to insert.
 ///
 /// No `compat_forced` counterpart to [`NewRevision`]: an Instance is either valid
-/// against its schema revision or refused, so `force` has nothing to waive.
+/// against its schema revision or refused, so `skip_compatibility_check` has nothing to waive.
 #[domain_model]
 #[derive(Clone, Debug)]
 pub struct NewInstanceRevision {
@@ -556,9 +552,9 @@ pub struct NewOperation {
 #[derive(Clone, Debug)]
 pub struct NewOperationItem {
     pub item_no: i32,
-    pub gts_id: String,
+    pub key: EntityKey,
     pub precondition: Precondition,
-    /// Persisted ADR-0004 waiver request. `compat_forced` avoids `MySQL`'s reserved `force`.
+    /// Persisted ADR-0004 waiver request (`skip_compatibility_check` on the wire).
     pub compat_forced: bool,
     /// The canonical request body. The stored CHECK requires it while the item is
     /// non-terminal, and the worker drops it at terminality.

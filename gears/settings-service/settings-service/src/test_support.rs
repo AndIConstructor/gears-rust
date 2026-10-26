@@ -1,4 +1,3 @@
-// Created: 2026-09-06 by Virtuozzo International GmbH
 //! Fakes and fixtures shared by this crate's unit tests.
 //!
 //! Every fake here stands in for a port the gear resolves from the platform at
@@ -14,7 +13,8 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
 use settings_service_sdk::SettingKey;
 use toolkit_db::migration_runner::run_migrations_for_testing;
-use toolkit_db::{ConnectOpts, DBProvider, DbError, connect_db};
+use toolkit_db::test_support::QueryRecorder;
+use toolkit_db::{ConnectOpts, DBProvider, Db, DbError, connect_db};
 use types_registry_sdk::{GtsTypeId, GtsTypeSchema};
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ use crate::audit::{AuditRecord, AuditSink};
 use crate::domain::contribution::SettingTypeRegistrar;
 use crate::domain::error::DomainError;
 use crate::domain::platform_scope::PlatformScope;
-use crate::domain::resolution::TenantHierarchy;
+use crate::domain::resolution::{Subtree, TenantHierarchy};
 use crate::infra::type_validator::SchemaSource;
 
 use std::num::NonZeroU32;
@@ -33,7 +33,7 @@ use serde_json::json;
 use toolkit_security::{AccessScope, SecurityContext};
 
 use crate::domain::category::{CategoryDraft, CategoryKey, CategoryRepository};
-use crate::domain::declaration::{DeclarationDraft, DeclarationRepository};
+use crate::domain::declaration::{DeclarationDraft, DeclarationRepository, DeclarationStatus};
 use crate::domain::resolution::{EffectiveCache, ScopeTarget, ValueResolver};
 use crate::domain::value::{ValueDraft, ValueRepository};
 use crate::infra::storage::access_repo::AccessRepo;
@@ -225,14 +225,33 @@ impl SettingTypeRegistrar for RecordingRegistrar {
 /// One connection, because `SQLite` `:memory:` is per-connection: every
 /// repository and every transaction must see the same schema and data.
 pub async fn sqlite_provider() -> Arc<DBProvider<DbError>> {
-    let opts = ConnectOpts {
+    let db = connect_db("sqlite::memory:", sqlite_opts())
+        .await
+        .expect("in-memory sqlite connects");
+    migrated(db).await
+}
+
+/// As [`sqlite_provider`], with every statement recorded: for a test that
+/// pins how many round trips an operation takes, which no timing assertion
+/// could do without flaking. The recorder attaches before the connection is
+/// wrapped, the only point `SeaORM` lets it.
+pub async fn sqlite_provider_recorded() -> (Arc<DBProvider<DbError>>, QueryRecorder) {
+    let (db, recorder) =
+        toolkit_db::test_support::connect_with_recorder("sqlite::memory:", sqlite_opts())
+            .await
+            .expect("in-memory sqlite connects with a recorder");
+    (migrated(db).await, recorder)
+}
+
+fn sqlite_opts() -> ConnectOpts {
+    ConnectOpts {
         max_conns: Some(1),
         min_conns: Some(1),
         ..Default::default()
-    };
-    let db = connect_db("sqlite::memory:", opts)
-        .await
-        .expect("in-memory sqlite connects");
+    }
+}
+
+async fn migrated(db: Db) -> Arc<DBProvider<DbError>> {
     run_migrations_for_testing(
         &db,
         crate::infra::storage::migrations::Migrator::migrations(),
@@ -263,6 +282,12 @@ pub struct FakeHierarchy {
     /// Report every bounded walk as cut short: a subtree larger than any
     /// budget, without building one.
     pub truncate_subtrees: std::sync::atomic::AtomicBool,
+    /// How many bounded walks were asked for: what a caller resolving a whole
+    /// subtree asks once, however many descendants it holds.
+    pub subtree_calls: std::sync::atomic::AtomicUsize,
+    /// Never answer a bounded walk: a tenant resolver that has stopped
+    /// answering, for the time budget a walk runs under.
+    pub stall_subtrees: std::sync::atomic::AtomicBool,
 }
 
 /// What [`FakeHierarchy::on_chain`] runs.
@@ -292,6 +317,15 @@ impl FakeHierarchy {
 
     pub fn chain_calls(&self) -> usize {
         self.chain_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn subtree_calls(&self) -> usize {
+        self.subtree_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Add a tenant below `parent` to a tree already handed out.
+    pub fn add_tenant(&self, id: Uuid, parent: Uuid) {
+        self.parents.lock().expect("lock").insert(id, Some(parent));
     }
 
     /// Every tenant below `tenant` that administration from it can reach:
@@ -376,14 +410,19 @@ impl TenantHierarchy for FakeHierarchy {
         Ok(self.standalone.lock().expect("lock").contains(&tenant))
     }
 
-    async fn descendants_bfs(
-        &self,
-        tenant: Uuid,
-        budget: usize,
-    ) -> Result<(Vec<Uuid>, bool), DomainError> {
+    async fn subtree(&self, tenant: Uuid, budget: usize) -> Result<Subtree, DomainError> {
+        self.subtree_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .stall_subtrees
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            std::future::pending::<()>().await;
+        }
         let reachable = self.reachable(tenant).await?;
         let parents = self.parents.lock().expect("lock").clone();
         let mut order = Vec::new();
+        let mut parent = HashMap::new();
         let mut queue = std::collections::VecDeque::from([tenant]);
         let mut truncated = false;
         while let Some(next) = queue.pop_front() {
@@ -399,6 +438,7 @@ impl TenantHierarchy for FakeHierarchy {
                     break;
                 }
                 order.push(kid);
+                parent.insert(kid, next);
                 queue.push_back(kid);
             }
             if truncated {
@@ -411,7 +451,11 @@ impl TenantHierarchy for FakeHierarchy {
         {
             truncated = true;
         }
-        Ok((order, truncated))
+        Ok(Subtree {
+            order,
+            parent,
+            truncated,
+        })
     }
 }
 
@@ -490,7 +534,16 @@ impl ResolutionHarness {
     }
 
     pub async fn with_ttl(ttl: Duration) -> Self {
-        let db = sqlite_provider().await;
+        Self::over(sqlite_provider().await, ttl).await
+    }
+
+    /// A harness whose database records every statement.
+    pub async fn recorded() -> (Self, QueryRecorder) {
+        let (db, recorder) = sqlite_provider_recorded().await;
+        (Self::over(db, Duration::from_secs(30)).await, recorder)
+    }
+
+    async fn over(db: Arc<DBProvider<DbError>>, ttl: Duration) -> Self {
         let tree = Tree::new();
         let hierarchy = Arc::new(tree.hierarchy());
         let cache = Arc::new(EffectiveCache::new(ttl));
@@ -547,8 +600,92 @@ impl ResolutionHarness {
             .await
     }
 
+    /// Declare a public boolean-shaped setting carrying a `display_name`, as a
+    /// module's contribution would: the one field `declare` leaves unset.
+    pub async fn declare_labelled(
+        &self,
+        name: &str,
+        scope_class: &str,
+        default: Value,
+        display_name: &str,
+    ) -> Uuid {
+        let conn = self.db.conn().expect("connection");
+        DeclarationRepo
+            .insert(
+                &conn,
+                &AccessScope::allow_all(),
+                DeclarationDraft {
+                    key: self.key(name).to_string(),
+                    leaf_slug: name.to_owned(),
+                    value_type_id: BOOL.to_owned(),
+                    category_id: self.category_id,
+                    default_value: default,
+                    scope_class: scope_class.to_owned(),
+                    mode: "standard".to_owned(),
+                    requires_step_up: true,
+                    anonymous_exposable: false,
+                    domain_affinity: None,
+                    has_secret_trait: false,
+                    data_classification: "public".to_owned(),
+                    source: "module_contributed".to_owned(),
+                    owner_module: Some("test".to_owned()),
+                    licence_feature: None,
+                    display_name: Some(display_name.to_owned()),
+                    description: None,
+                    created_by: "test".to_owned(),
+                },
+            )
+            .await
+            .expect("declaration")
+            .id
+    }
+
     pub async fn declare_typed(
         &self,
+        name: &str,
+        scope_class: &str,
+        default: Value,
+        value_type_id: &str,
+        classification: &str,
+    ) -> Uuid {
+        self.declare_in(
+            self.category_id,
+            name,
+            scope_class,
+            default,
+            value_type_id,
+            classification,
+        )
+        .await
+    }
+
+    /// A second category beside the harness's own, by slug.
+    pub async fn add_category(&self, slug: &str) -> Uuid {
+        let conn = self.db.conn().expect("connection");
+        CategoryRepo
+            .insert(
+                &conn,
+                &AccessScope::allow_all(),
+                CategoryDraft {
+                    key: CategoryKey::parse(slug).expect("slug"),
+                    name: slug.to_owned(),
+                    description: None,
+                    domain_affinity: None,
+                    sort_order: 0,
+                    icon: None,
+                },
+            )
+            .await
+            .expect("category")
+            .id
+    }
+
+    /// Declare a setting in a named category; its key still carries the
+    /// harness's `network` segment, so the key names one category and the
+    /// row another — what a filter on `category_id` must follow.
+    pub async fn declare_in(
+        &self,
+        category_id: Uuid,
         name: &str,
         scope_class: &str,
         default: Value,
@@ -565,7 +702,7 @@ impl ResolutionHarness {
                     key: key.to_string(),
                     leaf_slug: name.to_owned(),
                     value_type_id: value_type_id.to_owned(),
-                    category_id: self.category_id,
+                    category_id,
                     default_value: default,
                     scope_class: scope_class.to_owned(),
                     mode: "standard".to_owned(),
@@ -577,6 +714,7 @@ impl ResolutionHarness {
                     source: "module_contributed".to_owned(),
                     owner_module: Some("test".to_owned()),
                     licence_feature: None,
+                    display_name: None,
                     description: None,
                     created_by: "test".to_owned(),
                 },
@@ -598,6 +736,7 @@ impl ResolutionHarness {
                 declaration_id,
                 crate::domain::declaration::DeclarationMetadata {
                     mode: "standard".to_owned(),
+                    display_name: None,
                     description: None,
                     domain_affinity: None,
                     licence_feature: None,
@@ -623,6 +762,7 @@ impl ResolutionHarness {
                 declaration_id,
                 crate::domain::declaration::DeclarationMetadata {
                     mode: "standard".to_owned(),
+                    display_name: None,
                     description: None,
                     domain_affinity: Some(domain.to_owned()),
                     licence_feature: None,
@@ -637,6 +777,32 @@ impl ResolutionHarness {
             .expect("metadata");
     }
 
+    /// Tag a declaration `advanced`, the rest of its metadata as `declare`
+    /// leaves it.
+    pub async fn tag_advanced(&self, declaration_id: Uuid) {
+        let conn = self.db.conn().expect("connection");
+        DeclarationRepo
+            .update_metadata(
+                &conn,
+                &AccessScope::allow_all(),
+                declaration_id,
+                crate::domain::declaration::DeclarationMetadata {
+                    mode: "advanced".to_owned(),
+                    display_name: None,
+                    description: None,
+                    domain_affinity: None,
+                    licence_feature: None,
+                    data_classification: "public".to_owned(),
+                    requires_step_up: true,
+                    anonymous_exposable: false,
+                },
+                None,
+                false,
+            )
+            .await
+            .expect("metadata");
+    }
+
     pub async fn retire(&self, declaration_id: Uuid) {
         let conn = self.db.conn().expect("connection");
         DeclarationRepo
@@ -644,7 +810,7 @@ impl ResolutionHarness {
                 &conn,
                 &AccessScope::allow_all(),
                 declaration_id,
-                "retired",
+                DeclarationStatus::Retired,
                 None,
             )
             .await
@@ -680,6 +846,27 @@ impl ResolutionHarness {
     pub async fn set_flagged(&self, declaration_id: Uuid, tenant: Uuid, value: Value) {
         self.write(declaration_id, tenant, Some(value), None, true, "public")
             .await;
+    }
+
+    /// An override that stopped validating, carrying the classification the
+    /// writer would denormalize from its declaration: what a review row of a
+    /// `pii` setting must be masked by.
+    pub async fn set_flagged_classified(
+        &self,
+        declaration_id: Uuid,
+        tenant: Uuid,
+        value: Value,
+        classification: &str,
+    ) {
+        self.write(
+            declaration_id,
+            tenant,
+            Some(value),
+            None,
+            true,
+            classification,
+        )
+        .await;
     }
 
     /// A secret override that stopped validating: held by reference, as every
@@ -1021,6 +1208,53 @@ impl authz_resolver_sdk::AuthZResolverApi for AllowButMasked {
     }
 }
 
+/// A policy decision point that allows every action but reading values.
+///
+/// The caller it stands for holds the category right and not the settings
+/// one — a taxonomy author, say — and so may list the rail but not open any
+/// table under it. What such a caller must not receive is a count of what it
+/// could not open.
+struct AllowButValues;
+
+#[async_trait]
+impl authz_resolver_sdk::AuthZResolverApi for AllowButValues {
+    async fn evaluate(
+        &self,
+        _ctx: toolkit_security::PlatformSecurityContext,
+        request: authz_resolver_sdk::models::EvaluationRequest,
+    ) -> Result<
+        authz_resolver_sdk::models::EvaluationResponse,
+        toolkit::api::canonical_prelude::CanonicalError,
+    > {
+        let values = request.resource.resource_type == settings_service_sdk::gts::VALUE_SCHEMA;
+        Ok(authz_resolver_sdk::models::EvaluationResponse {
+            decision: !(values && request.action.name == "read"),
+            context: authz_resolver_sdk::models::EvaluationResponseContext::default(),
+        })
+    }
+}
+
+/// A policy decision point that allows every action but one: the per-action
+/// denial a surface that asks two decisions needs to prove each is asked.
+struct DenyAction(&'static str);
+
+#[async_trait]
+impl authz_resolver_sdk::AuthZResolverApi for DenyAction {
+    async fn evaluate(
+        &self,
+        _ctx: toolkit_security::PlatformSecurityContext,
+        request: authz_resolver_sdk::models::EvaluationRequest,
+    ) -> Result<
+        authz_resolver_sdk::models::EvaluationResponse,
+        toolkit::api::canonical_prelude::CanonicalError,
+    > {
+        Ok(authz_resolver_sdk::models::EvaluationResponse {
+            decision: request.action.name != self.0,
+            context: authz_resolver_sdk::models::EvaluationResponseContext::default(),
+        })
+    }
+}
+
 /// A policy decision point that denies everything.
 struct DenyAll;
 
@@ -1046,6 +1280,9 @@ impl authz_resolver_sdk::AuthZResolverApi for DenyAll {
 pub struct Answer {
     pub status: axum::http::StatusCode,
     pub body: Value,
+    /// The response body exactly as sent, for the tests that compare two
+    /// answers byte for byte or whose body is not JSON.
+    pub raw: String,
     pub etag: Option<String>,
     pub location: Option<String>,
     /// Every response header as text, for the ones a test reads by name —
@@ -1071,6 +1308,8 @@ pub struct RestHarness {
     /// What the write path published, for the tests that assert the event as
     /// well as the answer.
     pub published: Arc<RecordingPublisher>,
+    /// The setting types the declaration admin registered.
+    pub registrar: Arc<RecordingRegistrar>,
     router: axum::Router,
 }
 
@@ -1081,16 +1320,46 @@ impl RestHarness {
         Self::build(Arc::new(AllowAll), Arc::new(FixedStepUp::verified())).await
     }
 
+    /// The same surface whose declaration admin cannot reach the type
+    /// registry: every answer that needs a type's schema or traits is the
+    /// validator being unavailable.
+    pub async fn with_unavailable_registry() -> Self {
+        Self::build_with(
+            Arc::new(AllowAll),
+            Arc::new(FixedStepUp::verified()),
+            FakeSource {
+                unavailable: true,
+                ..resolution_catalogue()
+            },
+        )
+        .await
+    }
+
     /// The same surface with every authorization decision denied, for the
     /// tests that assert the gate rather than what is behind it.
     pub async fn denying() -> Self {
         Self::build(Arc::new(DenyAll), Arc::new(FixedStepUp::verified())).await
     }
 
+    /// The same surface with one action denied and every other allowed.
+    pub async fn denying_action(action: &'static str) -> Self {
+        Self::build(
+            Arc::new(DenyAction(action)),
+            Arc::new(FixedStepUp::verified()),
+        )
+        .await
+    }
+
     /// The same surface for a caller that may read but may not see `pii`
     /// values unmasked.
     pub async fn without_pii_entitlement() -> Self {
         Self::build(Arc::new(AllowButMasked), Arc::new(FixedStepUp::verified())).await
+    }
+
+    /// The same surface for a caller that may read categories and
+    /// declarations but not values.
+    pub async fn without_value_read() -> Self {
+        Self::build(Arc::new(AllowButValues), Arc::new(FixedStepUp::verified())).await
     }
 
     /// The same surface where the caller's last re-authentication is too old,
@@ -1109,6 +1378,14 @@ impl RestHarness {
         pdp: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
         step_up: Arc<dyn crate::domain::stepup::StepUpVerifier>,
     ) -> Self {
+        Self::build_with(pdp, step_up, resolution_catalogue()).await
+    }
+
+    async fn build_with(
+        pdp: Arc<dyn authz_resolver_sdk::AuthZResolverApi>,
+        step_up: Arc<dyn crate::domain::stepup::StepUpVerifier>,
+        admin_catalogue: FakeSource,
+    ) -> Self {
         let inner = ResolutionHarness::new().await;
         let enforcer = Arc::new(authz_resolver_sdk::PolicyEnforcer::new(pdp));
         let openapi = toolkit::api::OpenApiRegistryImpl::new();
@@ -1123,6 +1400,7 @@ impl RestHarness {
             axum::Router::new(),
             &openapi,
             categories,
+            Arc::clone(&inner.resolver),
             Arc::clone(&inner.db),
             Arc::clone(&enforcer),
         );
@@ -1166,14 +1444,15 @@ impl RestHarness {
             Arc::clone(&types),
         ));
         let step_up_for_writes = Arc::clone(&step_up);
+        let registrar = Arc::new(RecordingRegistrar::default());
         let admin = Arc::new(crate::domain::declaration::DeclarationAdmin::new(
             crate::infra::storage::declaration_repo::DeclarationRepo,
             crate::infra::storage::category_repo::CategoryRepo,
             crate::infra::storage::value_repo::ValueRepo,
             Arc::new(crate::infra::type_validator::GtsTypeValidator::new(
-                resolution_catalogue(),
+                admin_catalogue,
             )),
-            Arc::new(RecordingRegistrar::default()),
+            Arc::clone(&registrar) as Arc<dyn crate::domain::contribution::SettingTypeRegistrar>,
             step_up,
             crate::infra::storage::audit_store::AuditStore,
             Arc::clone(&inner.cache),
@@ -1183,6 +1462,7 @@ impl RestHarness {
             &openapi,
             declarations,
             admin,
+            Arc::clone(&inner.resolver),
             Arc::clone(&inner.db),
             Arc::clone(&enforcer),
         );
@@ -1207,6 +1487,7 @@ impl RestHarness {
             inner,
             secrets,
             published,
+            registrar,
             router,
         }
     }
@@ -1243,7 +1524,15 @@ impl RestHarness {
         caller: SecurityContext,
     ) -> Answer {
         let body = body.map(|json| serde_json::to_vec(&json).expect("serializes"));
-        self.dispatch(method, uri, body, if_match, caller).await
+        self.dispatch(
+            method,
+            uri,
+            body,
+            if_match,
+            caller,
+            Some("application/json"),
+        )
+        .await
     }
 
     /// The same, with the body sent as the exact text given — for a request
@@ -1263,6 +1552,28 @@ impl RestHarness {
             Some(body.as_bytes().to_vec()),
             if_match,
             context_for(caller),
+            Some("application/json"),
+        )
+        .await
+    }
+
+    /// The same, with the body's exact text and the `Content-Type` the test
+    /// names — `None` sends none — for the requests whose framing is the point.
+    pub async fn send_with_content_type(
+        &self,
+        method: &str,
+        uri: &str,
+        body: &str,
+        content_type: Option<&str>,
+        caller: Uuid,
+    ) -> Answer {
+        self.dispatch(
+            method,
+            uri,
+            Some(body.as_bytes().to_vec()),
+            None,
+            context_for(caller),
+            content_type,
         )
         .await
     }
@@ -1274,11 +1585,14 @@ impl RestHarness {
         body: Option<Vec<u8>>,
         if_match: Option<&str>,
         caller: SecurityContext,
+        content_type: Option<&str>,
     ) -> Answer {
         use tower::ServiceExt as _;
         let mut builder = axum::http::Request::builder().method(method).uri(uri);
-        if body.is_some() {
-            builder = builder.header("content-type", "application/json");
+        if body.is_some()
+            && let Some(content_type) = content_type
+        {
+            builder = builder.header("content-type", content_type);
         }
         if let Some(tag) = if_match {
             builder = builder.header("if-match", tag);
@@ -1316,10 +1630,12 @@ impl RestHarness {
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .expect("a bounded body");
+        let raw = String::from_utf8_lossy(&bytes).into_owned();
         let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         Answer {
             status,
             body,
+            raw,
             etag,
             location,
             headers,

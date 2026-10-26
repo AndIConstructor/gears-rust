@@ -1,4 +1,3 @@
-// Created: 2026-09-07 by Virtuozzo International GmbH
 // @cpt-dod:cpt-cf-settings-service-dod-value-writes-batch:p1
 //! The write coordinator: one transaction per change, commit, evict, publish.
 //!
@@ -26,7 +25,7 @@ use crate::domain::resolution::{EffectiveValue, ScopeTarget};
 use crate::domain::secrets::pending::{
     self as pending, Claim, PendingSecret, PendingSecretRepository,
 };
-use crate::domain::writes::service::{ImpactReport, StepUpPolicy, ValidationReport};
+use crate::domain::writes::service::{ImpactPage, ImpactReport, StepUpPolicy, ValidationReport};
 use crate::domain::writes::{
     Change, Committed, Gated, StagePrecondition, Staged, ValueWriter, WriteActor,
 };
@@ -820,7 +819,7 @@ impl WriteCoordinator {
         key: &SettingKey,
         requested: Option<Uuid>,
         value: &Value,
-        limit: Option<usize>,
+        page: ImpactPage,
     ) -> Result<ValidationReport, DomainError> {
         // @cpt-begin:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-3
         let (target, _, root) = self.writer.target_for(actor, requested).await?;
@@ -833,7 +832,7 @@ impl WriteCoordinator {
             .await?;
         // @cpt-end:cpt-cf-settings-service-flow-value-writes-validate:p1:inst-vw-val-4
         self.writer
-            .validate(&conn, &declaration, target, value, limit)
+            .validate(&conn, &declaration, target, value, page)
             .await
     }
 

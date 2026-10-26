@@ -12,6 +12,7 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use toolkit_db::DBProvider;
 use toolkit_db::secure::AccessScope;
+use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 use super::super::errors::{ItemFailure, WorkerError};
@@ -58,6 +59,7 @@ impl PublishWrite {
 ///
 /// A `false` is the ordinary overlapping-pass outcome: the item was already
 /// terminal, so its stored outcome stands and this pass reports that instead.
+#[domain_model]
 pub(super) struct Published {
     pub recorded: Vec<bool>,
 }
@@ -157,7 +159,7 @@ pub(super) fn published_outcome(
             tracing::info!(
                 %operation_id,
                 operation_item_id = item.id,
-                gts_id = %item.gts_id,
+                entity_key = %item.key,
                 "types_registry predicted a candidate would be admitted"
             );
             metrics.candidate_terminalized(TerminalStatus::Succeeded, item.pass_labels());
@@ -175,7 +177,7 @@ pub(super) fn published_outcome(
             tracing::info!(
                 %operation_id,
                 operation_item_id = item.id,
-                gts_id = %item.gts_id,
+                entity_key = %item.key,
                 resource_version,
                 "types_registry predicted a candidate's content is already current"
             );
@@ -207,7 +209,7 @@ fn published_refusal(
     tracing::warn!(
         %operation_id,
         operation_item_id = item.id,
-        gts_id = %item.gts_id,
+        entity_key = %item.key,
         reason = %failure.reason,
         "types_registry predicted a candidate would be refused"
     );
@@ -221,6 +223,7 @@ fn published_refusal(
 
 /// The reportable half of a published prediction, without the failure the caller
 /// already holds.
+#[domain_model]
 pub(super) struct PublishedOutcome {
     pub status: OperationItemStatus,
     pub gts_uuid: Option<Uuid>,

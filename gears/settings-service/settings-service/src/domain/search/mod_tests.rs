@@ -1,4 +1,3 @@
-// Created: 2026-09-17 by Virtuozzo International GmbH
 //! The search vocabulary: what a query may be, how it becomes a pattern, and
 //! how a value is read as text.
 
@@ -107,17 +106,20 @@ fn the_cursor_binding_changes_with_the_query_the_target_and_the_corpus_and_only_
     let needle = Needle::parse("proxy").expect("accepted");
     let other = Needle::parse("proxz").expect("accepted");
     let tenant = Uuid::from_u128(1);
-    let base = cursor_binding(&needle, tenant, Corpus::Public);
+    let base = cursor_binding(&needle, tenant, Corpus::Public, None);
     assert_eq!(
         base,
-        cursor_binding(&needle, tenant, Corpus::Public),
+        cursor_binding(&needle, tenant, Corpus::Public, None),
         "stable"
     );
-    assert_ne!(base, cursor_binding(&other, tenant, Corpus::Public));
+    assert_ne!(base, cursor_binding(&other, tenant, Corpus::Public, None));
     assert_ne!(
         base,
-        cursor_binding(&needle, Uuid::from_u128(2), Corpus::Public)
+        cursor_binding(&needle, Uuid::from_u128(2), Corpus::Public, None)
     );
-    assert_ne!(base, cursor_binding(&needle, tenant, Corpus::PublicAndPii));
+    assert_ne!(
+        base,
+        cursor_binding(&needle, tenant, Corpus::PublicAndPii, None)
+    );
     assert_eq!(base.len(), 16, "a fixed-width hex token: {base}");
 }

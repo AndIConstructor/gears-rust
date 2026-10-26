@@ -3,7 +3,7 @@
 > **Status: implemented, with §8 as the register of what is not.** The suite is
 > **280 tests** — 211 unit, three conformance suites, and the 63 Layer 3 scenarios
 > of §4.2–§4.6 — running green in about ten seconds of test time via
-> `make test-cluster-redis`, which is wired into `ci.yml`'s `integration` job. This
+> `make test-integration LANE=cluster-redis`, which is wired into `ci.yml`'s `integration` job. This
 > is the test plan for `cf-redis-cluster-plugin`, paired with
 > [DESIGN.md](./DESIGN.md), and it originated as the design deliverable of
 > [#4373](https://github.com/constructorfabric/gears-rust/issues/4373).
@@ -431,7 +431,7 @@ honesty claims, which no conformance scenario can reach.
 | `RD-SPEC-008` | Cluster mode routes every operation correctly | 3-primary cluster fixture: 300 keys, asserted to have landed on more than one shard (per-node `DBSIZE`), then every cache and lock operation once — `get`, `compare_and_swap`, `put_if_absent`, `contains`, `delete`, `try_lock`, `release`. Each is a Lua script, and a script whose keys hash to different slots is rejected outright, so "all of these succeeded" *is* the zero-`CROSSSLOT` assertion (DESIGN §6). The spread assertion is what makes it a routing test: keys landing on one shard would exercise no routing and pass anyway. The invariant itself remains held statically by `scripts.rs`'s source-derived single-key assertion; this is the runtime half |
 | `RD-SPEC-009` | `scan_prefix` in cluster mode covers every shard | 300 keys planted under one prefix, asserted to span shards, are **all** returned by one `scan_prefix` call — so `scan_cluster_buffered` really iterates every primary rather than only the one the client reached (DESIGN §4.4). A short count here — a key on an unvisited shard silently dropped — would pass every other scenario in this suite |
 | `RD-SPEC-010` | Cluster mode declares `prefix_watch: false` — **the gate on lifting it** | On the cluster fixture, `features().prefix_watch` is `false` and `watch_prefix` returns `Unsupported`, while `watch(key)` still works — its event is a plugin `PUBLISH`, which is broadcast cluster-wide, unlike the node-local keyspace notifications a prefix watcher would need. Deliberately an assertion of the *current, honest* limitation (DESIGN §4.3, §13 D2): the follow-up that implements per-shard expiry subscriptions replaces this test with its positive counterpart, and until then nothing may declare `true` — which this now holds mechanically rather than by review |
-| `RD-SPEC-014` | Sharded pub/sub is detected but not used | Against a Redis 7 container, `cluster.provider.sharded_pubsub_available` (DEBUG) is logged once, and `INFO commandstats` confirms **no** `SPUBLISH`/`SSUBSCRIBE` was issued — v1 records the capability without acting on it (DESIGN §13 D3). Against a Redis 6 container, neither the log nor the commands appear. Guards against a half-landed follow-up silently switching the publish path |
+| `RD-SPEC-014` | Sharded pub/sub is detected but not used | Against a Redis 7+ container (the workspace pin), `cluster.provider.sharded_pubsub_available` (DEBUG) is logged once, and `INFO commandstats` confirms **no** `SPUBLISH`/`SSUBSCRIBE` was issued — v1 records the capability without acting on it (DESIGN §13 D3). Against a Redis 6 container, neither the log nor the commands appear. Guards against a half-landed follow-up silently switching the publish path |
 | `RD-SPEC-011` | An operator hint contradicted by the server fails startup | `durability: fsync_always` against a container running `appendfsync everysec`: `build_and_start` returns `InvalidConfig` naming both the claimed and the actual value. With `CONFIG GET` denied by ACL, the same hint is trusted and `cluster.provider.consistency_asserted` (WARN) is logged instead (DESIGN §3.6) |
 | `RD-SPEC-012` | `database` selects a logical DB, and channels follow it | With `database: 3`, keys land in DB 3 (`SELECT 3` + `DBSIZE`), DB 0 is untouched, and `expired` notifications are received on `__keyspace@3__:…` rather than `@0` — the off-by-one-database bug that would silently deliver no expiry events |
 | `RD-SPEC-015` | A `topology` hint skips the `INFO replication` round trip | Two startups against one container, unhinted then with `topology: standalone`, each measured as an `INFO` call-count delta from a baseline taken immediately before it: the difference between the two deltas is exactly 1. Both `RedisClusterConfig::topology` and `PreflightRequest::topology_hint` promise the skip and DESIGN §3.4 says the hint "replaces detection", so a preflight that detects anyway wastes a round trip on every hinted deployment — and on the locked-down managed instance the hint exists for, logs `cluster.provider.topology_unknown` announcing a conservative declaration `resolve_topology` never makes. Asserted as a call count rather than as an absent WARN because no fixture refuses `INFO`, and because the count is the stronger claim: the WARN is unreachable once the command is not issued |
@@ -549,8 +549,8 @@ with the rest of the suite, so they cost no wall clock against the run as a whol
 | Layer | Trigger | Approx. duration |
 |---|---|---|
 | L1 unit tests | Every PR — `cargo test -p cf-redis-cluster-plugin --lib`, no Docker | 211 tests, sub-second |
-| L2 conformance + L3 integration, over eight single-node shapes plus two multi-node topologies | Every PR touching Rust — `make test-cluster-redis`, in `ci.yml`'s `integration` job | 280 tests total in ~10 s of test time, ~35 s including the build |
-| L3 Sentinel and Cluster topologies (`RD-SPEC-002`, `008..010`, `RD-LOCK-014`) | Every PR, in the same `make test-cluster-redis` run | 5 tests, and **no wall-clock cost** — `nextest` overlaps their containers with the single-node ones, so the suite still finishes in about ten seconds |
+| L2 conformance + L3 integration, over eight single-node shapes plus two multi-node topologies | Every PR touching Rust — `make test-integration LANE=cluster-redis`, in `ci.yml`'s `integration` job | 280 tests total in ~10 s of test time, ~35 s including the build |
+| L3 Sentinel and Cluster topologies (`RD-SPEC-002`, `008..010`, `RD-LOCK-014`) | Every PR, in the same `make test-integration LANE=cluster-redis` run | 5 tests, and **no wall-clock cost** — `nextest` overlaps their containers with the single-node ones, so the suite still finishes in about ten seconds |
 | ~~L4 fault injection and failover~~ (`RD-FAULT-001..008`) | **Never — not built**; §5 and §8 | — |
 
 The 280 are 211 unit tests, 66 Layer 3 test functions, and the three conformance
@@ -561,8 +561,8 @@ two functions — `RD-LIFE-006`'s silent-drop and panicking-drop halves are the
 worked example — so scenario count and test count are deliberately different
 numbers, and this is the only place either is written down.
 
-`make test-cluster-redis` passes `--retries 1`, for the reason
-`make test-cluster-pg` does: container setup is load-sensitive on a busy CI host,
+`make test-integration LANE=cluster-redis` passes `--retries 1`, for the reason
+`make test-integration LANE=cluster-pg` does: container setup is load-sensitive on a busy CI host,
 and a genuine logic regression fails both attempts, so the retry absorbs Docker
 churn without masking one.
 

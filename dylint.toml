@@ -44,6 +44,7 @@ excluded_paths = [
     "libs/toolkit-sdk",
     "libs/toolkit-security",
     "libs/toolkit-transport-grpc",
+    "libs/toolkit-taskward",
     "libs/toolkit-utils",
     "libs/system-sdks",
 
@@ -60,7 +61,7 @@ excluded_paths = [
     # gears/system/
     "gears/system/api-gateway",
     "gears/system/grpc-hub",
-    "gears/system/gear-orchestrator",
+    "gears/system/service-discovery",
     "gears/system/nodes-registry",
     "gears/system/oagw",
     "gears/system/types-registry",

@@ -13,8 +13,7 @@
 //! field means must-not-exist and a literal 0 is rejected.
 //!
 //! `compat_forced` persists the ADR-0004 waiver request for the worker.
-//! Added by `m20260908_000003_operation_item_compat_forced`; the name avoids
-//! `MySQL`'s reserved `force`.
+//! Added by `m20260908_000003_operation_item_compat_forced`.
 //!
 //! `request_payload` is dropped at terminality. Failed and dry-run receipts keep
 //! the structured outcome but not the submitted content, because keeping it would
@@ -40,7 +39,10 @@ pub struct Model {
     pub id: i64,
     pub operation_id: Uuid,
     pub item_no: i32,
-    pub gts_id: String,
+    /// An `EntityKey` in its `Display` form: always an identifier for a
+    /// registration, either kind of key for a deletion, a Registry Reference
+    /// lowercase and hyphenated.
+    pub entity_key: String,
     /// Copied from `operation.dry_run`; held in step by the composite FK.
     pub dry_run: bool,
     /// Copied from `operation.kind`; held in step by the composite FK.

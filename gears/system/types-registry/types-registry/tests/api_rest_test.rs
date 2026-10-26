@@ -156,6 +156,19 @@ impl std::ops::Deref for TestApi {
     }
 }
 
+/// The gear's routes with the request context `.authenticated()` installs in production:
+/// these tests call the handlers directly, below the authentication layer.
+fn routes(
+    router: Router,
+    openapi: &dyn toolkit::api::OpenApiRegistry,
+    legacy: Arc<TypesRegistryService>,
+    registry: Option<Arc<RegistryService>>,
+) -> Router {
+    types_registry::api::rest::routes::register_routes(router, openapi, legacy, registry).layer(
+        axum::Extension(toolkit_security::SecurityContext::anonymous()),
+    )
+}
+
 /// A router with both services wired, as `register_rest` builds it.
 async fn router_with_db() -> TestApi {
     router_with(false).await
@@ -225,12 +238,7 @@ async fn router_and_db_setup(
     } else {
         None
     };
-    let router = types_registry::api::rest::routes::register_routes(
-        Router::new(),
-        &openapi,
-        legacy,
-        Some(registry),
-    );
+    let router = routes(Router::new(), &openapi, legacy, Some(registry));
     let api = TestApi {
         router,
         _handle: handle,
@@ -249,7 +257,7 @@ fn router_without_db() -> Router {
         config,
     ));
     legacy.switch_to_ready().expect("switch legacy to ready");
-    types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None)
+    routes(Router::new(), &openapi, legacy, None)
 }
 
 fn schema(gts_id: &str) -> Value {
@@ -268,6 +276,7 @@ struct Response {
     retry_after: Option<String>,
     idempotency_replayed: Option<String>,
     cache_control: Option<String>,
+    etag: Option<String>,
     body: Value,
 }
 
@@ -309,6 +318,11 @@ async fn call_raw(router: &Router, req: Request<Body>) -> Response {
         .get(axum::http::header::CACHE_CONTROL)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let etag = resp
+        .headers()
+        .get(axum::http::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("read body");
@@ -325,6 +339,7 @@ async fn call_raw(router: &Router, req: Request<Body>) -> Response {
         retry_after,
         idempotency_replayed,
         cache_control,
+        etag,
         body,
     }
 }
@@ -895,6 +910,87 @@ async fn a_zero_precondition_is_refused() {
     assert_eq!(refused.status, StatusCode::BAD_REQUEST);
 }
 
+/// `skip_compatibility_check` is optional: absent and an explicit `false` are the same
+/// ordinary request, and `true` is refused, naming the field, wherever there is no
+/// applicable cross-minor check the deployment lets the caller skip.
+#[tokio::test]
+async fn skip_compatibility_check_defaults_to_false_and_names_its_refusals() {
+    let candidate = |skip: Option<bool>| {
+        let mut item = json!({ "gts_id": CF_TYPE, "content": schema(CF_TYPE) });
+        if let Some(skip) = skip {
+            item["skip_compatibility_check"] = json!(skip);
+        }
+        json!({ "items": [item] })
+    };
+    for (key, skip) in [("absent", None), ("false", Some(false))] {
+        let router = router_with_db().await;
+        let accepted = call(&router, submit(Some(key), &candidate(skip))).await;
+        assert_eq!(
+            accepted.status,
+            StatusCode::ACCEPTED,
+            "{key}: {:?}",
+            accepted.body
+        );
+    }
+
+    let disallowed = router_with_db().await;
+    let refused = call_raw(&disallowed, submit(Some("off"), &candidate(Some(true)))).await;
+    assert_candidate_refusal(
+        &refused,
+        CF_TYPE,
+        "skip_compatibility_check",
+        "VALIDATION_FAILED",
+    );
+
+    let (permitted, _) = router_and_db_configured(
+        false,
+        TypesRegistryConfig {
+            allow_compatibility_force: true,
+            ..TypesRegistryConfig::default()
+        },
+    )
+    .await;
+    // A major-only Type Schema has no cross-minor check to skip.
+    let refused = call_raw(&permitted, submit(Some("on"), &candidate(Some(true)))).await;
+    assert_candidate_refusal(
+        &refused,
+        CF_TYPE,
+        "skip_compatibility_check",
+        "VALIDATION_FAILED",
+    );
+    let description = refused.body["context"]["field_violations"][0]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        description.contains("no cross-minor compatibility check to skip"),
+        "{description}"
+    );
+}
+
+/// `force` is not a submission field; the body is refused rather than the flag
+/// ignored.
+#[tokio::test]
+async fn force_is_an_unknown_submission_field() {
+    let router = router_with_db().await;
+    let body = json!({
+        "items": [{ "gts_id": CF_TYPE, "content": schema(CF_TYPE), "force": true }]
+    });
+    let refused = call_raw(&router, submit(Some("key-1"), &body)).await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{:?}",
+        refused.body
+    );
+    let violation = &refused.body["context"]["field_violations"][0];
+    assert_eq!(violation["reason"], json!("invalid_json_body"));
+    let description = violation["description"].as_str().unwrap_or_default();
+    assert!(
+        description.contains("unknown field `force`"),
+        "{description}"
+    );
+}
+
 /// A Type Schema's `$id` must be exactly `gts://<gts_id>` of its item. Every
 /// other shape is a synchronous `400` naming the candidate and the `entity`
 /// field, before any `202` or operation exists.
@@ -1147,17 +1243,30 @@ async fn absent_resources_are_not_found_problems() {
     .await;
     assert_eq!(operation.status, StatusCode::NOT_FOUND);
     assert!(operation.body["type"].is_string());
+    // An operation, not an entity: a client dispatching on the resource type must
+    // not read a missing operation as a missing entity.
+    assert_eq!(
+        operation.body["context"]["resource_type"],
+        json!(types_registry_sdk::gts::OPERATION_RESOURCE_TYPE),
+        "{:?}",
+        operation.body,
+    );
+    assert_eq!(
+        operation.body["context"]["resource_name"],
+        json!("00000000-0000-0000-0000-000000000001"),
+    );
 
-    let entity = call(
-        &router,
-        get(&format!(
-            "{V2}/entities/{}",
-            gts_id!("cf.core.absent.type.v1~")
-        )),
-    )
-    .await;
+    let absent = gts_id!("cf.core.absent.type.v1~");
+    let entity = call(&router, get(&format!("{V2}/entities/{absent}"))).await;
     assert_eq!(entity.status, StatusCode::NOT_FOUND);
     assert!(entity.body["type"].is_string());
+    assert_eq!(
+        entity.body["context"]["resource_type"],
+        json!(types_registry_sdk::gts::TYPE_RESOURCE_TYPE),
+        "{:?}",
+        entity.body,
+    );
+    assert_eq!(entity.body["context"]["resource_name"], json!(absent));
 }
 
 /// A candidate that fails admission on its merits is **not** a failed request: the
@@ -1194,10 +1303,12 @@ async fn a_candidate_refused_by_admission_surfaces_through_the_operation() {
         item["error"],
     );
     assert_eq!(
-        item["error"]["dependency_id"],
-        gts_id!("cf.core.absent.type.v1~")
+        item["error"]["context"],
+        json!({
+            "dependency_id": gts_id!("cf.core.absent.type.v1~"),
+            "dependency_kind": "ref",
+        })
     );
-    assert_eq!(item["error"]["dependency_kind"], "ref");
 }
 
 // ---------------------------------------------------------------------------
@@ -1352,8 +1463,7 @@ fn both_versions_are_declared_with_distinct_operation_ids() {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    let _router =
-        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+    let _router = routes(Router::new(), &openapi, legacy, None);
 
     let declared = openapi.operations.lock().expect("operations lock").clone();
 
@@ -1437,8 +1547,7 @@ fn mutation_routes_are_internal_only() {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    let _router =
-        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+    let _router = routes(Router::new(), &openapi, legacy, None);
 
     let exposure = openapi.exposure.lock().expect("exposure lock");
     for operation_id in MUTATION_OPERATIONS {
@@ -1462,8 +1571,7 @@ fn the_idempotency_key_header_is_declared_as_a_required_parameter() {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    let _router =
-        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+    let _router = routes(Router::new(), &openapi, legacy, None);
 
     let params = openapi.params.lock().expect("params lock").clone();
     for operation_id in V2_MUTATION_OPERATIONS {
@@ -1495,8 +1603,7 @@ fn the_single_deletion_query_parameters_are_declared() {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    let _router =
-        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+    let _router = routes(Router::new(), &openapi, legacy, None);
 
     let params = openapi.params.lock().expect("params lock").clone();
     let declared = params
@@ -1546,8 +1653,7 @@ fn submission_response_headers_are_declared() {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    let _router =
-        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+    let _router = routes(Router::new(), &openapi, legacy, None);
 
     let headers = openapi
         .response_headers
@@ -1594,8 +1700,7 @@ fn json_extractor_error_statuses_are_declared_for_both_post_operations() {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    let _router =
-        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+    let _router = routes(Router::new(), &openapi, legacy, None);
 
     let responses = openapi.responses.lock().expect("responses lock");
     for operation_id in [
@@ -1706,7 +1811,7 @@ fn delete_one(key: Option<&str>, entity_key: &str, query: &str) -> Request<Body>
 }
 
 fn one_target(key: &str, expected_resource_version: i64) -> Value {
-    json!({ "items": [{ "key": key, "expected_resource_version": expected_resource_version }] })
+    json!({ "items": [{ "entity_key": key, "expected_resource_version": expected_resource_version }] })
 }
 
 async fn register_entity(router: &Router, idempotency_key: &str, gts_id: &str) {
@@ -1767,7 +1872,7 @@ async fn a_deletion_is_accepted_polled_and_leaves_a_tombstone() {
     assert_eq!(operation["dry_run"], json!(false));
     assert_eq!(operation["status"], json!("completed"));
     let item = &operation["items"][0];
-    assert_eq!(item["gts_id"], json!(CF_TYPE));
+    assert_eq!(item["entity_key"], json!(CF_TYPE));
     assert_eq!(item["status"], json!("succeeded"));
 
     let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
@@ -1789,8 +1894,8 @@ async fn a_batch_deletion_reports_outcomes_in_request_order() {
 
     let body = json!({
         "items": [
-            { "key": second, "expected_resource_version": 1 },
-            { "key": CF_TYPE, "expected_resource_version": 1 },
+            { "entity_key": second, "expected_resource_version": 1 },
+            { "entity_key": CF_TYPE, "expected_resource_version": 1 },
         ]
     });
     let accepted = call(&router, batch_delete(Some("delete-both"), &body)).await;
@@ -1799,19 +1904,19 @@ async fn a_batch_deletion_reports_outcomes_in_request_order() {
     let operation = poll(&router, &accepted).await;
     assert_eq!(operation["kind"], json!("deletion"));
     assert_eq!(
-        operation["items"][0]["gts_id"],
+        operation["items"][0]["entity_key"],
         json!(second),
         "request order, not identifier order: {:?}",
         operation["items"],
     );
-    assert_eq!(operation["items"][1]["gts_id"], json!(CF_TYPE));
+    assert_eq!(operation["items"][1]["entity_key"], json!(CF_TYPE));
     for index in 0..2 {
         assert_eq!(operation["items"][index]["status"], json!("succeeded"));
     }
 }
 
 #[tokio::test]
-async fn deleting_by_registry_reference_reports_the_identifier() {
+async fn deleting_by_registry_reference_echoes_the_reference() {
     let router = router_with_db().await;
     register_entity(&router, "register", CF_TYPE).await;
     let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
@@ -1829,12 +1934,72 @@ async fn deleting_by_registry_reference_reports_the_identifier() {
 
     let operation = poll(&router, &accepted).await;
     assert_eq!(
-        operation["items"][0]["gts_id"],
-        json!(CF_TYPE),
-        "the outcome is keyed by identifier even for a UUID submission: {:?}",
+        operation["items"][0]["entity_key"],
+        json!(reference),
+        "the outcome echoes the key as submitted: {:?}",
         operation["items"],
     );
     assert_eq!(operation["items"][0]["status"], json!("succeeded"));
+}
+
+/// Any UUID spelling is a Registry Reference, and the operation echoes it in
+/// canonical form. A replay spelled differently is the same operation.
+#[tokio::test]
+async fn deleting_by_a_non_canonical_reference_echoes_it_canonically() {
+    let router = router_with_db().await;
+    register_entity(&router, "register", CF_TYPE).await;
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    let reference = entity.body["gts_uuid"]
+        .as_str()
+        .expect("the read carries the Registry Reference")
+        .to_owned();
+
+    let accepted = call(
+        &router,
+        batch_delete(
+            Some("delete-upper"),
+            &one_target(&reference.to_uppercase(), 1),
+        ),
+    )
+    .await;
+    assert_eq!(accepted.status, StatusCode::ACCEPTED, "{:?}", accepted.body);
+    let operation = poll(&router, &accepted).await;
+    assert_eq!(operation["items"][0]["entity_key"], json!(reference));
+    assert_eq!(operation["items"][0]["status"], json!("succeeded"));
+
+    let replayed = call(
+        &router,
+        batch_delete(Some("delete-upper"), &one_target(&reference, 1)),
+    )
+    .await;
+    assert_eq!(
+        replayed.body["operation_id"], accepted.body["operation_id"],
+        "{:?}",
+        replayed.body,
+    );
+    let replay = poll(&router, &replayed).await;
+    assert_eq!(replay["items"][0]["entity_key"], json!(reference));
+}
+
+/// An identifier and its Registry Reference are one duplicate; the refusal is on
+/// `entity_key` and names both positions, since neither string repeats.
+#[tokio::test]
+async fn a_batch_naming_one_entity_by_both_keys_is_refused_naming_both() {
+    let router = router_with_db().await;
+    let reference = gts::GtsId::try_new(CF_TYPE)
+        .expect("identifier")
+        .to_uuid()
+        .to_string();
+    let body = json!({
+        "items": [
+            { "entity_key": CF_TYPE, "expected_resource_version": 1 },
+            { "entity_key": reference, "expected_resource_version": 1 },
+        ],
+    });
+    let refused = call(&router, batch_delete(Some("delete-dup"), &body)).await;
+    assert_field_refusal(&refused, "entity_key", "VALIDATION_FAILED");
+    let detail = refused.body.to_string();
+    assert!(detail.contains("items[0] and items[1]"), "{detail}");
 }
 
 #[tokio::test]
@@ -1862,9 +2027,9 @@ async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
             Some("mixed-batch"),
             &json!({
                 "items": [
-                    { "key": CF_TYPE, "expected_resource_version": 1 },
-                    { "key": references[0], "expected_resource_version": 1 },
-                    { "key": references[1], "expected_resource_version": 1 },
+                    { "entity_key": CF_TYPE, "expected_resource_version": 1 },
+                    { "entity_key": references[0], "expected_resource_version": 1 },
+                    { "entity_key": references[1], "expected_resource_version": 1 },
                 ]
             }),
         ),
@@ -1878,9 +2043,10 @@ async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
         .expect("the operation carries its items");
     assert_eq!(items.len(), 3, "{items:?}");
 
-    for (position, expected) in [CF_TYPE, CF_OTHER, CF_THIRD].iter().enumerate() {
+    let keys = [CF_TYPE, references[0].as_str(), references[1].as_str()];
+    for (position, expected) in keys.iter().enumerate() {
         assert_eq!(
-            items[position]["gts_id"],
+            items[position]["entity_key"],
             json!(expected),
             "item {position} is paired with the wrong target: {items:?}",
         );
@@ -1893,31 +2059,60 @@ async fn a_batch_mixing_identifiers_and_references_pairs_every_outcome() {
 }
 
 #[tokio::test]
-async fn an_unknown_registry_reference_is_a_not_found_problem() {
+async fn an_unknown_registry_reference_fails_its_item_only() {
     let router = router_with_db().await;
-    let reference = uuid::Uuid::new_v4().to_string();
+    register_entity(&router, "register", CF_TYPE).await;
+    let reference = uuid::Uuid::new_v4();
 
-    let refused = call(
+    let single = call(
         &router,
-        delete_one(Some("delete"), &reference, "?expected_resource_version=1"),
+        delete_one(
+            Some("delete"),
+            &reference.to_string(),
+            "?expected_resource_version=1",
+        ),
     )
     .await;
-    assert_eq!(refused.status, StatusCode::NOT_FOUND, "{:?}", refused.body);
-    assert_eq!(
-        refused.content_type.as_deref(),
-        Some("application/problem+json"),
-    );
+    assert_eq!(single.status, StatusCode::ACCEPTED, "{:?}", single.body);
+    let operation = poll(&router, &single).await;
+    assert_eq!(operation["status"], json!("completed"));
+    // The message is for humans; everything else is the contract.
+    let masked = |item: &Value| {
+        let mut item = item.clone();
+        item["error"]["message"] = json!("<message>");
+        item
+    };
+    let unresolved = json!({
+        "entity_key": reference.to_string(),
+        "status": "failed",
+        "resource_version": null,
+        "error": { "reason": "precondition_failed", "message": "<message>", "context": {} },
+    });
+    let items = operation["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(masked(&items[0]), unresolved);
 
-    let batched = call(
-        &router,
-        batch_delete(Some("batch"), &one_target(&reference, 1)),
-    )
-    .await;
+    // One refusal does not decide its batch neighbour.
+    let body = json!({
+        "items": [
+            { "entity_key": reference.to_string(), "expected_resource_version": 1 },
+            { "entity_key": CF_TYPE, "expected_resource_version": 1 },
+        ]
+    });
+    let batched = call(&router, batch_delete(Some("batch"), &body)).await;
+    assert_eq!(batched.status, StatusCode::ACCEPTED, "{:?}", batched.body);
+    let operation = poll(&router, &batched).await;
+    let items = operation["items"].as_array().expect("items");
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(masked(&items[0]), unresolved);
     assert_eq!(
-        batched.status,
-        StatusCode::NOT_FOUND,
-        "one deletion model, one answer: {:?}",
-        batched.body,
+        items[1],
+        json!({
+            "entity_key": CF_TYPE,
+            "status": "succeeded",
+            "resource_version": 2,
+            "error": null,
+        })
     );
 }
 
@@ -1947,7 +2142,7 @@ async fn batch_deletion_requires_a_positive_expected_resource_version() {
     let router = router_with_db().await;
 
     for (case, body) in [
-        ("missing", json!({ "items": [{ "key": CF_TYPE }] })),
+        ("missing", json!({ "items": [{ "entity_key": CF_TYPE }] })),
         ("zero", one_target(CF_TYPE, 0)),
         ("negative", one_target(CF_TYPE, -1)),
     ] {
@@ -1971,7 +2166,7 @@ async fn a_misspelled_dry_run_is_refused_rather_than_committed() {
         batch_delete(
             Some("camel-case-dry-run"),
             &json!({
-                "items": [{ "key": CF_TYPE, "expected_resource_version": 1 }],
+                "items": [{ "entity_key": CF_TYPE, "expected_resource_version": 1 }],
                 "dryRun": true,
             }),
         ),
@@ -2054,9 +2249,10 @@ async fn single_deletion_requires_a_positive_expected_resource_version() {
 }
 
 #[tokio::test]
-async fn single_deletion_refuses_an_if_match_header() {
+async fn both_deletion_routes_refuse_an_if_match_header() {
     let router = router_with_db().await;
-    let request = Request::builder()
+    register_entity(&router, "register", CF_TYPE).await;
+    let single = Request::builder()
         .method("DELETE")
         .uri(format!(
             "{V2}/entities/{CF_TYPE}?expected_resource_version=1"
@@ -2065,23 +2261,37 @@ async fn single_deletion_refuses_an_if_match_header() {
         .header("if-match", "\"1\"")
         .body(Body::empty())
         .expect("request");
+    let batch = Request::builder()
+        .method("POST")
+        .uri(format!("{V2}/entities:batchDelete"))
+        .header("content-type", "application/json")
+        .header("idempotency-key", "batch")
+        .header("if-match", "\"1\"")
+        .body(Body::from(one_target(CF_TYPE, 1).to_string()))
+        .expect("request");
 
-    let refused = call(&router, request).await;
-    assert_eq!(
-        refused.status,
-        StatusCode::BAD_REQUEST,
-        "{:?}",
-        refused.body
-    );
-    let text = serde_json::to_string(&refused.body).expect("serialize");
-    assert!(
-        text.contains("If-Match"),
-        "the refusal must name the header it refuses: {text}",
-    );
-    assert!(
-        text.contains("expected_resource_version"),
-        "and the parameter that replaces it: {text}",
-    );
+    for request in [single, batch] {
+        let refused = call(&router, request).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::BAD_REQUEST,
+            "{:?}",
+            refused.body
+        );
+        assert!(refused.location.is_none(), "no operation was created");
+        let text = serde_json::to_string(&refused.body).expect("serialize");
+        assert!(
+            text.contains("If-Match"),
+            "the refusal must name the header it refuses: {text}",
+        );
+        assert!(
+            text.contains("expected_resource_version"),
+            "and the parameter that replaces it: {text}",
+        );
+    }
+    let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(entity.body["lifecycle_status"], json!("active"));
+    assert_eq!(entity.body["origin"]["resource_version"], json!(1));
 }
 
 #[tokio::test]
@@ -2139,7 +2349,7 @@ async fn a_dry_run_deletion_predicts_and_the_commit_performs() {
             batch_delete(
                 Some("dry-batch"),
                 &json!({
-                    "items": [{ "key": CF_TYPE, "expected_resource_version": 1 }],
+                    "items": [{ "entity_key": CF_TYPE, "expected_resource_version": 1 }],
                     "dry_run": true,
                 }),
             ),
@@ -2157,7 +2367,7 @@ async fn a_dry_run_deletion_predicts_and_the_commit_performs() {
         assert_eq!(operation["dry_run"], json!(true), "{idempotency_key}");
         assert_eq!(operation["status"], json!("completed"), "{idempotency_key}");
         let item = &operation["items"][0];
-        assert_eq!(item["gts_id"], json!(CF_TYPE), "{idempotency_key}");
+        assert_eq!(item["entity_key"], json!(CF_TYPE), "{idempotency_key}");
         assert_eq!(item["status"], json!("succeeded"), "{idempotency_key}");
 
         let entity = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
@@ -2597,9 +2807,22 @@ fn batch_get(body: &Value) -> Request<Body> {
     post(&format!("{V2}/entities:batchGet"), body)
 }
 
+/// A `:batchGet` result by its echoed key: batch order is not contractual
+/// (DESIGN §3.3).
+fn result_for<'a>(body: &'a Value, key: &str) -> &'a Value {
+    body["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|item| item["entity_key"] == key)
+        // The key is not printed: it can be a UUID, and CodeQL reads a UUID in a
+        // panic message as cleartext logging. The body still names what came back.
+        .unwrap_or_else(|| panic!("every asked key is answered: {body}"))
+}
+
 /// One `items` envelope of unconditional keys.
 fn keys(keys: &[&str]) -> Value {
-    json!({ "items": keys.iter().map(|k| json!({ "key": k })).collect::<Vec<_>>() })
+    json!({ "items": keys.iter().map(|k| json!({ "entity_key": k })).collect::<Vec<_>>() })
 }
 
 /// `GET {V2}/entities`, with the query string spelled by the caller.
@@ -2641,7 +2864,7 @@ fn page_ids(body: &Value) -> Vec<String> {
 // --- `:batchGet` ------------------------------------------------------------
 
 /// One explicit result per requested key, absence included, echoing the key it was
-/// asked by and in request order (DESIGN §3.3).
+/// asked by (DESIGN §3.3).
 #[tokio::test]
 async fn a_batch_read_answers_every_key_including_the_absent_one() {
     let router = router_with_db().await;
@@ -2654,20 +2877,19 @@ async fn a_batch_read_answers_every_key_including_the_absent_one() {
     let response = call(&router, batch_get(&body)).await;
 
     assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
-    let items = response.body["items"].as_array().expect("items").to_owned();
+    let items = response.body["items"].as_array().expect("items");
     assert_eq!(items.len(), 3, "one result per requested key: {items:?}");
 
-    assert_eq!(items[0]["key"], json!(CF_ABSENT_TYPE));
-    assert_eq!(items[0]["status"], json!("not_found"));
+    let absent = result_for(&response.body, CF_ABSENT_TYPE);
+    assert_eq!(absent["status"], json!("not_found"));
     assert!(
-        items[0].get("entity").is_none() || items[0]["entity"].is_null(),
-        "an absence carries no entity: {:?}",
-        items[0],
+        absent.get("entity").is_none() || absent["entity"].is_null(),
+        "an absence carries no entity: {absent:?}",
     );
 
-    assert_eq!(items[1]["key"], json!(CF_TYPE));
-    assert_eq!(items[1]["status"], json!("found"));
-    let schema = &items[1]["entity"];
+    let schema = result_for(&response.body, CF_TYPE);
+    assert_eq!(schema["status"], json!("found"));
+    let schema = &schema["entity"];
     assert_eq!(schema["gts_id"], json!(CF_TYPE));
     assert_eq!(schema["kind"], json!("type_schema"));
     assert_eq!(schema["origin"]["resource_version"], json!(1));
@@ -2679,9 +2901,9 @@ async fn a_batch_read_answers_every_key_including_the_absent_one() {
         "a batch read returns every selected document, D3 artifacts included: {schema:?}",
     );
 
-    assert_eq!(items[2]["key"], json!(CF_INSTANCE));
-    assert_eq!(items[2]["status"], json!("found"));
-    assert_eq!(items[2]["entity"]["content"], json!({ "name": "first" }));
+    let instance = result_for(&response.body, CF_INSTANCE);
+    assert_eq!(instance["status"], json!("found"));
+    assert_eq!(instance["entity"]["content"], json!({ "name": "first" }));
 }
 
 /// Both key spellings resolve one row, and each result echoes the spelling it was
@@ -2700,13 +2922,51 @@ async fn a_batch_read_answers_identifiers_and_registry_references_alike() {
     assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
     let items = response.body["items"].as_array().expect("items");
     assert_eq!(items.len(), 2, "{items:?}");
-    assert_eq!(items[0]["key"], json!(uuid));
-    assert_eq!(items[1]["key"], json!(CF_TYPE));
-    for item in items {
+    for item in [
+        result_for(&response.body, &uuid),
+        result_for(&response.body, CF_TYPE),
+    ] {
         assert_eq!(item["status"], json!("found"), "{item:?}");
         assert_eq!(item["entity"]["gts_id"], json!(CF_TYPE));
         assert_eq!(item["entity"]["gts_uuid"], json!(uuid));
     }
+}
+
+/// Every UUID spelling is one Registry Reference: the spellings collapse onto one
+/// result, echoed lowercase and hyphenated as an operation echoes it. A key that
+/// is no identifier has no canonical form, so its `not_found` echoes it as sent.
+#[tokio::test]
+async fn a_batch_read_echoes_registry_references_canonically() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let uuid = gts::GtsId::try_new(CF_TYPE)
+        .expect("identifier")
+        .to_uuid()
+        .to_string();
+    let upper = uuid.to_uppercase();
+    let simple = uuid.replace('-', "");
+    let bogus = "gts.NOT.an.identifier";
+
+    let response = call(&router, batch_get(&keys(&[&upper, &simple, bogus]))).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+    let items = response.body["items"].as_array().expect("items");
+    assert_eq!(
+        items.len(),
+        2,
+        "two spellings of one UUID are one key: {items:?}"
+    );
+    let by_key = |key: &str| {
+        items
+            .iter()
+            .find(|item| item["entity_key"] == json!(key))
+            // The key is not printed: it is a UUID spelling (see `result_for`).
+            .unwrap_or_else(|| panic!("every asked key has a result: {items:?}"))
+    };
+    let found = by_key(&uuid);
+    assert_eq!(found["status"], json!("found"));
+    assert_eq!(found["entity"]["gts_id"], json!(CF_TYPE));
+    assert_eq!(by_key(bogus)["status"], json!("not_found"));
 }
 
 /// A key named twice is one result: the answer is per key, not per mention.
@@ -2726,7 +2986,7 @@ async fn duplicate_keys_collapse_to_one_result() {
     assert_eq!(
         items
             .iter()
-            .map(|item| item["key"].clone())
+            .map(|item| item["entity_key"].clone())
             .collect::<Vec<_>>(),
         vec![json!(CF_TYPE), json!(CF_ABSENT_TYPE)],
         "the duplicate collapses onto its first mention: {items:?}",
@@ -2754,10 +3014,13 @@ async fn an_impossible_identifier_is_classified_alike_by_both_read_surfaces() {
 
     let batched = call(&router, batch_get(&keys(&[IMPOSSIBLE_KEY, CF_ABSENT_TYPE]))).await;
     assert_eq!(batched.status, StatusCode::OK, "{:?}", batched.body);
-    let items = batched.body["items"].as_array().expect("items");
-    assert_eq!(items[0]["key"], json!(IMPOSSIBLE_KEY));
-    assert_eq!(items[0]["status"], json!("not_found"));
-    assert_eq!(items[1]["status"], json!("not_found"));
+    for key in [IMPOSSIBLE_KEY, CF_ABSENT_TYPE] {
+        assert_eq!(
+            result_for(&batched.body, key)["status"],
+            json!("not_found"),
+            "{key}"
+        );
+    }
 }
 
 /// One header cannot represent a batch of validators, so `If-None-Match` is refused
@@ -2848,7 +3111,7 @@ async fn a_batch_read_is_bounded_at_its_ceiling() {
 async fn an_oversized_batch_read_is_refused_with_its_exact_count() {
     let router = router_with_db().await;
     let items: Vec<Value> = (0..10_000)
-        .map(|i| json!({ "key": format!("k{i}") }))
+        .map(|i| json!({ "entity_key": format!("k{i}") }))
         .collect();
 
     let response = call(&router, batch_get(&json!({ "items": items }))).await;
@@ -2990,28 +3253,58 @@ async fn a_batch_key_over_1024_bytes_is_refused() {
     let router = router_with_db().await;
 
     let at = "a".repeat(1024);
-    let served = call(&router, batch_get(&json!({ "items": [{ "key": at }] }))).await;
+    let served = call(
+        &router,
+        batch_get(&json!({ "items": [{ "entity_key": at }] })),
+    )
+    .await;
     assert_eq!(served.status, StatusCode::OK, "{:?}", served.body);
     assert_eq!(served.body["items"][0]["status"], json!("not_found"));
 
     let over = "a".repeat(1025);
-    let refused = call(&router, batch_get(&json!({ "items": [{ "key": over }] }))).await;
-    assert_field_refusal(&refused, "key", "VALIDATION_FAILED");
+    let refused = call(
+        &router,
+        batch_get(&json!({ "items": [{ "entity_key": over }] })),
+    )
+    .await;
+    assert_field_refusal(&refused, "entity_key", "VALIDATION_FAILED");
 }
 
-/// An item's `if_none_match` has the key's bound: 1024 bytes are served, 1025 refused.
+/// An item's `if_none_match` has the key's bound: 1024 bytes are served, 1025
+/// refused, whether the handler (raw value) or the parser (quoted tag) sees it.
 #[tokio::test]
 async fn a_batch_validator_over_1024_bytes_is_refused() {
     let router = router_with_db().await;
-    let item =
-        |len: usize| json!({ "items": [{ "key": CF_TYPE, "if_none_match": "v".repeat(len) }] });
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let item = |tag: String| json!({ "items": [{ "entity_key": CF_TYPE, "if_none_match": tag }] });
 
-    let served = call(&router, batch_get(&item(1024))).await;
+    // 1024 bytes quoted: read as a condition that does not match, so `found`.
+    let served = call(
+        &router,
+        batch_get(&item(format!("\"{}\"", "v".repeat(1022)))),
+    )
+    .await;
     assert_eq!(served.status, StatusCode::OK, "{:?}", served.body);
-    assert_eq!(served.body["items"][0]["status"], json!("not_found"));
+    assert_eq!(served.body["items"][0]["status"], json!("found"));
 
-    let refused = call(&router, batch_get(&item(1025))).await;
+    let refused = call(
+        &router,
+        batch_get(&item(format!("\"{}\"", "v".repeat(1023)))),
+    )
+    .await;
     assert_field_refusal(&refused, "if_none_match", "VALIDATION_FAILED");
+}
+
+/// A batch item's condition is one entity-tag from an earlier read; anything else
+/// is refused rather than read as no condition.
+#[tokio::test]
+async fn a_batch_item_condition_that_is_no_entity_tag_is_refused() {
+    let router = router_with_db().await;
+    for tag in ["*", "unquoted", "", "\"a b\"", "\"a\nb\""] {
+        let body = json!({ "items": [{ "entity_key": CF_TYPE, "if_none_match": tag }] });
+        let refused = call(&router, batch_get(&body)).await;
+        assert_field_refusal(&refused, "if_none_match", "VALIDATION_FAILED");
+    }
 }
 
 /// The exact read shares the batch key bound; a non-canonical spelling is absent.
@@ -3021,7 +3314,7 @@ async fn an_exact_read_bounds_its_key_and_matches_only_the_canonical_spelling() 
     register_type_and_instance(&router).await;
 
     let refused = call(&router, exact(&"a".repeat(1025), "")).await;
-    assert_field_refusal(&refused, "key", "VALIDATION_FAILED");
+    assert_field_refusal(&refused, "entity_key", "VALIDATION_FAILED");
 
     for key in [
         "a".repeat(1024),
@@ -3036,6 +3329,91 @@ async fn an_exact_read_bounds_its_key_and_matches_only_the_canonical_spelling() 
             response.body
         );
     }
+}
+
+/// A registration identifier has the key bound, refused under `gts_id` with the
+/// code a longer identifier had before, and without echoing it.
+#[tokio::test]
+async fn a_registration_identifier_over_1024_bytes_is_refused_without_being_echoed() {
+    let router = router_with_db().await;
+    let over = format!("gts.{}", "a".repeat(1021));
+
+    let refused = call(
+        &router,
+        submit(Some("register-long"), &one_candidate(&over)),
+    )
+    .await;
+    assert_field_refusal(&refused, "gts_id", "INVALID_GTS_ID");
+    assert!(
+        !refused.body.to_string().contains(&over),
+        "{:?}",
+        refused.body
+    );
+
+    let at = format!("gts.{}", "a".repeat(1020));
+    let parsed = call(&router, submit(Some("register-at"), &one_candidate(&at))).await;
+    assert_eq!(parsed.status, StatusCode::BAD_REQUEST, "{:?}", parsed.body);
+    assert!(
+        parsed
+            .body
+            .to_string()
+            .contains("not a canonical GTS identifier")
+    );
+}
+
+/// A missing Registry Reference is reported as one, not as a GTS identifier.
+#[tokio::test]
+async fn an_absent_registry_reference_is_not_found_by_uuid() {
+    let router = router_with_db().await;
+    let reference = uuid::Uuid::new_v4().to_string();
+    let missing = call(&router, exact(&reference, "")).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{:?}", missing.body);
+    let detail = missing.body["detail"].as_str().expect("detail");
+    assert!(detail.contains(&reference), "{detail}");
+    assert!(!detail.contains("GTS ID"), "{detail}");
+}
+
+/// Both deletion routes share the read key bound, and the refusal names the
+/// length only: echoing the key would amplify it into the response and the log.
+#[tokio::test]
+async fn a_deletion_key_over_1024_bytes_is_refused_without_being_echoed() {
+    let router = router_with_db().await;
+    let over = format!("gts.{}", "a".repeat(1021));
+
+    let single = call(
+        &router,
+        delete_one(Some("delete-long"), &over, "?expected_resource_version=1"),
+    )
+    .await;
+    assert_field_refusal(&single, "entity_key", "VALIDATION_FAILED");
+    assert!(
+        !single.body.to_string().contains(&over),
+        "{:?}",
+        single.body
+    );
+
+    let batch = call(
+        &router,
+        batch_delete(Some("batch-delete-long"), &one_target(&over, 1)),
+    )
+    .await;
+    assert_field_refusal(&batch, "entity_key", "VALIDATION_FAILED");
+    assert!(!batch.body.to_string().contains(&over), "{:?}", batch.body);
+
+    // At the bound the key is classified, and refused as the identifier it is not.
+    let at = format!("gts.{}", "a".repeat(1020));
+    let parsed = call(
+        &router,
+        batch_delete(Some("batch-delete-at"), &one_target(&at, 1)),
+    )
+    .await;
+    assert_eq!(parsed.status, StatusCode::BAD_REQUEST, "{:?}", parsed.body);
+    assert!(
+        parsed
+            .body
+            .to_string()
+            .contains("not a canonical GTS identifier")
+    );
 }
 
 /// A pattern is bounded at 1024 bytes before `gts-rust` parses it.
@@ -3276,8 +3654,7 @@ fn the_discovery_query_parameters_are_declared() {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    let _router =
-        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+    let _router = routes(Router::new(), &openapi, legacy, None);
 
     let params = openapi.params.lock().expect("params lock").clone();
     let declared = params
@@ -3348,8 +3725,7 @@ fn all_seven_v2_operations_declare_problem_responses() {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    let _router =
-        types_registry::api::rest::routes::register_routes(Router::new(), &openapi, legacy, None);
+    let _router = routes(Router::new(), &openapi, legacy, None);
 
     let responses = openapi.responses.lock().expect("responses lock");
     for operation_id in V2_OPERATIONS {
@@ -3601,32 +3977,82 @@ async fn a_mixed_batch_omits_type_schema_documents_on_the_instance() {
     assert_eq!(instance["content"], json!({ "name": "first" }));
 }
 
+/// `provenance` is a Type Schema group: a selected `false` stays inside it, and an
+/// Instance omits the whole group on every read even when selected.
 #[tokio::test]
-async fn provenance_is_one_group_and_null_where_inapplicable() {
+async fn provenance_is_a_type_schema_group_absent_on_instances() {
+    const SELECT: &str = "provenance";
     let router = router_with_db().await;
     register_type_and_instance(&router).await;
 
-    let response = call(
-        &router,
-        selective_batch(&[CF_TYPE, CF_INSTANCE], "provenance"),
-    )
-    .await;
-    let schema = &response.body["items"][0]["entity"]["provenance"];
-    let instance = &response.body["items"][1]["entity"]["provenance"];
-    for provenance in [schema, instance] {
-        assert_eq!(
-            field_names(provenance),
-            ["compat_forced", "gts_impl_version", "gts_spec_version"],
-            "attribution is internal until P1",
-        );
-        assert!(provenance["gts_spec_version"].is_string(), "{provenance:?}");
-        assert!(provenance["gts_impl_version"].is_string(), "{provenance:?}");
-    }
-    assert_eq!(schema["compat_forced"], json!(false));
-    assert!(
-        instance["compat_forced"].is_null(),
-        "an Instance has nothing to waive: {instance:?}",
+    let batch = call(&router, selective_batch(&[CF_TYPE, CF_INSTANCE], SELECT)).await;
+    assert_eq!(batch.status, StatusCode::OK, "{:?}", batch.body);
+    let schema = &batch.body["items"][0]["entity"];
+    let instance = &batch.body["items"][1]["entity"];
+    assert_eq!(
+        field_names(schema),
+        ["gts_id", "gts_uuid", "kind", "lifecycle_status", SELECT],
     );
+    assert_eq!(
+        schema[SELECT],
+        json!({ "compatibility_check_skipped": false }),
+        "exactly one member, and a selected false is kept",
+    );
+    assert_eq!(
+        field_names(instance),
+        ["gts_id", "gts_uuid", "kind", "lifecycle_status"],
+        "an Instance omits the group, rather than reporting null or an empty one",
+    );
+
+    let single = call(&router, exact(CF_TYPE, &format!("?$select={SELECT}"))).await;
+    assert_eq!(single.status, StatusCode::OK, "{:?}", single.body);
+    assert_eq!(&single.body, schema);
+    let single = call(&router, exact(CF_INSTANCE, &format!("?$select={SELECT}"))).await;
+    assert_eq!(&single.body, instance);
+
+    let listed = traverse(&router, &format!("?$select=gts_id,{SELECT}")).await;
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(listed[0]["gts_id"], json!(CF_TYPE));
+    assert_eq!(listed[0][SELECT], schema[SELECT]);
+    assert!(listed[1].get(SELECT).is_none(), "{:?}", listed[1]);
+
+    let default = call(&router, exact(CF_TYPE, "")).await;
+    assert!(
+        default.body.get(SELECT).is_none(),
+        "not in the default projection: {:?}",
+        default.body
+    );
+    let selected = call(&router, exact(CF_TYPE, &format!("?$select={SELECT}"))).await;
+    assert_ne!(
+        selected.etag, default.etag,
+        "the validator is scoped to the selection"
+    );
+}
+
+/// An unknown name, a `provenance` member on its own or by path, and the internal
+/// revision audit columns are `INVALID_SELECT` on every read.
+#[tokio::test]
+async fn unsupported_read_fields_are_invalid_select() {
+    let router = router_with_db().await;
+    register_type_and_instance(&router).await;
+
+    for select in [
+        "unknown_field",
+        "compatibility_check_skipped",
+        "provenance.compatibility_check_skipped",
+        "provenance/compatibility_check_skipped",
+        "compat_forced",
+        "gts_spec_version",
+        "gts_impl_version",
+    ] {
+        let query = format!("?$select={select}");
+        let single = call(&router, exact(CF_TYPE, &query)).await;
+        assert_field_refusal(&single, "$select", "INVALID_SELECT");
+        let batch = call(&router, selective_batch(&[CF_TYPE], select)).await;
+        assert_field_refusal(&batch, "$select", "INVALID_SELECT");
+        let listed = call(&router, discover(&query)).await;
+        assert_field_refusal(&listed, "$select", "INVALID_SELECT");
+    }
 }
 
 /// Identity, kind and lifecycle are mandatory, so a projected tombstone is not an
@@ -3771,11 +4197,11 @@ async fn unknown_batch_body_fields_are_refused() {
     let router = router_with_db().await;
     for (body, field) in [
         (
-            json!({ "items": [{ "key": CF_TYPE }], "select": "content" }),
+            json!({ "items": [{ "entity_key": CF_TYPE }], "select": "content" }),
             "select",
         ),
         (
-            json!({ "items": [{ "key": CF_TYPE, "$select": "content" }] }),
+            json!({ "items": [{ "entity_key": CF_TYPE, "$select": "content" }] }),
             "$select",
         ),
     ] {
@@ -3819,7 +4245,7 @@ fn router_for_openapi(openapi: &TestOpenApi) -> Router {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    types_registry::api::rest::routes::register_routes(Router::new(), openapi, legacy, None)
+    routes(Router::new(), openapi, legacy, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -4019,8 +4445,19 @@ async fn toolkit_spellings_of_limit_and_cursor_are_one_slot_each() {
         let response = call(&router, discover(&query)).await;
         assert_field_refusal(&response, field, "VALIDATION_FAILED");
     }
-    let zero = call(&router, discover("?$top=0")).await;
-    assert_field_refusal(&zero, "$top", "VALIDATION_FAILED");
+    // Every spelling of zero is the gear's refusal under the name sent, never
+    // ToolKit's `$top` / `INVALID_LIMIT`; `%2B` is a literal `+`.
+    for (query, field) in [
+        ("?$top=0", "$top"),
+        ("?$top=00", "$top"),
+        ("?$top=%2B0", "$top"),
+        ("?limit=0", "limit"),
+        ("?limit=00", "limit"),
+        ("?limit=%2B0", "limit"),
+    ] {
+        let zero = call(&router, discover(query)).await;
+        assert_field_refusal(&zero, field, "VALIDATION_FAILED");
+    }
 }
 
 #[tokio::test]
@@ -4255,8 +4692,7 @@ fn generated_openapi() -> Value {
         Arc::new(InMemoryGtsRepository::new(config.to_gts_config())),
         config,
     ));
-    let _router =
-        types_registry::api::rest::routes::register_routes(Router::new(), &registry, legacy, None);
+    let _router = routes(Router::new(), &registry, legacy, None);
     let document = registry
         .build_openapi(&toolkit::api::OpenApiInfo::default())
         .expect("the document builds");
@@ -4350,6 +4786,31 @@ fn discovery_declares_kind_and_lifecycle_status_as_optional_strings() {
     }
 }
 
+/// A submitted item publishes exactly its four fields; only the identifier and the
+/// document are required.
+#[test]
+fn a_submitted_item_publishes_exactly_its_fields() {
+    let doc = generated_openapi();
+    let item = &doc["components"]["schemas"]["SubmitEntityDto"];
+    let mut published: Vec<&str> = item["properties"]
+        .as_object()
+        .expect("SubmitEntityDto properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    published.sort_unstable();
+    assert_eq!(
+        published,
+        [
+            "content",
+            "expected_resource_version",
+            "gts_id",
+            "skip_compatibility_check"
+        ]
+    );
+    assert_eq!(item["required"], json!(["gts_id", "content"]));
+}
+
 /// All three database-backed reads answer with the one `EntityDto`, whose
 /// identity, kind and lifecycle are required and never `null`.
 #[test]
@@ -4372,15 +4833,46 @@ fn every_entity_read_requires_identity_kind_and_lifecycle_in_the_generated_docum
     let kind = &entity["properties"]["kind"];
     assert_eq!(kind["$ref"], "#/components/schemas/EntityKindDto", "{kind}");
     assert!(kind.get("oneOf").is_none(), "never nullable: {kind}");
-    let provenance = schemas["ProvenanceDto"]["properties"]
+    let mut published: Vec<&str> = entity["properties"]
         .as_object()
-        .expect("provenance properties");
-    let mut members: Vec<&str> = provenance.keys().map(String::as_str).collect();
-    members.sort_unstable();
+        .expect("EntityDto properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    published.sort_unstable();
     assert_eq!(
-        members,
-        ["compat_forced", "gts_impl_version", "gts_spec_version"],
-        "attribution is not published in P0",
+        published,
+        [
+            "content",
+            "effective_traits",
+            "effective_traits_schema",
+            "gts_id",
+            "gts_uuid",
+            "kind",
+            "lifecycle_status",
+            "origin",
+            "provenance",
+            "resolved_schema",
+        ],
+        "exactly the read contract's fields are published",
+    );
+    let provenance = &entity["properties"]["provenance"];
+    assert_eq!(
+        provenance["$ref"], "#/components/schemas/ProvenanceDto",
+        "omitted rather than null: {provenance}"
+    );
+    assert!(provenance.get("oneOf").is_none(), "{provenance}");
+    let group = &schemas["ProvenanceDto"];
+    assert_eq!(
+        group["properties"],
+        json!({ "compatibility_check_skipped": group["properties"]["compatibility_check_skipped"] }),
+        "exactly one member: {group}"
+    );
+    assert_eq!(group["required"], json!(["compatibility_check_skipped"]));
+    assert_eq!(
+        group["properties"]["compatibility_check_skipped"]["type"],
+        json!("boolean"),
+        "a non-null boolean: {group}"
     );
     let body = |path: String, method: &str| {
         doc["paths"][path][method]["responses"]["200"]["content"]["application/json"]["schema"]
@@ -4668,4 +5160,193 @@ fn discovery_declares_the_page_size_as_positive_on_request_and_page() {
     let applied = &doc["components"]["schemas"]["PageInfoDto"]["properties"]["limit"];
     assert_eq!(applied["minimum"], 1, "{applied}");
     assert!(applied.get("maximum").is_none(), "{applied}");
+}
+
+// ---------------------------------------------------------------------------
+// Conditional reads (T22d)
+// ---------------------------------------------------------------------------
+
+fn get_if_none_match(uri: &str, value: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("if-none-match", value)
+        .body(Body::empty())
+        .expect("request")
+}
+
+/// The exact read refuses a header it cannot read, naming the header rather than
+/// the batch body field, instead of answering unconditionally.
+#[tokio::test]
+async fn an_unreadable_if_none_match_header_is_refused() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let over = format!("\"{}\"", "v".repeat(1025));
+    for value in [over.as_str(), "unquoted", "*, \"a\"", " , ", "\"a b\""] {
+        let refused = call(
+            &router,
+            get_if_none_match(&format!("{V2}/entities/{CF_TYPE}"), value),
+        )
+        .await;
+        assert_field_refusal(&refused, "If-None-Match", "VALIDATION_FAILED");
+        assert!(
+            !refused.body.to_string().contains("each if_none_match"),
+            "{:?}",
+            refused.body
+        );
+    }
+}
+
+/// The exact read hands out a quoted `ETag`, and sending it back answers a bodyless
+/// `304` carrying the same bytes (RFC 9110 §15.4.5).
+#[tokio::test]
+async fn a_current_etag_answers_304_with_the_same_etag() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let uri = format!("{V2}/entities/{CF_TYPE}");
+
+    let first = call(&router, get(&uri)).await;
+    assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+    let etag = first.etag.expect("an exact read carries an ETag");
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+
+    for condition in [
+        etag.clone(),
+        format!("W/{etag}"),
+        format!("\"stale\", {etag}"),
+        "*".to_owned(),
+    ] {
+        let conditional = call(&router, get_if_none_match(&uri, &condition)).await;
+        assert_eq!(conditional.status, StatusCode::NOT_MODIFIED, "{condition}");
+        assert_eq!(conditional.body, Value::Null, "{condition}: bodyless");
+        assert_eq!(
+            conditional.etag.as_deref(),
+            Some(etag.as_str()),
+            "{condition}"
+        );
+    }
+}
+
+/// A validator from before a revision, or for another `$select`, is not current.
+#[tokio::test]
+async fn a_stale_or_narrower_etag_answers_200_with_the_representation() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+    let uri = format!("{V2}/entities/{CF_TYPE}");
+    let stale = call(&router, get(&uri)).await.etag.expect("ETag");
+
+    let wide = call(
+        &router,
+        get_if_none_match(&format!("{uri}?$select=content"), &stale),
+    )
+    .await;
+    assert_eq!(
+        wide.status,
+        StatusCode::OK,
+        "a narrow token never answers a wider read"
+    );
+    assert!(wide.body["content"].is_object(), "{:?}", wide.body);
+    assert_ne!(wide.etag.as_deref(), Some(stale.as_str()));
+
+    let mut revised = schema(CF_TYPE);
+    revised["title"] = json!("revised");
+    let body = json!({
+        "items": [{ "gts_id": CF_TYPE, "content": revised, "expected_resource_version": 1 }]
+    });
+    let accepted = call(&router, submit(Some("revise"), &body)).await;
+    assert_eq!(
+        poll(&router, &accepted).await["items"][0]["status"],
+        json!("succeeded")
+    );
+
+    let after = call(&router, get_if_none_match(&uri, &stale)).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(after.body["origin"]["resource_version"], json!(2));
+    assert_ne!(after.etag.as_deref(), Some(stale.as_str()));
+}
+
+/// `batchGet` hands out one `etag` per key, the exact read's `ETag` byte for byte,
+/// and a current one comes back as `unchanged` with the same bytes and no entity.
+#[tokio::test]
+async fn a_batch_answers_unchanged_per_key_with_the_same_etag() {
+    let router = router_with_db().await;
+    register_type_and_instance(&router).await;
+
+    let first = call(&router, batch_get(&keys(&[CF_TYPE, CF_INSTANCE]))).await;
+    assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+    let etag = |key: &str| {
+        result_for(&first.body, key)["etag"]
+            .as_str()
+            .expect("a found result carries etag")
+            .to_owned()
+    };
+    let exact = call(&router, get(&format!("{V2}/entities/{CF_TYPE}"))).await;
+    assert_eq!(
+        exact.etag,
+        Some(etag(CF_TYPE)),
+        "byte-identical to the exact read's ETag"
+    );
+
+    let body = json!({ "items": [
+        { "entity_key": CF_TYPE, "if_none_match": etag(CF_TYPE) },
+        { "entity_key": CF_INSTANCE, "if_none_match": "\"stale\"" },
+        { "entity_key": CF_ABSENT_TYPE, "if_none_match": etag(CF_TYPE) },
+    ] });
+    let response = call(&router, batch_get(&body)).await;
+    assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+    let unchanged = result_for(&response.body, CF_TYPE);
+    assert_eq!(unchanged["status"], json!("unchanged"));
+    assert_eq!(unchanged["etag"], json!(etag(CF_TYPE)));
+    assert!(unchanged.get("entity").is_none(), "{unchanged}");
+    let found = result_for(&response.body, CF_INSTANCE);
+    assert_eq!(found["status"], json!("found"));
+    assert_eq!(found["etag"], json!(etag(CF_INSTANCE)));
+    assert!(found["entity"].is_object(), "{found}");
+    let absent = result_for(&response.body, CF_ABSENT_TYPE);
+    assert_eq!(absent["status"], json!("not_found"));
+    assert!(absent.get("etag").is_none(), "{absent}");
+}
+
+/// A page is a changing set, not an exact-key answer (DESIGN §3.3).
+#[tokio::test]
+async fn discovery_carries_no_validator() {
+    let router = router_with_db().await;
+    register_entity(&router, "arrange", CF_TYPE).await;
+
+    let page = call(&router, discover("")).await;
+    assert_eq!(page.status, StatusCode::OK, "{:?}", page.body);
+    assert_eq!(page.etag, None);
+    assert!(
+        page.body["items"][0].get("etag").is_none(),
+        "{:?}",
+        page.body
+    );
+}
+
+#[test]
+fn the_exact_read_declares_if_none_match_and_a_304_carrying_the_etag() {
+    let doc = generated_openapi();
+    let read = &doc["paths"][format!("{V2}/entities/{{entity_key}}")]["get"];
+    let params = read["parameters"].as_array().expect("parameters");
+    assert!(
+        params.iter().any(|p| p["name"] == "If-None-Match"
+            && p["in"] == "header"
+            && p["required"] != json!(true)),
+        "{params:?}",
+    );
+    assert!(
+        read["responses"]["200"]["headers"]["ETag"].is_object(),
+        "{read}"
+    );
+    let not_modified = &read["responses"]["304"];
+    assert!(not_modified["headers"]["ETag"].is_object(), "{read}");
+    assert!(
+        not_modified.get("content").is_none(),
+        "a 304 has no body: {not_modified}"
+    );
+
+    let schemas = &doc["components"]["schemas"];
+    let statuses = schemas["EntityLookupStatusDto"].to_string();
+    assert!(statuses.contains("\"unchanged\""), "{statuses}");
+    assert!(schemas["EntityLookupDto"]["properties"]["etag"].is_object());
 }

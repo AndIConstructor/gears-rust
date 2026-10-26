@@ -1,8 +1,8 @@
 //! REST handlers for the Types Registry gear.
 
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::HashSet;
 use std::sync::Arc;
+use types_registry_sdk::field;
 
 use axum::Json;
 use axum::extract::{Extension, OriginalUri};
@@ -10,9 +10,9 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use toolkit::api::canonical_prelude::*;
 use toolkit::api::rest::extract;
+use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use super::cursor::Binding;
 use super::dto::{
     BatchGetRequest, DeleteEntitiesRequest, DeleteEntityQuery, EntityDto, EntityLookupDto,
     EntityLookupsDto, EntityPageDto, GtsEntityDto, ListEntitiesQuery, ListEntitiesResponse,
@@ -22,14 +22,18 @@ use super::dto::{
 use super::params::{DiscoveryParams, ExactReadSelection, NoQuery};
 use super::paths::V2;
 use crate::domain::admission::{Accepted, Candidate, SubmitRequest};
-use crate::domain::enums::OperationKind;
+// Every v2 route authenticates a bearer today, so every call is a tenant's; T34 moves the
+// platform routes to `.platform_authenticated()` and their calls to `CallerContext::Platform`.
+use crate::domain::caller::CallerContext;
+use crate::domain::cursor::{self, Binding};
 use crate::domain::error::DomainError;
 use crate::domain::registry_service::{
-    DeleteRequest, DeleteTarget, DiscoveryQuery, EntityKey, EntityLookup, MAX_BATCH_GET_KEYS,
-    MAX_KEY_LEN, RegistryService, ServiceError,
+    BatchGetItem, DeleteRequest, DeleteTarget, DiscoveryQuery, EntityKey, EntityLookup,
+    MAX_BATCH_GET_KEYS, MAX_KEY_LEN, RegistryService, ServiceError,
 };
 use crate::domain::selection::FieldSelection;
 use crate::domain::service::TypesRegistryService;
+use crate::domain::validator::Validator;
 
 /// POST /api/v1/types-registry/entities
 ///
@@ -117,18 +121,9 @@ pub async fn get_entity(
     Ok(Json(entity.into()))
 }
 
-// ---------------------------------------------------------------------------
-// The database-backed platform-plane handlers (T9)
-// ---------------------------------------------------------------------------
-//
-// Mapping steps only. Every one of these reads a request, calls exactly one domain
-// method, and maps the result — no policy, no existence check and no vocabulary
-// decision lives here, which is what lets a future `api/grpc` adapter reuse the
-// same domain surface (SPEC §8.4). Size bounds checked here only fail early; the
-// domain enforces the same ones for every adapter. The one exception is a batch
-// item's `if_none_match`, which no domain method receives until T29 compares it.
-//
-// The handlers above this line are the pre-database path T27 deletes.
+// Database-backed platform handlers (T9): decode, call one domain method, encode.
+// Domain methods own policy and bounds; adapter checks only fail early.
+// T38 removes the pre-database handlers above.
 
 /// Advisory only: how long a client should wait before its first poll. The
 /// operation may well be terminal sooner — while admission is inline (T21) it
@@ -148,6 +143,7 @@ const IDEMPOTENCY_REPLAYED_HEADER: &str = "idempotency-replayed";
 /// decision — an absent or unusable key is the domain's refusal to make.
 pub async fn submit_entities(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
+    Extension(ctx): Extension<SecurityContext>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     extract::Json(req): extract::Json<SubmitEntitiesRequest>,
@@ -155,7 +151,6 @@ pub async fn submit_entities(
     let service = require_registry(service)?;
     let request = SubmitRequest {
         idempotency_key: idempotency_key(&headers)?,
-        kind: OperationKind::Registration,
         dry_run: req.dry_run.unwrap_or(false),
         candidates: req
             .items
@@ -164,13 +159,17 @@ pub async fn submit_entities(
                 gts_id: c.gts_id,
                 content: Some(c.content),
                 expected_resource_version: c.expected_resource_version,
-                force: c.force.unwrap_or(false),
+                force: c.skip_compatibility_check.unwrap_or(false),
             })
             .collect(),
     };
 
     let accepted = service
-        .submit(&request, time::OffsetDateTime::now_utc())
+        .submit(
+            CallerContext::Tenant(&ctx),
+            &request,
+            time::OffsetDateTime::now_utc(),
+        )
         .await
         .map_err(CanonicalError::from)?;
 
@@ -180,26 +179,40 @@ pub async fn submit_entities(
 /// Submit a deletion batch with per-item preconditions (DESIGN §3.3).
 pub async fn batch_delete_entities(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
+    Extension(ctx): Extension<SecurityContext>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     extract::Json(req): extract::Json<DeleteEntitiesRequest>,
 ) -> ApiResult<(StatusCode, HeaderMap, Json<OperationAcceptedDto>)> {
     let service = require_registry(service)?;
-    let request = DeleteRequest {
-        idempotency_key: idempotency_key(&headers)?,
-        dry_run: req.dry_run.unwrap_or(false),
-        targets: req
-            .items
-            .into_iter()
-            .map(|item| DeleteTarget {
-                key: EntityKey::parse(&item.key),
+    // Refused rather than ignored, exactly as on the single route.
+    if headers.contains_key(header::IF_MATCH) {
+        return Err(super::error::if_match_not_supported());
+    }
+    // Header first, as on the single route, so both report the same first error.
+    let idempotency_key = idempotency_key(&headers)?;
+    let targets = req
+        .items
+        .into_iter()
+        .map(|item| {
+            Ok(DeleteTarget {
+                key: deletion_key(&item.entity_key)?,
                 expected_resource_version: item.expected_resource_version,
             })
-            .collect(),
+        })
+        .collect::<Result<Vec<_>, CanonicalError>>()?;
+    let request = DeleteRequest {
+        idempotency_key,
+        dry_run: req.dry_run.unwrap_or(false),
+        targets,
     };
 
     let accepted = service
-        .delete(&request, time::OffsetDateTime::now_utc())
+        .delete(
+            CallerContext::Tenant(&ctx),
+            &request,
+            time::OffsetDateTime::now_utc(),
+        )
         .await
         .map_err(CanonicalError::from)?;
 
@@ -209,6 +222,7 @@ pub async fn batch_delete_entities(
 /// Submit a single deletion through the same [`DeleteRequest`] as batch deletion.
 pub async fn delete_entity(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
+    Extension(ctx): Extension<SecurityContext>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     extract::Path(key): extract::Path<String>,
@@ -224,17 +238,29 @@ pub async fn delete_entity(
         idempotency_key: idempotency_key(&headers)?,
         dry_run: query.dry_run.unwrap_or(false),
         targets: vec![DeleteTarget {
-            key: EntityKey::parse(&key),
+            key: deletion_key(&key)?,
             expected_resource_version: query.expected_resource_version,
         }],
     };
 
     let accepted = service
-        .delete(&request, time::OffsetDateTime::now_utc())
+        .delete(
+            CallerContext::Tenant(&ctx),
+            &request,
+            time::OffsetDateTime::now_utc(),
+        )
         .await
         .map_err(CanonicalError::from)?;
 
     receipt(uri.path(), accepted)
+}
+
+/// Bounded before `EntityKey::parse` copies the key; acceptance repeats the check.
+fn deletion_key(key: &str) -> Result<EntityKey, CanonicalError> {
+    if key.len() > MAX_KEY_LEN {
+        return Err(super::error::key_too_long(key.len()));
+    }
+    Ok(EntityKey::parse(key))
 }
 
 /// Decode `Idempotency-Key`; acceptance handles absence, this layer rejects invalid bytes.
@@ -322,15 +348,16 @@ fn operation_location(request_path: &str, operation_id: Uuid) -> String {
 /// Poll an operation without caching its caller-specific, changing state.
 pub async fn get_operation(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
+    Extension(ctx): Extension<SecurityContext>,
     extract::Path(operation_id): extract::Path<Uuid>,
 ) -> ApiResult<(HeaderMap, Json<OperationDto>)> {
     let service = require_registry(service)?;
     let record = service
-        .operation(operation_id)
+        .operation(CallerContext::Tenant(&ctx), operation_id)
         .await
         .map_err(CanonicalError::from)?
-        .ok_or_else(|| CanonicalError::from(DomainError::not_found_by_uuid(operation_id)))?;
-    Ok((no_store(), Json(record.into())))
+        .ok_or_else(|| super::error::operation_not_found(operation_id))?;
+    Ok((no_store(), Json(OperationDto::from(record))))
 }
 
 /// Add `Cache-Control: no-store` to caller-specific, changing responses.
@@ -346,17 +373,44 @@ fn no_store() -> HeaderMap {
 /// domain's classification, not this handler's.
 pub async fn get_entity_by_key(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
+    Extension(ctx): Extension<SecurityContext>,
     extract::Path(key): extract::Path<String>,
+    headers: HeaderMap,
     ExactReadSelection(selection): ExactReadSelection,
 ) -> ApiResult<Response> {
     let service = require_registry(service)?;
     let parsed = EntityKey::parse(&key);
-    let record = service
-        .entity(&parsed, selection)
+    let lookup = service
+        .lookup(
+            CallerContext::Tenant(&ctx),
+            &parsed,
+            selection,
+            super::etag::header_condition(&headers)?,
+        )
         .await
-        .map_err(CanonicalError::from)?
-        .ok_or_else(|| CanonicalError::from(DomainError::not_found_by_id(key)))?;
-    json_body(EntityDto::from(record), selection).await
+        .map_err(CanonicalError::from)?;
+    let (mut response, etag) = match lookup {
+        EntityLookup::Found { record, etag } => {
+            (json_body(EntityDto::from(record), selection).await?, etag)
+        }
+        // RFC 9110 §15.4.5: a `304` still carries the `ETag` a `200` would have.
+        EntityLookup::Unchanged { etag } => (StatusCode::NOT_MODIFIED.into_response(), etag),
+        EntityLookup::NotFound => {
+            return Err(CanonicalError::from(match parsed {
+                EntityKey::Uuid(gts_uuid) => DomainError::not_found_by_uuid(gts_uuid),
+                EntityKey::GtsId(_) => DomainError::not_found_by_id(key),
+            }));
+        }
+    };
+    response
+        .headers_mut()
+        .insert(header::ETAG, etag_header(etag)?);
+    Ok(response)
+}
+
+fn etag_header(etag: Validator) -> Result<HeaderValue, CanonicalError> {
+    HeaderValue::try_from(super::etag::entity_tag(etag))
+        .map_err(|_| CanonicalError::internal("the registry could not encode a validator").create())
 }
 
 /// Serialized off the executor when the body carries documents.
@@ -385,6 +439,7 @@ async fn json_body<T: serde::Serialize + Send + 'static>(
 /// must not lose the answers for the others.
 pub async fn batch_get_entities(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
+    Extension(ctx): Extension<SecurityContext>,
     headers: HeaderMap,
     _: NoQuery,
     extract::Json(req): extract::Json<BatchGetRequest>,
@@ -405,30 +460,35 @@ pub async fn batch_get_entities(
         return Err(ServiceError::BatchReadOutOfRange { count }.into());
     }
     let items = req.items.into_items();
-    // `if_none_match` is length-checked but not compared: no read emits a
-    // validator until T29.
-    let mut spelling_map: HashMap<EntityKey, String> = HashMap::with_capacity(items.len());
-    let mut keys: Vec<EntityKey> = Vec::with_capacity(items.len());
+    let mut asked: HashSet<EntityKey> = HashSet::with_capacity(items.len());
+    let mut reads: Vec<BatchGetItem> = Vec::with_capacity(items.len());
     for item in items {
         // Before `EntityKey::parse` copies the key; the domain repeats the check.
-        if item.key.len() > MAX_KEY_LEN {
-            return Err(super::error::key_too_long(item.key.len()));
+        if item.entity_key.len() > MAX_KEY_LEN {
+            return Err(super::error::key_too_long(item.entity_key.len()));
         }
         if let Some(validator) = &item.if_none_match
             && validator.len() > MAX_KEY_LEN
         {
-            return Err(super::error::validator_too_long(validator.len()));
+            return Err(super::error::validator_too_long(
+                field::IF_NONE_MATCH_FIELD,
+                validator.len(),
+            ));
         }
-        let key = EntityKey::parse(&item.key);
-        // The service dedups; the echo keeps the first spelling.
-        if let Entry::Vacant(e) = spelling_map.entry(key.clone()) {
-            e.insert(item.key);
-        }
-        keys.push(key);
+        let key = EntityKey::parse(&item.entity_key);
+        asked.insert(key.clone());
+        reads.push(BatchGetItem {
+            key,
+            if_none_match: item
+                .if_none_match
+                .as_deref()
+                .map(super::etag::item_condition)
+                .transpose()?,
+        });
     }
 
     let results = service
-        .batch_get(&keys, selection)
+        .batch_get(CallerContext::Tenant(&ctx), &reads, selection)
         .await
         .map_err(CanonicalError::from)?;
 
@@ -436,23 +496,20 @@ pub async fn batch_get_entities(
         items: results
             .into_iter()
             .map(|(key, lookup)| {
-                let key = spelling_map.remove(&key).ok_or_else(|| {
+                if !asked.remove(&key) {
                     tracing::error!(
                         unexpected_key = ?key,
-                        batch_size = keys.len(),
+                        batch_size = reads.len(),
                         "types_registry batch read answered a key it was not asked"
                     );
-                    CanonicalError::internal("the registry could not match a batch read result")
-                        .create()
-                })?;
-                Ok(EntityLookupDto {
-                    key,
-                    status: (&lookup).into(),
-                    entity: match lookup {
-                        EntityLookup::Found(record) => Some(EntityDto::from(record)),
-                        EntityLookup::NotFound => None,
-                    },
-                })
+                    return Err(CanonicalError::internal(
+                        "the registry could not match a batch read result",
+                    )
+                    .create());
+                }
+                // Canonical, as an operation echoes it: two spellings of one UUID
+                // are one key and one answer, so no single spelling could be echoed.
+                Ok(EntityLookupDto::new(key.to_string(), lookup))
             })
             .collect::<Result<_, CanonicalError>>()?,
     };
@@ -465,6 +522,7 @@ pub async fn batch_get_entities(
 /// the cursor for the next one (D12).
 pub async fn discover_entities(
     Extension(service): Extension<Option<Arc<RegistryService>>>,
+    Extension(ctx): Extension<SecurityContext>,
     params: DiscoveryParams,
 ) -> ApiResult<Response> {
     let service = require_registry(service)?;
@@ -478,18 +536,18 @@ pub async fn discover_entities(
         selection: params.selection,
     };
     if let Some(cursor) = &params.cursor {
-        query.after = Some(super::cursor::resume(cursor, &Binding::from(&query))?);
+        query.after = Some(cursor::resume(cursor, &Binding::from(&query))?);
     }
 
     let page = service
-        .discover(&query)
+        .discover(CallerContext::Tenant(&ctx), &query)
         .await
         .map_err(CanonicalError::from)?;
 
     let next_cursor = page
         .next_after
         .as_deref()
-        .map(|after| super::cursor::encode(after, &Binding::from(&query)))
+        .map(|after| cursor::encode(after, &Binding::from(&query)))
         .transpose()?;
     let body = EntityPageDto {
         items: page.items.into_iter().map(Into::into).collect(),

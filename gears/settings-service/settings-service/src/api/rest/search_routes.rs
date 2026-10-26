@@ -1,10 +1,11 @@
-// Created: 2026-09-17 by Virtuozzo International GmbH
 //! The route of the search surface.
 
 use std::sync::Arc;
 
 use axum::Router;
+use settings_service_sdk::odata::SettingFilterField;
 use toolkit::api::canonical_prelude::*;
+use toolkit::api::operation_builder::OperationBuilderODataExt;
 use toolkit::api::{OpenApiRegistry, OperationBuilder};
 use toolkit_db::{DBProvider, DbError};
 
@@ -28,13 +29,13 @@ pub fn register_routes(
         .summary("Search settings across categories")
         .description(
             "Cross-field search over every category the caller may see. Matches a \
-             setting's key, description, category name, Schema Default and the overrides \
+             setting's key, display name, description, category name, Schema Default and the overrides \
              explicitly set inside the target's subtree, under the same authorization, \
              target, visibility and `hidden` rules as browsing; results come back flat and \
              ordered by key, each hit with its category, the field that matched -- one of \
-             `key`, `description`, `category_name`, `default_value` or `value` -- and its \
+             `key`, `display_name`, `description`, `category_name`, `default_value` or `value` -- and its \
              declaration's `mode` as a tag that withholds nothing. A hit on the key, \
-             description, category name or default belongs to the declaration and carries \
+             display name, description, category name or default belongs to the declaration and carries \
              no scope; a hit on an override names the scope and tenant where it is set. \
              Search runs over stored rows, not resolved values: an inherited value is a hit \
              where it was set, and a default is a hit on its declaration. `tenant` bounds the \
@@ -44,7 +45,11 @@ pub fn register_routes(
              an empty result says nothing about it; a `pii` value is matched only for a \
              caller entitled to read it unmasked. A page holds up to `limit` settings; a \
              setting with several matching overrides contributes one hit per override. \
-             `$filter`, `$orderby` and `$select` are refused.",
+             `$filter` takes the grammar `GET /settings` takes - `category_id eq`, `key eq`, \
+             `key in (...)` and `needs_review eq true`, joined by `and` - and narrows the \
+             corpus in the query, so the cursor pages the filtered set; `needs_review eq \
+             true` keeps the settings whose own override at the target is flagged for review; \
+             the value of a flagged override is never a match. `$orderby` and `$select` are refused.",
         )
         .tag(TAG)
         .authenticated()
@@ -62,11 +67,13 @@ pub fn register_routes(
         .query_param_typed("limit", false, "Page size, in settings", "integer")
         .query_param("cursor", false, "Cursor for pagination")
         .handler(handlers::search_settings)
-        .json_response_with_schema::<toolkit_odata::Page<SearchHitDto>>(
+        .json_response_with_schema::<crate::api::rest::page_dto::PageDto<SearchHitDto>>(
             openapi,
             StatusCode::OK,
-            "A page of hits, ordered by key, with its pagination cursors",
+            "A page of hits, ordered by key, with its pagination cursors and the total \
+             of matching settings",
         )
+        .with_odata_filter::<SettingFilterField>()
         .error_400(openapi)
         .error_401(openapi)
         .error_403(openapi)

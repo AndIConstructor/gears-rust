@@ -13,8 +13,9 @@ on:
       - '.cf-studio/config/**'
       - '.cf-studio-kit.toml'
       - 'studio-kit-gears/**'
-      - 'docs/spec-templates/**'
       - 'Makefile'
+      - '.gears-dna/gears.mk'
+      - 'gears-rust.mk'
   workflow_call:
   workflow_dispatch:
 
@@ -41,14 +42,14 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           clean: 'true'
           fetch-depth: 0
           submodules: recursive
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
 
@@ -85,7 +86,7 @@ jobs:
             )"
           fi
 
-          if printf '%s\n' "$changed_files" | grep -Eq '^(studio-kit-gears/|docs/spec-templates/|\.cf-studio-kit\.toml$)'; then
+          if printf '%s\n' "$changed_files" | grep -Eq '^(studio-kit-gears/|\.cf-studio/config/|\.cf-studio-kit\.toml$)'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"

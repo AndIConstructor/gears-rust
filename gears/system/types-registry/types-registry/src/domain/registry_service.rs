@@ -15,59 +15,27 @@ use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 use crate::config::TypesRegistryConfig;
-use crate::domain::admission::acceptance::{AcceptanceContext, AcceptanceError, accept};
+use crate::domain::admission::acceptance::{
+    AcceptanceContext, AcceptanceError, accept, accept_deletion,
+};
 use crate::domain::admission::worker::{Tuning, WorkerError, run_operation};
 use crate::domain::admission::{
-    Accepted, Candidate, OperationDispatch, StoredFailure, SubmitRequest, UnreadableFailure,
+    Accepted, OperationDispatch, StoredFailure, SubmitRequest, UnreadableFailure,
 };
+pub use crate::domain::admission::{DeleteRequest, DeleteTarget};
+use crate::domain::caller::CallerContext;
 use crate::domain::enums::{
     EntityKind, LifecycleFilter, LifecycleStatus, OperationItemStatus, OperationKind,
     OperationStatus,
 };
+pub use crate::domain::key::{EntityKey, MAX_KEY_LEN};
 use crate::domain::policy::RegistrationPolicy;
-use crate::domain::ports::metrics::{AdmissionMetrics, PassLabels, RefusalStage};
+use crate::domain::ports::metrics::AdmissionMetrics;
 use crate::domain::ports::{
     CurrentReadRow, EntityRow, ListFilter, PageRequest, Stores, snapshot_read,
 };
 use crate::domain::selection::{EntityField, FieldSelection};
-
-/// GTS identifier or deterministic Registry Reference for the same row.
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum EntityKey {
-    GtsId(String),
-    Uuid(Uuid),
-}
-
-impl EntityKey {
-    /// Parse a UUID as a Registry Reference; otherwise keep the GTS identifier.
-    #[must_use]
-    pub fn parse(key: &str) -> Self {
-        match Uuid::parse_str(key) {
-            Ok(uuid) => Self::Uuid(uuid),
-            Err(_) => Self::GtsId(key.to_owned()),
-        }
-    }
-}
-
-/// Deletion target shared by single and batch requests.
-#[domain_model]
-#[derive(Clone, Debug)]
-pub struct DeleteTarget {
-    pub key: EntityKey,
-    /// Required positive version, validated during acceptance.
-    pub expected_resource_version: Option<i64>,
-}
-
-/// A submitted deletion, before its keys are resolved to identifiers.
-#[domain_model]
-#[derive(Clone, Debug)]
-pub struct DeleteRequest {
-    /// Required; optional only to share acceptance validation.
-    pub idempotency_key: Option<String>,
-    pub dry_run: bool,
-    pub targets: Vec<DeleteTarget>,
-}
+use crate::domain::validator::{IfNoneMatch, Validator};
 
 /// One operation and its per-candidate outcomes, as a caller polls it.
 #[domain_model]
@@ -87,7 +55,7 @@ pub struct OperationRecord {
 #[domain_model]
 #[derive(Clone, Debug)]
 pub struct OperationItemRecord {
-    pub gts_id: String,
+    pub key: EntityKey,
     pub status: OperationItemStatus,
     pub resource_version: Option<i64>,
     pub error: Option<Result<StoredFailure, UnreadableFailure>>,
@@ -108,7 +76,18 @@ pub struct EntityRecord {
     pub resolved_schema: Option<Box<RawValue>>,
     pub effective_traits: Option<Box<RawValue>>,
     pub effective_traits_schema: Option<Box<RawValue>>,
+    /// Managed Type Schemas only: how the current revision was admitted.
     pub provenance: Option<Provenance>,
+}
+
+/// Admission metadata of the current revision, selected as one group.
+#[domain_model]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Provenance {
+    /// Whether an applicable cross-minor compatibility check was deliberately waived
+    /// with `skip_compatibility_check` (ADR-0004). `false` is not evidence that a
+    /// check ran.
+    pub compatibility_check_skipped: bool,
 }
 
 /// Where a managed entity's current state came from.
@@ -120,33 +99,43 @@ pub struct ManagedOrigin {
     pub updated_at: OffsetDateTime,
 }
 
-#[domain_model]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Provenance {
-    pub gts_spec_version: String,
-    pub gts_impl_version: String,
-    /// `None` for an Instance.
-    pub compat_forced: Option<bool>,
-}
-
-/// One key's answer in a batch read.
-///
-/// Absence is a result, not a failure: a caller reconciling a set needs to know
-/// which of its keys is missing, and one absent key must not fail the others.
-/// P0 has the two states DESIGN's four reduce to — `unchanged` needs T29's
-/// validators and `failed` needs federation, which is out of scope (SPEC §10.1).
+/// One key's read result; absence is an answer, not a failure. Every answer but
+/// `NotFound` carries the current validator (RFC 9110 §15.4.5).
 #[domain_model]
 #[derive(Clone, Debug)]
-// `Found` already owns heap JSON up to the 1 MB document bound, so the 240 bytes
-// `NotFound` pays for the shared discriminant are not what makes a batch large.
-// Boxing would buy that back and charge an allocation and an indirection per found
-// record — the wrong trade for the variant that carries every successful read.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "boxing Found penalises every successful read with an allocation and an indirection; NotFound's discriminant overhead is acceptable"
-)]
 pub enum EntityLookup {
-    Found(EntityRecord),
+    Found {
+        record: EntityRecord,
+        etag: Validator,
+    },
+    /// The caller's condition matched, so no representation is returned.
+    Unchanged {
+        etag: Validator,
+    },
+    NotFound,
+}
+
+/// One key of a batch read; a condition makes just this key conditional.
+#[domain_model]
+#[derive(Clone, Debug)]
+pub struct BatchGetItem {
+    pub key: EntityKey,
+    pub if_none_match: Option<IfNoneMatch>,
+}
+
+impl From<EntityKey> for BatchGetItem {
+    fn from(key: EntityKey) -> Self {
+        Self {
+            key,
+            if_none_match: None,
+        }
+    }
+}
+
+/// A key's answer decided inside the snapshot, before any document is read.
+enum Answer {
+    Found(i64, Validator),
+    Unchanged(Validator),
     NotFound,
 }
 
@@ -194,7 +183,7 @@ pub struct DiscoveryPage {
 /// resolved document at 1 MB, so the ceiling is what bounds a single response —
 /// 500 keys is a response this gear should never be asked to build. A
 /// reconciliation that wants to inspect more identifiers than it writes pages its
-/// reads instead, which the T23 helper owns. The upgrade path is that helper
+/// reads instead, which the T29 helper owns. The upgrade path is that helper
 /// plus a bound on response *bytes* rather than on keys; until then the key count
 /// is the only bound there is.
 ///
@@ -203,9 +192,6 @@ pub struct DiscoveryPage {
 /// bound: a deployment that raises the write ceiling must not silently widen read
 /// fan-out with it.
 pub const MAX_BATCH_GET_KEYS: usize = 100;
-
-/// A read key's ceiling in bytes: a GTS identifier runs to 1024.
-pub const MAX_KEY_LEN: usize = 1024;
 
 /// What the service can fail with. One layer above the two admission halves, so a
 /// transport adapter maps one type.
@@ -225,9 +211,6 @@ pub enum ServiceError {
     /// A blocking task panicked or was cancelled; the source says which.
     #[error("a blocking task did not complete: {0}")]
     Blocking(#[source] tokio::task::JoinError),
-    /// Registry Reference with no identifier for an asynchronous item outcome.
-    #[error("no entity has Registry Reference {gts_uuid}")]
-    UnresolvedReference { gts_uuid: Uuid },
     /// A batch read named no key at all, or more than [`MAX_BATCH_GET_KEYS`].
     #[error(
         "a batch read must name between 1 and {MAX_BATCH_GET_KEYS} keys; this one named {count}"
@@ -235,12 +218,23 @@ pub enum ServiceError {
     BatchReadOutOfRange { count: usize },
     #[error("a key must be at most {MAX_KEY_LEN} bytes; this one is {len}")]
     KeyTooLong { len: usize },
+    #[error("a validator must be at most {MAX_KEY_LEN} bytes; this one is {len}")]
+    ValidatorTooLong { len: usize },
     /// `limit` outside `1..=limits.page_size_max` (D12).
     #[error("a page size must be between 1 and {max}; this request asked for {limit}")]
     PageSizeOutOfRange { limit: u64, max: u32 },
     /// The discovery pattern is not a GTS identifier pattern.
     #[error("the discovery pattern is not a GTS pattern: {message}")]
     InvalidPattern { message: String },
+    /// A discovery cursor longer than any token this registry issues.
+    #[error("a cursor must be at most 4096 bytes; this one is {len}")]
+    CursorTooLong { len: usize },
+    /// A cursor that will not decode, or that was issued for another query.
+    #[error("the cursor cannot be used for this request: {detail}")]
+    CursorNotUsable { detail: String },
+    /// A page cursor would not serialize: a defect here, never the caller's.
+    #[error("the registry could not construct a page cursor")]
+    CursorUnencodable,
 }
 
 impl ServiceError {
@@ -254,11 +248,14 @@ impl ServiceError {
             Self::Db(_) => "database",
             Self::CorruptDocument(_) => "corrupt_document",
             Self::Blocking(_) => "blocking_task",
-            Self::UnresolvedReference { .. } => "unresolved_reference",
             Self::BatchReadOutOfRange { .. } => "batch_read_out_of_range",
             Self::KeyTooLong { .. } => "key_too_long",
+            Self::ValidatorTooLong { .. } => "validator_too_long",
             Self::PageSizeOutOfRange { .. } => "page_size_out_of_range",
             Self::InvalidPattern { .. } => "invalid_pattern",
+            Self::CursorTooLong { .. } => "cursor_too_long",
+            Self::CursorNotUsable { .. } => "cursor_not_usable",
+            Self::CursorUnencodable => "cursor_unencodable",
         }
     }
 }
@@ -365,6 +362,7 @@ impl RegistryService {
     /// fingerprint conflict.
     pub async fn submit(
         &self,
+        _caller: CallerContext<'_>,
         request: &SubmitRequest,
         now: OffsetDateTime,
     ) -> Result<Accepted, ServiceError> {
@@ -413,105 +411,29 @@ impl RegistryService {
     /// Submit a single or batch deletion through the shared admission path (SPEC §8.4).
     ///
     /// # Errors
-    /// [`ServiceError::UnresolvedReference`] for an unknown Registry Reference,
-    /// plus errors from [`Self::submit`].
+    /// [`ServiceError::Acceptance`] for every synchronous refusal. An unknown
+    /// Registry Reference is not one: its item fails in the worker.
     pub async fn delete(
         &self,
+        _caller: CallerContext<'_>,
         request: &DeleteRequest,
         now: OffsetDateTime,
     ) -> Result<Accepted, ServiceError> {
-        // Bound Registry Reference lookups before resolving targets.
-        let limit = self.config.limits.batch_candidates;
-        if request.targets.len() > limit {
-            let error = AcceptanceError::BatchTooLarge {
-                count: request.targets.len(),
-                limit,
-            };
-            // This refusal never reaches acceptance's metric.
-            self.metrics.refused(
-                RefusalStage::Acceptance,
-                error.reason(),
-                PassLabels::new(OperationKind::Deletion, request.dry_run),
-            );
-            return Err(ServiceError::Acceptance(error));
-        }
-        let candidates = self.resolve_targets(&request.targets).await?;
-        self.submit(
-            &SubmitRequest {
-                idempotency_key: request.idempotency_key.clone(),
-                kind: OperationKind::Deletion,
-                dry_run: request.dry_run,
-                candidates,
+        let provider: DBProvider<AcceptanceError> = DBProvider::new(self.db.clone());
+        Ok(accept_deletion(
+            &self.stores,
+            &provider,
+            &Self::scope(),
+            &AcceptanceContext {
+                policy: &self.policy,
+                config: &self.config,
+                metrics: &self.metrics,
             },
+            &self.dispatch,
+            request,
             now,
         )
-        .await
-    }
-
-    /// Resolve immutable Registry References; admission rechecks mutable state.
-    async fn resolve_targets(
-        &self,
-        targets: &[DeleteTarget],
-    ) -> Result<Vec<Candidate>, ServiceError> {
-        let references: Vec<Uuid> = targets
-            .iter()
-            .filter_map(|target| match &target.key {
-                EntityKey::Uuid(gts_uuid) => Some(*gts_uuid),
-                EntityKey::GtsId(_) => None,
-            })
-            .collect();
-        // Identifier-only batches need no lookup.
-        let resolved = if references.is_empty() {
-            BTreeMap::new()
-        } else {
-            self.reverse_resolve(references).await?
-        };
-
-        targets
-            .iter()
-            .map(|target| {
-                let gts_id = match &target.key {
-                    EntityKey::GtsId(gts_id) => gts_id.clone(),
-                    EntityKey::Uuid(gts_uuid) => resolved.get(gts_uuid).cloned().ok_or(
-                        ServiceError::UnresolvedReference {
-                            gts_uuid: *gts_uuid,
-                        },
-                    )?,
-                };
-                Ok(Candidate {
-                    gts_id,
-                    // Deletion has no content or compatibility check to waive (ADR-0004).
-                    content: None,
-                    expected_resource_version: target.expected_resource_version,
-                    force: false,
-                })
-            })
-            .collect()
-    }
-
-    /// Resolve Registry References under one snapshot, in chunked batch reads
-    /// rather than one query per reference. The caller has already bounded the
-    /// batch by `limits.batch_candidates`. Omit missing rows so the caller reports
-    /// the first unresolved target in request order.
-    async fn reverse_resolve(
-        &self,
-        references: Vec<Uuid>,
-    ) -> Result<BTreeMap<Uuid, String>, ServiceError> {
-        let provider: DBProvider<ServiceError> = DBProvider::new(self.db.clone());
-        let scope = Self::scope();
-        let stores = Arc::clone(&self.stores);
-        provider
-            .transaction_with_config(snapshot_read(&self.db), move |tx| {
-                Box::pin(async move {
-                    // Resolve tombstones too, preserving the identifier path's `not_active` outcome.
-                    let rows = stores.find_by_gts_uuids(tx, &scope, &references).await?;
-                    Ok(rows
-                        .into_iter()
-                        .map(|row| (row.gts_uuid, row.gts_id))
-                        .collect())
-                })
-            })
-            .await
+        .await?)
     }
 
     /// Read one operation and its per-candidate outcomes.
@@ -519,7 +441,22 @@ impl RegistryService {
     /// # Errors
     /// [`ServiceError::Storage`] for a read failure. An absent operation is
     /// `Ok(None)`, because "not found" is an answer rather than a fault.
-    pub async fn operation(&self, id: Uuid) -> Result<Option<OperationRecord>, ServiceError> {
+    pub async fn operation(
+        &self,
+        _caller: CallerContext<'_>,
+        id: Uuid,
+    ) -> Result<Option<OperationRecord>, ServiceError> {
+        self.operation_record(id).await
+    }
+
+    /// [`Self::operation`] for the registry's own driver, which acts for no caller.
+    ///
+    /// # Errors
+    /// As [`Self::operation`].
+    pub(crate) async fn operation_record(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<OperationRecord>, ServiceError> {
         let provider: DBProvider<ServiceError> = DBProvider::new(self.db.clone());
         let scope = Self::scope();
         let stores = Arc::clone(&self.stores);
@@ -552,7 +489,7 @@ impl RegistryService {
                 .map(|item| {
                     let error = item.error_payload.as_deref().map(StoredFailure::parse);
                     OperationItemRecord {
-                        gts_id: item.gts_id,
+                        key: item.key,
                         status: item.status,
                         resource_version: item.result_resource_version,
                         error,
@@ -576,77 +513,109 @@ impl RegistryService {
     /// [`ServiceError::CorruptDocument`] if a stored document is not JSON.
     pub async fn entity(
         &self,
+        caller: CallerContext<'_>,
         key: &EntityKey,
         selection: FieldSelection,
     ) -> Result<Option<EntityRecord>, ServiceError> {
-        let results = self.batch_get(std::slice::from_ref(key), selection).await?;
-        Ok(results.into_iter().find_map(|(_, lookup)| match lookup {
-            EntityLookup::Found(record) => Some(record),
-            EntityLookup::NotFound => None,
-        }))
+        Ok(match self.lookup(caller, key, selection, None).await? {
+            EntityLookup::Found { record, .. } => Some(record),
+            EntityLookup::Unchanged { .. } | EntityLookup::NotFound => None,
+        })
+    }
+
+    /// [`Self::entity`], conditional on the caller's validators (SPEC §8.5).
+    ///
+    /// # Errors
+    /// As [`Self::batch_get`].
+    pub async fn lookup(
+        &self,
+        caller: CallerContext<'_>,
+        key: &EntityKey,
+        selection: FieldSelection,
+        if_none_match: Option<IfNoneMatch>,
+    ) -> Result<EntityLookup, ServiceError> {
+        let item = BatchGetItem {
+            key: key.clone(),
+            if_none_match,
+        };
+        let mut results = self
+            .batch_get(caller, std::slice::from_ref(&item), selection)
+            .await?;
+        Ok(results
+            .pop()
+            .map_or(EntityLookup::NotFound, |(_, lookup)| lookup))
     }
 
     /// Read a bounded set of keys, answering every one of them (DESIGN §3.3).
     ///
-    /// Results are returned in request order with the key each was asked by, so a
-    /// caller that mixed identifiers and Registry References matches answers to
-    /// questions without re-deriving either. A key named twice collapses onto its
-    /// first mention: the answer is per key, not per mention. The two spellings of
-    /// one row are **not** duplicates of each other — each is a key a caller asked
-    /// about and each is echoed.
+    /// Each result carries the key it answers; their order is not contractual
+    /// (DESIGN §3.3), so a caller matches answers to questions by key. A key named
+    /// twice collapses onto its first mention, condition included: the answer is
+    /// per key, not per mention. The identifier and the Registry Reference of one
+    /// row are **not** duplicates of each other — each is a key a caller asked
+    /// about and each is answered.
     ///
-    /// Constant in round trips rather than linear in keys: two identity reads and
-    /// two current-state reads per kind, all under one snapshot, whatever the batch
-    /// size. Only the documents `selection` names are fetched and parsed.
+    /// Constant in round trips, all in one snapshot; selected documents are fetched
+    /// only for `Found` keys.
     ///
     /// # Errors
     /// [`ServiceError::BatchReadOutOfRange`] for an empty or over-long batch,
     /// [`ServiceError::KeyTooLong`] for a key over [`MAX_KEY_LEN`] bytes,
+    /// [`ServiceError::ValidatorTooLong`] for a validator over [`MAX_KEY_LEN`] bytes,
     /// [`ServiceError::Storage`] for a read failure, or
     /// [`ServiceError::CorruptDocument`] if a stored document is not JSON.
     pub async fn batch_get(
         &self,
-        keys: &[EntityKey],
+        _caller: CallerContext<'_>,
+        items: &[BatchGetItem],
         selection: FieldSelection,
     ) -> Result<Vec<(EntityKey, EntityLookup)>, ServiceError> {
         // Bounded before any read, as deletion bounds its batch: the ceiling exists
         // to keep one request's work finite, so it cannot be checked after the work.
-        if keys.is_empty() || keys.len() > MAX_BATCH_GET_KEYS {
-            return Err(ServiceError::BatchReadOutOfRange { count: keys.len() });
+        if items.is_empty() || items.len() > MAX_BATCH_GET_KEYS {
+            return Err(ServiceError::BatchReadOutOfRange { count: items.len() });
         }
-        let mut requested: Vec<EntityKey> = Vec::with_capacity(keys.len());
+        let mut requested: Vec<BatchGetItem> = Vec::with_capacity(items.len());
         let mut seen: std::collections::HashSet<&EntityKey> =
-            std::collections::HashSet::with_capacity(keys.len());
-        for key in keys {
-            if let EntityKey::GtsId(gts_id) = key
+            std::collections::HashSet::with_capacity(items.len());
+        for item in items {
+            if let EntityKey::GtsId(gts_id) = &item.key
                 && gts_id.len() > MAX_KEY_LEN
             {
                 return Err(ServiceError::KeyTooLong { len: gts_id.len() });
             }
-            if seen.insert(key) {
-                requested.push(key.clone());
+            if let Some(len) = item
+                .if_none_match
+                .as_ref()
+                .map(IfNoneMatch::longest)
+                .filter(|len| *len > MAX_KEY_LEN)
+            {
+                return Err(ServiceError::ValidatorTooLong { len });
+            }
+            if seen.insert(&item.key) {
+                requested.push(item.clone());
             }
         }
 
         // A non-canonical identifier cannot be stored, so it never reaches SQL.
         let gts_ids: Vec<String> = requested
             .iter()
-            .filter_map(|key| match key {
+            .filter_map(|item| match &item.key {
                 EntityKey::GtsId(gts_id) if is_canonical(gts_id) => Some(gts_id.clone()),
                 EntityKey::GtsId(_) | EntityKey::Uuid(_) => None,
             })
             .collect();
         let gts_uuids: Vec<Uuid> = requested
             .iter()
-            .filter_map(|key| match key {
-                EntityKey::Uuid(gts_uuid) => Some(*gts_uuid),
+            .filter_map(|item| match item.key {
+                EntityKey::Uuid(gts_uuid) => Some(gts_uuid),
                 EntityKey::GtsId(_) => None,
             })
             .collect();
         if gts_ids.is_empty() && gts_uuids.is_empty() {
             return Ok(requested
                 .into_iter()
-                .map(|key| (key, EntityLookup::NotFound))
+                .map(|item| (item.key, EntityLookup::NotFound))
                 .collect());
         }
 
@@ -654,10 +623,9 @@ impl RegistryService {
         let scope = Self::scope();
         let stores = Arc::clone(&self.stores);
         // One snapshot keeps each row's atomically written `resource_version`,
-        // artifacts and authored document together. T11 revisions could otherwise
-        // pair N with N + 1 artifacts, breaking T29's version/body promise for
-        // conditional reads.
-        let state = provider
+        // fingerprint and documents together, so a validator describes the body
+        // it is returned with.
+        let (answers, rows, current) = provider
             .transaction_with_config(snapshot_read(&self.db), move |tx| {
                 Box::pin(async move {
                     let mut rows = stores.find_by_gts_ids(tx, &scope, &gts_ids).await?;
@@ -668,53 +636,54 @@ impl RegistryService {
                     rows.sort_by_key(|row| row.id);
                     rows.dedup_by_key(|row| row.id);
 
+                    let etags = validators(&*stores, tx, &scope, &rows, selection).await?;
+                    let answers = answer(requested, &rows, &etags);
+                    let found: std::collections::BTreeSet<i64> = answers
+                        .iter()
+                        .filter_map(|(_, answer)| match answer {
+                            Answer::Found(id, _) => Some(*id),
+                            Answer::Unchanged(_) | Answer::NotFound => None,
+                        })
+                        .collect();
+                    rows.retain(|row| found.contains(&row.id));
                     // Branch on row kind, not on key: Type Schemas have a document
                     // and D3's three artifacts, Instances only an authored value.
                     let current = read_current(&*stores, tx, &scope, &rows, selection).await?;
-                    Ok((rows, current))
+                    Ok((answers, rows, current))
                 })
             })
             .await?;
 
-        let mut records = build_records(state.0, state.1, selection).await?;
-        let by_gts_id: BTreeMap<&str, i64> = records
-            .iter()
-            .map(|(id, record)| (record.gts_id.as_str(), *id))
-            .collect();
-        let by_gts_uuid: BTreeMap<Uuid, i64> = records
-            .iter()
-            .map(|(id, record)| (record.gts_uuid, *id))
-            .collect();
-        let ids: Vec<Option<i64>> = requested
-            .iter()
-            .map(|key| match key {
-                EntityKey::GtsId(gts_id) => by_gts_id.get(gts_id.as_str()).copied(),
-                EntityKey::Uuid(gts_uuid) => by_gts_uuid.get(gts_uuid).copied(),
-            })
-            .collect();
-        drop((by_gts_id, by_gts_uuid));
+        let mut records = build_records(rows, current, selection).await?;
         // Moved out on a row's last mention; cloned only for a row asked by both spellings.
         let mut uses: BTreeMap<i64, usize> = BTreeMap::new();
-        for id in ids.iter().flatten() {
-            *uses.entry(*id).or_default() += 1;
+        for (_, answer) in &answers {
+            if let Answer::Found(id, _) = answer {
+                *uses.entry(*id).or_default() += 1;
+            }
         }
-        Ok(requested
+        Ok(answers
             .into_iter()
-            .zip(ids)
-            .map(|(key, id)| {
-                let record = id.and_then(|id| {
-                    let left = uses.get_mut(&id)?;
-                    *left -= 1;
-                    if *left == 0 {
-                        records.remove(&id)
-                    } else {
-                        records.get(&id).cloned()
+            .map(|(key, answer)| {
+                let lookup = match answer {
+                    Answer::NotFound => EntityLookup::NotFound,
+                    Answer::Unchanged(etag) => EntityLookup::Unchanged { etag },
+                    Answer::Found(id, etag) => {
+                        let record = uses.get_mut(&id).and_then(|left| {
+                            *left -= 1;
+                            if *left == 0 {
+                                records.remove(&id)
+                            } else {
+                                records.get(&id).cloned()
+                            }
+                        });
+                        record.map_or(EntityLookup::NotFound, |record| EntityLookup::Found {
+                            record,
+                            etag,
+                        })
                     }
-                });
-                (
-                    key,
-                    record.map_or(EntityLookup::NotFound, EntityLookup::Found),
-                )
+                };
+                (key, lookup)
             })
             .collect())
     }
@@ -730,7 +699,11 @@ impl RegistryService {
     /// [`ServiceError::PageSizeOutOfRange`] for a refused `limit`,
     /// [`ServiceError::InvalidPattern`] for a pattern `gts-rust` will not compile,
     /// or [`ServiceError::Storage`] for a read failure.
-    pub async fn discover(&self, query: &DiscoveryQuery) -> Result<DiscoveryPage, ServiceError> {
+    pub async fn discover(
+        &self,
+        _caller: CallerContext<'_>,
+        query: &DiscoveryQuery,
+    ) -> Result<DiscoveryPage, ServiceError> {
         let max = self.config.limits.page_size_max;
         let limit = match query.limit {
             None => self.config.limits.page_size_default,
@@ -800,6 +773,65 @@ fn ids_of(rows: &[EntityRow], kind: EntityKind) -> Vec<i64> {
         .collect()
 }
 
+/// Each row's validator. Type Schema fingerprints come from one keyed read.
+async fn validators(
+    stores: &dyn Stores,
+    tx: &toolkit_db::DbTx<'_>,
+    scope: &AccessScope,
+    rows: &[EntityRow],
+    selection: FieldSelection,
+) -> Result<BTreeMap<i64, Validator>, ServiceError> {
+    let type_ids = ids_of(rows, EntityKind::TypeSchema);
+    let fingerprints: BTreeMap<i64, Vec<u8>> = stores
+        .current_schema_projections(tx, scope, &type_ids)
+        .await?
+        .into_iter()
+        .map(|projection| (projection.entity_id, projection.cas.resolution_fingerprint))
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let fingerprint = match row.entity_kind {
+                EntityKind::Instance => None,
+                EntityKind::TypeSchema => Some(
+                    fingerprints
+                        .get(&row.id)
+                        .ok_or_else(|| missing_state(&row.gts_id, "current Type Schema state"))?
+                        .as_slice(),
+                ),
+            };
+            let etag = Validator::compute(row.resource_version, fingerprint, selection);
+            Ok((row.id, etag))
+        })
+        .collect()
+}
+
+/// Match each requested key to its row and the caller's condition to its validator.
+fn answer(
+    requested: Vec<BatchGetItem>,
+    rows: &[EntityRow],
+    etags: &BTreeMap<i64, Validator>,
+) -> Vec<(EntityKey, Answer)> {
+    let by_gts_id: BTreeMap<&str, i64> = rows.iter().map(|r| (r.gts_id.as_str(), r.id)).collect();
+    let by_gts_uuid: BTreeMap<Uuid, i64> = rows.iter().map(|r| (r.gts_uuid, r.id)).collect();
+    requested
+        .into_iter()
+        .map(|item| {
+            let id = match &item.key {
+                EntityKey::GtsId(gts_id) => by_gts_id.get(gts_id.as_str()).copied(),
+                EntityKey::Uuid(gts_uuid) => by_gts_uuid.get(gts_uuid).copied(),
+            };
+            let answer = match id.and_then(|id| Some((id, *etags.get(&id)?))) {
+                None => Answer::NotFound,
+                Some((_, etag)) if item.if_none_match.as_ref().is_some_and(|c| c.matches(etag)) => {
+                    Answer::Unchanged(etag)
+                }
+                Some((id, etag)) => Answer::Found(id, etag),
+            };
+            (item.key, answer)
+        })
+        .collect()
+}
+
 /// Branches on row kind, not on key: only a Type Schema has artifacts.
 async fn read_current(
     stores: &dyn Stores,
@@ -866,14 +898,12 @@ fn into_records(
             EntityField::EffectiveTraitsSchema,
             state.effective_traits_schema,
         )?;
-        let provenance = if selection.contains(EntityField::Provenance) {
-            let revision = state
-                .provenance
-                .ok_or_else(|| missing_state(&row.gts_id, "selected provenance"))?;
+        let provenance = if is_schema && selection.contains(EntityField::Provenance) {
+            let skipped = state.compat_forced.ok_or_else(|| {
+                missing_state(&row.gts_id, "provenance.compatibility_check_skipped")
+            })?;
             Some(Provenance {
-                gts_spec_version: revision.gts_spec_version,
-                gts_impl_version: revision.gts_impl_version,
-                compat_forced: revision.compat_forced,
+                compatibility_check_skipped: skipped,
             })
         } else {
             None
@@ -940,7 +970,7 @@ mod tests {
         EntityRow {
             id: 7,
             gts_uuid: Uuid::nil(),
-            gts_id: "gts.cf.core.example.type.v1~".to_owned(),
+            gts_id: toolkit_gts::gts_id!("cf.core.example.type.v1~").to_owned(),
             entity_kind: kind,
             family_id: 1,
             ownership_scope: OwnershipScope::Global,
@@ -963,7 +993,7 @@ mod tests {
                 resolved_schema: None,
                 effective_traits: None,
                 effective_traits_schema: None,
-                provenance: None,
+                compat_forced: None,
             },
         )])
     }
@@ -1014,7 +1044,7 @@ mod tests {
             content(),
         );
         assert!(
-            matches!(result, Err(ServiceError::CorruptDocument(ref d)) if d.contains("gts.cf.core")),
+            matches!(result, Err(ServiceError::CorruptDocument(ref d)) if d.contains(&format!("{}cf.core", toolkit_gts::GTS_ID_PREFIX))),
             "{result:?}",
         );
     }
@@ -1035,13 +1065,52 @@ mod tests {
         );
     }
 
+    fn provenance() -> FieldSelection {
+        FieldSelection::parse(&["provenance"]).expect("valid")
+    }
+
     #[test]
-    fn selected_provenance_that_did_not_come_back_is_corruption() {
-        let selection = FieldSelection::parse(&["provenance"]).expect("valid");
-        let result = into_records(vec![row(EntityKind::Instance)], state(None), selection);
+    fn a_selected_schema_provenance_that_did_not_come_back_is_corruption() {
+        let result = into_records(vec![row(EntityKind::TypeSchema)], state(None), provenance());
         assert!(
-            matches!(result, Err(ServiceError::CorruptDocument(_))),
+            matches!(result, Err(ServiceError::CorruptDocument(ref d)) if d.contains("compatibility_check_skipped")),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn selected_schema_provenance_keeps_its_stored_value_false_included() {
+        for stored in [true, false] {
+            let mut current = state(None);
+            current.get_mut(&7).expect("row").compat_forced = Some(stored);
+            let records = into_records(vec![row(EntityKind::TypeSchema)], current, provenance())
+                .expect("valid");
+            assert_eq!(
+                records[&7].provenance,
+                Some(Provenance {
+                    compatibility_check_skipped: stored
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn an_instance_has_no_provenance_even_when_it_is_selected() {
+        let records = into_records(vec![row(EntityKind::Instance)], state(None), provenance())
+            .expect("an Instance has no provenance to read");
+        assert_eq!(records[&7].provenance, None);
+    }
+
+    #[test]
+    fn unselected_schema_provenance_is_absent() {
+        let mut current = state(None);
+        current.get_mut(&7).expect("row").compat_forced = Some(true);
+        let records = into_records(
+            vec![row(EntityKind::TypeSchema)],
+            current,
+            FieldSelection::default(),
+        )
+        .expect("valid");
+        assert_eq!(records[&7].provenance, None);
     }
 }
