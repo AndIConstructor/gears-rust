@@ -14,6 +14,10 @@
 //! enforces. It is on unless a type turns it off, so a type that says nothing
 //! requires a subject.
 //!
+//! Other rules a derived schema cannot carry, because it refines only
+//! `payload` and cannot tie one payload member to another, are in
+//! [`check_type_rules`], which intake runs after the schema.
+//!
 //! The payload structs define the schemas; reading records into them has a
 //! limit. `gts-macros` 0.12 (de)serializes a derived struct with its own code,
 //! which ignores `#[serde(default)]` and `skip_serializing_if`: it reads every
@@ -24,7 +28,7 @@
 //!
 //! @cpt-dod:cpt-cf-construct-dod-record-intake-types:p1
 
-use gts::{GtsSchema, GtsTypeId};
+use gts::{GtsInstanceId, GtsSchema, GtsTypeId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -120,14 +124,28 @@ fn about_a_person() -> serde_json::Value {
     base = true,
     gts_abstract = true,
     type_id = gts_id!("cf.connectors.core.record.v1~"),
-    description = "Abstract base of one observed record inside a connector push. Dedupe and re-push idempotency are keyed on (tenant, connector, provenance, version) - tenant and connector identity from the push envelope, provenance and version from the record. The connector identity is one opaque value derived from the envelope's vendor and package, never the connector's build version. Provenance is the source-formed locator of the observed thing, version identifies its content at observation - re-pushing the same (provenance, version) is a no-op. Producer obligation: version MUST be derived from the observed content (each derived type documents its derivation): a producer obligation, not verifiable by the results API (the derivation input exists only at the source). Post-observation changes at the source are not propagated (forward-only delivery). The top level is frozen (additionalProperties: false): a derived content type refines only the payload member. A record about a person sets subject_id; a type states whether its records are about a person in the trait subject_required, on unless the type turns it off, and the results API enforces it. A record pushed to the results API carries no id.",
-    properties = "gts_type,provenance,version,subject_id,observed_at,payload",
+    description = "Abstract base of one observed record inside a connector push. Dedupe and re-push idempotency are keyed on (tenant, connector, provenance, version) - tenant and connector identity from the push envelope, provenance and version from the record. The connector identity is one opaque value derived from the envelope's vendor and package, never the connector's build version. Provenance is the source-formed locator of the observed thing, version identifies its content at observation - re-pushing the same (provenance, version) is a no-op. Producer obligation: version MUST be derived from the observed content (each derived type documents its derivation): a producer obligation, not verifiable by the results API (the derivation input exists only at the source). Post-observation changes at the source are not propagated (forward-only delivery). The top level is frozen (additionalProperties: false): a derived content type refines only the payload member. A record about a person sets subject_id; a type states whether its records are about a person in the trait subject_required, on unless the type turns it off, and the results API enforces it. A record kept in a GTS store carries its GTS instance id in id; a record pushed to the results API carries none.",
+    properties = "store_id,gts_type,provenance,version,subject_id,observed_at,payload",
     traits_schema = inline(RecordTraits),
     // The default value for the chain: a type that declares no traits
     // inherits it, and the gts store rejects a traits schema with no values.
     traits = about_a_person()
 )]
 pub struct RecordV1<P: GtsSchema> {
+    // Named `store_id` here and `id` on the wire: the generator takes a base
+    // with either a `GtsInstanceId` named `id` or a type member, and a record
+    // needs `type`. A plain comment, so it stays out of the schema.
+    /// The GTS instance id of a record kept in a GTS store: the type chain
+    /// plus the instance's own final segment, without the trailing tilde. A
+    /// record pushed to intake carries none.
+    #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        with = "String",
+        extend(
+            "pattern" = r"^gts\.[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*){3}\.v[0-9]+(\.[0-9]+)?~([a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*){3}\.v[0-9]+(\.[0-9]+)?~)*[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*){3}\.v[0-9]+(\.[0-9]+)?$"
+        )
+    )]
+    pub store_id: Option<GtsInstanceId>,
     /// The derived content type this instance conforms to; it must derive
     /// from this base.
     #[serde(rename = "type")]
@@ -214,13 +232,22 @@ pub struct ChatMessageV1 {
     pub text: String,
 }
 
-/// The kind of fact a candidate proposes. The values are fixed for
-/// `enrichment.fact_candidate.v1~`: a new kind needs a new version of the
+/// What a fact candidate's value is. Profile fields carry one value each;
+/// found facts carry a statement each. The values are fixed for
+/// `enrichment.fact_candidate.v1~`: a new field needs a new version of the
 /// type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(inline)]
-pub enum FactType {
+pub enum FactField {
+    OpenalexAuthorId,
+    Affiliation,
+    ResearchAreas,
+    LinkedinUrl,
+    LinkedinHeadline,
+    Location,
+    CurrentJobTitle,
+    Skills,
     Role,
     News,
     Award,
@@ -229,6 +256,42 @@ pub enum FactType {
     Profile,
     Bio,
     Mention,
+}
+
+impl FactField {
+    /// Whether the field's value is a list: `research_areas` and `skills`.
+    #[must_use]
+    pub fn is_list(self) -> bool {
+        matches!(self, Self::ResearchAreas | Self::Skills)
+    }
+}
+
+/// A fact candidate's value as the source states it: one string, or, for a
+/// list field, every item the source gave, cleaned (each item stripped, empty
+/// items dropped, order kept, nothing cut). Which form a field takes is
+/// checked by [`check_type_rules`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FactValue {
+    One(String),
+    List(Vec<String>),
+}
+
+/// The schema of a [`FactValue`]: one schema over both forms, so a refusal
+/// names its own keyword and place (`minItems` for an empty list, `pattern`
+/// at the item) rather than one `anyOf` for the whole value.
+fn fact_value_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "array"],
+        "minLength": 1,
+        "pattern": "\\S",
+        "minItems": 1,
+        "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S(?:[\\s\\S]*\\S)?$"
+        }
+    })
 }
 
 /// Trust classification assigned by the connector's tiering.
@@ -240,70 +303,145 @@ pub enum TrustTier {
     Saved,
 }
 
-/// Grounding of a fact candidate: URL plus verbatim quote.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(inline)]
-pub struct Citation {
-    /// The page the quote is from.
-    #[schemars(extend("format" = "uri"), regex(pattern = r"^https?://"))]
-    pub source_url: String,
-    /// The connector's id of the page chunk the quote is from.
-    #[schemars(length(min = 1))]
-    pub chunk_id: String,
-    /// The quote, verbatim.
-    #[schemars(length(min = 1))]
-    pub verbatim_quote: String,
-    /// Where the quote starts in the chunk. The source does not define the
-    /// unit or whether `char_end` is inclusive; Construct does not read
-    /// either.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "u64")]
-    pub char_start: Option<u64>,
-    /// Where the quote ends in the chunk; see `char_start`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "u64")]
-    pub char_end: Option<u64>,
-}
-
-/// The payload of a fact candidate record.
+/// The payload of a fact candidate record. Its `provenance` and `version`
+/// are SHA-256 digests, derived as `docs/fact-candidate-identity.md` in this
+/// crate specifies; [`check_type_rules`] checks their form.
 #[derive(Debug, Clone, PartialEq)]
 #[gts_type_schema(
     dir_path = "schemas",
     base = RecordV1,
     type_id = gts_id!("cf.connectors.core.record.v1~cf.construct.enrichment.fact_candidate.v1~"),
-    description = "One fact candidate the Enrichment connector proposes for a person: the connector runs the deterministic judgment (identity scoring, decide, tiering) and emits candidates; only fact management writes facts. The discovery dossier stays connector-internal, and the source model's co_sourced flag is dropped on purpose: it is an internal input to the connector's tiering and its effect arrives already folded into trust_tier. The record's subject_id is always set (a candidate is about one person); record provenance = the fact key plus the normalized value, version = a digest of the payload - both content-derived, so a re-push and a re-run of the same judgment dedupe to one record. The connector computes rather than forwards, so the record's observed_at is when the candidate was computed.",
-    properties = "claim,fact_type,confidence,trust_tier,source_url,date,evidence,citations",
+    description = "One fact the Enrichment connector found about one person, in the connector's own vocabulary: this connector owns the payload and its field list. field names what the value is. value is the fact as the source states it: for research_areas and skills, a list of the items the source gave, cleaned; for every other field, one string. confidence, trust_tier and identity_confidence are the connector's own judgment. The record's subject_id is always set. observed_at is when the connector formed the record. Provenance and version are SHA-256 content digests, written sha256: plus 64 lower-case hex digits; the provenance covers the subject in its canonical lower-case form, the field and the normalized value, and the version covers the payload's canonical JSON, as the Construct SDK's fact-candidate-identity.md specifies. The results API checks the value's form per field and the digests' form, which this schema cannot express.",
+    properties = "field,value,evidence,source_url,confidence,trust_tier,identity_confidence,rationale",
     traits = about_a_person()
 )]
 pub struct FactCandidateV1 {
-    /// The proposed factual statement, as stated by the source.
-    #[schemars(length(min = 1))]
-    pub claim: String,
-    pub fact_type: FactType,
-    /// The connector's per-candidate judgment, after identity scoring and
-    /// `decide()`.
+    /// What the value is.
+    pub field: FactField,
+    /// The value of the field, or the found fact's statement, as the source
+    /// states it.
+    #[schemars(schema_with = "fact_value_schema")]
+    pub value: FactValue,
+    /// A verbatim span from the source that supports the value. Absent when
+    /// the source gave none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String", length(min = 1), regex(pattern = r"\S"))]
+    pub evidence: Option<String>,
+    /// The page the value was found on. Absent when the value came without a
+    /// page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String", extend("format" = "uri"), regex(pattern = r"^https?://"))]
+    pub source_url: Option<String>,
+    /// The connector's confidence in this value, from 0 to 1.
     #[schemars(range(min = 0, max = 1))]
     pub confidence: f64,
-    /// Trust classification assigned by the connector's tiering. The
-    /// connector emits no other values.
+    /// Whether the connector asserts the value (`saved`) or only found it
+    /// (`found`).
     pub trust_tier: TrustTier,
-    /// The page the claim was grounded against.
-    #[schemars(extend("format" = "uri"), regex(pattern = r"^https?://"))]
-    pub source_url: String,
-    /// Date of the fact as carried by its source, never a clock read.
+    /// The connector's identity-match confidence for the person, from 0 to 1:
+    /// how sure it is that the sources it used are about this person.
+    #[schemars(range(min = 0, max = 1))]
+    pub identity_confidence: f64,
+    /// The connector's short account, in prose, of how it matched the person
+    /// and which sources it used. Never page content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "String")]
-    pub date: Option<String>,
-    /// Free-text evidence snippet supporting the claim.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "String")]
-    pub evidence: Option<String>,
-    /// Grounding: URL plus verbatim quote. Absent means none provided, not
-    /// verified-empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Vec<Citation>")]
-    pub citations: Option<Vec<Citation>>,
+    #[schemars(with = "String", length(min = 1), regex(pattern = r"\S"))]
+    pub rationale: Option<String>,
+}
+
+/// A rule of a record type that its generated schema cannot carry, broken:
+/// where, as a JSON pointer, and which rule, named like a JSON Schema keyword.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeRuleViolation {
+    pub place: String,
+    pub rule: &'static str,
+}
+
+impl std::fmt::Display for TypeRuleViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} breaks {}", self.place, self.rule)
+    }
+}
+
+impl std::error::Error for TypeRuleViolation {}
+
+/// Checks the rules of `type_id` that its generated schema cannot carry: a
+/// derived schema can only refine `payload`, and cannot tie one payload
+/// member to another. Intake runs it for the record's type and every type it
+/// derives from, after the schema. Only the fact candidate has such rules:
+///
+/// - `provenance` and `version` are `sha256:` plus 64 lower-case hex digits;
+/// - `value` is a list for the list fields ([`FactField::is_list`]), and one
+///   string for every other field;
+/// - no value or list item is whitespace only, and no list item starts or
+///   ends with whitespace, by the set of the identity derivation, which is wider than the schema's `\S` in a validator that
+///   follows ECMA-262.
+///
+/// The record must already have passed the type's schema.
+///
+/// # Errors
+///
+/// The first rule the record breaks.
+pub fn check_type_rules(
+    type_id: &str,
+    record: &serde_json::Value,
+) -> Result<(), TypeRuleViolation> {
+    if type_id != ENRICHMENT_FACT_CANDIDATE_TYPE {
+        return Ok(());
+    }
+    let broken = |place: String, rule| Err(TypeRuleViolation { place, rule });
+    for member in ["provenance", "version"] {
+        if !record[member].as_str().is_some_and(is_sha256_digest) {
+            return broken(format!("/{member}"), "pattern");
+        }
+    }
+    let payload = &record["payload"];
+    let list_field = FactField::deserialize(&payload["field"]).is_ok_and(FactField::is_list);
+    match (&payload["value"], list_field) {
+        (serde_json::Value::Array(items), true) => {
+            match items.iter().position(|item| {
+                item.as_str()
+                    .is_some_and(|item| is_blank(item) || !is_stripped(item))
+            }) {
+                Some(index) => broken(format!("/payload/value/{index}"), "pattern"),
+                None => Ok(()),
+            }
+        }
+        (serde_json::Value::String(value), false) if is_blank(value) => {
+            broken("/payload/value".to_owned(), "pattern")
+        }
+        (serde_json::Value::String(_), false) => Ok(()),
+        _ => broken("/payload/value".to_owned(), "type"),
+    }
+}
+
+/// `sha256:` plus 64 lower-case hex digits.
+fn is_sha256_digest(text: &str) -> bool {
+    text.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+/// Whether a text is whitespace only, by the identity derivation's set.
+fn is_blank(text: &str) -> bool {
+    text.chars().all(is_space)
+}
+
+/// Whether a text neither starts nor ends with whitespace, by the identity
+/// derivation's set. The schema's item pattern says the same, but without a
+/// lookahead (the GTS regular-expression profile has none), and a validator
+/// whose `$` matches before a final newline would let one through.
+fn is_stripped(text: &str) -> bool {
+    !text.starts_with(is_space) && !text.ends_with(is_space)
+}
+
+/// The identity derivation's whitespace (Python's `str.isspace`): Unicode
+/// white space, and the separators U+001C to U+001F.
+fn is_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
 /// One section of a course, the dashboard's module grouping.

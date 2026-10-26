@@ -3,8 +3,8 @@ use serde_json::{Value, json};
 
 use super::{
     CHAT_MESSAGE_TYPE, ChatMessageV1, ChatRole, ENRICHMENT_FACT_CANDIDATE_TYPE, FactCandidateV1,
-    MASTERY_COURSE_CATALOG_TYPE, RECORD_BASE_TYPE, RECORD_TYPES, RecordV1, SUBJECT_REQUIRED_TRAIT,
-    record_base_schema,
+    FactField, MASTERY_COURSE_CATALOG_TYPE, RECORD_BASE_TYPE, RECORD_TYPES, RecordV1,
+    SUBJECT_REQUIRED_TRAIT, TypeRuleViolation, check_type_rules, record_base_schema,
 };
 
 /// The schema of `type_id` as the link-time inventory submits it.
@@ -182,18 +182,16 @@ fn the_generated_schemas_match_the_committed_ones() {
 fn a_payload_without_an_optional_member_does_not_read_into_its_struct_yet() {
     let record = json!({
         "type": ENRICHMENT_FACT_CANDIDATE_TYPE,
-        "provenance": "openalex/A5012345678",
-        "version": "v1",
+        "provenance": "sha256:274b22ce748a45969ec5ead82845fc9324ffa01755758d9f2ab44c98f690fc15",
+        "version": "sha256:f0606b676be2895716327ce8c55faa64bfbcd9e6231d2a25f081e6e8bb716e79",
         "observed_at": "2026-09-10T07:30:00Z",
         "subject_id": "5d1f2c3a-8b4e-4c6d-9a1b-2c3d4e5f6a7b",
         "payload": {
-            "claim": "A claim.",
-            "fact_type": "role",
-            "confidence": 0.5,
+            "field": "board",
+            "value": "Jane Doe serves on the advisory board.",
+            "confidence": 0.83,
             "trust_tier": "found",
-            "source_url": "https://example.org/a",
-            "date": "2026-09-09",
-            "citations": []
+            "identity_confidence": 0.91
         }
     });
 
@@ -201,4 +199,181 @@ fn a_payload_without_an_optional_member_does_not_read_into_its_struct_yet() {
 
     let err = read.expect_err("evidence is optional but read as required");
     assert!(err.to_string().contains("evidence"), "{err}");
+}
+
+/// A pushed record leaves `id` out, so the base does not require it.
+#[test]
+fn the_base_does_not_require_an_instance_id() {
+    assert!(
+        !record_base_schema()["required"]
+            .as_array()
+            .expect("required")
+            .contains(&json!("id"))
+    );
+}
+
+/// Every field of the type's enum, read from its registered schema.
+fn every_fact_field() -> Vec<FactField> {
+    serde_json::from_value(
+        registered(ENRICHMENT_FACT_CANDIDATE_TYPE)["allOf"][1]["properties"]["payload"]
+            ["properties"]["field"]["enum"]
+            .clone(),
+    )
+    .expect("the field enum reads")
+}
+
+/// A fact candidate with valid digests, for `field` and `value`.
+fn candidate(field: FactField, value: &Value) -> Value {
+    json!({
+        "provenance": format!("sha256:{}", "a".repeat(64)),
+        "version": format!("sha256:{}", "b".repeat(64)),
+        "payload": { "field": field, "value": value }
+    })
+}
+
+#[test]
+fn only_research_areas_and_skills_are_list_fields() {
+    let lists: Vec<FactField> = every_fact_field()
+        .into_iter()
+        .filter(|field| field.is_list())
+        .collect();
+    assert_eq!(lists, vec![FactField::ResearchAreas, FactField::Skills]);
+}
+
+/// The rule intake runs takes a list exactly for the list fields, and one
+/// string exactly for every other field.
+#[test]
+fn every_field_takes_the_value_form_its_kind_says() {
+    let list = json!(["One item"]);
+    let one = json!("One statement.");
+    for field in every_fact_field() {
+        let (fits, other) = if field.is_list() {
+            (&list, &one)
+        } else {
+            (&one, &list)
+        };
+        assert_eq!(
+            check_type_rules(ENRICHMENT_FACT_CANDIDATE_TYPE, &candidate(field, fits)),
+            Ok(()),
+            "{field:?}"
+        );
+        assert_eq!(
+            check_type_rules(ENRICHMENT_FACT_CANDIDATE_TYPE, &candidate(field, other)),
+            Err(TypeRuleViolation {
+                place: "/payload/value".to_owned(),
+                rule: "type"
+            }),
+            "{field:?}"
+        );
+    }
+}
+
+#[test]
+fn the_type_rules_apply_only_to_the_fact_candidate() {
+    let record = json!({ "provenance": "not a digest", "payload": { "value": 1 } });
+    assert_eq!(check_type_rules(CHAT_MESSAGE_TYPE, &record), Ok(()));
+    assert_eq!(check_type_rules(RECORD_BASE_TYPE, &record), Ok(()));
+    assert_eq!(
+        check_type_rules(ENRICHMENT_FACT_CANDIDATE_TYPE, &record),
+        Err(TypeRuleViolation {
+            place: "/provenance".to_owned(),
+            rule: "pattern"
+        })
+    );
+}
+
+#[test]
+fn a_digest_is_sha256_and_64_lower_case_hex_digits() {
+    let with = |provenance: &str| {
+        let mut record = candidate(FactField::Board, &json!("A statement."));
+        record["provenance"] = json!(provenance);
+        check_type_rules(ENRICHMENT_FACT_CANDIDATE_TYPE, &record)
+    };
+    assert_eq!(
+        with(&format!("sha256:{}", "0123456789abcdef".repeat(4))),
+        Ok(())
+    );
+    for broken in [
+        format!("sha256:{}", "A".repeat(64)),
+        format!("sha256:{}", "a".repeat(63)),
+        format!("sha256:{}", "a".repeat(65)),
+        format!("sha256:{}", "g".repeat(64)),
+        format!("SHA256:{}", "a".repeat(64)),
+        format!("sha512:{}", "a".repeat(64)),
+        "sha256:".to_owned(),
+        "a".repeat(64),
+    ] {
+        assert_eq!(
+            with(&broken),
+            Err(TypeRuleViolation {
+                place: "/provenance".to_owned(),
+                rule: "pattern"
+            }),
+            "{broken}"
+        );
+    }
+}
+
+/// The base's optional `id` takes a GTS instance id, refuses a type id and a
+/// malformed one, and reads into the envelope and back.
+#[test]
+fn a_record_kept_in_a_store_carries_its_instance_id() {
+    let base = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft7)
+        .build(&json!({
+            "type": "object",
+            "properties": { "id": record_base_schema()["properties"]["id"].clone() }
+        }))
+        .expect("the id schema compiles");
+    let instance = format!("{CHAT_MESSAGE_TYPE}cf.construct.examples.chat_message.v1");
+    assert!(base.is_valid(&json!({ "id": instance })));
+    assert!(
+        !base.is_valid(&json!({ "id": CHAT_MESSAGE_TYPE })),
+        "a type id"
+    );
+    assert!(!base.is_valid(&json!({ "id": "not a gts id" })));
+
+    let record = json!({
+        "id": instance,
+        "type": CHAT_MESSAGE_TYPE,
+        "provenance": "chat_engine/thread-42/msg-7",
+        "version": "2026-09-10T09:13:00Z",
+        "observed_at": "2026-09-10T09:13:05Z",
+        "subject_id": "5d1f2c3a-8b4e-4c6d-9a1b-2c3d4e5f6a7b",
+        "payload": {
+            "source": "chat_engine",
+            "message_id": "msg-7",
+            "thread_id": "thread-42",
+            "role": "user",
+            "text": "Hello"
+        }
+    });
+    let typed: RecordV1<ChatMessageV1> =
+        serde_json::from_value(record.clone()).expect("a stored record reads");
+    assert_eq!(
+        typed.store_id.as_ref().map(ToString::to_string).as_deref(),
+        Some(instance.as_str())
+    );
+    assert_eq!(serde_json::to_value(&typed).expect("writes"), record);
+}
+
+/// A list item that starts or ends with whitespace is refused in code too,
+/// for a validator whose `$` matches before a final newline.
+#[test]
+fn a_list_item_that_is_not_stripped_breaks_the_rules() {
+    for (index, item) in [(0, " Lead"), (1, "Trail\n"), (0, "\u{1c}Separator")] {
+        let mut items = vec![json!("First"), json!("Second")];
+        items[index] = json!(item);
+        assert_eq!(
+            check_type_rules(
+                ENRICHMENT_FACT_CANDIDATE_TYPE,
+                &candidate(FactField::Skills, &json!(items))
+            ),
+            Err(TypeRuleViolation {
+                place: format!("/payload/value/{index}"),
+                rule: "pattern"
+            }),
+            "{item:?}"
+        );
+    }
 }

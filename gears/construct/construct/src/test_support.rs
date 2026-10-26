@@ -345,24 +345,18 @@ pub fn example_records() -> Vec<serde_json::Value> {
         ),
         serde_json::json!({
             "type": construct_sdk::gts::ENRICHMENT_FACT_CANDIDATE_TYPE,
-            "provenance": "openalex/A5012345678/works/W2741809807",
-            "version": "2026-09-09T18:00:00Z",
+            "provenance": "sha256:274b22ce748a45969ec5ead82845fc9324ffa01755758d9f2ab44c98f690fc15",
+            "version": "sha256:f0606b676be2895716327ce8c55faa64bfbcd9e6231d2a25f081e6e8bb716e79",
             "observed_at": "2026-09-10T07:30:00Z",
             "subject_id": subject,
             "payload": {
-                "claim": "Jane Doe is a professor of computational biology at ETH Zurich.",
-                "fact_type": "role",
+                "field": "board",
+                "value": "Jane Doe serves on the scientific advisory board of the Swiss Institute of Bioinformatics.",
+                "evidence": "Jane Doe joined the institute's scientific advisory board in 2024.",
+                "source_url": "https://example.org/news/sib-advisory-board",
                 "confidence": 0.83,
                 "trust_tier": "found",
-                "source_url": "https://openalex.org/A5012345678",
-                "date": "2026-09-09",
-                "citations": [{
-                    "source_url": "https://openalex.org/A5012345678",
-                    "chunk_id": "affiliations-0",
-                    "verbatim_quote": "ETH Zurich, Department of Biosystems Science and Engineering",
-                    "char_start": 0,
-                    "char_end": 60
-                }]
+                "identity_confidence": 0.91
             }
         }),
         serde_json::json!({

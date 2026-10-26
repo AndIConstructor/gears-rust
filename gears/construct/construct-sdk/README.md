@@ -15,7 +15,10 @@ The `cf-gears-construct-sdk` crate provides:
   type requires `subject_id` is its GTS trait `subject_required`
   (`gts::RecordTraits`), on unless the type turns it off. The generated record
   schemas are committed under `schemas/`; a test fails when they drift (run it
-  with `UPDATE_SCHEMAS=1` after an intended change).
+  with `UPDATE_SCHEMAS=1` after an intended change). The rules a generated schema
+  cannot carry are in `gts::check_type_rules`; the fact candidate's
+  `provenance` and `version` are derived as `docs/fact-candidate-identity.md`
+  specifies.
 - The person types (`person_types`) — one GTS graph node type per category of a person's profile
 
 ```rust,ignore
