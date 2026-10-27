@@ -42,6 +42,7 @@
 **Public links**
 
 - **Gears (Rust) monorepo** — <https://github.com/constructorfabric/gears-rust>
+- **Why Gears (for technical decision-makers)** — [`docs/WHY_GEARS.md`](./WHY_GEARS.md)
 - **Architecture Manifest** — [`docs/ARCHITECTURE_MANIFEST.md`](./ARCHITECTURE_MANIFEST.md)
 - **Overview slides** — [`docs/slides/1_OVERVIEW.md`](./slides/1_OVERVIEW.md)
 - **Gears inventory** — [`docs/GEARS.md`](./GEARS.md)
@@ -78,7 +79,7 @@ A similar middleware could exist or be built for Go or C#, and mature teams ofte
 | 3 | **Memory & data-race safety** | GC; memory races possible, detected only at runtime (`-race`) | GC; memory races possible | Compile-time ownership & `Send`/`Sync` | Compile-time, same as Rust |
 | 4 | **Error handling** | `if err != nil`, lint-gated in mature shops | exceptions / analyzer policy | `Result<T, E>`, `?` — must handle | `Result` + **canonical error taxonomy** (RFC-9457) |
 | 5 | **Null safety** | `nil` panics | NRT helps, policy-dependent | `Option<T>` — no null | `Option<T>` everywhere |
-| 6 | **Panics / unsafe shortcuts** | runtime panics possible | runtime exceptions possible | possible, but lintable | `unwrap`, `panic`, unsafe patterns [**prohibited at build time**](#b14-preconfigured-build-gated-safety) |
+| 6 | **Panics / unsafe shortcuts** | runtime panics possible | runtime exceptions possible | possible, but lintable | `unwrap`, `expect`, and `unsafe` [**denied by default at build time**](#b14-preconfigured-build-gated-safety), with narrow, explicit exceptions |
 | 7 | **State evolution** | `switch` may miss new constants | `switch` often needs analyzer support | exhaustive `match` over enums | exhaustive `match` + architecture lints |
 | 8 | **ID / domain mix-ups** | named types catch swaps, but literals/conversions remain easy; opaque structs add boilerplate | record structs / value objects work, but require conventions and serializers | zero-cost newtypes; no implicit conversion; private fields by default | tenant/user/resource IDs can be distinct validated types |
 | 9 | **Scoped resource cleanup** | `defer` discipline | `using` / `IDisposable` discipline | `Drop` + lifetimes | scoped transactions, guards, spans, connections |
@@ -192,7 +193,7 @@ C# gives you a rich runtime, but exceptions are invisible in signatures — any 
 
 Rust has neither. Fallibility (`Result`) and absence (`Option`) are explicit in every signature, and exhaustive `match` means adding a new variant forces you to handle it everywhere.
 
-**Gears** goes further than plain Rust style advice: nil-like failure paths and unsafe shortcuts are blocked by the build. Project policy treats `unwrap`, avoidable `panic`, unchecked assumptions, and unsafe patterns as architecture violations, not personal taste. In Go or C#, teams can enforce similar rules with analyzers, linters, and review policy; in Gears, Clippy plus project-specific lints make these checks part of the standard build gate.
+**Gears** goes further than plain Rust style advice: the workspace lints deny `unwrap`, `expect`, and `unsafe` code by default, so these shortcuts fail the build instead of waiting for review. Exceptions are narrow and visible: tests may use `unwrap`/`expect`, and every other exception is declared explicitly in the code or the crate manifest (see [B.14](#b14-preconfigured-build-gated-safety)). `panic!` itself is not lint-gated; avoiding it is a review rule. In Go or C#, teams can enforce similar rules with analyzers, linters, and review policy; in Gears, these Clippy and compiler lints are part of the standard build gate.
 
 ### A.4 Sum types make illegal states unrepresentable
 
@@ -428,24 +429,27 @@ rows, _ := db.Query("SELECT * FROM documents WHERE owner = ?", userID)
 // forgot AND tenant_id = ?  -> leaks every tenant's documents
 ```
 
-In Gears, entities derive `Scopable`, and the recommended repository path uses `SecureConn` to apply the caller's `AccessScope` (tenant, resource, owner, type) as automatic `WHERE` clauses:
+In Gears, entities derive `Scopable`, and the recommended repository path uses `SecureConn`. It turns the caller's `AccessScope` (tenant, resource, owner, type) into `WHERE` clauses on every query:
 
 ```rust
-// Rust + Gears — scoping is applied by the framework from the SecurityContext.
-#[derive(Scopable)]
-#[secure(tenant_col = "tenant_id", owner_col = "owner_id")]
-struct Document { /* ... */ }
+// Rust + Gears — each scope column is declared once on the entity.
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Scopable)]
+#[sea_orm(table_name = "documents")]
+#[secure(tenant_col = "tenant_id", resource_col = "id", owner_col = "owner_id", no_type)]
+pub struct Model { /* ... */ }
 
-// The AccessScope (derived from the authenticated caller) is applied automatically.
+// `access_scope` is built from the authorization decision for the caller.
 let docs = secure_conn
-    .scoped::<Document>(&access_scope)
-    .filter(documents::Column::Status.eq("active"))
-    .all()
-    .await?; // emitted SQL always includes the tenant/owner predicates
+    .find::<document::Entity>(&access_scope)
+    .filter(Condition::all().add(document::Column::Status.eq("active")))
+    .all(&secure_conn)
+    .await?; // emitted SQL includes the predicates derived from access_scope
 ```
 
+An empty scope returns no rows. The only unfiltered scope is `AccessScope::allow_all()`, which adds no predicates; it is meant for an explicit "no row filter" authorization decision or for system jobs, so every use must be justified and reviewed.
+
 > The architecture makes the **scoped path the normal path**. Direct ORM or SQL access is
-> reserved for infrastructure/migration code and guarded by review plus architecture lints.
+> reserved for infrastructure/migration code and guarded by review, Clippy `disallowed-methods`, and architecture lints.
 
 ### B.4 Authentication & authorization, built in (NIST SP 800-162 PDP/PEP)
 
@@ -472,11 +476,10 @@ This is where Gears uses Rust's linting model as a platform feature. This is not
 - **Versioned REST paths** — endpoints must be `/<gear>/v1/...`.
 - **Mandatory `OperationBuilder` metadata** — auth posture, error responses, and schemas must be declared.
 - **GTS identifier correctness** — valid IDs; no `schema_for!` on GTS structs.
-- **No unsafe shortcuts** — `unwrap`, avoidable `panic`, unsafe code paths, and unchecked invariants are treated as build-time failures where they would undermine platform guarantees.
 
 Why this matters for Gears: the framework is not just a set of helper libraries; it is a **runtime contract** for secure XaaS systems. `cargo gears lint` lets the repository encode rules that ordinary Rust tooling cannot know: which layer may import which crate, which API paths must be versioned, which API metadata is mandatory, where SQL is allowed, and which GTS identifiers are valid. That turns some design-document rules into CI-enforced checks.
 
-Compared with Go/C# alternatives, this is not about one ecosystem being incapable and another being capable. Go has `go vet`, `staticcheck`, and custom analyzers; C# has Roslyn analyzers; both are mature and useful. The difference is that Gears already includes project-specific checks for layer boundaries, route metadata, SQL placement, GTS identifiers, and unsafe shortcuts, wired into the same quality gate as formatting, Clippy, tests, and security checks.
+Compared with Go/C# alternatives, this is not about one ecosystem being incapable and another being capable. Go has `go vet`, `staticcheck`, and custom analyzers; C# has Roslyn analyzers; both are mature and useful. The difference is that Gears already includes project-specific checks for layer boundaries, route metadata, SQL placement, and GTS identifiers, wired into the same quality gate as formatting, Clippy, tests, and security checks.
 
 > Documentation in markdown decays. `cargo gears lint` makes selected architecture rules executable in CI; that is not a substitute for design review, but it catches violations that reviewers would otherwise have to remember manually.
 
@@ -487,7 +490,7 @@ Gears offer a set of useful capabilities for building modern XaaS systems:
 - **Gear-owned migrations** — gears own their database migrations and run them as part of the runtime lifecycle, so schema ownership follows capability ownership.
 - **Cluster primitives** — the cluster system gear provides common cross-instance coordination primitives: distributed cache, leader election, distributed locks, and service discovery. Operators can bind each primitive to the right backend for the deployment (in-process, Postgres, Redis, Kubernetes, NATS, etcd), while consumers keep the same facade-style API and get startup validation when a backend cannot satisfy required guarantees.
 - **Transactional outbox** — reliable async message production with per-partition ordering, transactional or leased processing modes, retry/reject semantics, and graceful cancellation.
-- **HTTP client** — `toolkit-http` provides a standard outbound HTTP client with rustls TLS, pooling, timeouts, retries with exponential backoff, User-Agent injection, fail-fast concurrency limiting, response size limits, transparent gzip/brotli/deflate decompression, and secure redirect handling with SSRF and credential-leakage protections.
+- **HTTP client** — `toolkit-http` provides a standard outbound HTTP client with rustls TLS, pooling, timeouts, retries with exponential backoff, User-Agent injection, fail-fast concurrency limiting, response size limits, and transparent gzip/brotli/deflate decompression. Redirects are restricted by default: the client follows only same-origin redirects (plus an optional host allowlist), blocks HTTPS-to-HTTP downgrades, and strips credential headers such as `Authorization` and `Cookie` when a redirect changes origin. It does not filter private or internal destination addresses, and it allows plain HTTP unless built with `fips` or configured with `deny_insecure_http()`.
 - **SSE streaming** — toolkit support for typed server-sent events gives gears a standard way to expose streaming APIs without inventing one-off protocols.
 
 ### B.7 One consistent API dialect: `OperationBuilder` + OpenAPI + OData
@@ -554,7 +557,7 @@ This is not unique to Rust — Go, C#, and other ecosystems can and should enfor
 
 Gears also defines a workspace lint floor in `Cargo.toml` and `clippy.toml`. This answers the practical question "what does prohibited mean?" with concrete build rules, not style guidance.
 
-- **Unsafe and debug leakage** — the workspace default sets `unsafe_code = "forbid"`. `unwrap_used`, `expect_used`, `dbg_macro`, `use_debug`, and `unnecessary_debug_formatting` are denied; tests are the explicit exception for `unwrap`/`expect` through `clippy.toml`. A narrowly scoped FFI crate may opt out of the `unsafe` default when its implementation requires it.
+- **Unsafe and debug leakage** — the workspace default sets `unsafe_code = "forbid"`. `unwrap_used`, `expect_used`, `dbg_macro`, `use_debug`, and `unnecessary_debug_formatting` are denied; tests are the explicit exception for `unwrap`/`expect` through `clippy.toml`. Outside tests, a rare exception (for example, `expect` on a constant regex) needs an explicit `#[allow]` that is visible in review. A narrowly scoped FFI crate may opt out of the `unsafe` default when its implementation requires it.
 - **Async correctness** — `await_holding_lock`, `await_holding_refcell_ref`, `async_yields_async`, and `unused_async` are denied. These catch common Tokio mistakes: holding a lock across `.await`, carrying `RefCell` borrows across suspension points, and adding unnecessary async boundaries.
 - **Numeric safety** — `cast_possible_truncation`, `cast_possible_wrap`, `cast_precision_loss`, `cast_sign_loss`, `integer_division`, `float_cmp`, and `lossy_float_literal` are denied. For quotas, usage metering, billing, and limits, silent narrowing or precision loss must be explicit and reviewed.
 - **Complexity budget** — `cognitive_complexity`, `type_complexity`, `too_many_lines`, and `struct_excessive_bools` are denied with project thresholds: cognitive complexity `20`, type complexity `190`, function length `200`, and at most `2` bool fields in a struct. The bool limit nudges state modeling toward enums instead of ambiguous flag bags.
