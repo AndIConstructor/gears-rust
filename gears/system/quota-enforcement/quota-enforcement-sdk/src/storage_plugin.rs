@@ -525,6 +525,10 @@ pub trait QuotaEnforcementStoragePluginV1: Send + Sync + 'static {
     /// - [`StorageError::IdempotencyPayloadMismatch`] for a replay with a
     ///   different payload (I2).
     /// - [`StorageError::QuotaDeactivated`] when a planned Quota is inactive.
+    /// - [`StorageError::LeaseContentionTimeout`] when the wait on a contended
+    ///   row exceeds the metric's budget (I8). The default is 0 ms, so a
+    ///   concurrent writer on the same row is refused at once; nothing was
+    ///   written and the call is safe to retry.
     /// - [`StorageError::Unavailable`] when the backend cannot answer.
     ///
     /// # Replay and retention
@@ -578,6 +582,10 @@ pub trait QuotaEnforcementStoragePluginV1: Send + Sync + 'static {
     ///   period has ended. Neither is raised for a replay.
     /// - [`StorageError::IdempotencyPayloadMismatch`] for a replay with a
     ///   different payload (I2).
+    /// - [`StorageError::LeaseContentionTimeout`] when the wait on a contended
+    ///   row exceeds the metric's budget (I8). The default is 0 ms, so a
+    ///   concurrent writer on the same row is refused at once; nothing was
+    ///   written and the call is safe to retry.
     /// - [`StorageError::Unavailable`] when the backend cannot answer.
     async fn apply_credit(
         &self,
@@ -601,6 +609,10 @@ pub trait QuotaEnforcementStoragePluginV1: Send + Sync + 'static {
     ///   already settled, checked before any write.
     /// - [`StorageError::IdempotencyPayloadMismatch`] for a replay of this
     ///   rollback with a different payload (I2).
+    /// - [`StorageError::LeaseContentionTimeout`] when the wait on a contended
+    ///   row exceeds the metric's budget (I8). The default is 0 ms, so a
+    ///   concurrent writer on the same row is refused at once; nothing was
+    ///   written and the call is safe to retry.
     /// - [`StorageError::Unavailable`] when the backend cannot answer.
     async fn apply_rollback(
         &self,
@@ -623,8 +635,7 @@ pub trait QuotaEnforcementStoragePluginV1: Send + Sync + 'static {
     /// # Errors
     ///
     /// The variants of [`QuotaEnforcementStoragePluginV1::apply_debit_plan`],
-    /// plus [`StorageError::LeaseInflightLimitExceeded`] (I7) and
-    /// [`StorageError::LeaseContentionTimeout`] (I8).
+    /// plus [`StorageError::LeaseInflightLimitExceeded`] (I7).
     async fn acquire_lease(
         &self,
         ctx: &SecurityContext,
@@ -810,7 +821,6 @@ pub trait QuotaEnforcementStoragePluginV1: Send + Sync + 'static {
 
     // --- sweeper and reclamation ---
 
-    /// Physically reclaim up to `batch_size` leases expired before `before`.
     /// How many expired leases are still unreclaimed, by metric, behind the
     /// `lease_unreclaimed_expired` gauge. Counts rows, so it stays cheap while
     /// the sweeper is down and the backlog is what an operator needs to see.
@@ -823,6 +833,7 @@ pub trait QuotaEnforcementStoragePluginV1: Send + Sync + 'static {
         before: OffsetDateTime,
     ) -> Result<Vec<(MetricId, u64)>, StorageError>;
 
+    /// Physically reclaim up to `batch_size` leases expired before `before`.
     async fn reclaim_expired_leases(
         &self,
         batch_size: u32,
