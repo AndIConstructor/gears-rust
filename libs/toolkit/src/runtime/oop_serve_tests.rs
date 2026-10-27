@@ -397,11 +397,13 @@ async fn e2e_startup_readiness_transition_and_graceful_shutdown() {
     );
 
     // 3. Attach the composed gear routes (simulates post-start()).
-    server.attach(
-        gear_router,
-        "{\"openapi\":\"3.1.0\"}".to_owned(),
-        RouteAuthPolicy::default(),
-    );
+    server
+        .attach(
+            gear_router,
+            "{\"openapi\":\"3.1.0\"}".to_owned(),
+            RouteAuthPolicy::default(),
+        )
+        .expect("attach");
 
     // 4. Gear routes now serve.
     assert!(
@@ -471,11 +473,13 @@ async fn attach_forwards_configured_labels_to_directory_registration() {
         .expect("server should bind");
 
     // `attach` spawns the presence loop, which registers immediately.
-    server.attach(
-        Router::new().route("/ping", get(|| async { "pong" })),
-        "{}".to_owned(),
-        RouteAuthPolicy::default(),
-    );
+    server
+        .attach(
+            Router::new().route("/ping", get(|| async { "pong" })),
+            "{}".to_owned(),
+            RouteAuthPolicy::default(),
+        )
+        .expect("attach");
 
     // Poll until the registration is captured (registration is async).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -618,11 +622,13 @@ async fn gear_handler_receives_connect_info_through_fallback() {
         .await
         .expect("server should bind");
 
-    server.attach(
-        Router::new().route("/peer", get(peer)),
-        "{}".to_owned(),
-        RouteAuthPolicy::default(),
-    );
+    server
+        .attach(
+            Router::new().route("/peer", get(peer)),
+            "{}".to_owned(),
+            RouteAuthPolicy::default(),
+        )
+        .expect("attach");
 
     // A `200` proves the gear handler's `ConnectInfo<SocketAddr>` extractor found
     // the connect-info in the request extensions *through* the swap fallback — a
@@ -729,7 +735,6 @@ async fn canonical_error_layer_runs_inside_the_trace_span_when_composed() {
     let tracer = provider.tracer("oop-serve-canonical-order-test");
     let subscriber =
         tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
-    let _guard = tracing::subscriber::set_default(subscriber);
 
     let readiness = readiness(Vec::<String>::new());
     // No authenticator: the unlisted route runs only in development mode.
@@ -747,6 +752,17 @@ async fn canonical_error_layer_runs_inside_the_trace_span_when_composed() {
         DrainGuard::new(readiness),
         &options,
     );
+
+    // Register the request span's callsite before installing the subscriber, so the
+    // interest rebuild `set_default` runs covers it. Otherwise a parallel test that hits
+    // the callsite first can cache it as disabled for this subscriber too.
+    let warm_up = app
+        .clone()
+        .oneshot(Request::builder().uri("/boom").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(warm_up.status().is_server_error(), "the gear route failed");
+    let _guard = tracing::subscriber::set_default(subscriber);
 
     let resp = app
         .oneshot(Request::builder().uri("/boom").body(Body::empty()).unwrap())
@@ -1151,4 +1167,47 @@ async fn a_worker_refuses_to_serve_tenant_operations_it_cannot_check() {
             .expect("server should shut down promptly after cancel")
             .expect("server shuts down");
     }
+}
+
+/// Without a bearer authenticator and without `auth_disabled`, the listener's tenant plane
+/// is absent, not disabled: a raw route the policy does not list is refused, never served
+/// with a default context.
+#[tokio::test]
+async fn without_a_tenant_authenticator_an_unlisted_route_is_refused() {
+    use crate::api::{OpenApiRegistryImpl, OperationBuilder};
+
+    let registry = OpenApiRegistryImpl::new();
+    let router = OperationBuilder::get("/axis/v1/anon")
+        .operation_id("axis.anon")
+        .anonymous()
+        .handler(|| async { "anon" })
+        .text_response(StatusCode::OK, "OK", "text/plain")
+        .register(Router::new(), &registry)
+        .route("/raw", get(|| async { "raw" }));
+    let options = OopServeOptions::new(
+        "axis-gear".to_owned(),
+        "i-1".to_owned(),
+        "http://localhost".to_owned(),
+        free_addr(),
+        Arc::new(E2eDirectory::default()),
+    );
+    let app = layer_gear_router(
+        router,
+        route_auth_policy(registry.operation_specs.iter()),
+        DrainGuard::new(readiness(Vec::<String>::new())),
+        &options,
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/raw").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("TENANT_AUTH_NOT_CONFIGURED"), "{body}");
+
+    let (status, _) = axis_status(app, Method::GET, "/axis/v1/anon", None, None).await;
+    assert_eq!(status, StatusCode::OK, "an anonymous route keeps its plane");
 }

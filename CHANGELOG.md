@@ -2560,6 +2560,15 @@ release-plz updates this file in the Release PR.
   field `auth_disabled`. Configuration files are unaffected (it defaults to `false`);
   code constructing either struct with a literal must set it
   (`OopServeOptions::with_auth_disabled` sets it on the builder).
+- `toolkit-http-middleware`: `layer_route_auth(.., None, ..)` without a bearer
+  authenticator now fails closed (`TenantPlane::Absent`): tenant and unlisted routes
+  answer 401 `TENANT_AUTH_NOT_CONFIGURED` instead of reaching the handler, and a request
+  no route matches is 404 without running the router's fallback. Pass a bearer
+  authenticator, or call `layer_route_auth_with(.., TenantPlane::Disabled, ..)` for the
+  development default tenant context.
+- `toolkit-http-middleware`: `security_context_middleware` ignores a bearer on an
+  `AnonymousRoute` instead of validating it: the handler keeps the anonymous context, and
+  an invalid bearer there is no longer 401.
 
 #### toolkit-auth 0.8.0 migration
 

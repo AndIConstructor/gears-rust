@@ -997,12 +997,52 @@ async fn without_a_tenant_plane_an_unserved_request_keeps_its_status() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// [`TenantPlane::Absent`] never runs a router's fallback: it is an unlisted handler nothing
+/// could check, so an unmatched request is `404` with or without routes beside it.
+#[tokio::test]
+async fn without_a_tenant_plane_the_fallback_never_runs() {
+    let ran = Arc::new(AtomicUsize::new(0));
+    let fallback = {
+        let ran = Arc::clone(&ran);
+        move || {
+            ran.fetch_add(1, Ordering::SeqCst);
+            async { "fallback" }
+        }
+    };
+    let policy: RouteAuthPolicy = [(Method::GET, "/anon".to_owned(), RouteAuth::Anonymous)]
+        .into_iter()
+        .collect();
+    let routers = [
+        ("with routes", Router::new().route("/anon", get(anon_echo))),
+        ("fallback only", Router::new()),
+    ];
+    for (case, router) in routers {
+        let app = layer_route_auth_with(
+            router.fallback(fallback.clone()),
+            policy.clone(),
+            TenantPlane::Absent,
+            None,
+        );
+        for bearer in [None, Some(BEARER_TENANT)] {
+            let (status, _, body) = call(app.clone(), Method::GET, "/nowhere", bearer, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{case} {bearer:?}: {body}");
+        }
+    }
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "the fallback never ran");
+}
+
+/// Echo of the tenant context: `subject_id tenant_id`.
+async fn ids_echo(Extension(ctx): Extension<SecurityContext>) -> String {
+    format!("{} {}", ctx.subject_id(), ctx.subject_tenant_id())
+}
+
 /// [`TenantPlane::Disabled`] (development): the default tenant context on non-platform
-/// routes, never on a platform one.
+/// routes, anonymous ones included and whatever bearer is presented, never on a platform one.
 #[tokio::test]
 async fn a_disabled_tenant_plane_runs_with_the_default_context() {
     let policy: RouteAuthPolicy = [
         (Method::GET, "/p".to_owned(), RouteAuth::Platform),
+        (Method::GET, "/anon".to_owned(), RouteAuth::Anonymous),
         (Method::GET, "/auth".to_owned(), RouteAuth::Authenticated),
     ]
     .into_iter()
@@ -1011,20 +1051,28 @@ async fn a_disabled_tenant_plane_runs_with_the_default_context() {
         layer_route_auth_with(
             Router::new()
                 .route("/p", get(platform_echo))
-                .route("/auth", get(anon_echo))
-                .route("/unlisted", get(anon_echo)),
+                .route("/anon", get(ids_echo))
+                .route("/auth", get(ids_echo))
+                .route("/unlisted", get(ids_echo)),
             policy.clone(),
             TenantPlane::Disabled,
             None,
         )
     };
-    for path in ["/auth", "/unlisted"] {
-        let (status, _, body) = call(app(), Method::GET, path, None, None).await;
-        assert_eq!(
-            (status, body.as_str()),
-            (StatusCode::OK, "subject"),
-            "{path}"
-        );
+    let default_ids = format!(
+        "{} {}",
+        toolkit_security::constants::DEFAULT_SUBJECT_ID,
+        toolkit_security::constants::DEFAULT_TENANT_ID
+    );
+    for path in ["/anon", "/auth", "/unlisted"] {
+        for bearer in [None, Some(BEARER_TENANT), Some(BEARER_FORGED)] {
+            let (status, _, body) = call(app(), Method::GET, path, bearer, None).await;
+            assert_eq!(
+                (status, body.as_str()),
+                (StatusCode::OK, default_ids.as_str()),
+                "{path} {bearer:?}"
+            );
+        }
     }
     let result = call(app(), Method::GET, "/p", Some(BEARER_TENANT), None).await;
     assert_reason(

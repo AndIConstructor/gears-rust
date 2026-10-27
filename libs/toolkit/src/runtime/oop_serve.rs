@@ -165,6 +165,17 @@ impl OopServeOptions {
         self
     }
 
+    /// The listener's tenant plane: the bearer authenticator when one is installed, else
+    /// [`TenantPlane::Disabled`] under `auth_disabled`, else [`TenantPlane::Absent`].
+    #[must_use]
+    pub fn tenant_plane(&self) -> TenantPlane {
+        match (&self.bearer_authenticator, self.auth_disabled) {
+            (Some(bearer), _) => TenantPlane::Authenticator(bearer.clone()),
+            (None, true) => TenantPlane::Disabled,
+            (None, false) => TenantPlane::Absent,
+        }
+    }
+
     /// Set the gear version (used for registration + `OpenAPI` version).
     #[must_use]
     pub fn with_version(mut self, version: Option<String>) -> Self {
@@ -505,15 +516,10 @@ fn layer_gear_router(
     // without an internal authenticator, tenant and unlisted routes without a bearer
     // authenticator (unless `auth_disabled`). `check_route_auth` refuses to start
     // before that can happen for a declared tenant operation.
-    let tenant = match (&options.bearer_authenticator, options.auth_disabled) {
-        (Some(bearer), _) => TenantPlane::Authenticator(bearer.clone()),
-        (None, true) => TenantPlane::Disabled,
-        (None, false) => TenantPlane::Absent,
-    };
     let mut gear = layer_route_auth_with(
         gear_router,
         route_auth,
-        tenant,
+        options.tenant_plane(),
         options.internal_authenticator.clone(),
     );
 
@@ -791,49 +797,56 @@ impl OopHttpServer {
 
     /// Refuse to serve tenant operations without a bearer authenticator (unless
     /// `auth_disabled`): a startup error names the cause instead of a listener that
-    /// refuses every tenant request. Platform operations without an internal
-    /// authenticator only warn: the platform gate already refuses each request, and a
-    /// linked gear's platform route nobody calls must not stop the process.
+    /// refuses every tenant request. Without one, a route the policy does not list is
+    /// refused too, which only a warning can flag: the router cannot list its routes.
+    /// Platform operations without an internal authenticator only warn (when layered):
+    /// the platform gate already refuses each request, and a linked gear's platform route
+    /// nobody calls must not stop the process.
     ///
     /// # Errors
     /// When tenant operations are declared and no tenant authenticator is available.
     pub(super) fn check_route_auth(&self, route_auth: &RouteAuthPolicy) -> anyhow::Result<()> {
+        if !matches!(self.options.tenant_plane(), TenantPlane::Absent) {
+            return Ok(());
+        }
         let gear = &self.options.gear_name;
         let tenant = route_auth.tenant_routes();
-        if !tenant.is_empty()
-            && self.options.bearer_authenticator.is_none()
-            && !self.options.auth_disabled
-        {
+        if !tenant.is_empty() {
             anyhow::bail!(
                 "gear '{gear}' serves tenant operations but no tenant authenticator is \
                  available (link authn-resolver, or set oop_http.auth_disabled for \
                  development): {tenant:?}"
             );
         }
-        let platform = route_auth.platform_routes();
-        if !platform.is_empty() && self.options.internal_authenticator.is_none() {
-            tracing::warn!(
-                gear = %gear,
-                routes = ?platform,
-                "platform operations are served without oop_http.internal_auth; \
-                 every request to them is refused with 401"
-            );
-        }
+        tracing::warn!(
+            gear = %gear,
+            reason = "TENANT_AUTH_NOT_CONFIGURED",
+            "no tenant authenticator on this listener: a route not declared through \
+             OperationBuilder is refused with 401 (link authn-resolver, or set \
+             oop_http.auth_disabled for development)"
+        );
         Ok(())
     }
 
-    /// Atomically publish the composed gear routes (with auth policy) and their
-    /// `OpenAPI` document, then start background directory presence.
+    /// Check the route policy ([`Self::check_route_auth`]), then atomically publish the
+    /// composed gear routes (with auth policy) and their `OpenAPI` document, then start
+    /// background directory presence.
     ///
     /// Presence (registration + heartbeat + self-heal) starts only once the gear
     /// can serve requests, so discovery never advertises a not-yet-serving instance.
     /// Dependency resolution runs in the proxy-wiring phase before serving.
+    ///
+    /// # Errors
+    /// When the route policy fails [`Self::check_route_auth`]; nothing is published.
     pub(super) fn attach(
         &mut self,
         gear_router: Router,
         openapi_json: String,
         route_auth: RouteAuthPolicy,
-    ) {
+    ) -> anyhow::Result<()> {
+        // A declared operation whose plane has no validator would refuse every request;
+        // stop here, before serving, and say why.
+        self.check_route_auth(&route_auth)?;
         let openapi_arc: Arc<str> = Arc::from(openapi_json);
         let layered = layer_gear_router(
             gear_router,
@@ -864,6 +877,7 @@ impl OopHttpServer {
             self.options.heartbeat_interval,
             self.cancel.clone(),
         )));
+        Ok(())
     }
 
     /// Wait for the server to drain on shutdown, then deregister from

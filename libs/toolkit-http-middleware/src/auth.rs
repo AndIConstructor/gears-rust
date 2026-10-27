@@ -3,11 +3,11 @@
 //! Two complementary middlewares:
 //!
 //! - [`security_context_middleware`] (**tenant plane**) extracts the bearer token from
-//!   the incoming `Authorization` header and **always** re-validates it via an
-//!   injected [`BearerAuthenticator`] — there is no trusted-peer fast path
+//!   the incoming `Authorization` header and, on every non-anonymous route, re-validates
+//!   it via an injected [`BearerAuthenticator`] — there is no trusted-peer fast path
 //!   (zero-trust). On success the reconstructed [`SecurityContext`](toolkit_security::SecurityContext)
 //!   is inserted into the request extensions for downstream handlers and the
-//!   `AuthZ` resolver.
+//!   `AuthZ` resolver. A bearer on an anonymous route is ignored, never validated.
 //! - [`internal_auth_middleware`] (**platform plane**) extracts the
 //!   `X-ToolKit-Internal-Token` header and, if present, validates it via an
 //!   injected [`InternalAuthenticator`], inserting [`PeerAuthenticated`] and a
@@ -71,8 +71,8 @@ const AUTH_INFRA_FAILURE_DETAIL: &str = "authentication infrastructure failure";
 /// `Authorization: Bearer` header — framework probe endpoints (`/healthz`,
 /// `/readyz`), and platform-plane-only handlers that authenticate via
 /// `X-ToolKit-Internal-Token` instead. When present, [`security_context_middleware`] lets
-/// a request without an `Authorization` header pass through instead of
-/// returning `401`.
+/// the request pass through with the anonymous context instead of returning `401`; a
+/// presented `Authorization` header is ignored, not validated.
 ///
 /// **Not the same as `OperationSpec.exposed`.** `exposed` controls whether
 /// a route is registered in the gateway for external access; this marker
@@ -165,8 +165,9 @@ pub enum TenantPlane {
     /// Bearers are validated by this authenticator.
     Authenticator(DynBearerAuthenticator),
     /// No authenticator: tenant and unlisted routes that a handler serves are refused with
-    /// `401` `TENANT_AUTH_NOT_CONFIGURED` rather than served unauthenticated. A path nothing
-    /// serves keeps its `404`, and a method undeclared on a declared path its `405`.
+    /// `401` `TENANT_AUTH_NOT_CONFIGURED` rather than served unauthenticated. A path no route
+    /// matches is `404` and a method undeclared on a declared path `405`, both answered
+    /// without running a fallback or handler, since nothing could check them.
     Absent,
     /// Development only (`auth_disabled`): every non-platform route runs with the
     /// default tenant [`SecurityContext`], as the gateway does under `auth_disabled`.
@@ -194,8 +195,9 @@ impl FromIterator<(Method, String, RouteAuth)> for RouteAuthPolicy {
 ///
 /// Every plane fails closed. Platform routes are refused without an internal authenticator
 /// (the gate guards every served route), and tenant and unlisted routes without a bearer
-/// authenticator ([`TenantPlane::Absent`]). A host that serves declared tenant routes without
-/// one should refuse to start instead (see `RouteAuthPolicy::tenant_routes`).
+/// authenticator ([`TenantPlane::Absent`]). Both cases are logged as a warning here; a host
+/// that serves declared tenant routes without a bearer authenticator should refuse to start
+/// instead (see `RouteAuthPolicy::tenant_routes`).
 pub fn layer_route_auth<S>(
     router: Router<S>,
     policy: RouteAuthPolicy,
@@ -218,9 +220,17 @@ pub fn layer_route_auth_with<S>(
 where
     S: Clone + Send + Sync + 'static,
 {
-    // The gate and the absent tenant plane run on matched routes only, so a path or
-    // method nobody serves keeps its 404 or 405 instead of becoming a 401. axum refuses
-    // a route layer on a router without routes, which has nothing to guard anyway.
+    let platform_routes = policy.platform_routes();
+    if internal.is_none() && !platform_routes.is_empty() {
+        tracing::warn!(
+            routes = ?platform_routes,
+            "platform routes are served without an internal authenticator; every request \
+             to them is refused with 401"
+        );
+    }
+    // The gate runs on matched routes only, so a path nobody serves keeps its 404 instead
+    // of becoming a 401. axum refuses a route layer on a router without routes, which has
+    // no platform route to guard anyway.
     let has_routes = router.has_routes();
     let policy = Arc::new(policy);
     let mut router = if has_routes {
@@ -233,17 +243,45 @@ where
             Arc::new(bearer),
             security_context_middleware::<DynBearerAuthenticator>,
         )),
-        TenantPlane::Absent if has_routes => router.route_layer(from_fn_with_state(
-            Arc::clone(&policy),
-            tenant_plane_absent_middleware,
-        )),
-        TenantPlane::Absent => router,
+        // A full layer, not a route layer: a route layer skips the router's fallback,
+        // which would then serve unauthenticated.
+        TenantPlane::Absent => {
+            let tenant_routes = policy.tenant_routes();
+            if !tenant_routes.is_empty() {
+                tracing::warn!(
+                    routes = ?tenant_routes,
+                    reason = "TENANT_AUTH_NOT_CONFIGURED",
+                    "tenant routes are served without a tenant authenticator; every request \
+                     to them is refused with 401"
+                );
+            }
+            router.layer(from_fn_with_state(
+                Arc::clone(&policy),
+                tenant_plane_absent_middleware,
+            ))
+        }
         TenantPlane::Disabled => {
             tracing::warn!(
                 "tenant authentication is DISABLED on this listener (auth_disabled): every \
                  non-platform route runs with the default tenant SecurityContext. Development only."
             );
-            router.layer(from_fn(tenant_plane_disabled_middleware))
+            let context = SecurityContext::builder()
+                .subject_id(toolkit_security::constants::DEFAULT_SUBJECT_ID)
+                .subject_tenant_id(toolkit_security::constants::DEFAULT_TENANT_ID)
+                .build()
+                .inspect_err(|err| {
+                    tracing::error!(
+                        error = %err,
+                        "default tenant SecurityContext could not be built; non-platform \
+                         routes answer 500"
+                    );
+                })
+                .ok()
+                .map(Arc::new);
+            router.layer(from_fn_with_state(
+                context,
+                tenant_plane_disabled_middleware,
+            ))
         }
     };
     if let Some(internal) = internal {
@@ -256,17 +294,34 @@ where
 }
 
 /// [`TenantPlane::Absent`]: refuse tenant and unlisted routes; anonymous and platform routes
-/// are decided by their own plane. A method undeclared on a declared path is answered `405`
-/// here, as the router would, without running any handler: whatever serves it is unchecked.
+/// are decided by their own plane. A request no route matches is answered `404`, and a method
+/// undeclared on a declared path `405`, here, as the router would, without running the
+/// fallback or any handler: whatever serves it is unchecked.
 async fn tenant_plane_absent_middleware(
     State(policy): State<Arc<RouteAuthPolicy>>,
     request: Request,
     next: Next,
 ) -> Response {
+    if request.extensions().get::<MatchedPath>().is_none() {
+        tracing::debug!(
+            method = %request.method(),
+            route = matched_route(&request),
+            reason = "TENANT_AUTH_NOT_CONFIGURED",
+            "unmatched request answered 404 without running the fallback"
+        );
+        return http::StatusCode::NOT_FOUND.into_response();
+    }
     let auth = request.extensions().get::<RouteAuth>().copied();
     if auth.is_none()
         && let Some(allowed) = declared_elsewhere(&policy, &request)
     {
+        tracing::info!(
+            method = %request.method(),
+            route = matched_route(&request),
+            reason = "TENANT_AUTH_NOT_CONFIGURED",
+            "method undeclared on a declared route answered 405: no tenant authenticator \
+             on this listener"
+        );
         return method_not_allowed(&allowed);
     }
     match auth {
@@ -306,20 +361,22 @@ fn method_not_allowed(allowed: &[Method]) -> Response {
 
 /// [`TenantPlane::Disabled`]: the default tenant context on every non-platform route, as the
 /// gateway does under `auth_disabled`. A synthetic tenant context is never put on a platform
-/// route, where it could stand in for a platform caller.
-async fn tenant_plane_disabled_middleware(mut request: Request, next: Next) -> Response {
+/// route, where it could stand in for a platform caller. `context` is built once when the
+/// layer is installed; `None` (a build failure, logged there) answers `500`.
+async fn tenant_plane_disabled_middleware(
+    State(context): State<Option<Arc<SecurityContext>>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     if request.extensions().get::<RouteAuth>() != Some(&RouteAuth::Platform) {
-        let Ok(context) = SecurityContext::builder()
-            .subject_id(toolkit_security::constants::DEFAULT_SUBJECT_ID)
-            .subject_tenant_id(toolkit_security::constants::DEFAULT_TENANT_ID)
-            .build()
-        else {
-            tracing::error!("default tenant SecurityContext could not be built");
+        let Some(context) = context else {
             return CanonicalError::internal(AUTH_INFRA_FAILURE_DETAIL)
                 .create()
                 .into_response();
         };
-        request.extensions_mut().insert(context);
+        request
+            .extensions_mut()
+            .insert(SecurityContext::clone(&context));
     }
     next.run(request).await
 }
