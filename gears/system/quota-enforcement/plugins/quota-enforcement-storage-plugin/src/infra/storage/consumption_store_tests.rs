@@ -1604,3 +1604,40 @@ async fn the_backlog_gauge_counts_only_expired_leases_still_active() {
     assert_eq!(backlog, vec![(metric, 2)]);
     h.down().await;
 }
+
+#[tokio::test]
+async fn a_full_commit_refuses_a_hold_whose_counter_row_is_missing() {
+    let h = Harness::up().await;
+    let id = h.allocation_quota("u1", Some(100)).await;
+    let acquired = h
+        .acquire("u1", 40, TTL, &write(OperationType::Reserve, "r1", 1))
+        .await
+        .expect("acquire");
+    let token = acquired.get().token.expect("an allowed acquisition holds");
+    let conn = h.db.conn().expect("connection");
+    alloc::Entity::delete_many()
+        .filter(alloc::Column::QuotaId.eq(id.as_uuid()))
+        .secure()
+        .scope_with(&AccessScope::allow_all())
+        .exec(&conn)
+        .await
+        .expect("drop the counter row");
+
+    // Nothing comes back on a full commit, so no credit runs to notice the gap.
+    let committed = h
+        .store
+        .commit_lease(
+            &ctx(),
+            &scope_for(tenant()),
+            token,
+            None,
+            &partial("c1", 2),
+            &[],
+        )
+        .await;
+    assert!(
+        matches!(committed, Err(StorageError::Internal(_))),
+        "{committed:?}"
+    );
+    h.down().await;
+}

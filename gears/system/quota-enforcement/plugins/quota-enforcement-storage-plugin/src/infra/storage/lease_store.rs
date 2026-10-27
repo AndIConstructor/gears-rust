@@ -826,17 +826,25 @@ pub(super) async fn counter_value_of(
     period_id: Option<Uuid>,
     wait: RowWait,
 ) -> Result<u64, TxError> {
+    let missing = |what: &str| {
+        TxError::Storage(StorageError::Internal(format!(
+            "the {what} of a hold on quota {quota_id} is missing"
+        )))
+    };
     let value = match period_id {
-        Some(period_id) => super::repo::consumption_counter_repo::find_by_period_id_for_update(
-            tx, scope, period_id, wait,
-        )
-        .await?
-        .map_or(0, |row| row.consumed),
+        Some(period_id) => {
+            super::repo::consumption_counter_repo::find_by_period_id_for_update(
+                tx, scope, period_id, wait,
+            )
+            .await?
+            .ok_or_else(|| missing("period row"))?
+            .consumed
+        }
         None => super::repo::allocation_counter_repo::read_in_flight_for_update(
             tx, scope, quota_id, wait,
         )
         .await?
-        .unwrap_or(0),
+        .ok_or_else(|| missing("allocation counter"))?,
     };
     Ok(u64::try_from(value).unwrap_or(0))
 }
