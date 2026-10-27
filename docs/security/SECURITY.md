@@ -752,9 +752,13 @@ The following areas have been identified for future hardening:
    - **TODO-7** — JWT signature validation (`jsonwebtoken`) currently uses `ring` / non-FIPS `aws-lc-rs`. Audit the surface and either replace upstream, fork, or restrict JWT to symmetric HMAC. Build-time floor enforced via [`deny-fips.toml`](../../deny-fips.toml) Phase B promotion.
    - **TODO-8** — Runtime Operational Environment validation on Linux + Windows (macOS already has a sysctl-based fail-closed gate). Today OE coverage on Linux + Windows is verified manually per release via CMVP cert search.
    - **TODO-1** — Keychain / NCrypt / HSM-stored private keys for server-side TLS (today's PEM/DER load is acceptable for development and most production deployments where filesystem permissions guard the key).
+
 2. **Secure ORM type-column auto-injection** — the `ScopableEntity` trait supports a `type_col` dimension, but automatic GTS type constraint injection from PDP → `AccessScope` → SQL `WHERE` is under development
+
 3. **Tenant Resolver access-control plugins** — the `Unauthorized` error variant is reserved in the SDK, but no production plugin enforces caller-vs-target authorization (the static plugin allows any caller to query any configured tenant; the single-tenant plugin uses identity matching only). A policy-backed plugin would enforce fine-grained tenant visibility
+
 4. **Security guidelines in spec templates** — add explicit security checklist sections to PRD and DESIGN templates (threat modeling, data classification, authentication requirements per feature)
+
 5. **Security-focused architecture lints** — extend the `DE07xx` series with additional rules:
    - Detecting hardcoded secrets or API keys
    - Enforcing `SecretString` / `SecretValue` usage for sensitive fields
@@ -762,8 +766,11 @@ The following areas have been identified for future hardening:
    - Validating `SecurityContext` propagation in gear handlers
    - Detecting a discarded PDP-derived `AccessScope` or an unjustified production `AccessScope::allow_all()`
    - Detecting protected service paths with no `PolicyEnforcer` gate and direct external clients that bypass OAGW
+
 6. **Fuzz target expansion** — current implemented targets cover OData parsers (`fuzz_odata_filter`, `fuzz_odata_cursor`, `fuzz_odata_orderby`). Planned targets: `fuzz_yaml_config`, `fuzz_html_parser`, `fuzz_pdf_parser`, `fuzz_json_config`, `fuzz_markdown_parser`
+
 7. **Kani formal verification** — expand use of the [Kani Rust Verifier](https://model-checking.github.io/kani/) for proving safety properties on critical code paths (`make kani`)
+
 8. **SBOM generation** — add Software Bill of Materials generation to CI for supply-chain transparency
 
 ---
