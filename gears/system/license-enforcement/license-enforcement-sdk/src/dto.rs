@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use crate::ids::{DelegationId, EvidenceId, GrantId};
 use crate::models::{
-    Conditions, DelegatedPermissions, Grant, GrantTerms, Pack, ResourceRef, SubjectRef,
-    TerminationReason, Window,
+    Conditions, DelegatedPermissions, Grant, GrantTerms, Pack, ResourceRefInput, SubjectRefInput,
+    TerminationReason, WindowInput,
 };
 use crate::reason::DenialReason;
 
@@ -102,7 +102,7 @@ pub struct DelegationVerbRequest {
 #[serde(deny_unknown_fields)]
 pub struct RenewRequest {
     /// New window.
-    pub window: Window,
+    pub window: WindowInput,
     /// Idempotency token.
     pub idempotency_token: String,
     /// Required current version.
@@ -115,7 +115,7 @@ pub struct RenewRequest {
 #[serde(deny_unknown_fields)]
 pub struct BindRequest {
     /// The subject.
-    pub subject: SubjectRef,
+    pub subject: SubjectRefInput,
     /// Idempotency token.
     pub idempotency_token: String,
     /// Required current version.
@@ -149,7 +149,7 @@ pub enum DelegationSelection {
     /// `count` unbound grants on this resource.
     Resource {
         /// The resource.
-        resource: ResourceRef,
+        resource: ResourceRefInput,
         /// Number of grants.
         count: u32,
     },
@@ -165,7 +165,7 @@ pub struct DelegateRequest {
     pub selection: DelegationSelection,
     /// Own window of the sub-grants, inside the parent window. Absent: inherited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub window: Option<Window>,
+    pub window: Option<WindowInput>,
     /// Conditions added to the parent conditions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Conditions>,

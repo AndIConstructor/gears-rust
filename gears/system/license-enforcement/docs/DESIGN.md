@@ -332,10 +332,12 @@ and `cpt-cf-license-enforcement-fr-precedence`.
 exact bytes that the plugin admitted. From other evidence, for example a revocation list, the plugin keeps only its
 own material. For the `issue` intake, the bytes are the canonical form of the request and the identity
 of the caller who sent it. Evidence also has an id, the id of the plugin that admitted it, the intake that it came
-through, an optional replay key, and the evidence that it replaces. The plugin sets the replay key, and the gear
-rejects a second evidence with the same key. For the `issue` intake, the replay key is the tenant and the idempotency
-token of the request. These fields come from `cpt-cf-license-enforcement-fr-admission-plugin` and
-`cpt-cf-license-enforcement-fr-signed-artifact`.
+through, an optional replay key, an optional external id, and the evidence that it replaces. The plugin sets the
+replay key, and the gear rejects a second evidence with the same key. For the `issue` intake, the replay key is the
+tenant and the idempotency token of the request. The external id is the id that the evidence carries, and the plugin
+reads it from the evidence. The plugin names the evidence that it replaces by the external id of that evidence. The
+gear finds it by this id and rejects the new evidence when there is none. These fields come from
+`cpt-cf-license-enforcement-fr-admission-plugin` and `cpt-cf-license-enforcement-fr-signed-artifact`.
 
 **Audit event.** An audit event records one lifecycle transition, binding, delegation, import, or rejection at
 import. It has an id, a tenant, an actor, a time, an operation, a target, an optional denial reason, the state before
@@ -614,13 +616,14 @@ candidate tenant as `tenant-resolver` returns it.
 - **Scope**: At init, finds the one `GrantAdmissionPluginV1` that the binary links, and does not start with zero or
   more. Exposes the intakes that the plugin declares. Gives the plugin access to its `PluginMaterial` through
   `ctx`. On admission, it:
-  - rejects evidence that is already admitted. The plugin rejects evidence that is older than the evidence that it
-    replaces.
+  - rejects evidence that is already admitted, and evidence that replaces evidence that the store does not hold. The
+    plugin rejects evidence that is older than the evidence that it replaces, for example by a version mark in its
+    material.
   - rejects a root whose holder is not the tenant of `SecurityContext` or its descendant.
   - returns to the grant service the evidence, the roots that it names, and the plugin material, or the rejection
 - **Boundaries**: Decides nothing about the sufficiency of evidence. No runtime plugin selection.
 - **Related**: Called by `cpt-cf-license-enforcement-component-grant-service`. Hosts the linked admission plugin. Reads
-  `cpt-cf-license-enforcement-component-store` for replay keys and plugin material.
+  `cpt-cf-license-enforcement-component-store` for replay keys, external ids, and plugin material.
 
 #### Management API
 
@@ -950,8 +953,8 @@ the stored models and the fields that the design needs. It is not a complete sch
   - The check reads candidates through two indexes: by tenant and resource type, and by tenant and bound subject.
     Both indexes cover only grants that are not terminated, and include the end of the window.
 - **Packs.** Id, holder tenant, version.
-- **Evidence.** Id, plugin id, intake, the exact bytes that the plugin admitted, replay key, replaced evidence. The
-  replay key is unique per plugin.
+- **Evidence.** Id, plugin id, intake, the exact bytes that the plugin admitted, replay key, external id, replaced
+  evidence. The replay key and the external id are each unique per plugin.
 - **Idempotency records.** Tenant and token as key, payload hash, stored response, expiry at the end of the
   idempotency window.
 - **Plugin material.** Plugin id and key as key, and a value that only the plugin interprets. The retention sweeper

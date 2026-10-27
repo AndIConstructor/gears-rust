@@ -3,8 +3,8 @@ use time::macros::datetime;
 use uuid::Uuid;
 
 use super::{
-    Binding, DelegatedPermissions, Grant, GrantState, Permissions, ResourceRef, SubjectRef,
-    Validity, Window,
+    Binding, DelegatedPermissions, Grant, GrantState, GrantTerms, Permissions, ResourceRef,
+    SubjectRef, TerminationReason, Validity, Window,
 };
 use crate::ids::{EvidenceId, GrantId};
 
@@ -103,4 +103,47 @@ fn request_side_types_reject_unknown_fields() {
         "may_bindd": true,
     }));
     assert!(err.is_err());
+}
+
+#[test]
+fn grant_terms_reject_unknown_nested_fields() {
+    let terms = json!({
+        "resource": { "type": "gts.cf.core.lic.res.v1~acme.app.lic.seat.v1~", "id": "42" },
+        "subject_type": "gts.cf.core.lic.subj.v1~cf.core.lic.tenant.v1~",
+        "window": {
+            "not_before": "2026-01-01T00:00:00Z",
+            "expires_at": "2027-01-01T00:00:00Z",
+        },
+        "permissions": { "may_bind": true, "max_depth": 1, "requires_acceptance": false },
+    });
+    assert!(serde_json::from_value::<GrantTerms>(terms.clone()).is_ok());
+    for (path, key) in [
+        ("resource", "instance_id"),
+        ("window", "grace_untill"),
+        ("permissions", "added_later"),
+    ] {
+        let mut t = terms.clone();
+        t[path][key] = json!("x");
+        assert!(
+            serde_json::from_value::<GrantTerms>(t).is_err(),
+            "{path}.{key}"
+        );
+    }
+}
+
+#[test]
+fn grant_reads_unknown_enum_values() {
+    let mut json = serde_json::to_value(grant()).unwrap();
+    json["state"] = json!("terminated");
+    json["termination_reason"] = json!("expired_by_policy");
+    json["binding"] = json!({ "kind": "pool", "pool_id": 7 });
+    let g = serde_json::from_value::<Grant>(json).unwrap();
+    assert_eq!(g.termination_reason, Some(TerminationReason::Unknown));
+    assert_eq!(g.binding, Binding::Unknown);
+}
+
+#[test]
+fn unknown_enum_values_do_not_serialize() {
+    assert!(serde_json::to_value(TerminationReason::Unknown).is_err());
+    assert!(serde_json::to_value(Binding::Unknown).is_err());
 }

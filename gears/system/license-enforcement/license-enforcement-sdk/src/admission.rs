@@ -192,17 +192,22 @@ pub struct NewEvidence {
     pub bytes: Vec<u8>,
     /// The gear rejects a second evidence with the same key.
     pub replay_key: Option<String>,
-    /// Evidence that this evidence replaces.
-    pub replaces: Option<EvidenceId>,
+    /// Id that the evidence carries, unique per plugin. Later evidence names
+    /// this evidence by it in `replaces`.
+    pub external_id: Option<String>,
+    /// `external_id` of the evidence that this evidence replaces. The gear
+    /// finds that evidence by it and rejects this one when there is none.
+    pub replaces: Option<String>,
 }
 
 impl NewEvidence {
-    /// Evidence without a replay key that replaces nothing.
+    /// Evidence without a replay key or an external id that replaces nothing.
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
             replay_key: None,
+            external_id: None,
             replaces: None,
         }
     }
@@ -213,6 +218,7 @@ impl fmt::Debug for NewEvidence {
         f.debug_struct("NewEvidence")
             .field("bytes", &Redacted(self.bytes.len()))
             .field("replay_key", &self.replay_key)
+            .field("external_id", &self.external_id)
             .field("replaces", &self.replaces)
             .finish()
     }

@@ -1,8 +1,10 @@
 //! The grant model (DESIGN §3.1).
 //!
-//! Request-only models reject unknown fields, so a misspelled field fails
-//! instead of being dropped. Types that responses carry accept unknown fields,
-//! so a new field does not break older clients.
+//! Request types reject unknown fields, so a misspelled field fails instead of
+//! being dropped. Response types accept unknown fields, and their enums that
+//! can grow read an unknown value as `Unknown`, so an addition does not break
+//! older clients. A shape that both carry has one type per side: `ResourceRef`
+//! in a [`Grant`], [`ResourceRefInput`] in [`GrantTerms`].
 
 use gts::GtsTypeId;
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,49 @@ pub struct SubjectRef {
     pub id: String,
 }
 
+/// Request form of [`ResourceRef`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceRefInput {
+    /// Resource contract type, derived from `gts.cf.core.lic.res.v1~`.
+    #[serde(rename = "type")]
+    #[schema(value_type = String)]
+    pub gts_type: GtsTypeId,
+    /// Instance id; absent for the whole type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+impl From<ResourceRefInput> for ResourceRef {
+    fn from(r: ResourceRefInput) -> Self {
+        Self {
+            gts_type: r.gts_type,
+            id: r.id,
+        }
+    }
+}
+
+/// Request form of [`SubjectRef`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubjectRefInput {
+    /// Subject contract type, derived from `gts.cf.core.lic.subj.v1~`.
+    #[serde(rename = "type")]
+    #[schema(value_type = String)]
+    pub gts_type: GtsTypeId,
+    /// Subject instance id.
+    pub id: String,
+}
+
+impl From<SubjectRefInput> for SubjectRef {
+    fn from(s: SubjectRefInput) -> Self {
+        Self {
+            gts_type: s.gts_type,
+            id: s.id,
+        }
+    }
+}
+
 /// The binding slot of a grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -53,6 +98,10 @@ pub enum Binding {
         /// The sub-grant.
         grant_id: GrantId,
     },
+    /// A kind that this version of the SDK does not know. The server never
+    /// sends it.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// A validity window. `grace_until`, when present, ends a grace period that
@@ -71,6 +120,34 @@ pub struct Window {
     #[serde(default, with = "time::serde::rfc3339::option")]
     #[schema(value_type = Option<String>, format = DateTime)]
     pub grace_until: Option<OffsetDateTime>,
+}
+
+/// Request form of [`Window`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WindowInput {
+    /// Start of validity, inclusive.
+    #[serde(with = "time::serde::rfc3339")]
+    #[schema(value_type = String, format = DateTime)]
+    pub not_before: OffsetDateTime,
+    /// End of validity, exclusive.
+    #[serde(with = "time::serde::rfc3339")]
+    #[schema(value_type = String, format = DateTime)]
+    pub expires_at: OffsetDateTime,
+    /// End of the grace period, exclusive.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub grace_until: Option<OffsetDateTime>,
+}
+
+impl From<WindowInput> for Window {
+    fn from(w: WindowInput) -> Self {
+        Self {
+            not_before: w.not_before,
+            expires_at: w.expires_at,
+            grace_until: w.grace_until,
+        }
+    }
 }
 
 /// Validity of a grant: its own window, or the window of its parent.
@@ -110,6 +187,28 @@ pub struct Permissions {
     pub max_depth: u32,
     /// The grant awaits the acceptance of its holder when it is created.
     pub requires_acceptance: bool,
+}
+
+/// Request form of [`Permissions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsInput {
+    /// The holder may `bind` and `unbind`.
+    pub may_bind: bool,
+    /// Maximum delegation depth below this grant; 0 means not delegable.
+    pub max_depth: u32,
+    /// The grant awaits the acceptance of its holder when it is created.
+    pub requires_acceptance: bool,
+}
+
+impl From<PermissionsInput> for Permissions {
+    fn from(p: PermissionsInput) -> Self {
+        Self {
+            may_bind: p.may_bind,
+            max_depth: p.max_depth,
+            requires_acceptance: p.requires_acceptance,
+        }
+    }
 }
 
 /// Holder permissions of a sub-grant that the grantor sets at `delegate`. The
@@ -153,6 +252,10 @@ pub enum TerminationReason {
     Rejected,
     /// Replaced by a successor.
     Replaced,
+    /// A reason that this version of the SDK does not know. The server never
+    /// sends it.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// Conditions over the subject and resource `metadata` of a check, or recipient
@@ -173,21 +276,21 @@ pub type RecipientRules = Conditions;
 #[serde(deny_unknown_fields)]
 pub struct GrantTerms {
     /// The licensed resource.
-    pub resource: ResourceRef,
+    pub resource: ResourceRefInput,
     /// Subject contract type that the grant covers, or the base of the bound
     /// subject's type.
     #[schema(value_type = String)]
     pub subject_type: GtsTypeId,
     /// A subject fixed at admission. It never changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fixed_subject: Option<SubjectRef>,
+    pub fixed_subject: Option<SubjectRefInput>,
     /// Validity window.
-    pub window: Window,
+    pub window: WindowInput,
     /// Conditions over the check `metadata`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Conditions>,
     /// Holder permissions.
-    pub permissions: Permissions,
+    pub permissions: PermissionsInput,
     /// Recipient rules evaluated at `delegate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_rules: Option<RecipientRules>,
