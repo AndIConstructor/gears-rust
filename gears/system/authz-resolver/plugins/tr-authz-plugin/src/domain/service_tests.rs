@@ -778,12 +778,22 @@ async fn unscoped_capability_check_does_not_emit_unsupported_owner_predicates() 
     let tenant = Uuid::now_v7();
     let svc = Service::new(Arc::new(MockTenantResolver::with_tenants(tenant, vec![])));
     let mut request = make_request(tenant);
+    request.action.name = "create".to_owned();
     request.context.require_constraints = false;
     request.context.supported_properties.clear();
     let result = svc.evaluate(&request).await;
     assert!(result.decision);
     assert!(result.context.constraints.is_empty());
 
+    request.action.name = "list".to_owned();
+    let list = svc.evaluate(&request).await;
+    assert!(list.decision);
+    assert!(
+        !list.context.constraints.is_empty(),
+        "a list with the same flags keeps its row fence"
+    );
+
+    request.action.name = "create".to_owned();
     request.context.supported_properties = vec!["owner_tenant_id".to_owned()];
     let scoped = svc.evaluate(&request).await;
     assert!(scoped.decision);
@@ -823,6 +833,7 @@ async fn a_group_selector_keeps_its_constraints_on_an_unconstrained_check() {
     let in_subtree: fn(&Predicate) -> bool = |p| matches!(p, Predicate::InGroupSubtree(_));
     for (property, is_expected) in [("group_ids", in_group), ("ancestor_group_ids", in_subtree)] {
         let mut request = make_request(tenant);
+        request.action.name = "create".to_owned();
         request.context.require_constraints = false;
         request.context.supported_properties.clear();
         request.context.capabilities = vec![

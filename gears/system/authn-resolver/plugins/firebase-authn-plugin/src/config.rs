@@ -78,7 +78,9 @@ impl FirebaseAuthnPluginConfig {
                 "invalid or duplicate Firebase UID mapping"
             );
             anyhow::ensure!(
-                identity.email.contains('@') && !identity.email.trim().is_empty(),
+                identity.email.contains('@')
+                    && !identity.email.trim().is_empty()
+                    && identity.email.trim() == identity.email,
                 "verified email mapping is required"
             );
             anyhow::ensure!(
@@ -140,6 +142,9 @@ mod tests {
             }),
             ("email without @", |c| {
                 c.identities[0].email = "a.example.com".to_owned();
+            }),
+            ("email with surrounding whitespace", |c| {
+                c.identities[0].email = " a@example.com".to_owned();
             }),
             ("nil tenant", |c| c.identities[0].tenant_id = Uuid::nil()),
             ("no scopes", |c| c.identities[0].token_scopes.clear()),

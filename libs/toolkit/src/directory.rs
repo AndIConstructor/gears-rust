@@ -324,25 +324,26 @@ mod tests {
     /// retry: neither erases the other's gRPC services or `OpenAPI` spec.
     #[tokio::test]
     async fn presence_and_hub_registrations_keep_each_others_half() {
-        let dir = Arc::new(GearManager::new());
-        let api = LocalDirectoryClient::new(dir);
-        let id = Uuid::new_v4().to_string();
-        // What `OopServer`'s presence loop sends.
-        let presence = RegisterInstanceInfo::new("worker", &id)
-            .with_rest_endpoint(ServiceEndpoint::http("127.0.0.1", 8080))
-            .with_openapi_spec(r#"{"openapi":"3.1.0"}"#);
-        // What grpc-hub sends.
-        let hub = RegisterInstanceInfo::new("worker", &id)
-            .with_grpc_services(vec![(
-                "worker.Svc".to_owned(),
-                ServiceEndpoint::http("127.0.0.1", 50051),
-            )])
-            .with_version("1.0.0");
-
-        for order in [
-            [&hub, &presence, &presence, &hub],
-            [&presence, &hub, &hub, &presence],
-        ] {
+        for hub_first in [true, false] {
+            // A fresh directory per order, so each starts from nothing.
+            let api = LocalDirectoryClient::new(Arc::new(GearManager::new()));
+            let id = Uuid::new_v4().to_string();
+            // What `OopServer`'s presence loop sends.
+            let presence = RegisterInstanceInfo::new("worker", &id)
+                .with_rest_endpoint(ServiceEndpoint::http("127.0.0.1", 8080))
+                .with_openapi_spec(r#"{"openapi":"3.1.0"}"#);
+            // What grpc-hub sends.
+            let hub = RegisterInstanceInfo::new("worker", &id)
+                .with_grpc_services(vec![(
+                    "worker.Svc".to_owned(),
+                    ServiceEndpoint::http("127.0.0.1", 50051),
+                )])
+                .with_version("1.0.0");
+            let order = if hub_first {
+                [&hub, &presence, &presence, &hub]
+            } else {
+                [&presence, &hub, &hub, &presence]
+            };
             for info in order {
                 api.register_instance(info.clone()).await.unwrap();
             }

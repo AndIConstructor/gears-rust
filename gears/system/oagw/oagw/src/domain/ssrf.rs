@@ -392,6 +392,8 @@ fn is_never_exempt_ipv4(ip: Ipv4Addr) -> bool {
         || ip == Ipv4Addr::BROADCAST
         // Alibaba Cloud metadata, inside the shared 100.64.0.0/10 space.
         || ip == Ipv4Addr::new(100, 100, 100, 200)
+        // Oracle Cloud's legacy metadata endpoint.
+        || ip == Ipv4Addr::new(192, 0, 0, 192)
 }
 
 /// The IPv4 address an IPv6 address carries: mapped, compatible, translated,
@@ -1435,6 +1437,7 @@ mod tests {
             "224.0.0.1",
             "255.255.255.255",
             "100.100.100.200",
+            "192.0.0.192",
             "::1",
             "::",
             "fe80::1",

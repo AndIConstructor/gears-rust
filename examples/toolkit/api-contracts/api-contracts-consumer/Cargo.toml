@@ -52,10 +52,10 @@ tracing.workspace = true
 # The `status` operation's body and the tenant its cache probe is keyed by.
 serde_json.workspace = true
 uuid.workspace = true
-
-# OoP-only, gated behind `oop_module`.
 # The status probe's deadline.
 tokio.workspace = true
+
+# OoP-only, gated behind `oop_module`.
 clap = { workspace = true, optional = true }
 mimalloc = { workspace = true, optional = true }
 authn-resolver = { package = "cf-gears-authn-resolver", path = "../../../../gears/system/authn-resolver/authn-resolver", optional = true }
