@@ -742,7 +742,7 @@ AuthN, AuthZ, and Tenant Resolver plugins let ISVs bind the tenant plane to thei
 - Development configurations may disable authentication or use static/shared-secret plugins. They are not a production ZTA baseline.
 - Inbound TLS, inter-workload mTLS, network segmentation, direct-egress prevention, runtime device/workload posture, centralized audit retention, and incident response are deployment capabilities, as is normal for an application framework.
 - Tenant-plane calls carry only the tenant token. The toolkit does not yet give the receiving service a verified identity of the calling workload, so workload authorization for these calls (requirement 6) needs mesh mTLS or an equivalent deployment control.
-- mTLS/SPIFFE workload identity types exist as a direction, but their issuance and full transport wiring are not currently supplied by the toolkit.
+- mTLS/SPIFFE workload identity is not implemented. `PlatformIdentity::Spiffe` is reserved, but the toolkit does not issue certificates or wire mTLS into its transports. A SPIFFE URI alone does not make a service compatible with the SPIFFE Workload API. Closing this gap needs a separate implementation design that covers initial trust, enrollment, peer identity checks, certificate renewal, and revocation. [ADR-0006](../arch/toolkit-oop/ADR/0006-cpt-cf-adr-platform-plane-auth.md) sets the direction, and the [ModKit zero-trust design](https://github.com/MikeFalcon77/modkit-zero-trust/blob/main/modkit_zero_trust.MD) is a starting point. The controls in that design are proposed, not implemented.
 
 ## 16. Opportunities for Improvement
 
