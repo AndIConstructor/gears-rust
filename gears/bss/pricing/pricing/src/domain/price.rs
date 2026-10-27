@@ -7,15 +7,19 @@ use super::{
     money::{self, PriceData},
     price_book_entry::{ChargeKind, Model, model_allowed},
 };
+use bss_money::CurrencySpec;
 use rust_decimal::Decimal;
 use time::Date;
 use uuid::Uuid;
 
 string_enum!(Eligibility {All=>"all", New=>"new"});
-string_enum!(PriceState {Draft=>"draft", Pending=>"pending", Approved=>"approved", Rejected=>"rejected"});
+string_enum!(PriceState {Draft=>"draft", Pending=>"pending", Approved=>"approved", Rejected=>"rejected", Cancelled=>"cancelled"});
 // Matrix row 10's display state: a draft, pending or rejected price shows its state; an approved
-// one shows where its window stands today.
-string_enum!(DisplayStatus {Draft=>"draft", Pending=>"pending", Rejected=>"rejected", Scheduled=>"scheduled", Active=>"active", Superseded=>"superseded"});
+// one shows where its window stands today; a cancelled price shows `cancelled` (D-520).
+string_enum!(DisplayStatus {Draft=>"draft", Pending=>"pending", Rejected=>"rejected", Scheduled=>"scheduled", Active=>"active", Superseded=>"superseded", Cancelled=>"cancelled"});
+// What a price row asks the `prices` unit to do (D-520, D-521). `set` is today's price.
+// `cancel` and `end` name another price and carry no money of their own.
+string_enum!(ChangeKind {Set=>"set", Cancel=>"cancel", End=>"end"});
 
 #[toolkit_macros::domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +33,10 @@ pub struct Price {
     pub version_no: i32,
     pub dim_value: Option<String>,
     pub model: Model,
+    /// The price's own currency spec: its book's currency and the scale the currency table gave
+    /// it when the price was written. A new or edited draft takes the current scale; an approved
+    /// price keeps its stored one.
+    pub currency: CurrencySpec,
     pub price: Option<PriceData>,
     pub min_fee: Option<Decimal>,
     pub eligibility: Eligibility,
@@ -47,7 +55,8 @@ pub fn parse_start(text: &str) -> Result<Date, RuleError> {
     Date::parse(text, &time::format_description::well_known::Iso8601::DATE)
         .map_err(|_| RuleError::new("WINDOW_START_INVALID"))
 }
-/// Validate all independent authoring rules. Currency scale is supplied by the book context.
+/// Validate all independent authoring rules. The minimum fee is judged on the price's own
+/// currency spec.
 #[must_use]
 pub fn validate(
     price: &Price,
@@ -55,7 +64,6 @@ pub fn validate(
     values: Option<&[String]>,
     siblings: &[Price],
     today: Date,
-    minor_digits: u32,
 ) -> Vec<RuleError> {
     let mut errors = Vec::new();
     if !model_allowed(kind, price.model) {
@@ -73,6 +81,7 @@ pub fn validate(
         other.id != price.id
             && other.price_book_entry_id == price.price_book_entry_id
             && other.dim_value == price.dim_value
+            // A cancelled price has left the chain (D-520).
             && other.state == PriceState::Approved
             && other.effective_from == price.effective_from
     }) {
@@ -87,10 +96,12 @@ pub fn validate(
             Some(_) => {}
         }
     }
-    if price
-        .min_fee
-        .is_some_and(|fee| fee < Decimal::ZERO || fee.scale() > minor_digits)
-    {
+    // Not negative, at most 28 digits, and no more fractional places than the currency once
+    // trailing zeros are dropped: `30.00` is on a 2-place increment and on a 0-place one, `0.001`
+    // is on neither.
+    if price.min_fee.is_some_and(|fee| {
+        bss_pricing_sdk::numeric::validate_minimum_fee(fee, &price.currency).is_err()
+    }) {
         errors.push(RuleError::new("MIN_FEE_INVALID"));
     }
     errors
@@ -117,9 +128,23 @@ pub fn window_display(
         PriceState::Draft => DisplayStatus::Draft,
         PriceState::Pending => DisplayStatus::Pending,
         PriceState::Rejected => DisplayStatus::Rejected,
+        PriceState::Cancelled => DisplayStatus::Cancelled,
         PriceState::Approved if to.is_some_and(|end| end <= today) => DisplayStatus::Superseded,
         PriceState::Approved if from > today => DisplayStatus::Scheduled,
         PriceState::Approved => DisplayStatus::Active,
+    }
+}
+/// A `cancel` or `end` row's display state (D-520, D-521). It has no window of its own: a draft,
+/// pending or rejected change shows its state, and an applied one shows `superseded`, so no
+/// window narrowing lists it as a price in force.
+#[must_use]
+pub fn change_display(state: PriceState) -> DisplayStatus {
+    match state {
+        PriceState::Draft => DisplayStatus::Draft,
+        PriceState::Pending => DisplayStatus::Pending,
+        PriceState::Rejected => DisplayStatus::Rejected,
+        PriceState::Cancelled => DisplayStatus::Cancelled,
+        PriceState::Approved => DisplayStatus::Superseded,
     }
 }
 /// Approved prices of exactly one chain, ordered by start and version.
@@ -142,6 +167,8 @@ pub fn approved_prices<'a>(
 }
 /// Recompute implicit ends; an explicit end is kept unless a successor starts inside it.
 pub fn normalize_windows(prices: &mut [Price]) {
+    // A cancelled price is not approved, so it leaves the chain and its predecessor
+    // re-opens onto the next surviving start (D-520).
     let mut order: Vec<usize> = (0..prices.len())
         .filter(|i| prices[*i].state == PriceState::Approved)
         .collect();
@@ -171,6 +198,54 @@ pub fn normalize_windows(prices: &mut [Price]) {
             next_start
         };
     }
+}
+/// Close an approved price at `end` (D-521).
+///
+/// The current end is the next approved start of the same chain, or the shorter of that
+/// start and an explicit end (D-390). `end` must be after the price's start and no later
+/// than that current end. A price with no current end may close on any later date. The
+/// result is explicitly closed at `end`. A successor cannot start inside a valid `end`,
+/// because `end` is not after the next start.
+///
+/// The door still refuses an end that is not after today (`END_DATE_INVALID`) and a price
+/// that has already ended (`PRICE_ALREADY_ENDED`). This function is the window rule only.
+///
+/// # Errors
+/// `END_DATE_INVALID` when `target` is not an approved price of `chain`, when `end` is not
+/// after the start, or when `end` is after the current end.
+pub fn end_price(chain: &[Price], target: Uuid, end: Date) -> Result<Price, RuleError> {
+    let Some(price) = chain.iter().find(|row| row.id == target) else {
+        return Err(RuleError::new("END_DATE_INVALID"));
+    };
+    if price.state != PriceState::Approved || end <= price.effective_from {
+        return Err(RuleError::new("END_DATE_INVALID"));
+    }
+    let next_start = chain
+        .iter()
+        .filter(|row| {
+            row.id != price.id
+                && row.state == PriceState::Approved
+                && row.price_book_entry_id == price.price_book_entry_id
+                && row.dim_value == price.dim_value
+                && row.effective_from > price.effective_from
+        })
+        .map(|row| row.effective_from)
+        .min();
+    let current = if price.closed_explicitly {
+        match (price.effective_to, next_start) {
+            (Some(explicit), Some(next)) => Some(explicit.min(next)),
+            (explicit, next) => explicit.or(next),
+        }
+    } else {
+        next_start
+    };
+    if current.is_some_and(|until| end > until) {
+        return Err(RuleError::new("END_DATE_INVALID"));
+    }
+    let mut closed = price.clone();
+    closed.effective_to = Some(end);
+    closed.closed_explicitly = true;
+    Ok(closed)
 }
 /// The price of exactly one chain (no default fallback) in force on a date.
 #[must_use]
@@ -537,6 +612,7 @@ pub fn field_of(code: &str) -> &'static str {
         "WINDOW_END_INVALID" | "PAIR_RETURN_STALE" | "TEMPORARY_SPANS_A_CHANGE" => {
             "temporary_until"
         }
+        "END_DATE_INVALID" => "effective_to",
         "DIM_NOT_DECLARED" | "DIM_VALUE_UNKNOWN" => "dim_value",
         "MIN_FEE_INVALID" => "min_fee",
         "ELIGIBILITY_INVALID" => "eligibility",

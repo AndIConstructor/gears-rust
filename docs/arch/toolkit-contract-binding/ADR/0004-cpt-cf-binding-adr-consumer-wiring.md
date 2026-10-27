@@ -41,7 +41,10 @@ with the OoP bootstrap and the embedded (in-process) runtime.
 * **SDK-crate-only dependency** — the consumer must depend only on the provider's `*-sdk` crate. Loading
   the provider's implementation crate as a process-time stub must not be required.
 * **No static endpoint configuration** — the endpoint of a remote provider is resolved at runtime
-  through `DirectoryService`, not hard-coded in `config.yaml` or source code.
+  through `DirectoryService`, not hard-coded in `config.yaml` or source code. **Amended by
+  `cpt-cf-adr-optional-service-discovery`:** this driver holds for directory-based deployments, but is superseded for
+  the explicit directory-less mode (`discovery: none`), where a static `consumer_wiring.<dep>.endpoint` is the
+  supported resolution mechanism (e.g. a k8s Service URL) rather than a dev/test-only escape hatch.
 * **Transparency across runtime profiles** — in Profile 1 (embedded), the local in-process
   implementation is used without any HTTP hop; in Profile 2/3 (OoP), the generated REST client is
   wired automatically. Gear business logic sees `Arc<dyn BillingApi>` in both cases.
@@ -99,7 +102,7 @@ inventory::submit! {
         dep_gear:   "billing",
         wire: |hub: &ClientHub,
                resolver: Arc<dyn EndpointResolver>,
-               internal_token_provider: Option<&InternalTokenProvider>|
+               tuning: ClientTuning|
               -> anyhow::Result<WireOutcome> {
             // Short-circuit: Profile 1 in-process impl already present.
             if hub.try_get_local::<dyn billing_sdk::BillingApi>().is_some() {
@@ -109,11 +112,11 @@ inventory::submit! {
             if hub.has_remote_proxy::<dyn billing_sdk::BillingApi>() {
                 return Ok(WireOutcome::Remote);
             }
-            // The process's platform-plane credential source is threaded onto the
-            // resolving client so its platform-plane methods attach
-            // `X-ToolKit-Internal-Token` (`None` in Profile 1 attaches nothing).
-            let tuning = ClientTuning::default()
-                .with_internal_token_provider(internal_token_provider.cloned());
+            // `tuning` is prepared by the proxy-wiring phase from the consumer's
+            // `consumer_wiring.<dep>` config and already carries the process's
+            // platform-plane credential source, so the resolving client's
+            // platform-plane methods attach `X-ToolKit-Internal-Token`
+            // (no credential in Profile 1 attaches nothing).
             let client = billing_sdk::BillingApiRestResolvingClient::new(resolver, "billing", tuning);
             hub.register_remote_proxy::<dyn billing_sdk::BillingApi>(Arc::new(client));
             Ok(WireOutcome::Remote)
@@ -159,7 +162,8 @@ resolve loop for those that bound remotely:
 
 ```text
 for each ConsumerRegistration where owner_gear == this_gear:
-    outcome = ConsumerRegistration.wire(client_hub, resolver_for(dep_gear), internal_token_provider)?
+    (endpoint, tuning) = read_consumer_wiring(dep_gear)  // parsed ConsumerWiring
+    outcome = ConsumerRegistration.wire(client_hub, resolver_for(dep_gear, endpoint), tuning)?
     if outcome == Local:
         mark dep_gear readiness-resolved       // no directory probe at all
     else:
@@ -211,24 +215,49 @@ resolving client. That is a correctness-preserving fallback rather than a failur
 resolves per call — but it costs an HTTP hop to an in-process gear, so declare co-located providers
 in `deps` when you want the local path guaranteed.
 
-### Static endpoint override (escape hatch)
+### Consumer wiring: endpoint override + client tuning
 
-For local development and integration tests a static endpoint overrides discovery, set per gear
-under the same `config` block the provider side already uses for `client_wiring`:
+Each consumed dependency is configured per gear under the same `config` block the provider side uses
+for `client_wiring`, keyed by the dependency (provider) gear name. `consumer_wiring.<dep>` is an
+**object** (`ConsumerWiring`) carrying an optional `endpoint` plus a flattened `ClientTuning`:
 
 ```yaml
-# config.yaml (development / test only)
+# config.yaml
 gears:
   orders:
     config:
       consumer_wiring:
-        billing: "http://localhost:8081"
+        api-contracts:
+          timeout: "5s"
+          max_concurrent_requests: 256
+          pool_max_idle_per_host: 256
+          # endpoint: "http://localhost:8081"   # optional; omit to keep discovery
 ```
 
-When the key is present the proxy-wiring phase (`host_runtime::run_proxy_wiring_phase`) reads it via
-`static_endpoint_override(...)` and wires the dep through a `StaticEndpointResolver`
-(`toolkit::discovery`), which bypasses the directory entirely and is readiness-resolved immediately —
-no probe loop. Every use is logged at `warn!`.
+The bare-string form earlier drafts accepted (`billing: "http://localhost:8081"`) is **no longer
+supported**: the override lives on the optional `endpoint` field, and a bare string is a boot error
+whose message names the object form.
+
+Because the consumer path is **REST-only** (`#[toolkit::consumes]` always wires a
+`<Contract>RestResolvingClient`; there is no gRPC resolving client), `ConsumerWiring` carries **no**
+`transport` tag and every `ClientTuning` knob applies — no gRPC disambiguation and no
+`rest_only_knobs_set` warning (contrast the provider-side `client_wiring`).
+
+This is the caller-owned config surface that [DESIGN §1.3](../DESIGN.md#13-operational-semantics)
+specifies for remote contracts — "Own config (URL, timeout, retry policy) via `ClientConfig`" — now
+reachable on the actual high-concurrency gear-to-gear caller. `ConsumerWiring` deserializes into a
+`ClientTuning` whose `apply_to(endpoint)` produces that per-call `ClientConfig`.
+
+The proxy-wiring phase (`host_runtime::run_proxy_wiring_phase`) reads the entry via
+`read_consumer_wiring(...)`, splits it into `(endpoint, tuning)`, threads the process's platform-plane
+credential onto the tuning, and hands it to `ConsumerRegistration::wire`. A present-but-unparseable
+entry — wrong shape, wrong-typed tuning, or a non-absolute `endpoint` (validated at parse time by
+`ConsumerWiring`'s `deserialize_with`) — is a boot error (`RegistryError::ProxyWiring`), matching the
+provider side's `client_wiring` (`toolkit::wiring::read_wiring`); it is never downgraded to discovery.
+
+**`endpoint` present** → the dep is wired through a `StaticEndpointResolver` (`toolkit::discovery`),
+bypassing the directory and readiness-resolved immediately (no probe loop). This is the dev/test
+escape hatch, logged at `warn!`. **`endpoint` omitted** → discovery is untouched; only tuning applies.
 
 The `<owner>` segment is `ConsumerRegistration::owner_gear`, which `#[toolkit::consumes]` derives as
 the **kebab-case of the annotated struct's ident** — a separate attribute cannot read the
@@ -241,11 +270,16 @@ Known limits of the escape hatch: exactly one address (no list, weights or failo
 the directory if that address is dead, no metadata or version predicate, and it is read once at
 startup with no hot reload.
 
-**The production guard is deferred.** This ADR originally specified that the key's presence in a
-production configuration should be a fatal startup error. The runtime has no deployment-profile or
-environment concept to key that on — `AppConfig` carries no `profile` field — so the guard would
-require a deliberate config-schema change first. Until then the `warn!` on every static-override use
-is the only safety signal.
+**The production guard is deferred, and now superseded for directory-less mode.** This ADR originally specified that
+the key's presence in a production configuration should be a fatal startup error. The runtime has no
+deployment-profile or environment concept to key that on — `AppConfig` carries no `profile` field — so the guard
+would require a deliberate config-schema change first.
+`cpt-cf-adr-optional-service-discovery` resolves the direction rather than adding that guard: under the explicit
+`discovery: none` mode the static `endpoint` is a **supported** production resolution mechanism, so a blanket
+"fatal in production" guard would be wrong. The key remains discouraged (and should still warn) under
+`discovery: directory`, where directory resolution is the intended path. That ADR also owns updating the `warn!`
+text and the "dev/test" / "Not for production use" doc comments on `ConsumerWiring::endpoint` and
+`StaticEndpointResolver` so they distinguish the two modes.
 
 ### Readiness response shape
 
@@ -413,3 +447,7 @@ Document the current pattern; require authors to configure static endpoints.
   `run_proxy_wiring_phase`, after `DirectoryClient` is in the hub and before `gear.run()`. It is
   shared by both runtime paths (in-process host and OoP serving); `bootstrap/oop.rs` contains no
   consumer-wiring code.
+* Consumer client tuning: this ADR's original scope was *discovery* (the endpoint alone), so the
+  wired client used a hardcoded `ClientTuning::default()`. It now parses `consumer_wiring.<dep>` into
+  `ConsumerWiring` (optional `endpoint` + flattened `ClientTuning`) and threads it through `WireFn`
+  into the resolving client — the caller-owned config specified for remote contracts.

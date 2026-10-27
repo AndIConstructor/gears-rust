@@ -6,7 +6,7 @@
 mod plan_support;
 use bss_pricing::infra::storage::{
     entity::{plan_revision, price},
-    repo::{plan_revision_repo, price_book_entry_repo, price_repo},
+    repo::{book_repo, plan_revision_repo, price_book_entry_repo, price_repo},
 };
 use bss_products_sdk::models::SkuType;
 use plan_support::{
@@ -41,7 +41,13 @@ async fn price_at(
         .await
         .unwrap()
         .unwrap();
+    let book = book_repo::find(&conn, &scope(f), f.ctx.subject_tenant_id(), e.book_id)
+        .await
+        .unwrap()
+        .unwrap();
     let mut p = entry_support::price(&e);
+    // The price carries its book's currency, as every read checks.
+    p.currency = book.currency;
     p.version_no = version_no;
     p.state = state.into();
     p.dim_value = dim.map(str::to_owned);
@@ -147,7 +153,7 @@ async fn a_skus_entries_are_listed_across_books_with_their_usage_and_the_price_i
         None,
         t - day * 30,
         Some(t - day * 10),
-        "0.10",
+        "0.1",
     )
     .await;
     let current = price_at(
@@ -158,10 +164,10 @@ async fn a_skus_entries_are_listed_across_books_with_their_usage_and_the_price_i
         None,
         t - day * 10,
         Some(t + day * 10),
-        "0.20",
+        "0.2",
     )
     .await;
-    price_at(&f, e_eur, 3, "approved", None, t + day * 10, None, "0.30").await;
+    price_at(&f, e_eur, 3, "approved", None, t + day * 10, None, "0.3").await;
     price_at(
         &f,
         e_eur,
@@ -173,8 +179,8 @@ async fn a_skus_entries_are_listed_across_books_with_their_usage_and_the_price_i
         "0.25",
     )
     .await;
-    price_at(&f, e_eur, 5, "pending", None, t + day * 20, None, "0.40").await;
-    price_at(&f, e_eur, 6, "rejected", None, t + day * 21, None, "0.50").await;
+    price_at(&f, e_eur, 5, "pending", None, t + day * 20, None, "0.4").await;
+    price_at(&f, e_eur, 6, "rejected", None, t + day * 21, None, "0.5").await;
     // e_usd: only a value chain and a draft — nothing of the default chain in force.
     price_at(
         &f,
@@ -217,10 +223,7 @@ async fn a_skus_entries_are_listed_across_books_with_their_usage_and_the_price_i
     assert_eq!(second["currency"], "EUR");
     assert_eq!(second["usage"], usage((1, 2, 1), 1, 0, 1, 0));
     assert_eq!(second["current_price"]["id"], current.id.to_string());
-    assert_eq!(
-        second["current_price"]["price_json"],
-        json!({"rate":"0.20"})
-    );
+    assert_eq!(second["current_price"]["price_json"], json!({"rate":"0.2"}));
     assert_eq!(second["current_price"]["status"], "active");
     assert_eq!(second["current_price"]["model"], "per_unit");
     assert!(second["current_price"]["dim_value"].is_null());
@@ -257,7 +260,7 @@ async fn the_price_in_force_is_shown_only_to_a_holder_of_price_book_read() {
         None,
         today() - time::Duration::days(1),
         None,
-        "0.10",
+        "0.1",
     )
     .await;
     // The user holds every grant: the money is there.
@@ -606,7 +609,7 @@ async fn seeded_sku(f: &Fixture, catalog: &Catalog, tag: &str, n: usize) -> Uuid
             None,
             today() - time::Duration::days(1),
             None,
-            "0.10",
+            "0.1",
         )
         .await;
         let (_, revision) = plan(f, &format!("{tag}-plan-{i:03}"), own).await;
@@ -963,11 +966,11 @@ async fn sku_entries_status_comes_from_todays_counts() {
     let ended = entry(&f, ended_book, sku, "usage", None).await;
     // A value chain in force prices the entry and is not its current_price (D-434).
     price_at(&f, value, 1, "approved", Some("eu"), t - day, None, "0.25").await;
-    price_at(&f, later, 1, "approved", None, t + day, None, "0.30").await;
-    price_at(&f, live, 1, "approved", None, t - day, None, "0.20").await;
-    price_at(&f, live, 2, "draft", None, t + day, None, "0.40").await;
-    price_at(&f, pending, 1, "pending", None, t, None, "0.50").await;
-    price_at(&f, rejected, 1, "rejected", None, t - day, None, "0.60").await;
+    price_at(&f, later, 1, "approved", None, t + day, None, "0.3").await;
+    price_at(&f, live, 1, "approved", None, t - day, None, "0.2").await;
+    price_at(&f, live, 2, "draft", None, t + day, None, "0.4").await;
+    price_at(&f, pending, 1, "pending", None, t, None, "0.5").await;
+    price_at(&f, rejected, 1, "rejected", None, t - day, None, "0.6").await;
     price_at(
         &f,
         ended,
@@ -976,7 +979,7 @@ async fn sku_entries_status_comes_from_todays_counts() {
         None,
         t - day * 30,
         Some(t - day),
-        "0.10",
+        "0.1",
     )
     .await;
 
@@ -1042,7 +1045,7 @@ async fn sku_entries_narrow_by_the_plain_keys() {
         None,
         t - time::Duration::days(1),
         None,
-        "0.20",
+        "0.2",
     )
     .await;
     price_at(
@@ -1053,7 +1056,7 @@ async fn sku_entries_narrow_by_the_plain_keys() {
         None,
         t + time::Duration::days(1),
         None,
-        "0.30",
+        "0.3",
     )
     .await;
     price_at(
@@ -1064,7 +1067,7 @@ async fn sku_entries_narrow_by_the_plain_keys() {
         None,
         t - time::Duration::days(1),
         None,
-        "0.40",
+        "0.4",
     )
     .await;
     price_at(
@@ -1168,7 +1171,7 @@ async fn sku_entries_order_by_book_name_and_status_both_ways() {
         None,
         t - time::Duration::days(1),
         None,
-        "0.20",
+        "0.2",
     )
     .await;
     let by_name = vec![priced.to_string(), other.to_string(), z.to_string()];
@@ -1343,5 +1346,176 @@ async fn sku_entries_of_five_and_fifty_books_read_the_same_statements() {
         sql(&fifty.1),
         sql(&unpriced.1),
         "a narrowing that keeps nothing still reads the SKU's entries"
+    );
+}
+
+fn filter_query(expr: &str) -> String {
+    format!("/price-book-entries?$filter={}", expr.replace(' ', "%20"))
+}
+
+/// D-517: `$filter=id in (…)` lists those entries instead of `sku_id`, at most 200 ids. Another
+/// field, `or`, more than 200 ids, and `sku_id` beside the filter are 400. Money and the tenant
+/// stay as they are.
+#[tokio::test]
+async fn price_book_entries_can_be_read_by_id() {
+    let (f, catalog) = setup().await;
+    let eur = book(&f, "b-eur").await;
+    let usd = usd_book(&f).await;
+    let sku = catalog.sku(SkuType::Usage);
+    let other = catalog.sku(SkuType::Usage);
+    let left = entry(&f, eur, sku, "usage", None).await;
+    let right = entry(&f, usd, other, "usage", None).await;
+    let hidden = entry(&f, eur, other, "usage", None).await;
+    let (s, page, _) = get(&f, &filter_query(&format!("id in ({left},{right})"))).await;
+    assert_eq!(s, 200, "{page}");
+    assert_eq!(
+        item_ids(&page),
+        {
+            let mut ids = vec![left.to_string(), right.to_string()];
+            ids.sort();
+            ids
+        },
+        "the named entries, in id order: {page}"
+    );
+    assert!(!item_ids(&page).contains(&hidden.to_string()));
+    let (s, foreign, _) = f
+        .call_as(
+            &stranger(),
+            "GET",
+            &filter_query(&format!("id in ({left})")),
+            json!({}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{foreign}");
+    assert_eq!(foreign["items"], json!([]), "another tenant sees nothing");
+    let (s, bare, _) = f
+        .call_as(
+            &holding(&f, "price_book_entry:read"),
+            "GET",
+            &filter_query(&format!("id in ({left})")),
+            json!({}),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{bare}");
+    assert!(bare["items"][0]["current_price"].is_null(), "{bare}");
+    let missing = Uuid::new_v4();
+    let (s, partial, _) = get(&f, &filter_query(&format!("id in ({left},{missing})"))).await;
+    assert_eq!(s, 200, "{partial}");
+    assert_eq!(item_ids(&partial), vec![left.to_string()]);
+    let (s, one, _) = get(&f, &filter_query(&format!("id eq {left}"))).await;
+    assert_eq!(s, 200, "{one}");
+    assert_eq!(item_ids(&one), vec![left.to_string()]);
+    let too_many = (0..201)
+        .map(|_| Uuid::new_v4().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    // Each refusal by its own description (review RF-P item 9): the problem's `type` URI already
+    // holds "or" and "in", so a substring of the whole body told the refusals apart from nothing.
+    let unparsed = "the filter is `id in (...)`, at most 200 ids: ";
+    for (expr, said, whole) in [
+        ("code eq 'EUR'", unparsed, false),
+        (
+            &format!("id in ({left}) or id in ({right})"),
+            "`or` is not accepted; the filter is `id in (...)`",
+            true,
+        ),
+        (
+            &format!("id in ({too_many})"),
+            "`id in (...)` lists at most 200 ids",
+            true,
+        ),
+        (
+            "id ne 00000000-0000-0000-0000-000000000001",
+            "the filter is `id in (...)`, at most 200 ids",
+            true,
+        ),
+    ] {
+        let (s, body, _) = get(&f, &filter_query(expr)).await;
+        assert_eq!(s, 400, "{expr}: {body}");
+        let violation = &body["context"]["field_violations"][0];
+        assert_eq!(violation["reason"], "QUERY_INVALID", "{expr}: {body}");
+        let description = violation["description"].as_str().unwrap();
+        if whole {
+            assert_eq!(description, said, "{expr}: {body}");
+        } else {
+            assert!(
+                description.starts_with(said) && description.len() > said.len(),
+                "{expr}: the parser's own cause follows {said:?}: {body}"
+            );
+        }
+    }
+    let (s, both, _) = get(
+        &f,
+        &format!(
+            "/price-book-entries?sku_id={sku}&{}",
+            filter_query(&format!("id in ({left})")).trim_start_matches("/price-book-entries?")
+        ),
+    )
+    .await;
+    assert_eq!(s, 400, "{both}");
+    assert!(both.to_string().contains("QUERY_INVALID"), "{both}");
+}
+
+/// D-517 (review RF-P item 1): the served contract of `GET /price-book-entries` declares `$filter`
+/// as a plain parameter whose description names the two shapes the read accepts. It publishes no
+/// `x-odata-filter`: that table would offer `id ne`, which the read refuses.
+#[tokio::test]
+async fn the_served_id_filter_names_only_what_the_read_accepts() {
+    let (f, _) = setup().await;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
+    let _router = bss_pricing::api::rest::authoring::router(f.state, &openapi);
+    let api = serde_json::to_value(
+        openapi
+            .build_openapi(&toolkit::api::OpenApiInfo::default())
+            .unwrap(),
+    )
+    .unwrap();
+    let op = &api["paths"]["/bss-pricing/v1/price-book-entries"]["get"];
+    assert!(op["x-odata-filter"].is_null(), "{op}");
+    let filter = op["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["in"] == "query" && p["name"] == "$filter")
+        .unwrap_or_else(|| panic!("$filter is declared: {op}"));
+    let text = filter["description"].as_str().unwrap();
+    for said in ["`id eq <id>`", "`id in (<id>, ...)`", "200", "8192 bytes"] {
+        assert!(text.contains(said), "the filter says {said}: {text}");
+    }
+}
+
+/// D-517 (review RF-P item 1): a raw `$filter` longer than the toolkit's `MAX_FILTER_LEN` is 400
+/// `QUERY_INVALID` before it is parsed. The filter one byte over is a well-formed `id eq`, which
+/// the read would otherwise answer; the filter at the limit itself is still read.
+#[tokio::test]
+async fn an_id_filter_past_the_length_cap_is_refused_before_it_is_parsed() {
+    let (f, catalog) = setup().await;
+    let eur = book(&f, "b-eur").await;
+    let left = entry(&f, eur, catalog.sku(SkuType::Usage), "usage", None).await;
+    let padded = |len: usize| {
+        let tail = format!("eq {left}");
+        format!("id{}{tail}", " ".repeat(len - 2 - tail.len()))
+    };
+    let limit = toolkit::api::odata::MAX_FILTER_LEN;
+    let at = padded(limit);
+    assert_eq!(at.len(), limit);
+    let (s, page, _) = get(&f, &filter_query(&at)).await;
+    assert_eq!(s, 200, "a filter at the limit is read: {page}");
+    assert_eq!(item_ids(&page), vec![left.to_string()]);
+    let over = padded(limit + 1);
+    assert_eq!(over.len(), limit + 1);
+    let (s, body, _) = get(&f, &filter_query(&over)).await;
+    assert_eq!(s, 400, "{body}");
+    let violation = &body["context"]["field_violations"][0];
+    assert_eq!(violation["reason"], "QUERY_INVALID", "{body}");
+    assert_eq!(violation["field"], "$filter", "{body}");
+    assert_eq!(
+        violation["description"],
+        format!("`$filter` is at most {limit} bytes"),
+        "{body}"
     );
 }

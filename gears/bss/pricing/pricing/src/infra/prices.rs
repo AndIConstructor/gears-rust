@@ -10,8 +10,9 @@
 //! @cpt-dod:cpt-cf-bss-pricing-dod-sod-excludes-authors:p1
 use crate::{
     domain::{
-        RuleError, book,
-        price::{self, Eligibility, Price, PriceState, SkuMetering},
+        RuleError,
+        currency::CurrencyScales,
+        price::{self, ChangeKind, Eligibility, Price, PriceState, SkuMetering},
         price_book_entry::{ChargeKind, Model},
     },
     infra::{
@@ -21,8 +22,8 @@ use crate::{
             RepoError,
             entity::{self, price_book_entry},
             repo::{
-                book_repo, dimension_repo, plan_item_repo, plan_repo, plan_revision_repo,
-                price_book_entry_repo, price_repo,
+                acceptance_repo, book_repo, dimension_repo, plan_item_repo, plan_repo,
+                plan_revision_repo, price_book_entry_repo, price_repo,
             },
         },
     },
@@ -56,7 +57,9 @@ pub struct PriceBookEntryContext {
     /// The entry's model (D-427): every price of the entry is decoded and judged in it.
     pub model: Model,
     pub values: Option<Vec<String>>,
-    pub digits: u32,
+    /// The book's currency: every price of the entry carries it, and a new or edited draft takes
+    /// its current scale ([`Self::current`]).
+    pub currency: String,
     pub prices: Vec<entity::price::Model>,
     pub policy: Option<crate::infra::usage_policy_wire::UsageRatingPolicy>,
 }
@@ -92,7 +95,7 @@ impl PriceBookEntryContext {
             kind,
             model: price_book_entry_repo::model_of(entry)?,
             values,
-            digits: book::minor_digits(&book.currency),
+            currency: book.currency,
             prices,
             policy: crate::infra::storage::repo::usage_policy_repo::for_entries(
                 tx,
@@ -103,14 +106,29 @@ impl PriceBookEntryContext {
             .remove(&entry.id),
         })
     }
-    /// Every price of the entry in the pure model.
+    /// Every price of the entry in the pure model. A `cancel` or `end` row is not a price, so it
+    /// is not here (D-520, D-521); `prices` keeps every row.
     /// # Errors
     /// Returns a corrupt stored price.
     pub fn domain_prices(&self) -> Result<Vec<Price>, RepoError> {
         self.prices
             .iter()
-            .map(|m| price_repo::to_domain(m, self.model))
+            .filter(|m| price_repo::is_price(m))
+            .map(|m| self.decode(m))
             .collect()
+    }
+    /// One stored price of the entry in the pure model, in the entry's model and with its stored
+    /// currency spec, which must name the book's currency.
+    /// # Errors
+    /// A corrupt stored price, or one whose currency is not its book's.
+    pub fn decode(&self, m: &entity::price::Model) -> Result<Price, RepoError> {
+        price_repo::in_book(m, self.model, &self.currency)
+    }
+    /// The spec a new or edited draft of the entry takes: the book's currency at the scale
+    /// `scales` gives it today; `None` when the table no longer knows the currency.
+    #[must_use]
+    pub fn current(&self, scales: &CurrencyScales) -> Option<bss_money::CurrencySpec> {
+        scales.resolve(&self.currency)
     }
     /// The first pure refusal of a candidate against the entry's approved prices.
     #[must_use]
@@ -133,7 +151,6 @@ impl PriceBookEntryContext {
             self.values.as_deref(),
             siblings,
             today,
-            self.digits,
         )
         .first()
         .copied()
@@ -164,12 +181,20 @@ pub struct PricesSubject {
     /// Partners that publish-changes pulled in; recorded in the snapshot.
     pub added_partner: Vec<Uuid>,
     pub release: Release,
+    /// The currency table a draft's stored scale is checked against: a draft written under
+    /// another scale is refused (`CURRENCY_SCALE_CHANGED`) until its author edits it, and a draft
+    /// in a currency the table no longer lists is refused (`BOOK_CURRENCY_INVALID`).
+    currency_scales: Arc<CurrencyScales>,
     /// A definite Products refusal met while judging, kept whole for the door: the approval
     /// error carries only static codes, and the caller must see Products' own status and code.
     refused: Arc<Mutex<Option<CanonicalError>>>,
     /// What `collect` gathers for the synchronous `snapshot` (D-408): the plans reading the
     /// unit's entries and each entry SKU's current descriptors, both outside `after`.
     review: Arc<Mutex<Review>>,
+    /// The approved prices outside the unit whose window or state the last `apply` changed: the
+    /// predecessors it re-closed or re-opened, and the prices it cancelled or ended. The event
+    /// lists them with the unit's prices (D-520, D-521).
+    moved: Arc<Mutex<BTreeSet<Uuid>>>,
 }
 
 /// The reviewer's information about a unit that is never fingerprinted content.
@@ -182,11 +207,94 @@ struct Review {
 
 /// One entry's part of a unit, judged against the entry's current approved prices.
 struct Judged {
+    /// Every row of the entry, as stored.
     stored: Vec<entity::price::Model>,
-    /// The unit prices as they will be approved: shifted, not yet normalised.
+    /// The unit's prices as they will be approved: shifted, not yet normalised.
     proposed: Vec<Price>,
-    /// Every approved price of the entry once the unit applies, normalised per chain.
+    /// Every approved price of the entry once the unit applies, normalised per chain: a price the
+    /// unit cancels is gone, and a price it ends carries its explicit end.
     chain: Vec<Price>,
+    /// The unit's `cancel` and `end` rows (D-520, D-521).
+    changes: Vec<Change>,
+    /// The chains the unit touches: its prices' and the changed prices' dimension values.
+    touched: BTreeSet<Option<String>>,
+}
+
+/// A `cancel` or `end` row as its guards read it (D-520, D-521). A price (`set`) is not a change,
+/// and only an end carries a new end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// Cancel the approved price `target`. `id` is the change row; nil at the door that has not
+    /// written it yet.
+    Cancel { id: Uuid, target: Uuid },
+    /// End the approved price `target` at `end`, exclusive. `id` as for a cancel.
+    End { id: Uuid, target: Uuid, end: Date },
+}
+impl Change {
+    /// The change row; nil at the door that has not written it yet.
+    #[must_use]
+    pub const fn id(&self) -> Uuid {
+        match *self {
+            Self::Cancel { id, .. } | Self::End { id, .. } => id,
+        }
+    }
+    /// The approved price the change names.
+    #[must_use]
+    pub const fn target(&self) -> Uuid {
+        match *self {
+            Self::Cancel { target, .. } | Self::End { target, .. } => target,
+        }
+    }
+    /// The stored `change_kind` of the row.
+    #[must_use]
+    pub const fn kind(&self) -> ChangeKind {
+        match self {
+            Self::Cancel { .. } => ChangeKind::Cancel,
+            Self::End { .. } => ChangeKind::End,
+        }
+    }
+    /// An end's new end; `None` for a cancel.
+    #[must_use]
+    pub const fn end(&self) -> Option<Date> {
+        match *self {
+            Self::Cancel { .. } => None,
+            Self::End { end, .. } => Some(end),
+        }
+    }
+    /// The change a stored row asks for; `None` for a price (`set`).
+    /// # Errors
+    /// A corrupt row: an unknown kind, a change that names no price, or an end with no new end.
+    pub fn of(m: &entity::price::Model) -> Result<Option<Self>, RepoError> {
+        let kind: ChangeKind = m
+            .change_kind
+            .parse()
+            .map_err(|_| RepoError::CorruptRow(format!("price {} change_kind", m.id)))?;
+        let target = || {
+            m.target_price_id
+                .ok_or_else(|| RepoError::CorruptRow(format!("change {} names no price", m.id)))
+        };
+        match kind {
+            ChangeKind::Set => Ok(None),
+            ChangeKind::Cancel => Ok(Some(Self::Cancel {
+                id: m.id,
+                target: target()?,
+            })),
+            ChangeKind::End => Ok(Some(Self::End {
+                id: m.id,
+                target: target()?,
+                end: m
+                    .effective_to
+                    .ok_or_else(|| RepoError::CorruptRow(format!("end {} has no new end", m.id)))?,
+            })),
+        }
+    }
+}
+/// Where a change's guards run (D-520): at its door or at submit, or at the unit's apply, where a
+/// cancel's price that started since is the race's own code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    Judge,
+    Apply,
 }
 
 fn invalid(code: &'static str, detail: impl Into<String>) -> ApprovalError {
@@ -230,7 +338,7 @@ fn after(r: &Price, note: Option<&str>) -> Value {
         "version_no": r.version_no,
         "dim_value": r.dim_value,
         "price": r.price,
-        "min_fee": r.min_fee.map(|v| v.to_string()),
+        "min_fee": r.min_fee.map(bss_money::canonical_decimal),
         "eligibility": r.eligibility.as_str(),
         "effective_from": date(r.effective_from),
         "effective_to": r.effective_to.map(date),
@@ -241,12 +349,23 @@ fn after(r: &Price, note: Option<&str>) -> Value {
         "note": note,
     })
 }
+/// A `cancel` or `end` row's proposed content (D-520, D-521): what it asks of which price.
+fn change_after(m: &entity::price::Model, change: &Change) -> Value {
+    json!({
+        "price_book_entry_id": m.price_book_entry_id,
+        "change_kind": change.kind().as_str(),
+        "target_price_id": change.target(),
+        "dim_value": m.dim_value,
+        "effective_to": change.end().map(date),
+        "note": m.note,
+    })
+}
 fn before(r: &Price) -> Value {
     json!({
         "price_id": r.id,
         "version_no": r.version_no,
         "price": r.price,
-        "min_fee": r.min_fee.map(|v| v.to_string()),
+        "min_fee": r.min_fee.map(bss_money::canonical_decimal),
         "eligibility": r.eligibility.as_str(),
         "effective_from": date(r.effective_from),
         "effective_to": r.effective_to.map(date),
@@ -424,13 +543,15 @@ fn by_entry(models: Vec<entity::price::Model>) -> BTreeMap<Uuid, Vec<entity::pri
 }
 
 impl PricesSubject {
-    /// A subject for the caller's tenant; no shift, no pulled-in partner, withdraw semantics.
+    /// A subject for the caller's tenant judging drafts against `currency_scales`; no shift, no
+    /// pulled-in partner, withdraw semantics.
     #[must_use]
     pub fn new(
         ctx: SecurityContext,
         hub: Arc<toolkit::ClientHub>,
         book_id: Uuid,
         now: OffsetDateTime,
+        currency_scales: Arc<CurrencyScales>,
     ) -> Self {
         let tenant_id = ctx.subject_tenant_id();
         Self {
@@ -443,9 +564,21 @@ impl PricesSubject {
             common_effective_date: None,
             added_partner: Vec::new(),
             release: Release::Draft,
+            currency_scales,
             refused: Arc::default(),
             review: Arc::default(),
+            moved: Arc::default(),
         }
+    }
+    /// The approved prices outside the unit whose window or state the last `apply` changed, in
+    /// ascending id: re-closed or re-opened predecessors, cancelled and ended prices (D-520,
+    /// D-521). Empty before an apply.
+    #[must_use]
+    pub fn moved(&self) -> BTreeSet<Uuid> {
+        self.moved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
     /// The Products refusal that ended the last judgement, if any; the door answers it as is.
     #[must_use]
@@ -549,6 +682,7 @@ impl PricesSubject {
         price_book_entry_id: Uuid,
         prices: &[entity::price::Model],
         shift: Option<Date>,
+        stage: Stage,
     ) -> Result<Judged, ApprovalError> {
         let entry =
             price_book_entry_repo::find(tx, &self.scope(), self.tenant_id, price_book_entry_id)
@@ -569,6 +703,24 @@ impl PricesSubject {
                 format!("entry {price_book_entry_id}"),
             ));
         }
+        // D-522: a released entry's prices are not submitted or applied: `BOOK_ARCHIVED` while
+        // its book is archived, else `ENTRY_REFERENCE_RELEASED` (an unarchive left it released).
+        if entry.reference_state
+            == crate::domain::price_book_entry::ReferenceState::Released.as_str()
+        {
+            let archived = book_repo::find(tx, &self.scope(), self.tenant_id, self.book_id)
+                .await
+                .map_err(storage)?
+                .is_some_and(|book| book.archived_at.is_some());
+            return Err(invalid(
+                if archived {
+                    "BOOK_ARCHIVED"
+                } else {
+                    "ENTRY_REFERENCE_RELEASED"
+                },
+                format!("entry {price_book_entry_id}"),
+            ));
+        }
         self.meter_observations.check(&entry).map_err(|error| {
             *self.refused.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
             invalid("METER_POLICY_REFUSED", format!("entry {}", entry.id))
@@ -577,17 +729,53 @@ impl PricesSubject {
             .await
             .map_err(storage)?;
         let unit: BTreeSet<Uuid> = prices.iter().map(|m| m.id).collect();
+        let sets: Vec<&entity::price::Model> =
+            prices.iter().filter(|m| price_repo::is_price(m)).collect();
+        let changes: Vec<Change> = prices
+            .iter()
+            .filter_map(|m| Change::of(m).transpose())
+            .collect::<Result<_, _>>()
+            .map_err(storage)?;
         let siblings: Vec<Price> = pc
             .domain_prices()
             .map_err(storage)?
             .into_iter()
             .filter(|r| r.state == PriceState::Approved && !unit.contains(&r.id))
             .collect();
-        let drafts = prices
+        let drafts = sets
             .iter()
-            .map(|m| price_repo::to_domain(m, pc.model))
+            .map(|m| pc.decode(m))
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
+        // A draft carries the scale of the day it was written or last edited. One the table has
+        // changed since is refused and left as it is: its author edits it, which takes today's
+        // scale, and submits it again. A book currency the table no longer lists takes no price
+        // at all, so its drafts are refused with their own code: no edit can help them. A
+        // `cancel` or `end` row keeps its price's scale and is not judged here.
+        match pc.current(&self.currency_scales) {
+            None => {
+                if let Some(draft) = drafts.first() {
+                    return Err(invalid(
+                        "BOOK_CURRENCY_INVALID",
+                        format!("price {}: currency {}", draft.id, pc.currency),
+                    ));
+                }
+            }
+            Some(current) => {
+                if let Some(stale) = drafts.iter().find(|r| r.currency != current) {
+                    return Err(invalid(
+                        "CURRENCY_SCALE_CHANGED",
+                        format!(
+                            "price {}: stored at scale {}, the table now gives {} scale {}",
+                            stale.id,
+                            stale.currency.scale(),
+                            current.code(),
+                            current.scale()
+                        ),
+                    ));
+                }
+            }
+        }
         let proposed =
             price::shift_selection(&drafts, shift).map_err(|e| rule(e, price_book_entry_id))?;
         let today = self.now.date();
@@ -638,6 +826,34 @@ impl PricesSubject {
             r.state = PriceState::Approved;
             r
         }));
+        // D-520, D-521: each change is judged against the chain as the unit's prices leave it, and
+        // one unit names a price once, as one pending change does across units.
+        let before = chain.clone();
+        let mut named = BTreeSet::new();
+        let mut touched: BTreeSet<Option<String>> =
+            proposed.iter().map(|r| r.dim_value.clone()).collect();
+        for change in &changes {
+            let target = change.target();
+            if !named.insert(target) {
+                return Err(invalid("PRICE_CHANGE_PENDING", format!("price {target}")));
+            }
+            let bound = matches!(change, Change::Cancel { .. })
+                && acceptance_repo::binds_price(tx, &self.scope(), self.tenant_id, target)
+                    .await
+                    .map_err(storage)?;
+            let ended = guard_change(change, &before, &pc.prices, today, stage, bound)?;
+            if let Some(named) = before.iter().find(|row| row.id == target) {
+                touched.insert(named.dim_value.clone());
+            }
+            match ended {
+                Some(closed) => {
+                    if let Some(slot) = chain.iter_mut().find(|row| row.id == closed.id) {
+                        *slot = closed;
+                    }
+                }
+                None => chain.retain(|row| row.id != target),
+            }
+        }
         price::normalize_windows(&mut chain);
         if pc.kind == ChargeKind::Usage {
             self.guard(entry.sku_id, &chain, &unit)?;
@@ -646,7 +862,76 @@ impl PricesSubject {
             stored: pc.prices,
             proposed,
             chain,
+            changes,
+            touched,
         })
+    }
+}
+
+/// The guards of a `cancel` or an `end` (D-520, D-521): at its door, at submit and again at
+/// apply. `chain` is the entry's approved prices as the unit's own prices leave them; `stored` is
+/// every row of the entry; `bound` says whether a consumer's binding names the price a cancel
+/// names ([`acceptance_repo::binds_price`]). An `end` answers its price explicitly closed at the
+/// new end.
+///
+/// A cancel names an approved price that has not started, that no other pending change names
+/// and that no binding names. Its `keep_for_bound` mark is not the test: the apply sets it on the
+/// price before every `new` price, whether or not anyone holds it (D-520 amended). An end names an
+/// approved price that has not ended by today and that no other pending change names; its new
+/// end is after today, after the price's start and no later than its current end.
+/// # Errors
+/// A cancel: `PRICE_NOT_SCHEDULED` (not approved, or started; `PRICE_ALREADY_STARTED` at
+/// [`Stage::Apply`]), `PRICE_CHANGE_PENDING`, `PRICE_BOUND` (a binding names it). An end:
+/// `PRICE_ALREADY_ENDED` (not approved, or ended), `PRICE_CHANGE_PENDING`, `END_DATE_INVALID`.
+pub fn guard_change(
+    change: &Change,
+    chain: &[Price],
+    stored: &[entity::price::Model],
+    today: Date,
+    stage: Stage,
+    bound: bool,
+) -> Result<Option<Price>, ApprovalError> {
+    let named = change.target();
+    let refuse = |code: &'static str| invalid(code, format!("price {named}"));
+    let target = chain
+        .iter()
+        .find(|row| row.id == named && row.state == PriceState::Approved);
+    let pending = stored.iter().any(|row| {
+        row.id != change.id()
+            && row.target_price_id == Some(named)
+            && row.state == PriceState::Pending.as_str()
+    });
+    match *change {
+        Change::Cancel { .. } => {
+            let target = target.ok_or_else(|| refuse("PRICE_NOT_SCHEDULED"))?;
+            if target.effective_from <= today {
+                return Err(refuse(match stage {
+                    Stage::Judge => "PRICE_NOT_SCHEDULED",
+                    Stage::Apply => "PRICE_ALREADY_STARTED",
+                }));
+            }
+            if pending {
+                return Err(refuse("PRICE_CHANGE_PENDING"));
+            }
+            if bound {
+                return Err(refuse("PRICE_BOUND"));
+            }
+            Ok(None)
+        }
+        Change::End { end, .. } => {
+            if target.is_none_or(|t| t.effective_to.is_some_and(|end| end <= today)) {
+                return Err(refuse("PRICE_ALREADY_ENDED"));
+            }
+            if pending {
+                return Err(refuse("PRICE_CHANGE_PENDING"));
+            }
+            if end <= today {
+                return Err(refuse("END_DATE_INVALID"));
+            }
+            price::end_price(chain, named, end)
+                .map(Some)
+                .map_err(|error| rule(error, named))
+        }
     }
 }
 
@@ -673,6 +958,9 @@ impl<'a> ApprovalSubject<DbTx<'a>> for PricesSubject {
         let mut items = Vec::new();
         let grouped = by_entry(models);
         self.review(tx, &grouped.keys().copied().collect()).await?;
+        // Each entry's book currency, read once per book: every price decodes as every read of a
+        // price decodes it, with its stored currency checked against its book's.
+        let mut currencies: BTreeMap<Uuid, String> = BTreeMap::new();
         for (price_book_entry_id, prices) in grouped {
             let unit: BTreeSet<Uuid> = prices.iter().map(|m| m.id).collect();
             let entry =
@@ -683,28 +971,63 @@ impl<'a> ApprovalSubject<DbTx<'a>> for PricesSubject {
                         invalid("ENTRY_NOT_FOUND", format!("entry {price_book_entry_id}"))
                     })?;
             let model = price_book_entry_repo::model_of(&entry).map_err(storage)?;
-            let mut chain: Vec<Price> =
+            let currency: &str = match currencies.entry(entry.book_id) {
+                std::collections::btree_map::Entry::Occupied(known) => known.into_mut(),
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    let book = book_repo::find(tx, &self.scope(), self.tenant_id, entry.book_id)
+                        .await
+                        .map_err(storage)?
+                        .ok_or_else(|| {
+                            storage(RepoError::CorruptRow(format!(
+                                "entry {} has no book",
+                                entry.id
+                            )))
+                        })?;
+                    slot.insert(book.currency)
+                }
+            };
+            let approved: Vec<Price> =
                 price_repo::for_entry(tx, &self.scope(), self.tenant_id, price_book_entry_id)
                     .await
                     .map_err(storage)?
                     .iter()
-                    .filter(|m| m.state == PriceState::Approved.as_str() && !unit.contains(&m.id))
-                    .map(|m| price_repo::to_domain(m, model))
+                    .filter(|m| {
+                        m.state == PriceState::Approved.as_str()
+                            && price_repo::is_price(m)
+                            && !unit.contains(&m.id)
+                    })
+                    .map(|m| price_repo::in_book(m, model, currency))
                     .collect::<Result<_, _>>()
                     .map_err(storage)?;
-            let drafts = prices
+            let sets: Vec<&entity::price::Model> =
+                prices.iter().filter(|m| price_repo::is_price(m)).collect();
+            let drafts = sets
                 .iter()
-                .map(|m| price_repo::to_domain(m, model))
+                .map(|m| price_repo::in_book(m, model, currency))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(storage)?;
             let proposed = price::shift_selection(&drafts, self.common_effective_date)
                 .map_err(|e| rule(e, price_book_entry_id))?;
+            let mut chain = approved.clone();
             chain.extend(proposed.iter().cloned().map(|mut r| {
                 r.state = PriceState::Approved;
                 r
             }));
+            // A cancelled price leaves the chain, so each price's predecessor is read without it.
+            let mut changes = Vec::new();
+            for m in &prices {
+                if let Some(change) = Change::of(m).map_err(storage)? {
+                    changes.push((m, change));
+                }
+            }
+            for (_, change) in changes
+                .iter()
+                .filter(|(_, c)| matches!(c, Change::Cancel { .. }))
+            {
+                chain.retain(|row| row.id != change.target());
+            }
             price::normalize_windows(&mut chain);
-            for (m, r) in prices.iter().zip(&proposed) {
+            for (m, r) in sets.iter().zip(&proposed) {
                 let predecessor = chain
                     .iter()
                     .find(|c| c.id == r.id)
@@ -715,6 +1038,19 @@ impl<'a> ApprovalSubject<DbTx<'a>> for PricesSubject {
                     created_by: m.created_by,
                     before: predecessor.map(before),
                     after: after(r, m.note.as_deref()),
+                });
+            }
+            // D-520, D-521: a change shows the price it names as `before`, and what it asks.
+            for (m, change) in changes {
+                items.push(ItemRef {
+                    item_type: ITEM_TYPE.into(),
+                    item_id: m.id,
+                    created_by: m.created_by,
+                    before: approved
+                        .iter()
+                        .find(|r| r.id == change.target())
+                        .map(before),
+                    after: change_after(m, &change),
                 });
             }
         }
@@ -733,8 +1069,14 @@ impl<'a> ApprovalSubject<DbTx<'a>> for PricesSubject {
             }
         }
         for (price_book_entry_id, prices) in by_entry(models) {
-            self.judge(tx, price_book_entry_id, &prices, self.common_effective_date)
-                .await?;
+            self.judge(
+                tx,
+                price_book_entry_id,
+                &prices,
+                self.common_effective_date,
+                Stage::Judge,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -780,14 +1122,20 @@ impl<'a> ApprovalSubject<DbTx<'a>> for PricesSubject {
                 .ok(),
         })
     }
-    /// Re-judge every touched chain, then approve, re-close predecessors and mark
-    /// `keep_for_bound`; any refusal rolls the whole unit back as `APPLY_REFUSED`.
+    /// Re-judge every touched chain, then approve, re-close predecessors, cancel and end the
+    /// prices the unit's changes name (D-520, D-521) and mark `keep_for_bound`; any refusal rolls
+    /// the whole unit back as `APPLY_REFUSED`. The prices outside the unit whose window or state
+    /// moved are kept for the event ([`Self::moved`]).
     async fn apply(
         &self,
         tx: &DbTx<'a>,
         unit: &Unit,
         items: &[ItemRef],
     ) -> Result<(), ApprovalError> {
+        self.moved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         let models = self.load_all(tx, items.iter().map(|i| i.item_id)).await?;
         if let Some(m) = models
             .iter()
@@ -798,24 +1146,27 @@ impl<'a> ApprovalSubject<DbTx<'a>> for PricesSubject {
                 detail: format!("price {}", m.id),
             });
         }
+        let mut moved = BTreeSet::new();
         // Entries in ascending id: two batches over the same entries meet in one order.
         for (price_book_entry_id, prices) in by_entry(models) {
             let judged = self
-                .judge(tx, price_book_entry_id, &prices, unit.common_effective_date)
+                .judge(
+                    tx,
+                    price_book_entry_id,
+                    &prices,
+                    unit.common_effective_date,
+                    Stage::Apply,
+                )
                 .await
                 .map_err(applied)?;
             let normalised = |id: Uuid| judged.chain.iter().find(|c| c.id == id);
             // The current predecessor of EVERY `new` price of a touched chain binds renewals,
             // whether the `new` price is in this unit or was approved earlier and a price of this
-            // unit now sits in front of it. A mark is never cleared.
-            let touched: BTreeSet<Option<&str>> = judged
-                .proposed
-                .iter()
-                .map(|r| r.dim_value.as_deref())
-                .collect();
+            // unit now sits in front of it, or a price this unit cancels no longer does. A mark
+            // is never cleared.
             let mut keep = BTreeSet::new();
             for c in judged.chain.iter().filter(|c| {
-                c.eligibility == Eligibility::New && touched.contains(&c.dim_value.as_deref())
+                c.eligibility == Eligibility::New && judged.touched.contains(&c.dim_value)
             }) {
                 if let Some(predecessor) = price::in_force_before(&judged.chain, c) {
                     keep.insert(predecessor.id);
@@ -839,18 +1190,72 @@ impl<'a> ApprovalSubject<DbTx<'a>> for PricesSubject {
                 .await
                 .map_err(storage)?;
             }
+            let changed = |kind: ChangeKind| -> BTreeSet<Uuid> {
+                judged
+                    .changes
+                    .iter()
+                    .filter(|c| c.kind() == kind)
+                    .map(Change::target)
+                    .collect()
+            };
+            let (cancelled, ended) = (changed(ChangeKind::Cancel), changed(ChangeKind::End));
+            // A concurrent write to a price this apply re-closes, cancels or ends is contention:
+            // the transaction retries and judges again.
+            let contended = |e: RepoError| match e {
+                RepoError::Conflict { .. } => ApprovalError::Contended,
+                other => storage(other),
+            };
             for stored in judged
                 .stored
                 .iter()
-                .filter(|m| m.state == PriceState::Approved.as_str())
+                .filter(|m| m.state == PriceState::Approved.as_str() && price_repo::is_price(m))
             {
+                // D-520: the cancelled price leaves the chain, and this loop re-closes the price
+                // before it onto the normalised end, as it re-closes every other one.
+                if cancelled.contains(&stored.id) {
+                    price_repo::cancel(
+                        tx,
+                        &self.scope(),
+                        self.tenant_id,
+                        stored.id,
+                        stored.version,
+                        unit.id,
+                        self.now,
+                    )
+                    .await
+                    .map_err(contended)?;
+                    moved.insert(stored.id);
+                    continue;
+                }
                 let Some(chain) = normalised(stored.id) else {
                     continue;
                 };
                 let keep_for_bound = stored.keep_for_bound || keep.contains(&stored.id);
-                if chain.effective_to != stored.effective_to
+                if ended.contains(&stored.id) {
+                    // D-521: the explicit end, unless a successor already starts inside it.
+                    let end = chain.effective_to.ok_or_else(|| {
+                        ApprovalError::Store(format!("price {} lost its new end", stored.id))
+                    })?;
+                    price_repo::close_explicitly(
+                        tx,
+                        &self.scope(),
+                        self.tenant_id,
+                        stored.id,
+                        stored.version,
+                        end,
+                        keep_for_bound,
+                        self.now,
+                    )
+                    .await
+                    .map_err(contended)?;
+                    moved.insert(stored.id);
+                } else if chain.effective_to != stored.effective_to
                     || keep_for_bound != stored.keep_for_bound
                 {
+                    // Only a moved end is news for the event; a new `keep_for_bound` mark is not.
+                    if chain.effective_to != stored.effective_to {
+                        moved.insert(stored.id);
+                    }
                     price_repo::set_window(
                         tx,
                         &self.scope(),
@@ -862,13 +1267,31 @@ impl<'a> ApprovalSubject<DbTx<'a>> for PricesSubject {
                         self.now,
                     )
                     .await
-                    .map_err(|e| match e {
-                        RepoError::Conflict { .. } => ApprovalError::Contended,
-                        other => storage(other),
-                    })?;
+                    .map_err(contended)?;
                 }
             }
+            // A change row is approved as it was written: it is the record of what the unit did,
+            // and the approved-start index does not count it (D-520, D-521).
+            for m in prices.iter().filter(|m| !price_repo::is_price(m)) {
+                price_repo::approve(
+                    tx,
+                    &self.scope(),
+                    self.tenant_id,
+                    m.id,
+                    unit.id,
+                    price_repo::Approval {
+                        effective_from: m.effective_from,
+                        effective_to: m.effective_to,
+                        temporary_until: None,
+                        keep_for_bound: false,
+                    },
+                    self.now,
+                )
+                .await
+                .map_err(storage)?;
+            }
         }
+        *self.moved.lock().unwrap_or_else(PoisonError::into_inner) = moved;
         Ok(())
     }
     async fn unlock(

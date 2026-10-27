@@ -104,7 +104,6 @@ pub struct ReadSnapshot {
     /// Every price of the entries the items name, as stored: a binding renders its row.
     pub rows: BTreeMap<Uuid, price::Model>,
     pub defaults: TenantDefaults,
-    pub rounding: String,
     pub dimensions: BTreeMap<Uuid, Option<String>>,
     pub resolved: Vec<ItemResolution>,
     pub versions: BTreeMap<Uuid, SkuVersion>,
@@ -132,7 +131,12 @@ pub async fn load_price(
     // @cpt-begin:cpt-cf-bss-pricing-flow-read-contract-events:p1:inst-read-contract-events-flow-5
     let row = price_repo::find(tx, scope, tenant, id)
         .await?
-        .filter(|p| p.state == PriceState::Approved.as_str())
+        // An approved price, or a cancelled one (D-520), never a `cancel` or `end` row.
+        .filter(|p| {
+            price_repo::is_price(p)
+                && (p.state == PriceState::Approved.as_str()
+                    || p.state == PriceState::Cancelled.as_str())
+        })
         .ok_or_else(|| {
             PriceResource::not_found("price not found")
                 .with_resource("price")
@@ -145,6 +149,13 @@ pub async fn load_price(
     let book = book_repo::find(tx, &children, tenant, entry.book_id)
         .await?
         .ok_or_else(|| corrupt(format!("entry {} has no book", entry.id)))?;
+    // Served as stored, so it is read as the in-process read reads it: money and fee in canonical
+    // text, a currency spec in range that names the book's currency; anything else is corrupt.
+    price_repo::in_book(
+        &row,
+        price_book_entry_repo::model_of(&entry)?,
+        &book.currency,
+    )?;
     Ok(PriceSnapshot { row, entry, book })
     // @cpt-end:cpt-cf-bss-pricing-flow-read-contract-events:p1:inst-read-contract-events-flow-5
 }
@@ -224,8 +235,14 @@ pub async fn read_stored_at(
     if let Some(lost) = wanted.iter().find(|w| !held.contains(w)) {
         return Err(corrupt(format!("entry {lost} of revision {id}")));
     }
-    let mut grouped =
-        price_repo::by_entry(price_repo::for_entries(tx, &children, tenant, &wanted).await?);
+    // The prices only: a `cancel` or `end` row is never resolved, pinned or bound (D-520, D-521).
+    let mut grouped = price_repo::by_entry(
+        price_repo::for_entries(tx, &children, tenant, &wanted)
+            .await?
+            .into_iter()
+            .filter(price_repo::is_price)
+            .collect(),
+    );
     let mut dimensions = BTreeMap::new();
     let entry_rows = found.clone();
     for e in found {
@@ -235,8 +252,8 @@ pub async fn read_stored_at(
         let model = price_book_entry_repo::model_of(&e)?;
         let domain = of_entry
             .iter()
-            .map(|p| price_repo::to_domain(p, model))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|p| price_repo::in_book(p, model, &book.currency))
+            .collect::<Result<Vec<_>, RepoError>>()?;
         prices.extend(of_entry.into_iter().map(|p| (p.id, p)));
         let values = e
             .dimension_key
@@ -304,7 +321,6 @@ pub async fn read_stored_at(
             default_tax_category: settings.default_tax_category,
             invoice_line_templates,
         },
-        rounding: settings.default_rounding,
         dimensions,
         resolved: Vec::new(),
         versions: BTreeMap::new(),

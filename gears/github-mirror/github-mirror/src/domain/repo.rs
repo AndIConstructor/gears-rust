@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use github_mirror_sdk::{
     Branch, CheckRun, Comment, Commit, CommitComment, CommitFile, CommitStatus, Contributor,
     Deployment, Issue, IssueEvent, IssueReaction, IssueTimelineEvent, Label, Milestone,
     PullRequest, PullRequestCommit, PullRequestFile, Release, Repo, Review, ReviewComment,
-    ReviewThread, SyncSummary, Tag, WorkflowJob, WorkflowRun,
+    ReviewThread, Tag, WorkflowJob, WorkflowRun,
 };
 use toolkit_macros::domain_model;
 use toolkit_odata::{ODataQuery, Page};
@@ -12,7 +14,11 @@ use toolkit_security::AccessScope;
 use uuid::Uuid;
 
 use super::error::DomainError;
-use super::ports::github::FetchedRepository;
+use super::ports::github::{
+    ActionsListing, CommitDetail, CommitListing, IssueDetail, IssueListing, ListingCompleteness,
+    MetadataListing, PullDetail, PullListing,
+};
+use super::scope::ScopeConfig;
 
 /// Write-side record for a mirrored repository (what sync knows about it).
 #[domain_model]
@@ -63,6 +69,13 @@ pub trait RepoRepository: Send + Sync {
         scope: &AccessScope,
         full_name: &str,
     ) -> Result<Option<Repo>, DomainError>;
+
+    /// GitHub's ids for every mirrored repository of `owner`.
+    ///
+    /// Filtered in the query rather than by the caller, so an owner is not
+    /// missed because the tenant has more repositories than one page holds.
+    async fn ids_by_owner(&self, scope: &AccessScope, owner: &str)
+    -> Result<Vec<i64>, DomainError>;
 }
 
 /// Write-side record for a mirrored issue (pull requests included).
@@ -98,10 +111,16 @@ pub struct IssueRecord {
 /// The slice of a listing a caller asked for: how many rows, and how many to
 /// skip first. The skip is pushed into SQL so a request for page 50 does not
 /// read the 49 pages before it.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageWindow {
     limit: u64,
     offset: u64,
+    /// Keep only rows a sync wrote at or after this instant.
+    extracted_since: Option<DateTime<Utc>>,
+    /// Keep only rows GitHub last changed at or after this instant, by the
+    /// entity's own stamp; entities without one ignore it.
+    updated_since: Option<DateTime<Utc>>,
 }
 
 impl PageWindow {
@@ -154,7 +173,12 @@ impl PageWindow {
                 ),
             });
         }
-        Ok(Self { limit, offset })
+        Ok(Self {
+            limit,
+            offset,
+            extracted_since: None,
+            updated_since: None,
+        })
     }
 
     /// The first `limit` rows, clamped to [`Self::MAX_LIMIT`].
@@ -171,6 +195,8 @@ impl PageWindow {
                 limit
             },
             offset: 0,
+            extracted_since: None,
+            updated_since: None,
         }
     }
 
@@ -184,6 +210,28 @@ impl PageWindow {
     #[must_use]
     pub const fn offset(self) -> u64 {
         self.offset
+    }
+
+    #[must_use]
+    pub const fn with_extracted_since(mut self, since: Option<DateTime<Utc>>) -> Self {
+        self.extracted_since = since;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_updated_since(mut self, since: Option<DateTime<Utc>>) -> Self {
+        self.updated_since = since;
+        self
+    }
+
+    #[must_use]
+    pub const fn extracted_since(self) -> Option<DateTime<Utc>> {
+        self.extracted_since
+    }
+
+    #[must_use]
+    pub const fn updated_since(self) -> Option<DateTime<Utc>> {
+        self.updated_since
     }
 }
 
@@ -244,6 +292,7 @@ mod page_window_tests {
 /// mirror does not yet apply (`labels`, `assignee`, `creator`, `mentioned`,
 /// `milestone`) are recorded as unsupported in PRD 4.3 rather than silently
 /// ignored here.
+#[domain_model]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListingFilter {
     /// The state to keep, or `None` for every state.
@@ -261,6 +310,7 @@ pub struct ListingFilter {
 /// A parsed enum rather than the raw query string: an unrecognised `state`
 /// used to reach SQL and return an empty page, which reads as "no such
 /// issues" instead of "no such state".
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueState {
     Open,
@@ -295,6 +345,7 @@ impl IssueState {
 }
 
 /// The sort keys GitHub offers that the mirror stores a column for.
+#[domain_model]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ListingSort {
     #[default]
@@ -302,6 +353,7 @@ pub enum ListingSort {
     Updated,
 }
 
+#[domain_model]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ListingDirection {
     #[default]
@@ -467,6 +519,11 @@ pub trait PullRequestRepository: Send + Sync {
         repo_id: i64,
         number: i64,
     ) -> Result<Option<PullRequest>, DomainError>;
+    async fn open_head_shas(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<Vec<String>, DomainError>;
     /// Hard-delete this repo's rows whose `extracted_at` predates
     /// `extracted_before` — rows the sync that set the watermark did not
     /// see. Only called for a listing fetched to completion; a truncated or
@@ -614,6 +671,10 @@ pub struct ReviewCommentRecord {
     pub subject_type: Option<String>,
     /// The review this inline comment belongs to, when it belongs to one.
     pub pull_request_review_id: Option<i64>,
+    /// Code lines above and below the commented line, cut from `diff_hunk`
+    /// when the sync's `inline_comment_snippets` asks for them.
+    pub snippet_before: Option<String>,
+    pub snippet_after: Option<String>,
 }
 
 #[async_trait]
@@ -866,6 +927,88 @@ pub struct ContributorRecord {
     pub last_seen_at: Option<DateTime<Utc>>,
 }
 
+impl ContributorRecord {
+    /// Take in another view of the same person: roles union, the widest
+    /// observation window, and the profile of whichever view saw them last.
+    ///
+    /// Which side is newer is read from `last_seen_at` rather than assumed,
+    /// because callers point both ways: a listing folds a fresh sighting into
+    /// what it has, while the storage merge folds the stored row into a fresh
+    /// record. A newer view that carries no avatar or profile URL leaves the
+    /// one already held, so a sighting that knew only a login does not blank
+    /// what an earlier one learned.
+    pub fn absorb(&mut self, other: Self) {
+        let theirs_is_newer = match (self.last_seen_at, other.last_seen_at) {
+            (Some(mine), Some(theirs)) => theirs > mine,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+
+        for role in other.roles {
+            if !self.roles.contains(&role) {
+                self.roles.push(role);
+            }
+        }
+        self.roles.sort();
+        self.first_seen_at = match (self.first_seen_at, other.first_seen_at) {
+            (Some(mine), Some(theirs)) => Some(mine.min(theirs)),
+            (mine, theirs) => mine.or(theirs),
+        };
+        self.last_seen_at = self.last_seen_at.max(other.last_seen_at);
+
+        if theirs_is_newer {
+            self.account_type = other.account_type;
+            if other.login.is_some() {
+                self.login = other.login;
+            }
+            if other.avatar_url.is_some() {
+                self.avatar_url = other.avatar_url;
+            }
+            if other.html_url.is_some() {
+                self.html_url = other.html_url;
+            }
+            return;
+        }
+        self.login = self.login.take().or(other.login);
+        self.avatar_url = self.avatar_url.take().or(other.avatar_url);
+        self.html_url = self.html_url.take().or(other.html_url);
+    }
+}
+
+#[cfg(test)]
+mod contributor_record_tests {
+    use chrono::{Duration, Utc};
+
+    use super::ContributorRecord;
+
+    fn sighting(profile: Option<&str>, seen_hours_ago: i64) -> ContributorRecord {
+        let seen = Utc::now() - Duration::hours(seen_hours_ago);
+        ContributorRecord {
+            repo_id: 42,
+            user_id: 7,
+            login: Some("alice".to_owned()),
+            account_type: "User".to_owned(),
+            avatar_url: profile.map(|_| "https://avatars.example/alice".to_owned()),
+            html_url: profile.map(str::to_owned),
+            roles: vec!["author".to_owned()],
+            first_seen_at: Some(seen),
+            last_seen_at: Some(seen),
+        }
+    }
+
+    #[test]
+    fn a_newer_record_without_urls_keeps_the_stored_ones() {
+        let mut fresh = sighting(None, 0);
+        fresh.absorb(sighting(Some("https://github.com/alice"), 48));
+
+        assert_eq!(
+            fresh.avatar_url.as_deref(),
+            Some("https://avatars.example/alice")
+        );
+        assert_eq!(fresh.html_url.as_deref(), Some("https://github.com/alice"));
+    }
+}
+
 #[async_trait]
 pub trait ContributorRepository: Send + Sync {
     async fn upsert(
@@ -1065,6 +1208,7 @@ pub trait ReviewThreadRepository: Send + Sync {
         repo_id: i64,
         pull_number: i64,
         query: &ODataQuery,
+        extracted_since: Option<DateTime<Utc>>,
     ) -> Result<Page<ReviewThread>, DomainError>;
 }
 
@@ -1405,13 +1549,604 @@ pub trait IssueTimelineRepository: Send + Sync {
     ) -> Result<u64, DomainError>;
 }
 
+/// Per-repository run status: is this repository mid-sync, and when did a run
+/// last finish it?
+///
+/// Sessions record individual runs; this records the repository. A run that
+/// dies leaves `in_progress` here, and the resume operation re-runs every
+/// repository still marked so (PRD §5.2).
+#[domain_model]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum RepoRunStatus {
+    InProgress,
+    Complete,
+}
+
+impl RepoRunStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
+
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoSyncStatusRecord {
+    pub repo_full_name: String,
+    pub repo_id: Option<i64>,
+    pub status: RepoRunStatus,
+    pub last_session_id: Option<Uuid>,
+    pub last_synced_at: Option<String>,
+}
+
 #[async_trait]
-pub trait SyncWriter: Send + Sync {
-    async fn write_sync(
+pub trait RepoSyncStatusRepository: Send + Sync {
+    async fn upsert(
         &self,
         scope: &AccessScope,
         tenant_id: Uuid,
-        fetched: FetchedRepository,
+        record: RepoSyncStatusRecord,
+    ) -> Result<RepoSyncStatusRecord, DomainError>;
+
+    async fn find(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+    ) -> Result<Option<RepoSyncStatusRecord>, DomainError>;
+
+    async fn complete_if_last_session(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        session_id: Uuid,
+        repo_id: Option<i64>,
+        synced_at: &str,
+    ) -> Result<bool, DomainError>;
+
+    /// Every repository the scope can see in slug order, optionally narrowed
+    /// to one status, starting after the slug `after` when a page continues.
+    async fn list(
+        &self,
+        scope: &AccessScope,
+        status: Option<RepoRunStatus>,
+        after: Option<&str>,
+        limit: u64,
+    ) -> Result<Vec<RepoSyncStatusRecord>, DomainError>;
+}
+
+/// Durable face of one sync run. Unlike the mirrored records above, this is
+/// the gear's own vocabulary — GitHub knows nothing about sessions.
+///
+/// `status` holds one of `queued`, `in_progress`, `complete`, `failed`,
+/// `interrupted`; the sync engine owns the transitions (gears-rust#4632).
+/// The last four are the reference DESIGN §3.7 `extraction_sessions` states,
+/// with its `running` and `completed` spelled `in_progress` and `complete` to
+/// match the per-repository run status; `queued` is the one addition, for a
+/// job waiting on the background worker.
+#[domain_model]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display, strum::EnumString, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum SessionStatus {
+    Queued,
+    InProgress,
+    Complete,
+    Failed,
+    Interrupted,
+}
+
+impl SessionStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
+    }
+}
+
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncSessionRecord {
+    pub id: Uuid,
+    pub repo_full_name: String,
+    pub repo_id: Option<i64>,
+    pub status: SessionStatus,
+    pub progress_percent: i32,
+    pub error: Option<String>,
+    pub summary_json: Option<String>,
+    pub telemetry_json: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[async_trait]
+pub trait SyncSessionRepository: Send + Sync {
+    async fn upsert(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: SyncSessionRecord,
+    ) -> Result<SyncSessionRecord, DomainError>;
+
+    async fn find_by_id(
+        &self,
+        scope: &AccessScope,
+        id: Uuid,
+    ) -> Result<Option<SyncSessionRecord>, DomainError>;
+
+    /// The heartbeat's write: `progress_percent`, `telemetry_json` and
+    /// `updated_at` only, so a tick never overwrites the rest of the row with
+    /// a stale copy.
+    async fn record_heartbeat(
+        &self,
+        scope: &AccessScope,
+        id: Uuid,
+        progress_percent: i32,
+        telemetry_json: &str,
+        updated_at: &str,
+    ) -> Result<(), DomainError>;
+
+    async fn finish_if_running(
+        &self,
+        scope: &AccessScope,
+        record: &SyncSessionRecord,
+    ) -> Result<bool, DomainError>;
+
+    /// Sessions newest first, `created_at` then `id` descending, starting
+    /// after the `(created_at, id)` pair in `after` when a page continues.
+    async fn list_recent(
+        &self,
+        scope: &AccessScope,
+        after: Option<(&str, Uuid)>,
+        limit: u64,
+    ) -> Result<Vec<SyncSessionRecord>, DomainError>;
+
+    /// Sessions in any of `statuses`, paired with the tenant that owns them.
+    ///
+    /// The tenant id comes back because the caller needs it to write the row
+    /// again — the record itself does not carry one. Used by the startup
+    /// sweep, which runs across every tenant under an unconstrained scope.
+    async fn list_by_statuses(
+        &self,
+        scope: &AccessScope,
+        statuses: &[SessionStatus],
+    ) -> Result<Vec<(Uuid, SyncSessionRecord)>, DomainError>;
+}
+
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSyncRecord {
+    pub repo_full_name: String,
+    pub session_id: Uuid,
+    pub owner_id: Uuid,
+    pub scope: ScopeConfig,
+    pub since: Option<DateTime<Utc>>,
+    pub updated_at: String,
+}
+
+#[async_trait]
+pub trait ActiveSyncRepository: Send + Sync {
+    async fn find(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+    ) -> Result<Option<ActiveSyncRecord>, DomainError>;
+
+    async fn insert(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: &ActiveSyncRecord,
+    ) -> Result<bool, DomainError>;
+
+    async fn replace(
+        &self,
+        scope: &AccessScope,
+        record: &ActiveSyncRecord,
+        previous_session_id: Uuid,
+    ) -> Result<bool, DomainError>;
+
+    async fn delete(
+        &self,
+        scope: &AccessScope,
+        repo_full_name: &str,
+        session_id: Uuid,
+    ) -> Result<(), DomainError>;
+
+    async fn touch(
+        &self,
+        scope: &AccessScope,
+        owner_id: Uuid,
+        updated_at: &str,
+    ) -> Result<(), DomainError>;
+
+    async fn list(&self, scope: &AccessScope) -> Result<Vec<ActiveSyncRecord>, DomainError>;
+}
+
+/// Incremental-sweep watermark for one `(repository, endpoint family)` pair.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncWatermarkRecord {
+    pub repo_id: i64,
+    pub family: String,
+    pub last_seen_updated_at: Option<String>,
+    pub page1_etag: Option<String>,
+    pub stage_etags: BTreeMap<String, String>,
+    pub last_head_sha: Option<String>,
+    pub sweep_in_progress: bool,
+    pub candidate_high_water: Option<String>,
+}
+
+#[async_trait]
+pub trait SyncWatermarkRepository: Send + Sync {
+    async fn upsert(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: SyncWatermarkRecord,
+    ) -> Result<SyncWatermarkRecord, DomainError>;
+
+    async fn find(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+    ) -> Result<Option<SyncWatermarkRecord>, DomainError>;
+}
+
+/// Change-detection fingerprint of one mirrored entity, per family.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityFingerprintRecord {
+    pub repo_id: i64,
+    pub family: String,
+    pub entity_id: String,
+    pub fingerprint: String,
+    pub updated_at: Option<String>,
+    pub node_id: Option<String>,
+    pub child_counts_hash: Option<String>,
+    pub last_refined_at: Option<String>,
+    pub refinement_status: String,
+}
+
+#[async_trait]
+pub trait EntityFingerprintRepository: Send + Sync {
+    async fn upsert(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: EntityFingerprintRecord,
+    ) -> Result<EntityFingerprintRecord, DomainError>;
+
+    async fn find(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+        entity_id: &str,
+    ) -> Result<Option<EntityFingerprintRecord>, DomainError>;
+
+    /// The stored fingerprints of `family` for `entity_ids`, in no particular
+    /// order: one read for a whole listing page.
+    async fn find_many(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        family: &str,
+        entity_ids: &[String],
+    ) -> Result<Vec<EntityFingerprintRecord>, DomainError>;
+
+    /// A whole page of fingerprints in one statement per chunk.
+    async fn upsert_many(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        records: Vec<EntityFingerprintRecord>,
+    ) -> Result<(), DomainError>;
+}
+
+/// The storage side of one sync, one method per task.
+///
+/// Every method is one transaction, so a task either lands whole or not at
+/// all; a sync interrupted between tasks leaves every table internally
+/// consistent, which is what makes re-running it the resume mechanism
+/// (DESIGN §4, ADR-0001). Contributors ride along with the listing or detail
+/// they were seen in and are merged with what earlier syncs already learned.
+#[async_trait]
+pub trait SyncWriter: Send + Sync {
+    async fn write_repository(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repository: RepoRecord,
+    ) -> Result<Repo, DomainError>;
+
+    async fn write_issue_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        listing: IssueListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_issue_detail(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        detail: IssueDetail,
+    ) -> Result<(), DomainError>;
+
+    async fn write_pull_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        listing: PullListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_pull_detail(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        detail: PullDetail,
+    ) -> Result<(), DomainError>;
+
+    async fn write_commit_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        listing: CommitListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_commit_detail(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        detail: CommitDetail,
+    ) -> Result<(), DomainError>;
+
+    async fn write_metadata_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        listing: MetadataListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_actions_listing(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        listing: ActionsListing,
+    ) -> Result<(), DomainError>;
+
+    async fn write_workflow_jobs(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        jobs: Vec<WorkflowJobRecord>,
+    ) -> Result<(), DomainError>;
+
+    /// Remove everything the mirror holds about one repository: every mirrored
+    /// entity, the change-detection state, the run status and sessions, and
+    /// the repository row itself, in one transaction. Returns how many rows
+    /// went.
+    ///
+    /// # Errors
+    /// Storage failures.
+    async fn delete_repository(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        repo_full_name: &str,
+    ) -> Result<u64, DomainError>;
+
+    /// Merge the people one run met into `gm_contributors`, unioning roles
+    /// with what earlier runs stored; returns how many rows were written.
+    ///
+    /// # Errors
+    /// Storage failures.
+    async fn write_contributors(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        repo_id: i64,
+        contributors: Vec<ContributorRecord>,
+    ) -> Result<u64, DomainError>;
+
+    /// Hard-delete rows of every complete listing that this sync did not
+    /// touch (`extracted_at` before `watermark`); returns how many went.
+    async fn reconcile_stale(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        complete: &ListingCompleteness,
         watermark: DateTime<Utc>,
-    ) -> Result<SyncSummary, DomainError>;
+    ) -> Result<u64, DomainError>;
+}
+
+/// One conversation the grouping pass derived (`domain::sync::conversations`):
+/// an inline review-comment reply chain (`conv_type` `inline`, always under a
+/// pull request) or top-level comments tied together by quoting (`toplevel`,
+/// under an issue or a pull request). `root_comment_id` is the comment that
+/// opened it and the value every member carries as `conversation_id`.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LogicalConversation {
+    pub repo_id: i64,
+    pub conv_type: String,
+    pub root_comment_id: i64,
+    pub parent_kind: String,
+    pub parent_number: i64,
+    pub comment_count: i64,
+    pub is_resolved: Option<bool>,
+    pub created_at: Option<String>,
+}
+
+/// A top-level comment as the grouping pass reads it.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentForGrouping {
+    pub id: i64,
+    pub issue_number: i64,
+    pub body: Option<String>,
+    pub created_at: String,
+    pub conversation_id: Option<i64>,
+}
+
+/// A review comment as the grouping pass reads it.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewCommentForGrouping {
+    pub id: i64,
+    pub pull_number: i64,
+    pub in_reply_to_id: Option<i64>,
+    pub created_at: String,
+    pub conversation_id: Option<i64>,
+}
+
+/// A review thread as the grouping pass reads it, to pair an inline
+/// conversation with GitHub's resolution flag.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewThreadForGrouping {
+    pub id: String,
+    pub pull_number: i64,
+    pub is_resolved: bool,
+    pub comments_count: i64,
+}
+
+/// The comments of one conversation: review comments for an `inline` one,
+/// issue or pull-request comments for a `toplevel` one.
+#[domain_model]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConversationComments {
+    pub comments: Vec<Comment>,
+    pub review_comments: Vec<ReviewComment>,
+}
+
+#[async_trait]
+pub trait ConversationRepository: Send + Sync {
+    async fn pull_numbers(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+    ) -> Result<Vec<i64>, DomainError>;
+
+    /// Top-level comments of the issues and pull requests listed.
+    async fn comments_for_grouping(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        issue_numbers: &[i64],
+    ) -> Result<Vec<CommentForGrouping>, DomainError>;
+
+    async fn review_comments_for_grouping(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        pull_numbers: &[i64],
+    ) -> Result<Vec<ReviewCommentForGrouping>, DomainError>;
+
+    async fn review_threads_for_grouping(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        pull_numbers: &[i64],
+    ) -> Result<Vec<ReviewThreadForGrouping>, DomainError>;
+
+    /// Issues and pull requests with a top-level comment a sync wrote at or
+    /// after `since`, or with any top-level comment when `since` is `None`.
+    async fn issues_with_comments_since(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<i64>, DomainError>;
+
+    /// Pull requests with a review comment a sync wrote at or after `since`,
+    /// or with any review comment when `since` is `None`.
+    async fn pulls_with_review_comments_since(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<i64>, DomainError>;
+
+    async fn conversation_parents(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        conv_type: &str,
+    ) -> Result<Vec<i64>, DomainError>;
+
+    async fn conversations_of(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        conv_type: &str,
+        parent_numbers: &[i64],
+    ) -> Result<Vec<LogicalConversation>, DomainError>;
+
+    /// Every conversation of the repository, or those under one issue or
+    /// pull-request number, ordered by parent, type and root.
+    async fn list(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        parent_number: Option<i64>,
+    ) -> Result<Vec<LogicalConversation>, DomainError>;
+
+    async fn upsert(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        record: LogicalConversation,
+    ) -> Result<(), DomainError>;
+
+    async fn delete(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        conv_type: &str,
+        root_comment_ids: &[i64],
+    ) -> Result<u64, DomainError>;
+
+    async fn set_comment_conversation(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        comment_id: i64,
+        conversation_id: Option<i64>,
+    ) -> Result<(), DomainError>;
+
+    async fn set_review_comment_conversation(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        comment_id: i64,
+        conversation_id: Option<i64>,
+    ) -> Result<(), DomainError>;
+
+    /// The top-level comments whose `conversation_id` is `root_comment_id`, oldest first.
+    async fn comments_in(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        root_comment_id: i64,
+    ) -> Result<Vec<Comment>, DomainError>;
+
+    /// The review comments whose `conversation_id` is `root_comment_id`, oldest first.
+    async fn review_comments_in(
+        &self,
+        scope: &AccessScope,
+        repo_id: i64,
+        root_comment_id: i64,
+    ) -> Result<Vec<ReviewComment>, DomainError>;
 }

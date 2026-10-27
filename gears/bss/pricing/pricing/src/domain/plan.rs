@@ -133,7 +133,6 @@ pub struct PlanBook {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Defaults {
     pub gl: Option<String>,
-    pub rounding: String,
     pub tax_category: Option<String>,
 }
 /// Everything the checks read, as plain data.
@@ -579,7 +578,11 @@ fn tally_pricing(
         t.mismatch
             .add(format!("{name} - the entry prices another SKU"), &it);
     }
-    if e.reference_state == EntryReferenceState::Lost {
+    // D-522: a released entry (its book archived) holds no reference either.
+    if matches!(
+        e.reference_state,
+        EntryReferenceState::Lost | EntryReferenceState::Released
+    ) {
         t.entry_lost.add(name, &it);
     }
     // @cpt-begin:cpt-cf-bss-pricing-algo-plans-revision-checks:p1:inst-plans-revision-checks-2
@@ -868,9 +871,8 @@ fn sku_rows(ctx: &PlanContext, t: &Tally) -> Vec<Check> {
 fn info_rows(ctx: &PlanContext) -> Vec<Check> {
     let d = &ctx.defaults;
     let descriptors = format!(
-        "invoice line: entry override -> SKU -> tenant default; GL: SKU -> {}; rounding {}; tax {}",
+        "invoice line: entry override -> SKU -> tenant default; GL: SKU -> {}; tax {}",
         d.gl.as_deref().unwrap_or("none"),
-        d.rounding,
         d.tax_category.as_deref().unwrap_or("none")
     );
     let approval = if ctx.quorum == 0 {
@@ -882,7 +884,7 @@ fn info_rows(ctx: &PlanContext) -> Vec<Check> {
         row(
             "DESCRIPTORS",
             true,
-            "Invoice line, GL code, tax, rounding resolved",
+            "Invoice line, GL code, tax resolved",
             descriptors,
         ),
         row(

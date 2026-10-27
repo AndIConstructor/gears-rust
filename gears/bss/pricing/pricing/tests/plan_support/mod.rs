@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::secure::AccessScope;
@@ -85,6 +85,9 @@ pub struct Catalog {
     /// Products bound its registry to another owner (a wiring error): every system subject,
     /// pricing's own included, is `REFERENCE_OWNER_MISMATCH`.
     pub foreign_owner: AtomicBool,
+    /// Opt-in: a `release` waits this many milliseconds before it answers (a slow Products).
+    /// Zero (the default) answers at once.
+    pub stall_releases_ms: AtomicU64,
 }
 impl Catalog {
     /// Arm the dated reads (see `versions`) and add one published version of a declared SKU.
@@ -305,6 +308,10 @@ impl ReferenceRegistryV1 for Catalog {
         if self.down.load(Ordering::SeqCst) {
             return Err(Self::unavailable());
         }
+        let stall = self.stall_releases_ms.load(Ordering::SeqCst);
+        if stall > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(stall)).await;
+        }
         self.releases.fetch_add(1, Ordering::SeqCst);
         for item in self.refs.lock().unwrap().values_mut() {
             if item.0 == id {
@@ -381,6 +388,8 @@ impl ReferenceRegistryV1 for Catalog {
             created_by: Uuid::nil(),
             created_at: time::OffsetDateTime::now_utc(),
             updated_at: time::OffsetDateTime::now_utc(),
+            archived_at: None,
+            archived_by: None,
         })
     }
     async fn sku_version_as_of(
@@ -444,13 +453,18 @@ pub fn holding(f: &Fixture, grant: &str) -> SecurityContext {
 pub fn stranger() -> SecurityContext {
     entry_support::user_of(Uuid::new_v4())
 }
-/// A book of the fixture tenant, through its door.
+/// A `EUR` book of the fixture tenant, through its door.
 pub async fn book(f: &Fixture, code: &str) -> Uuid {
+    book_in(f, code, "EUR").await
+}
+/// A book of the fixture tenant in `currency`, through its door: the fixture's currency table
+/// must know the currency.
+pub async fn book_in(f: &Fixture, code: &str, currency: &str) -> Uuid {
     let (s, b, _) = f
         .call(
             "POST",
             "/price-books",
-            json!({"code":code,"name":code,"currency":"EUR"}),
+            json!({"code":code,"name":code,"currency":currency}),
             None,
             Some(&format!("book-{code}")),
         )

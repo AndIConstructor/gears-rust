@@ -73,7 +73,7 @@ Feature algorithm: `cpt-cf-bss-pricing-algo-read-contract-events-period-slices-a
 1. [ ] - `p1` - Split the period at every price boundary inside the bound chain, including a temporary end. - `inst-read-contract-events-period-slices-and-quote-1`
 2. [ ] - `p1` - Prorate recurring slices by calendar days; rate usage by reading timestamp with tier counters per slice. - `inst-read-contract-events-period-slices-and-quote-2`
 3. [ ] - `p1` - Aggregate per price/subscription/period (no plan carries an included quantity to deduct since D-467) and apply the coverage-prorated min_fee once per price; not built in pricing, Rating applies the floor (D-415). - `inst-read-contract-events-period-slices-and-quote-3`
-4. [ ] - `p1` - Apply period-start promotion after floors, then the bound rounding/currency policy; quote returns totals while resolve never does; quote is not built (D-415). - `inst-read-contract-events-period-slices-and-quote-4`
+4. [ ] - `p1` - Apply period-start promotion after floors, then HALF_EVEN rounding at the bound price's currency scale (D-533, D-535); quote returns totals while resolve never does; quote is not built (D-415). - `inst-read-contract-events-period-slices-and-quote-4`
 
 ### typed-events
 
@@ -95,7 +95,7 @@ State definition: `cpt-cf-bss-pricing-state-read-contract-events` in the FEATURE
 The spec consumer paths GET /pricing/v1/resolve and GET /pricing/v1/prices/{id} are mounted below the gear's base; phase 4 registers them with golden snake_case request/response contracts:
 
 - GET /bss-pricing/v1/resolve?plan_revision_id=&date=&item_id=&pins= (label plan, action read; D-419). plan_revision_id and date (YYYY-MM-DD) are required; item_id resolves that one item only; pins is comma-separated, each pin price_id (the price's own chain) or price_id:dim_value (a default-chain price that value was bound to), at most 1 000. Only a published or superseded revision resolves, and a scheduled one on a date on or after its sale date, judged by the state the revision reads today (D-447, D-454): a due revision resolves as published on every date, before and after its switch is persisted. Refusals: 409 REVISION_NOT_PUBLISHED (a draft or pending revision); 409 REVISION_NOT_YET_AVAILABLE (a scheduled revision on a date before its sale date); 400 DATE_INVALID; 400 PIN_FOREIGN for the whole request (a pin that names no approved price of an entry an item of this revision names, or a :dim_value pin on a price that is not a default-chain price; the value itself is not checked against today's registry); 400 PIN_DUPLICATE (two pins for one item and value); 400 PINS_TOO_MANY; 404 for an unknown or another tenant's revision, before any Products read, and for an item_id the revision does not have. Each item's SKU version is read as of date as pricing's system actor, only after the caller has passed plan:read and the revision was found in its tenant (D-424), so a consumer needs pricing plan:read and never products read: 503 REGISTRY_UNAVAILABLE when Products cannot answer, Products' own status and code on a definite refusal, and sku_version null for a SKU Products does not know (D-421). A chain that no price covers is not a refusal: it is uncovered (D-420, PRD AC #18).
-- GET /bss-pricing/v1/prices/{id} (label price, action read; D-422): an approved price of the tenant, whatever its window (closed, followed by a later price, keep_for_bound), with its entry's SKU, charge kind, period, model (D-427), book and currency; stored facts only, no status or other value computed from today, no authoring internals (version, pending_unit_id, note, created_by). A draft, pending or rejected price, an unknown id and another tenant's id are 404 with one body; an id that is not an id is 400 ID_INVALID. Every refusal names the type of what it refused: each GET /resolve refusal is a cf.bss.pricing.plan.v1~ resource error, each GET /prices/{id} refusal a cf.bss.pricing.price.v1~ one.
+- GET /bss-pricing/v1/prices/{id} (label price, action read; D-422): an approved price of the tenant, whatever its window (closed, followed by a later price, keep_for_bound), with its entry's SKU, charge kind, period, model (D-427), book and currency; stored facts only, no status or other value computed from today, no authoring internals (version, pending_unit_id, note, created_by). A cancelled price is served too, with `status: cancelled`, a stored fact; an approved price carries no status (D-520). The SDK's `ImmutablePrice.state` is `Approved` or `Cancelled` the same way, and a binding's price is always `Approved`. A draft, pending or rejected price, an unknown id and another tenant's id are 404 with one body; an id that is not an id is 400 ID_INVALID. Every refusal names the type of what it refused: each GET /resolve refusal is a cf.bss.pricing.plan.v1~ resource error, each GET /prices/{id} refusal a cf.bss.pricing.price.v1~ one.
 
 GET /pricing/v1/quote is a Studio preview with quantities (no plan item is optional since D-467); it is not built, and the Studio is not wired to the API (D-415). Both reads are tenant-scoped and deny-by-default, and write nothing: no binding, no audit row, no idempotency key.
 
@@ -126,10 +126,11 @@ price_id }` values. Its result is a matrix of `ResolvedCell { selection, binding
 cell has `binding=None`. Complete bindings carry entry identity, dimension key/requested value,
 dated SKU version/code/name/unit, typed exact-decimal money, invoice inputs with template provenance,
 and `via_default`. Legacy entries carry `usage_rating_policy=None`. D-502 stores immutable entry policies and D-503 projects their materialized
-content here; the semantic provider is required only at new-entry and publication gates. Missing priced-cell descriptors or a rounding value not representable by the initial
-`HalfEven` projection returns the typed `IncompleteCommercialInputs` canonical precondition violation
+content here; the semantic provider is required only at new-entry and publication gates. Missing priced-cell descriptors return
+the typed `IncompleteCommercialInputs` canonical precondition violation
 (type `INCOMPLETE_COMMERCIAL_INPUTS`, subject the missing field).
-REST retains nullable descriptors and its existing rounding vocabulary and goldens. Neither transport
+Invoice inputs carry `Rounding::HalfEven` (D-535); the line posts at the bound price's `currency.scale()` (D-533).
+REST retains nullable descriptors and its goldens. Neither transport
 computes totals. Both adapters map the shared local snapshot, matrix and invoice inputs explicitly;
 dated Products reads occur only after the local read transaction finishes.
 
@@ -140,7 +141,7 @@ key), although catch-up may persist the already-approved switch. Other read meth
 
 The digest helpers implement restricted RFC 8785 canonical JSON, wrapped as `{domain,payload}` before
 SHA-256. Domains delivered here are `pricing.money.v1`, `pricing.bindings.v1`, `pricing.policy.v1` and
-`pricing.template.v1`. Money payload is `{currency, model, minimum_fee}` with every model operand,
+`pricing.template.v1`. Money payload is `{currency, currency_scale, model, minimum_fee}` with every model operand (D-532),
 excluding IDs, all dates, closing observations and its own digest. Binding payload is
 `{plan_id, revision_id, bindings:[{selection,binding}]}` and contains every declared binding field,
 including entry, requested dimensions, dated unit, complete price observation, policy identity/version/
@@ -166,8 +167,7 @@ Resolution is a per-item matrix of default and value chains (D-420) with each it
 | Level | Field | Content |
 | --- | --- | --- |
 | revision | plan_revision_id, plan_id, rev_no, state | The revision resolved; state is published, superseded or scheduled, as the revision reads today (D-454). |
-| revision | book_id, currency, currency_minor_digits | The revision's book, its currency and that currency's scale (domain::book::minor_digits). |
-| revision | rounding_policy | The tenant default_rounding: half_up, half_even, half_down, up or down since D-437; a value stored before it reads as stored. |
+| revision | book_id, currency | The revision's book and its currency. The scale is on each binding (D-531). |
 | revision | date | The date resolved (YYYY-MM-DD). |
 | revision | items | One per item of the revision, or the one item_id names. |
 | item | item_id, sku_id | The item and its SKU; since D-467 an item carries no treatment, included_qty or qty_min. |
@@ -186,22 +186,23 @@ Resolution is a per-item matrix of default and value chains (D-420) with each it
 | binding | price_id | The bound price. |
 | binding | dim_used | The chain the bound price belongs to: the value, or null for the default chain. |
 | binding | pinned_from | The pin the renewal walk started from; null for a signup. |
+| binding | currency, currency_scale | The bound price's stored currency (its book's) and scale, a JSON integer: the scale its invoice line posts at. A later change of the currency table changes neither (D-531). |
 | binding | price, min_fee | The price's money object as stored, in the item's model (the binding carries no model of its own, D-427): { amount } for flat; { rate } for per_unit; { tiers: [{ up_to, rate }] } for graduated and volume, the last up_to null; { package_size, package_price } for package. Every amount is exact decimal text; min_fee is null when the price has none. |
 | binding | eligibility | all or new. |
 | binding | effective_from, effective_to, temporary_until | The stored window and the temporary end, if any. effective_to is for information: a successor's start sets it, including a new successor that a pinned subscription does not take. |
 | binding | ends_on | Where the binding ends for its holder (D-425): temporary_until for a temporary price, the stored end of an explicitly closed price, null when it has none. A consumer slices a period at ends_on, never at effective_to. |
 | binding | keep_for_bound | Whether the price is kept for pinned subscriptions (the predecessor of a new price). |
 
-In the served OpenAPI, the revision's state, charge_kind, period, model, each input's source and eligibility are enums of exactly the tokens above; rounding_policy stays a string, because no CHECK guards default_rounding (D-439). The pinned price read's charge_kind, period, model and eligibility are the same enums.
+In the served OpenAPI, the revision's state, charge_kind, period, model, each input's source and eligibility are enums of exactly the tokens above (D-439). The pinned price read's charge_kind, period, model and eligibility are the same enums.
 
-The pinned price read returns one approved price's stored facts with its entry's SKU, charge kind, period, model (D-427), book and currency (D-422). Pricing prices are read forever; consumer pins persist outside this gear. Events use toolkit outbox envelopes, not a second pricing schema.
+The pinned price read returns one approved price's stored facts with its entry's SKU, charge kind, period, model (D-427), book, and its stored currency and currency_scale (D-422, D-531). Pricing prices are read forever; consumer pins persist outside this gear. Events use toolkit outbox envelopes, not a second pricing schema.
 
 Tenant-scoped parent validation is required even where foreign keys use entity ids. Never substitute a
 cross-gear read for transactional local ownership/version guards. Approved money and historical pins survive.
 
 ## 7. Events & Alarms
 
-Core payloads (camelCase on the wire): PricesPublished { book_id, unit_id, prices[] { price_id, price_book_entry_id, dim_value (null is the default chain), effective_from, effective_to, eligibility }, actor_ref }, ApprovalUnitDecided { unit_id, kind, state (approved, rejected or withdrawn), generation, actors[] }, PriceBookEntryReferenceLost { price_book_entry_id, sku_id, reservation_id, actor_ref }, and in phase 3 PlanRevisionPublished { plan_id, revision_id, rev_no, book_id, superseded_revision_id (null for a first publication), unit_id, actor_ref } about the plan; each also names its tenant_id. Later payloads name the published revision, retired plan, promotion id/version or migration request/target/subscriptions. The tenant is an envelope fact. The envelope carries no correlation id (trace_parent is unset); an event joins its audit rows through the subject ids it names (unit_id, price_book_entry_id), which the same transaction audits with the request's correlation id. No SkuChanged subscription is required by phase 2.
+Core payloads (camelCase on the wire): PricesPublished { book_id, unit_id, prices[] { price_id, price_book_entry_id, dim_value (null is the default chain), effective_from, effective_to, eligibility, state (`approved` or `cancelled`; additive, absent from an older event) }, actor_ref } (prices[] holds every price whose window or state the apply changed: the unit's prices, each predecessor whose end moved, a cancelled price and an ended price; never a cancel or end row, D-520, D-521), ApprovalUnitDecided { unit_id, kind, state (approved, rejected or withdrawn), generation, actors[] }, PriceBookEntryReferenceLost { price_book_entry_id, sku_id, reservation_id, actor_ref }, and in phase 3 PlanRevisionPublished { plan_id, revision_id, rev_no, book_id, superseded_revision_id (null for a first publication), unit_id, actor_ref } about the plan; each also names its tenant_id. Later payloads name the published revision, retired plan, promotion id/version or migration request/target/subscriptions. The tenant is an envelope fact. The envelope carries no correlation id (trace_parent is unset); an event joins its audit rows through the subject ids it names (unit_id, price_book_entry_id), which the same transaction audits with the request's correlation id. No SkuChanged subscription is required by phase 2.
 
 Every event is a broker TypedEvent of source bss-pricing on the topic `gts.cf.core.events.topic.v1~cf.bss.pricing.catalog.v1`, and the bound producer prepares every type at bind (a broker that lacks one fails the boot). Type ids are `gts.cf.core.events.event.v1~cf.bss.pricing.<name>.v1~`; subject types are `gts.cf.core.events.subject.v1~cf.bss.pricing.<subject>.v1~` (a subject type names a kind of entity, so it is a GTS type id: the broker refuses one without the trailing `~`).
 
@@ -278,8 +279,9 @@ TEXT without database JSON reformatting. No expiry column or cleanup path exists
 new-sale BillingTerms validation adapter. Acceptance schema 1 stores the full query, including the
 BillingTerms snapshot's own schema version, accepted/deadline timestamps, digests and all selected
 bindings. Hold schema 1 stores its frozen bindings and activation; the retained acceptance supplies
-the referenced BillingTerms. The v1 reader is frozen: a later additive format gets another explicit
-version reader without changing stored digest meaning or supplying missing historical fields.
+the referenced BillingTerms. Each stored price carries its `currency` and `currency_scale`. The v1 shapes
+change in place and keep schema 1 (D-532); a reader never changes stored digest meaning or supplies
+missing historical fields.
 Exact decimal/time adapters reject lossy input. Receipt reading does not recalculate digests, choose
 anchors, replace descriptors or require currently sellable catalog content.
 

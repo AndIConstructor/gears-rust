@@ -29,12 +29,19 @@ pub struct Row {
     pub closed: bool,
     pub temporary_until: Option<&'static str>,
     pub version_no: i32,
+    /// `set` for a price; `cancel` or `end` for a change row naming `target` (D-520, D-521).
+    pub change_kind: &'static str,
+    pub target: Option<Uuid>,
+    /// The currency stored with the price: its book's. `EUR` by default.
+    pub currency: &'static str,
+    /// The scale stored with the price: the one the currency table gave it. 2 by default.
+    pub currency_scale: i16,
 }
 impl Default for Row {
     fn default() -> Self {
         Self {
             dim: None,
-            price: json!({"amount":"30.00"}),
+            price: json!({"amount":"30"}),
             min_fee: None,
             from: "2026-09-01",
             to: None,
@@ -44,6 +51,10 @@ impl Default for Row {
             closed: false,
             temporary_until: None,
             version_no: 1,
+            change_kind: "set",
+            target: None,
+            currency: "EUR",
+            currency_scale: 2,
         }
     }
 }
@@ -58,6 +69,12 @@ pub async fn put(f: &Fixture, entry: Uuid, row: Row) -> Uuid {
     } else {
         None
     };
+    // A cancelled price names the unit that cancelled it (the pairing CHECK of 000022).
+    let cancelled_by_unit_id = if row.state == "cancelled" {
+        Some(plan_support::unit_of_kind(f, "prices").await)
+    } else {
+        None
+    };
     price_repo::insert(
         &f.db.conn().unwrap(),
         &scope(f),
@@ -68,6 +85,8 @@ pub async fn put(f: &Fixture, entry: Uuid, row: Row) -> Uuid {
             version_no: row.version_no,
             dim_value: row.dim.map(str::to_owned),
             price_json: row.price,
+            currency: row.currency.into(),
+            currency_scale: row.currency_scale,
             min_fee: row.min_fee.map(str::to_owned),
             eligibility: row.eligibility.into(),
             effective_from: date(row.from),
@@ -77,6 +96,9 @@ pub async fn put(f: &Fixture, entry: Uuid, row: Row) -> Uuid {
             temporary_until: row.temporary_until.map(date),
             paired_price_id: None,
             return_of_price_id: None,
+            change_kind: row.change_kind.into(),
+            target_price_id: row.target,
+            cancelled_by_unit_id,
             state: row.state.into(),
             pending_unit_id,
             approved_by_unit_id: None,
@@ -328,13 +350,14 @@ pub fn vm_binding() -> bss_pricing_sdk::read::AcceptedBinding {
         price_id: Uuid::from_u128(3),
         price_book_entry_id: Uuid::from_u128(2),
         money_digest: [0; 32],
-        currency: "EUR".into(),
+        currency: bss_money::CurrencySpec::try_new("EUR".into(), 2).unwrap(),
         model: PriceModel::PerUnit {
             unit_amount: "0.047".parse().unwrap(),
         },
         minimum_fee: None,
         effective_from: date("2026-10-01"),
         ends_on: None,
+        state: PriceState::Approved,
     };
     price.money_digest = money_digest(&price);
     AcceptedBinding {
@@ -363,7 +386,6 @@ pub fn vm_binding() -> bss_pricing_sdk::read::AcceptedBinding {
             gl_code: "VM_REVENUE".into(),
             tax_category: "cloud-services".into(),
             timing: bss_pricing_sdk::terms::BillingTiming::Arrears,
-            currency_scale: 2,
             rounding: Rounding::HalfEven,
         },
     }

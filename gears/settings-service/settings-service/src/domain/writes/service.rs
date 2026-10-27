@@ -1,4 +1,3 @@
-// Created: 2026-09-07 by Virtuozzo International GmbH
 // @cpt-dod:cpt-cf-settings-service-dod-value-writes-gates:p1
 // @cpt-dod:cpt-cf-settings-service-dod-value-writes-atomicity:p1
 // @cpt-dod:cpt-cf-settings-service-dod-value-writes-stale:p1
@@ -11,6 +10,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use toolkit_macros::domain_model;
 
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
@@ -41,6 +41,7 @@ use crate::domain::value::{ValueDraft, ValueRepository};
 use crate::log_text::LogSafe;
 
 /// Who is writing, with what proof.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct WriteActor {
     /// The authenticated caller.
@@ -103,6 +104,7 @@ fn session_sub(bearer: &str) -> Option<String> {
 }
 
 /// What a change does to the scope's own row.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
     /// Store this value.
@@ -127,6 +129,7 @@ pub enum Change {
 /// stored before it opens, under a reference unique to this write. What the
 /// transaction then persists is the reference; the plaintext is gone from here.
 /// Whether a stage judges the caller's `If-Match` before the store leg.
+#[domain_model]
 #[derive(Debug, Clone, Copy)]
 pub enum StagePrecondition<'a> {
     /// A write: the tag the caller presented, judged against the current row
@@ -137,6 +140,7 @@ pub enum StagePrecondition<'a> {
     None,
 }
 
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Staged {
     /// A value to store: inline, or as the reference of an entry just created.
@@ -161,6 +165,7 @@ pub enum Staged {
 
 /// Whether step-up still has to be verified for this change, or was verified
 /// once for the whole request.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepUpPolicy {
     /// Verify here when the declaration requires it.
@@ -170,6 +175,7 @@ pub enum StepUpPolicy {
 }
 
 /// A change that passed every gate.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct Gated {
     /// The declaration written.
@@ -189,6 +195,7 @@ pub struct Gated {
 }
 
 /// A committed change.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Committed {
     /// The setting key.
@@ -221,6 +228,7 @@ pub struct Committed {
 /// The report is advisory; a client that fetches it on its own time through
 /// `impact` — asynchronously, once the type check has answered — asks
 /// `validate` to skip it, and pays only for the type check.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImpactPage {
     /// The report, with the page size `impact` takes.
@@ -230,6 +238,7 @@ pub enum ImpactPage {
 }
 
 /// The read-only report of `validate`.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct ValidationReport {
     /// Field-level detail; empty when valid.
@@ -241,6 +250,7 @@ pub struct ValidationReport {
 }
 
 /// One descendant whose effective value would change.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImpactEntry {
     /// The descendant.
@@ -252,6 +262,7 @@ pub struct ImpactEntry {
 }
 
 /// The bounded impact report.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImpactReport {
     /// The first `limit` affected descendants in traversal order.
@@ -292,6 +303,7 @@ impl ImpactReport {
 }
 
 /// The writer.
+#[domain_model]
 pub struct ValueWriter<D, V, A, S, P> {
     values: V,
     resolver: Arc<ValueResolver<D, V, A>>,
@@ -417,7 +429,7 @@ where
         }
         // @cpt-end:cpt-cf-settings-service-algo-value-writes-gates:p1:inst-vw-gate-2
         // @cpt-begin:cpt-cf-settings-service-algo-value-writes-gates:p1:inst-vw-gate-3
-        if declaration.status == "retired" {
+        if declaration.status.is_retired() {
             return Err(DomainError::Retired {
                 key: declaration.key.clone(),
             });
@@ -819,7 +831,7 @@ where
             .ok_or(DomainError::NotFound {
                 resource: "declaration",
             })?;
-        if live.status == "retired" {
+        if live.status.is_retired() {
             return Err(DomainError::Retired { key: live.key });
         }
         // From here on the declaration is the row as it is inside this

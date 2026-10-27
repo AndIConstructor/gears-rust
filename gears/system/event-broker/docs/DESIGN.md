@@ -366,7 +366,7 @@ A concrete topic is an **instance** of that base, for example `gts.cf.core.event
 **A topic carries the stream's own data, and nothing else.** What it is called, what it is for, and how long its events are kept are properties of the stream, so they live on the topic. How many partitions the broker gives it and which backend stores them are the broker's concerns, configured there - see §4.1 "Deployment Modes" - and identical for every topic a broker serves. A topic declares no traits.
 
 Members of a topic instance:
-- `id` (**required**): the topic's own full GTS identifier, carrying `x-gts-instance` narrowed to the topic base.
+- `id` (**required**): the topic's own full GTS identifier, carrying `x-gts-instance-ref: "/$id"`, so it must be an instance of the topic type it is validated against.
 - `description` (**required**): what the stream carries, for a reader deciding whether to subscribe to it.
 - `retention` (String, ISO 8601 Duration, optional): how long events on this topic are kept. Absent means the broker's configured default. This is event retention, distinct from the producer-state deduplication window, which has its own field and its own `P14D` cap - see §3.2 "Producer Modes".
 - `consolidation`: reserved for compaction policy. Not defined yet.
@@ -1952,7 +1952,36 @@ All errors follow RFC 9457 Problem Details (`application/problem+json`) using th
 | `gts.cf.core.events.subject_type.v1~` | producers | consumers | — (subject types owned by other modules) |
 | `gts.cf.core.events.consumer_group.v1~` | — | consumers (named groups; explicit grant required) | group creators (POST `/v1/consumer-groups`) and `types_registry` upserts |
 
-Wildcards in the resource pattern are supported on every cell above.
+Wildcards are supported in granted resource patterns.
+
+**PEP checks** use the resource's GTS id:
+
+| Operation | Action | PEP resource type | Resource property |
+|---|---|---|---|
+| Publish | `produce` | Event type | `event_type_id` |
+| JOIN a topic | `consume` | Topic id | `topic_id` |
+| JOIN an exact event-type interest | `consume` | Event type | `event_type_id` |
+| JOIN a wildcard interest | `consume` | `gts.cf.core.events.event.v1~` | `event_type_id` (the pattern) |
+| Deliver a matching event | `consume` | Event type | `event_type_id` |
+| JOIN, get or list a named group | `consume` | Group id | `consumer_group_id` |
+| Delete a named group | `manage` | Group id | `consumer_group_id` |
+| Create a group | `define` | `gts.cf.core.events.consumer_group.v1~` | — |
+
+Wildcard interests use the event base type because a wildcard pattern is not a
+valid GTS id. They currently require a grant covering the whole event family.
+Checking whether a narrower grant covers the requested pattern is not yet
+implemented. Tenant scope is checked separately on `gts.cf.core.events.request.v1~`.
+
+Before authorization, publishing a type outside the event family returns
+`404 EventTypeNotFound`. A JOIN pattern that neither covers nor is covered by
+the event family returns `400 BadTypePattern`.
+
+Delivery checks `consume` for each matching event using the stream caller's
+security context, including derived types matched by a parent selector.
+Denied events count as examined but are not delivered. If evaluation returns an error,
+the stream closes with `teardown`; the current batch is neither emitted nor
+reported as progress, so it can be replayed. Decisions are not cached: each
+matching event requires one PEP evaluation.
 
 **Subject_type is enforced on two independent dimensions**:
 1. **Authorization** (the `subject_type:produce` / `subject_type:consume` permission above) — *capability*: can the principal write or read events whose subject is of this type?

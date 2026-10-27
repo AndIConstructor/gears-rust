@@ -360,7 +360,7 @@ The base type defines behavioral traits via standard [GTS Schema Traits](https:/
 
 | Trait | Type | Default | Description |
 |-------|------|---------|-------------|
-| `allowed_parent_types` | string[] | `[]` | GTS instance identifiers of tenant types allowed as parent. Empty array means the type is root-only or leaf-only. The root tenant type has `allowed_parent_types: []` by convention. |
+| `allowed_parent_types` | string[] | `[]` | GTS type identifiers of tenant types allowed as parent. Empty array means no parent tenant type is allowed, so a tenant of this type cannot be created under any parent; it does not restrict which types may list this type as their parent. The root tenant type has `allowed_parent_types: []` by convention. |
 | `idp_provisioning` | boolean | `false` | Whether tenants of this type typically require dedicated IdP-side resources. AM still invokes `provision_tenant` / `deprovision_tenant`; provider implementations may use this trait to decide whether to create dedicated resources or reuse shared ones. Mutating IdP methods **MUST NOT** silently no-op — providers that do not support a required operation **MUST** return `idp_unsupported_operation`. |
 
 Derived type schemas resolve their behavioral traits via `x-gts-traits` (per [GTS spec §9.7](https://github.com/GlobalTypeSystem/gts-spec?tab=readme-ov-file#97---schema-traits-x-gts-traits-schema--x-gts-traits)). Properties not specified fall back to defaults from the base type's `x-gts-traits-schema`.
@@ -370,8 +370,8 @@ Derived type schemas resolve their behavioral traits via `x-gts-traits` (per [GT
 | GTS Schema ID (chained, public) | Description | `x-gts-traits` |
 |---------------------------------|-------------|----------------|
 | `gts.cf.core.am.tenant_type.v1~cf.core.am.provider.v1~` | Platform operator; root tenant | `allowed_parent_types: []`, `idp_provisioning: true` |
-| `gts.cf.core.am.tenant_type.v1~cf.core.am.reseller.v1~` | Reseller; nestable under provider or other resellers | `allowed_parent_types: [cf.core.am.provider.v1~, cf.core.am.reseller.v1~]`, `idp_provisioning: true` |
-| `gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~` | End customer; leaf tenant | `allowed_parent_types: [cf.core.am.provider.v1~, cf.core.am.reseller.v1~]` |
+| `gts.cf.core.am.tenant_type.v1~cf.core.am.reseller.v1~` | Reseller; nestable under provider or other resellers | `allowed_parent_types: [gts.cf.core.am.tenant_type.v1~cf.core.am.provider.v1~, gts.cf.core.am.tenant_type.v1~cf.core.am.reseller.v1~]`, `idp_provisioning: true` |
+| `gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~` | End customer; leaf tenant | `allowed_parent_types: [gts.cf.core.am.tenant_type.v1~cf.core.am.provider.v1~, gts.cf.core.am.tenant_type.v1~cf.core.am.reseller.v1~]` |
 
 **Runtime Registration:** New tenant types are registered via the GTS REST API (`POST /schemas`) or programmatically via `GtsStore.register_schema()`.
 
@@ -379,7 +379,7 @@ Derived type schemas resolve their behavioral traits via `x-gts-traits` (per [GT
 
 When strict-mode enforcement is active, AM validates the chained schema identifier against the GTS registry at tenant creation time and rejects unregistered types with `CanonicalError::InvalidArgument` (HTTP 400, `reason=INVALID_TENANT_TYPE`).
 
-**Input and storage format:** The API accepts the **full chained `GtsSchemaId`** (e.g., `gts.cf.core.am.tenant_type.v1~x.core.am.reseller.v1~`). Short-name aliases are not supported — GTS identifiers can contain multiple chained segments (up to 1024 characters per `GTS_MAX_LENGTH`), making short-name derivation ambiguous. AM validates the chained schema identifier against the GTS registry and derives a deterministic UUIDv5 `tenant_type_uuid` from that GTS identifier using the shared GTS namespace convention. The `tenants` table stores `tenant_type_uuid`; the public chained `tenant_type` is re-hydrated from Types Registry when AM needs to emit tenant projections back through the API or operator-facing diagnostics. The `allowed_parent_types` trait values in `x-gts-traits` use GTS instance identifiers (per GTS spec); AM resolves them to chained schema IDs for comparison against the requested public tenant type before persisting the derived UUID key.
+**Input and storage format:** The API accepts the **full chained `GtsSchemaId`** (e.g., `gts.cf.core.am.tenant_type.v1~x.core.am.reseller.v1~`). Short-name aliases are not supported — GTS identifiers can contain multiple chained segments (up to 1024 characters per `GTS_MAX_LENGTH`), making short-name derivation ambiguous. AM validates the chained schema identifier against the GTS registry and derives a deterministic UUIDv5 `tenant_type_uuid` from that GTS identifier using the shared GTS namespace convention. The `tenants` table stores `tenant_type_uuid`; the public chained `tenant_type` is re-hydrated from Types Registry when AM needs to emit tenant projections back through the API or operator-facing diagnostics. The `allowed_parent_types` trait values in `x-gts-traits` are full chained GTS type identifiers ending in `~` under `gts.cf.core.am.tenant_type.v1~` (enforced by `x-gts-type-ref`); AM compares them against the requested public tenant type before persisting the derived UUID key.
 
 **Trait-driven validation at tenant creation (active only under `strict_barriers = true`; PR1 default stub-admits):**
 
@@ -710,6 +710,58 @@ Revoke folds a provider-reported absence into success (idempotency by error-mapp
 
 Holds no storage handle and no credential: there is no account table, inventory projection, provider-state replica, or credential cache, so a restart loses nothing and a provider outage yields an error rather than a stale inventory. Does not validate name charset, scope-allowlist membership, or per-tenant quota — those belong to the adapter, which owns client-id derivation and its own limits; AM applies only size caps so an oversized payload never rides the wire. Does not reconcile an ambiguous outcome: it surfaces the category and the caller reconciles by matching its submitted name in the listing. Does not orchestrate tenant offboarding — a tenant's accounts are removed by the adapter through the existing `deprovision_tenant` hook.
 
+##### Future Quota Enforcement integration (not implemented)
+
+The current implementation enforces the adapter's limit. The migration target is
+AM-owned admission in `ServiceAccountService`, after the PEP gate, tenant guard,
+and input caps, and before the IdP mutation. This ordering applies to REST and
+in-process SDK callers and keeps platform quota policy independent of the IdP.
+Quota Manager provisions limits through QE management APIs; AM consumes the
+[QE consumer contract](../../quota-enforcement/docs/DESIGN.md#33-api-contracts)
+through its SDK and `ClientHub`. No QE dependency or accounting store is added by
+this preparation.
+
+The public AM contract remains `ResourceExhausted` (HTTP 429), the service-account
+resource type, and `context.violations[].subject = "service_accounts"`. This AM
+subject token is neither a GTS metric ID nor a concrete Quota ID. Clients use the
+category and subject, not the detail text. A QE capacity-exhaustion `Denied`
+verdict maps to `ServiceAccountQuotaExceeded`, just as a provider quota refusal
+does today. QE returns that verdict as a successful call, not an HTTP error.
+Transport failures and unknown admission outcomes must not become quota-exceeded
+errors. `NO_APPLICABLE_QUOTA` needs an explicit missing-configuration policy; it
+must not be described as a full tenant or silently allow creation.
+
+Before enabling QE admission, the integration must resolve these requirements:
+
+- **Metric ownership.** AM publishes the metric, tenant subject projection,
+  request contract, and constraint contract in `types-registry`, following
+  [QE projection contracts](../../quota-enforcement/docs/GTS_PROJECTION_CONTRACT_FLOW.md).
+  Model occupied accounts as `allocation`, amount `1`, with no calendar period.
+  Attribute the operation to the resolved target tenant, not the initiating
+  user's tenant. QE resolves the projection; AM does not select one per caller.
+- **Admission and completion.** Reserve atomically before creation; commit one
+  occupied unit after confirmed creation; release an uncommitted reservation
+  only after confirming that no account was retained. A preview or a separate
+  count-then-create check cannot enforce the limit under concurrency.
+- **Uncertain outcomes.** Persist operation identity and accounting progress
+  without storing credentials. Reconcile `Ambiguous`, process crashes, commit
+  failures, and reservation expiry against provider state. A failed response or
+  expired reservation does not prove that creation failed. This requires a
+  follow-up design change to the current stateless pass-through model above.
+- **Account removal.** Agree a durable account-to-allocation reference and an
+  idempotent deallocation contract covering revoke and tenant offboarding.
+  Repeated DELETE or provider `NotFound` must not return capacity twice; secret
+  rotation must not change occupancy. A committed allocation cannot be freed by
+  releasing its former lease. QE consumer rollback addresses the original
+  debit/commit operation, while credit is a management operation. The default
+  retention windows (24 hours for idempotency, 30 days for the operation log)
+  do not establish a lifetime deallocation guarantee for long-lived accounts.
+- **Cutover.** Provision quotas and seed existing occupancy with concurrent
+  mutations accounted for before enabling enforcement. Select one authoritative
+  platform limit. Retire the adapter's old policy limit at cutover, or explicitly
+  retain it as a separate technical cap; otherwise a Quota Manager increase can
+  still be blocked by the old `per_tenant_quota` configuration.
+
 ##### Related components (by ID)
 
 - `cpt-cf-account-management-component-tenant-service` — related; owns the `TenantRepo` and the tenant-resolve guard this component reuses verbatim, and owns the `deprovision_tenant` hook through which accounts are removed at tenant offboarding
@@ -1019,7 +1071,7 @@ The AM-owned contract is configured independently from the optional bootstrap sa
 
 Registration occurs while Types Registry is in configuration mode. Its existing system `post_init` ready transition semantically validates the complete staged catalogue before AM's stateful bootstrap starts, after which ordinary AM reads use the same process-local `TypesRegistryClient` as every other consumer. Consequently, the platform-root schema is not duplicated under `types-registry.config.entities` in quickstart or E2E configuration.
 
-**Interim limitation (#4627):** this registration is process-local, not durable, and it does not coordinate replicas. A read after the ready transition proves only that the local in-memory catalogue contains the schema; it does not prove persistence. Durable create-if-absent/fail-on-drift behavior, restart proof, and cross-replica tests belong to the Types Registry P0 SDK and consumer cutover (T23–T26).
+**Interim limitation (#4627):** this registration is process-local, not durable, and it does not coordinate replicas. A read after the ready transition proves only that the local in-memory catalogue contains the schema; it does not prove persistence. Durable create-if-absent/fail-on-drift behavior, restart proof, and cross-replica tests belong to the Types Registry P0 SDK and consumer cutover (T29–T32, T41 and T43; [task list](../../types-registry/docs/p0/todo.md)).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1435,7 +1487,7 @@ populated unconditionally by `am_error_to_problem`):
 | `Aborted` | 409 | Two distinct situations. (a) Concurrency conflict — SERIALIZABLE retry budget exhausted on a hierarchy-mutating transaction (`reason = "SERIALIZATION_CONFLICT"`); the losing writer receives a deterministic 409 per `feature-tenant-hierarchy-management §6 / AC line 711`, and retrying is always safe. (b) Ambiguous IdP outcome on a service-account operation (`reason = "AMBIGUOUS_OUTCOME"`, `type = service_account.v1~`); the provider may have retained state, so retrying the same request is **not** safe — it would come back as a 400 name collision. The caller reconciles by listing the tenant and matching the name it submitted. The two reasons are what separate "retry" from "reconcile" within this category. |
 | `AlreadyExists` | 409 | Unique-constraint violation on a tenant write (Postgres `23505` / SQLite `2067`). Currently funnels through `From<DbErr>` classification at the boundary — direct domain emission is reserved for future flows. |
 | `PermissionDenied` | 403 | Barrier violation or unauthorized cross-tenant access (`reason = "CROSS_TENANT_DENIED"`). Cross-tenant denials originating from the PEP/PDP chain land here. |
-| `ResourceExhausted` | 429 | Integrity audit single-flight refusal — the `integrity_check_runs` singleton PK gate enforces single-flight, and concurrent callers receive this category. The 429 envelope carries `quota_violations[].subject = "integrity_check"` so the client can disambiguate this contention category; the gate itself is observable via that subject token rather than a public reason discriminator. Safe to retry with backoff. |
+| `ResourceExhausted` | 429 | Service-account create refused at the tenant account limit — `context.violations[].subject = "service_accounts"`, independently of the admission source; retry only after the quota policy or occupied capacity changes. Integrity audit single-flight refusal — the `integrity_check_runs` singleton PK gate enforces single-flight, and concurrent callers receive this category. The 429 envelope carries `quota_violations[].subject = "integrity_check"` so the client can disambiguate this contention category; the gate itself is observable via that subject token rather than a public reason discriminator. Retry with backoff applies only to `integrity_check` single-flight contention. |
 | `ServiceUnavailable` | 503 | Transient infrastructure outage: IdP contract call failed/timed out, AuthZ PDP transport failure, DB connectivity loss. `retry_after_seconds` populated when the caller has a defensible retry-budget hint (e.g. IdP-supplied `Retry-After`); absent for DB outages where no SLA hint is available. |
 | `Unimplemented` | 501 | IdP plugin does not support the requested administrative operation — including the whole service-account half, which a tenant-only or user-only adapter declines through the contract's default implementations. Never a simulated success. |
 | `Internal` | 500 | Unexpected internal failure. The audit-only `diagnostic` field is recorded server-side; the public `detail` is generic. |

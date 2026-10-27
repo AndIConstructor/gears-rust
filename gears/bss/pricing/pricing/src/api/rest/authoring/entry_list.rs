@@ -13,7 +13,7 @@ use super::{
     AuthoringState, books,
     dto::PricingPriceBookEntryList,
     price_book_entries,
-    support::{self, authz_failure, invalid_because, require_authenticated, response, transaction},
+    support::{self, authz_failure, invalid_because, require_authenticated, transaction},
 };
 use crate::{
     authz::{self, actions, resource_types},
@@ -252,14 +252,15 @@ async fn list_entries(
     }
     odata.filter_hash = Some(hash);
     let dated = day != today;
-    transaction(&state.db.db(), move |tx| {
-        let (scope, books, ctx, odata) = (scope.clone(), books.clone(), ctx.clone(), odata.clone());
+    let tenant = ctx.subject_tenant_id();
+    let body = transaction(&state.db.db(), move |tx| {
+        let (scope, books, odata) = (scope.clone(), books.clone(), odata.clone());
         Box::pin(async move {
-            let tenant = ctx.subject_tenant_id();
             books::find(tx, &AccessScope::for_tenant(tenant), tenant, id).await?;
             // D-428, D-440, D-472: every entry's usage, price in force and next price in a fixed
             // number of reads per page.
-            let shown = price_book_entries::shows_money(tx, books.as_ref(), tenant, id).await?;
+            let money = price_book_entries::money_book(tx, books.as_ref(), tenant, id).await?;
+            let shown = money.is_some();
             // D-473 (amended): the usage split on another day moves with the start and the end of
             // every approved price, so it is money: without the grant on the book, a day other
             // than today is refused before any entry, price or usage is read (D-483).
@@ -272,12 +273,19 @@ async fn list_entries(
                 .into());
             }
             let page = books::entries_page(tx, &scope, tenant, id, &odata).await?;
-            let body = PricingPriceBookEntryList {
-                items: price_book_entries::read(tx, tenant, page.items, shown, day).await?,
+            Ok(PricingPriceBookEntryList {
+                items: price_book_entries::read(
+                    tx,
+                    tenant,
+                    page.items,
+                    money.as_ref().map(|book| book.currency.as_str()),
+                    day,
+                )
+                .await?,
                 page_info: page.page_info,
-            };
-            Ok(response(StatusCode::OK, &body, None)?)
+            })
         })
     })
-    .await
+    .await?;
+    super::names::named(&state, &ctx, body, None).await
 }

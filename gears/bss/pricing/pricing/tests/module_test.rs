@@ -18,15 +18,20 @@ fn declared_paths() -> Routes {
         ("GET", "/bss-pricing/v1/price-books/{id}"),
         ("PATCH", "/bss-pricing/v1/price-books/{id}"),
         ("DELETE", "/bss-pricing/v1/price-books/{id}"),
+        ("POST", "/bss-pricing/v1/price-books/{id}/archive"),
+        ("POST", "/bss-pricing/v1/price-books/{id}/unarchive"),
         ("GET", "/bss-pricing/v1/price-books/{id}/entries"),
         ("GET", "/bss-pricing/v1/price-books/{id}/export"),
         ("GET", "/bss-pricing/v1/settings"),
         ("PUT", "/bss-pricing/v1/settings"),
+        ("GET", "/bss-pricing/v1/currencies"),
         ("GET", "/bss-pricing/v1/dimension-keys"),
         ("PUT", "/bss-pricing/v1/dimension-keys"),
         ("POST", "/bss-pricing/v1/price-book-entries/{id}/prices"),
         ("PATCH", "/bss-pricing/v1/prices/{id}"),
         ("DELETE", "/bss-pricing/v1/prices/{id}"),
+        ("POST", "/bss-pricing/v1/prices/{id}/cancel"),
+        ("POST", "/bss-pricing/v1/prices/{id}/end"),
         ("POST", "/bss-pricing/v1/prices/{id}/submit"),
         ("GET", "/bss-pricing/v1/price-books/{id}/publish-changes"),
         ("POST", "/bss-pricing/v1/price-books/{id}/publish-changes"),
@@ -74,6 +79,8 @@ fn if_match_routes() -> Routes {
         ("PATCH", "/bss-pricing/v1/price-book-entries/{id}"),
         ("PATCH", "/bss-pricing/v1/price-books/{id}"),
         ("DELETE", "/bss-pricing/v1/price-books/{id}"),
+        ("POST", "/bss-pricing/v1/price-books/{id}/archive"),
+        ("POST", "/bss-pricing/v1/price-books/{id}/unarchive"),
         ("PUT", "/bss-pricing/v1/settings"),
         ("PUT", "/bss-pricing/v1/dimension-keys"),
         ("PATCH", "/bss-pricing/v1/prices/{id}"),
@@ -94,6 +101,8 @@ fn idempotency_key_routes() -> Routes {
         ("POST", "/bss-pricing/v1/price-books"),
         ("POST", "/bss-pricing/v1/price-books/{id}/entries"),
         ("POST", "/bss-pricing/v1/price-book-entries/{id}/prices"),
+        ("POST", "/bss-pricing/v1/prices/{id}/cancel"),
+        ("POST", "/bss-pricing/v1/prices/{id}/end"),
         ("POST", "/bss-pricing/v1/prices/{id}/submit"),
         ("POST", "/bss-pricing/v1/price-books/{id}/publish-changes"),
         ("POST", "/bss-pricing/v1/approval-units/{id}/approve"),
@@ -125,7 +134,7 @@ async fn the_registered_route_set_is_exactly_the_declared_paths() {
         .collect();
     assert_eq!(registered, declared_paths());
     assert_eq!(census::source_routes(), registered);
-    assert_eq!(registered.len(), 56);
+    assert_eq!(registered.len(), 61);
     assert!(router.has_routes());
 }
 
@@ -184,8 +193,9 @@ fn every_precondition_reading_route_is_in_the_precondition_census() {
         idempotency_key_routes()
     );
     for (needle, control, production) in [
-        ("preconditions::if_match(", 1, 13),
-        ("preconditions::idempotency_key(", 1, 14),
+        // + 2: the book's archive and unarchive (D-522).
+        ("preconditions::if_match(", 1, 15),
+        ("preconditions::idempotency_key(", 1, 16),
         ("Query<", 1, 0),
         // + 1: plan_items::delete answers 204 below its door; + 16: the plan and revision doors
         // (eight registrations and the statuses their handlers and operations answer); + 6: the
@@ -206,7 +216,15 @@ fn every_precondition_reading_route_is_in_the_precondition_census() {
         // (D-470), its registration and its 200 answer; + 4: run 9.6's reservations read and
         // effective-policy read (D-480, D-481), each registration and its 200 answer; + 2: run
         // 9.7's batch checks read (D-482), its registration and its 200 answer; + 2: run 9.8b's
-        // plans counts (D-485), its registration and its 200 answer.
+        // plans counts (D-485), its registration and its 200 answer. D-518 kept the sum for the
+        // three list reads (each registration's 304, each handler's 200 now answered by
+        // `respond`); + 3: the settings read's 304 registration and `revalidate_version`'s 200
+        // check and 304 answer; + 3: the cancel and end draft doors (D-520, D-521); - 11: D-519's
+        // twelve reads that name their actors answer their 200 through the one `names::named`
+        // (`StatusCode::OK` once), not each from its own function; + 3: the book's archive and
+        // unarchive (D-522), two registrations and two 200 answers, while the book read answers
+        // through `names::named` now; + 2: the currency table (D-537), its registration and its
+        // 200 answer.
         ("StatusCode::", 2, 112),
     ] {
         assert_eq!(census::count_in_functions(census::CONTROL, needle), control);
@@ -252,9 +270,16 @@ fn etag_routes() -> Routes {
         ("GET", "/bss-pricing/v1/plans/{id}"),
         ("GET", "/bss-pricing/v1/plan-revisions/{id}"),
         ("GET", "/bss-pricing/v1/plan-items/{id}"),
+        // D-518: the list reads. The tag is a weak hash of the JSON body, not an If-Match version.
+        ("GET", "/bss-pricing/v1/plans"),
+        ("GET", "/bss-pricing/v1/plans/counts"),
+        ("GET", "/bss-pricing/v1/price-books"),
         // D-469: the write answers that set one (run 9.2's census).
         ("POST", "/bss-pricing/v1/price-books"),
         ("PATCH", "/bss-pricing/v1/price-books/{id}"),
+        // D-522: the archive mark moves the book's version.
+        ("POST", "/bss-pricing/v1/price-books/{id}/archive"),
+        ("POST", "/bss-pricing/v1/price-books/{id}/unarchive"),
         ("PUT", "/bss-pricing/v1/settings"),
         ("PUT", "/bss-pricing/v1/dimension-keys"),
         ("PATCH", "/bss-pricing/v1/dimension-keys"),
@@ -263,6 +288,8 @@ fn etag_routes() -> Routes {
         ("PUT", "/bss-pricing/v1/approval-policy"),
         ("DELETE", "/bss-pricing/v1/approval-policy/{kind}"),
         ("POST", "/bss-pricing/v1/price-book-entries/{id}/prices"),
+        ("POST", "/bss-pricing/v1/prices/{id}/cancel"),
+        ("POST", "/bss-pricing/v1/prices/{id}/end"),
         ("PATCH", "/bss-pricing/v1/prices/{id}"),
         ("POST", "/bss-pricing/v1/plans"),
         ("PATCH", "/bss-pricing/v1/plans/{id}"),
@@ -308,12 +335,13 @@ async fn every_operation_has_a_human_summary_and_a_description() {
         assert_ne!(description, summary, "{id}");
         described += 1;
     }
-    assert_eq!(described, 56);
+    assert_eq!(described, 61);
 }
 
 /// Every answer that sets an `ETag` declares the header on its success response, and nothing else
-/// declares one: the eight reads, and the nineteen write answers that the census of run 9.2 found
-/// (D-469), each the version a following If-Match takes.
+/// declares one: the eight reads and the nineteen write answers of D-469, each the version a
+/// following If-Match takes, plus the three list reads of D-518 (a weak tag of the JSON body,
+/// also declared on the 304) and the settings read's 304 (its strong version tag, D-518).
 #[tokio::test]
 async fn every_answer_that_sets_an_etag_declares_it() {
     let harness = rest_support::Harness::new().await.unwrap();
@@ -346,8 +374,10 @@ async fn every_answer_that_sets_an_etag_declares_it() {
         })
         .count();
     assert_eq!(
-        anywhere, 27,
-        "only the success answer of those ops declares it"
+        anywhere, 38,
+        "only the success answer of those ops declares it, plus the 304 of the three list reads \
+         and of the settings read, the 201 of the cancel and end drafts, and the 200 of the book's \
+         archive and unarchive"
     );
 }
 
@@ -380,6 +410,7 @@ async fn no_operation_declares_a_422() {
 // GET /price-books/{id}/export price_book:read false false
 // GET /settings config:read false false
 // PUT /settings config:settings true false
+// GET /currencies config:read false false (D-537)
 // GET /dimension-keys config:read false false
 // PUT /dimension-keys config:settings true false
 
@@ -394,6 +425,8 @@ async fn no_operation_declares_a_422() {
 // POST /price-book-entries/{id}/prices price:author false true
 // PATCH /prices/{id} price:author true false
 // DELETE /prices/{id} price:author true false
+// POST /prices/{id}/cancel price:author false true
+// POST /prices/{id}/end price:author false true
 
 // Run-4 approvals: method | path | resource:action | If-Match | Idempotency-Key
 // POST /prices/{id}/submit price:submit false true
@@ -548,6 +581,111 @@ async fn startup_validates_versioned_hold_policy_before_registering_providers() 
         (default.version.get(), default.duration_seconds.get()),
         (1, 86_400)
     );
+}
+
+/// The deployment's table of non-ISO currency scales is judged at startup: a bad entry stops the
+/// gear before it registers anything, with the code `CURRENCY_SCALES_INVALID` and naming the entry
+/// and why, a good one starts it, and no table is an empty one.
+#[tokio::test]
+async fn startup_validates_the_currency_scale_table_before_registering_providers() {
+    for (table, cause) in [
+        (serde_json::json!({"EUR":3}), "key EUR is an ISO 4217 code"),
+        (
+            serde_json::json!({"USDC":6}),
+            "key \"USDC\" is not a currency code",
+        ),
+        (
+            serde_json::json!({"xts":2}),
+            "key \"xts\" is not a currency code",
+        ),
+        (serde_json::json!({"XTS":29}), "key XTS has scale 29"),
+        (
+            serde_json::json!({"XTS":2,"JPY":0}),
+            "key JPY is an ISO 4217 code",
+        ),
+    ] {
+        let result =
+            rest_support::Harness::with_config(serde_json::json!({"currency_scales":table})).await;
+        let Err(error) = result else {
+            panic!("a bad currency scale table must not start the gear");
+        };
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("invalid currency_scales (CURRENCY_SCALES_INVALID)"),
+            "the refusal names the table and its stable code"
+        );
+        assert!(text.contains(cause), "the refusal names the entry and why");
+    }
+    rest_support::Harness::with_config(serde_json::json!({"currency_scales":{"XTS":2,"QQQ":8}}))
+        .await
+        .unwrap();
+    let config: bss_pricing::config::BssPricingConfig =
+        serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(config.currency_scales.is_empty(), "empty by default");
+}
+
+/// The configured table reaches the doors through the gear's own wiring: a book in `XTS`, a code
+/// only the deployment's table knows, is created when the table lists it and refused when it does
+/// not.
+#[tokio::test]
+async fn the_configured_currency_table_reaches_the_doors() {
+    use tower::ServiceExt;
+    let tenant = uuid::Uuid::new_v4();
+    let author = toolkit_security::SecurityContext::builder()
+        .subject_id(uuid::Uuid::new_v4())
+        .subject_tenant_id(tenant)
+        .subject_type("user")
+        .build()
+        .unwrap();
+    for (table, status) in [
+        (serde_json::json!({"XTS": 2}), 201),
+        (serde_json::json!({}), 400),
+    ] {
+        let harness = rest_support::Harness::with_pdp(
+            serde_json::json!({"currency_scales": table}),
+            Some(std::sync::Arc::new(rest_support::AllowingResolver {
+                tenant,
+            })),
+        )
+        .await
+        .unwrap();
+        let (router, _) = harness.router(axum::Router::new()).unwrap();
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/bss-pricing/v1/price-books")
+                    .extension(author.clone())
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "xts-book")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({"code":"xts","name":"XTS","currency":"XTS"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            status,
+            "the door reads the table the gear was configured with"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        if status == 201 {
+            assert_eq!(
+                body["currency"], "XTS",
+                "the book takes the configured code"
+            );
+        } else {
+            assert_eq!(
+                body["context"]["field_violations"][0]["reason"], "BOOK_CURRENCY_INVALID",
+                "without the table the code is unknown"
+            );
+        }
+    }
 }
 
 #[test]

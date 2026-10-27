@@ -1,10 +1,10 @@
-// Created: 2026-09-07 by Virtuozzo International GmbH
 //! Ports the write path depends on whose bindings arrive later or live in
 //! infrastructure: the Secret Manager, the Change Publisher and the counters.
 
 use async_trait::async_trait;
 use secrecy::SecretString;
 use serde_json::Value;
+use toolkit_macros::domain_model;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
@@ -62,6 +62,7 @@ pub trait SecretManager: Send + Sync {
 }
 
 /// The binding while no Credential Store is available.
+#[domain_model]
 pub struct NoSecretManager;
 
 const NO_STORE: &str = "secret values are not supported: no Secret Manager is bound";
@@ -128,6 +129,7 @@ pub trait SecretResolveGate: Send + Sync {
 
 /// What the write path publishes after a change is durably committed, or
 /// after it was rejected.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueEvent {
     /// `event_value_changed`: a value was stored.
@@ -226,6 +228,7 @@ pub trait LifecycleMetrics: Send + Sync {
 }
 
 /// Counts nothing; the test binding.
+#[domain_model]
 pub struct NoMetrics;
 
 impl WriteMetrics for NoMetrics {

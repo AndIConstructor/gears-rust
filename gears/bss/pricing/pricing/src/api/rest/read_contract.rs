@@ -26,13 +26,13 @@ use super::authoring::{
     support::{self, DoorError, require_authenticated},
 };
 use super::closed_sets::{
-    PricingChargeKind, PricingEligibility, PricingModel, PricingPeriod,
-    PricingResolvedRevisionState,
+    PricingChargeKind, PricingEligibility, PricingModel, PricingPeriod, PricingPinnedPriceStatus,
+    PricingPriceState, PricingResolvedRevisionState,
 };
 use crate::{
     authz::{self, ResourceRef, actions, resource_types},
     domain::{
-        book, dimension,
+        dimension,
         resolve::{ItemResolution, Pin, Resolved},
     },
     infra::{
@@ -40,7 +40,7 @@ use crate::{
             PriceResource, PriceSnapshot, ReadSnapshot, load_legacy_resolution, load_price,
             plan_denied, plan_invalid, price_conflict, price_denied, read_failure,
         },
-        storage::RepoError,
+        storage::{RepoError, repo::price_repo},
     },
 };
 use authz_resolver_sdk::PolicyEnforcer;
@@ -102,11 +102,12 @@ pub fn router(state: Arc<AuthoringState>, openapi: &dyn OpenApiRegistry) -> Rout
         .operation_id("bss_pricing.get_price")
         .summary("Read a pinned price")
         .description(
-            "Returns an approved price of the tenant with its original money whatever its window \
-             (closed, followed by a later price, kept for bound subscriptions), with its entry's \
-             SKU, charge kind, period, book and currency: stored facts only. A draft, pending, \
-             rejected, unknown or foreign price is one and the same 404; an id that is not an id \
-             is 400 ID_INVALID.",
+            "Returns an approved price of the tenant, or a cancelled one (D-520), with its \
+             original money whatever its window, with its entry's SKU, charge kind, period, book \
+             and currency: stored facts only. A cancelled price carries status `cancelled`; an \
+             approved one carries no status, since its display status depends on the day \
+             (D-422). A draft, pending, rejected, unknown or foreign price is one and the same \
+             404; an id that is not an id is 400 ID_INVALID.",
         )
         .tag("Pricing")
         .authenticated()
@@ -176,7 +177,8 @@ async fn get_price(
     .map_err(|e| read_failure(e, price_conflict))?;
     support::response(StatusCode::OK, &body, None)
 }
-/// `GET /prices/{id}` below its door (D-422): an approved price of the tenant, as stored.
+/// `GET /prices/{id}` below its door (D-422): an approved price of the tenant, as stored, or a
+/// cancelled one, which says `cancelled` (D-520).
 /// # Errors
 /// One and the same 404 for a draft, pending or rejected price, an unknown id and another
 /// tenant's id.
@@ -184,6 +186,7 @@ fn render_price(snapshot: PriceSnapshot) -> Result<PricingPinnedPriceDto, DoorEr
     let PriceSnapshot { row, entry, book } = snapshot;
     let id = row.id;
     let e = entry.id;
+    let currency = price_repo::currency_of(&row)?;
     Ok(PricingPinnedPriceDto {
         price_id: row.id,
         price_book_entry_id: entry.id,
@@ -198,7 +201,8 @@ fn render_price(snapshot: PriceSnapshot) -> Result<PricingPinnedPriceDto, DoorEr
             .map(|p| PricingPeriod::stored(p, &format_args!("entry {e} period")))
             .transpose()?,
         book_id: book.id,
-        currency: book.currency,
+        currency: currency.code().to_owned(),
+        currency_scale: currency.scale(),
         version_no: row.version_no,
         dim_value: row.dim_value,
         model: PricingModel::stored(&entry.model, &format_args!("entry {e} model"))?,
@@ -217,6 +221,9 @@ fn render_price(snapshot: PriceSnapshot) -> Result<PricingPinnedPriceDto, DoorEr
         return_of_price_id: row.return_of_price_id,
         approved_by_unit_id: row.approved_by_unit_id,
         approved_at: row.approved_at,
+        status: (PricingPriceState::stored(&row.state, &format_args!("price {id} state"))?
+            == PricingPriceState::Cancelled)
+            .then_some(PricingPinnedPriceStatus::Cancelled),
     })
 }
 
@@ -330,10 +337,13 @@ fn render(
                     let row = stored.rows.get(&b.price.id).ok_or_else(|| {
                         CanonicalError::internal("a bound price has no stored row").create()
                     })?;
+                    let currency = price_repo::currency_of(row).map_err(stored_failure)?;
                     Ok::<_, CanonicalError>(PricingResolveBindingDto {
                         price_id: row.id,
                         dim_used: b.dim_used().map(str::to_owned),
                         pinned_from: b.pinned_from,
+                        currency: currency.code().to_owned(),
+                        currency_scale: currency.scale(),
                         price: row.price_json.clone(),
                         min_fee: row.min_fee.clone(),
                         eligibility: PricingEligibility::stored(
@@ -396,8 +406,6 @@ fn render(
         .map_err(stored_failure)?,
         book_id: stored.revision.book_id,
         currency: stored.currency.clone(),
-        currency_minor_digits: book::minor_digits(&stored.currency),
-        rounding_policy: stored.rounding.clone(),
         date: date.to_string(),
         items,
     })

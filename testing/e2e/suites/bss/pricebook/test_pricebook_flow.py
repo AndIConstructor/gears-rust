@@ -22,13 +22,16 @@ reads the lifecycle moves its audit rows carry since migration 000008 (P-D-213),
 force has its own path (P-D-214), and a category reads alone with its SKU count (P-D-215). Pricing
 says where a SKU is priced and sold (D-434), a kind's quorum override is reset in both gears
 (D-435, P-D-216), dimension values are edited one at a time with their use (D-436), and the
-settings offer currencies and say who wrote them, with five rounding modes (D-437, D-438).
+settings offer currencies and say who wrote them (D-438); they carry no rounding.
 
 Phase 9: a plan item is a SKU and its entry (D-467) and a new plan's code is upper case (D-468); the
 plans list names each plan's current revision and the one in effect (D-460); a plan submit and a
 publish-changes carry a note (D-464); both gears count their approval units and page them newest
 first (D-470, P-D-227), and a unit says whether its reader may approve it (D-471, P-D-228); an
 entry names its next price (D-472), and a book's entries list reads its prices on a date (D-473).
+
+Archive: a finished book is archived and releases its entries' SKU references (D-522), so the SKU
+retires and is archived in turn (P-D-263); both lists hide what is archived unless asked.
 """
 
 import datetime
@@ -43,6 +46,18 @@ USAGE_TYPES = "/usage-collector/v1/usage-types"
 
 def _key() -> dict:
     return {"Idempotency-Key": str(uuid.uuid4())}
+
+
+def _canonical(money: dict) -> dict:
+    """The money as the server keeps it: each decimal in canonical text ("30.00" is kept as "30").
+
+    A price stores and echoes its decimals without trailing fractional zeros (D-527).
+    """
+
+    def decimal(text: str) -> str:
+        return text.rstrip("0").rstrip(".") if "." in text else text
+
+    return {key: decimal(value) for key, value in money.items()}
 
 
 def _products_quorum_zero(api) -> None:
@@ -198,7 +213,7 @@ def test_a_priced_sku_publishes_its_price_and_blocks_retirement(api, variant):
     assert replay.json() == entry, "the same Idempotency-Key replays the receipt"
 
     # One draft price, published with quorum 0.
-    start = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+    start = (datetime.datetime.now(datetime.timezone.utc).date() + datetime.timedelta(days=30)).isoformat()
     r = api.post(
         f"{PRICING}/price-book-entries/{entry['id']}/prices",
         json={**shape["price"], "eligibility": "all", "effective_from": start},
@@ -221,7 +236,7 @@ def test_a_priced_sku_publishes_its_price_and_blocks_retirement(api, variant):
     assert [e["entry"]["id"] for e in export["entries"]] == [entry["id"]]
     prices = export["entries"][0]["prices"]
     assert [(x["id"], x["state"], x["effective_from"], x["price_json"]) for x in prices] == [
-        (price["id"], "approved", start, shape["price"]["price"])
+        (price["id"], "approved", start, _canonical(shape["price"]["price"]))
     ], prices
 
     # D-428: the entry read counts its approved price, and no plan names it.
@@ -391,8 +406,12 @@ def _current(
 
 
 def _current_of(row: dict) -> dict:
-    """``current`` without its book identity, for the assertions that do not name the book."""
-    return {k: v for k, v in row["current"].items() if k != "book"}
+    """``current`` without its book identity and its author's name, for the assertions that name
+    neither. The name is always there (D-519): a string, or null when it is not available now, as
+    on every write answer."""
+    current = row["current"]
+    assert "created_by_name" in current, current
+    return {k: v for k, v in current.items() if k not in ("book", "created_by_name")}
 
 
 @pytest.mark.timeout(120)
@@ -589,7 +608,9 @@ def test_a_plan_blocked_by_a_pending_price_publishes_copies_and_clones(api, revi
         resolved = _resolve(api, rev1, start)
         assert resolved["state"] == "published", resolved
         assert (resolved["plan_id"], resolved["rev_no"], resolved["book_id"]) == (plan, 1, book)
-        assert (resolved["currency"], resolved["currency_minor_digits"]) == ("EUR", 2), resolved
+        # The scale is each binding's own (stored with its price), not the revision's.
+        assert resolved["currency"] == "EUR", resolved
+        assert "currency_minor_digits" not in resolved, resolved
         [item] = resolved["items"]
         assert (item["sku_id"], item["price_book_entry_id"]) == (sku, entry), item
         assert (item["charge_kind"], item["period"]) == ("recurring", "month"), item
@@ -603,8 +624,10 @@ def test_a_plan_blocked_by_a_pending_price_publishes_copies_and_clones(api, revi
         assert binding["price_id"] == price, binding
         assert binding["dim_used"] is None, binding
         assert binding["pinned_from"] is None, binding
-        # D-427: the model is the item's (its entry's); the binding carries the money.
-        assert (item["model"], binding["price"]) == ("flat", {"amount": "30.00"}), binding
+        assert (binding["currency"], binding["currency_scale"]) == ("EUR", 2), binding
+        # D-427: the model is the item's (its entry's); the binding carries the money, stored as
+        # canonical text ("30.00" is sent, "30" is kept).
+        assert (item["model"], binding["price"]) == ("flat", {"amount": "30"}), binding
         assert (binding["eligibility"], binding["effective_from"]) == ("all", start), binding
 
         # The pinned price read serves that price, as stored.
@@ -622,7 +645,8 @@ def test_a_plan_blocked_by_a_pending_price_publishes_copies_and_clones(api, revi
             "month",
             "EUR",
         ), pinned
-        assert (pinned["price"], pinned["effective_from"]) == ({"amount": "30.00"}, start), pinned
+        assert (pinned["price"], pinned["effective_from"]) == ({"amount": "30"}, start), pinned
+        assert pinned["currency_scale"] == 2, pinned
         assert "status" not in pinned and "version" not in pinned, pinned
 
         # A copy is rev 2 whose item attaches; publishing it supersedes rev 1.
@@ -729,7 +753,10 @@ def _monthly_entry(api, book: str, sku: str, model: str):
 
 
 def _draft_price(api, entry: dict, money: dict, start: str) -> None:
-    """A draft price carries only its money; its model is echoed from its entry (D-427)."""
+    """A draft price carries only its money; its model is echoed from its entry (D-427).
+
+    The echo carries the money in canonical text ("30.00" is sent, "30" is kept).
+    """
     r = api.post(
         f"{PRICING}/price-book-entries/{entry['id']}/prices",
         json={"price": money, "eligibility": "all", "effective_from": start},
@@ -740,7 +767,7 @@ def _draft_price(api, entry: dict, money: dict, start: str) -> None:
     assert (price["state"], price["model"], price["price_json"]) == (
         "draft",
         entry["model"],
-        money,
+        _canonical(money),
     ), price
 
 
@@ -816,6 +843,8 @@ def test_a_sku_without_a_category_is_priced_in_two_models_and_its_reads_carry_it
             "deprecated": 0,
             "retired": 0,
             "in_review": 0,
+            # P-D-263: the counts carry the archived SKUs apart.
+            "archived": 0,
         }, r.text
         r = api.post(f"{PRODUCTS}/categories/{unused}/retire", json={})
         assert r.status_code == 200, r.text
@@ -987,8 +1016,8 @@ def test_a_sku_without_a_category_is_priced_in_two_models_and_its_reads_carry_it
 
         # Each revision resolves in its own entry's model and money.
         for revision, entry, model, money in (
-            (rev1, flat, "flat", {"amount": "30.00"}),
-            (rev2, per_unit, "per_unit", {"rate": "2.50"}),
+            (rev1, flat, "flat", {"amount": "30"}),
+            (rev2, per_unit, "per_unit", {"rate": "2.5"}),
         ):
             resolved = _resolve(api, revision, start)
             [resolved_item] = resolved["items"]
@@ -1134,22 +1163,22 @@ def _settings_body(read: dict) -> dict:
 def test_where_a_sku_is_priced_and_sold_and_the_settings_offer_currencies(api):
     """D-434 to D-438 and P-D-216 on the real binary, whose chain ran migration 000014.
 
-    The settings PUT requires ``currencies``, knows five rounding modes and says who wrote it; a
-    new book outside the offered currencies is 409. A kind's quorum override is reset by DELETE in
-    both gears, and the default is never deleted. A SKU priced today in a EUR book and sold by a
-    published plan reads where it is priced (its entry with its book, usage and the price in force)
-    and where it is sold (the plan, and the plan item alone). The Price Books screen's reads
-    (D-440 to D-442): the entry's prices with their status, the entry read's price in force, and
-    its book in the book list (a page with ``page_info``, found by ``q`` and by ``sku_id``) with
-    its stats. A dimension key's values are edited one at a time and each value carries its use.
-    The settings and both policies are restored.
+    The settings PUT requires ``currencies``, has no rounding (``default_rounding`` is an unknown
+    field) and says who wrote it; a new book outside the offered currencies is 409. A kind's quorum
+    override is reset by DELETE in both gears, and the default is never deleted. A SKU priced today
+    in a EUR book and sold by a published plan reads where it is priced (its entry with its book,
+    usage and the price in force) and where it is sold (the plan, and the plan item alone). The
+    Price Books screen's reads (D-440 to D-442): the entry's prices with their status, the entry
+    read's price in force, and its book in the book list (a page with ``page_info``, found by ``q``
+    and by ``sku_id``) with its stats. A dimension key's values are edited one at a time and each
+    value carries its use. The settings and both policies are restored.
     """
     run = uuid.uuid4().hex[:8]
     code = f"E2E-SOLD-{run}"
     settings_before, _ = _settings(api)
     policy_before, _ = _policy(api)
     try:
-        # The settings: currencies required, five rounding modes, the writer stamped.
+        # The settings: currencies required, no rounding setting, the writer stamped.
         read, tag = _settings(api)
         body = _settings_body(read)
         without = {k: v for k, v in body.items() if k != "currencies"}
@@ -1157,19 +1186,20 @@ def test_where_a_sku_is_priced_and_sold_and_the_settings_offer_currencies(api):
         assert r.status_code == 400, r.text
         r = api.put(
             f"{PRICING}/settings",
-            json={**body, "default_rounding": "bankers", "currencies": []},
+            json={**body, "default_rounding": "half_even", "currencies": []},
             headers={"If-Match": tag},
         )
         assert r.status_code == 400, r.text
-        assert "ROUNDING_INVALID" in r.text, r.text
+        assert "default_rounding" in r.text, r.text
         r = api.put(
             f"{PRICING}/settings",
-            json={**body, "default_rounding": "half_even", "currencies": ["EUR", "USD"]},
+            json={**body, "currencies": ["EUR", "USD"]},
             headers={"If-Match": tag},
         )
         assert r.status_code == 200, r.text
         saved = r.json()
-        assert (saved["currencies"], saved["default_rounding"]) == (["EUR", "USD"], "half_even")
+        assert saved["currencies"] == ["EUR", "USD"], saved
+        assert "default_rounding" not in saved, saved
         assert uuid.UUID(saved["updated_by"]) and saved["updated_at"], saved
         r = api.post(
             f"{PRICING}/price-books",
@@ -1254,7 +1284,7 @@ def test_where_a_sku_is_priced_and_sold_and_the_settings_offer_currencies(api):
             "flat",
         ), row
         assert row["usage"] == _entry_usage(active=1, plans=1), row
-        assert row["current_price"]["price_json"] == {"amount": "30.00"}, row
+        assert row["current_price"]["price_json"] == {"amount": "30"}, row
         assert row["current_price"]["status"] == "active", row
         # The Price Books screen (D-440): the entry's prices with their status today, and the
         # entry read's price in force and dated counts.
@@ -1748,7 +1778,7 @@ def test_a_draft_item_may_wait_for_its_entry(api):
     )
     assert r.status_code == 201, r.text
     entry = r.json()["id"]
-    start = datetime.date.today().isoformat()
+    start = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     r = api.post(
         f"{PRICING}/price-book-entries/{entry}/prices",
         json={
@@ -1777,3 +1807,108 @@ def test_a_draft_item_may_wait_for_its_entry(api):
     r = api.post(f"{PRICING}/plan-revisions/{rev}/submit", json={}, headers=_key())
     assert r.status_code == 201, r.text
     assert "REVISION_CHECKS_RED" not in r.text, r.text
+
+
+def _pricing_quorum_zero(api) -> None:
+    """Pricing's default quorum 0, written at the policy's own ETag."""
+    _, tag = _policy(api)
+    r = api.put(f"{PRICING}/approval-policy", json={"quorum": 0}, headers={"If-Match": tag})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.timeout(120)
+def test_an_archived_book_releases_its_sku_so_the_sku_retires_and_archives(api):
+    """Ask 58 (pricing D-522, products P-D-263).
+
+    A finished book is archived: its entry's SKU reference is released, the entry reads
+    ``released``, and the book leaves the list unless asked ``archived eq true``. Products then
+    retires the SKU, which no live reference keeps, and archives it, and the SKU leaves its list
+    the same way. Every date is a UTC date.
+    """
+    run = uuid.uuid4().hex[:8]
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+    _products_quorum_zero(api)
+    code = f"E2E-ARCHIVE-{run}"
+    r = api.post(
+        f"{PRODUCTS}/skus",
+        json={"code": code, "name": f"E2E archive {run}", "type": "recurring"},
+    )
+    assert r.status_code == 201, r.text
+    sku = r.json()["id"]
+    r = api.post(f"{PRODUCTS}/skus/{sku}/submit", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["applied"] is True, r.text
+
+    _pricing_quorum_zero(api)
+    book_code = f"archive-{run}"
+    r = api.post(
+        f"{PRICING}/price-books",
+        json={"code": book_code, "name": f"Archive {run}", "currency": "EUR"},
+        headers=_key(),
+    )
+    assert r.status_code == 201, r.text
+    book = r.json()["id"]
+    r = _monthly_entry(api, book, sku, "flat")
+    assert r.status_code == 201, r.text
+    entry = r.json()
+    assert entry["reference_state"] == "confirmed", entry
+    _draft_price(api, entry, {"amount": "30.00"}, today)
+    r = api.post(f"{PRICING}/price-books/{book}/publish-changes", json={}, headers=_key())
+    assert r.status_code == 201, r.text
+    assert r.json()["applied"] is True, r.text
+
+    # The live entry keeps the SKU referenced.
+    r = api.post(f"{PRODUCTS}/skus/{sku}/retire", json={})
+    assert r.status_code == 409, r.text
+    assert "SKU_REFERENCED" in r.text, r.text
+
+    # Archive the finished book at its ETag.
+    r = api.get(f"{PRICING}/price-books/{book}")
+    assert r.status_code == 200, r.text
+    r = api.post(
+        f"{PRICING}/price-books/{book}/archive",
+        json={},
+        headers={"If-Match": r.headers["etag"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["archived_at"] is not None, r.text
+    r = api.get(f"{PRICING}/price-book-entries/{entry['id']}")
+    assert r.status_code == 200, r.text
+    assert r.json()["reference_state"] == "released", r.text
+    r = api.get(f"{PRICING}/price-books", params={"q": book_code})
+    assert r.status_code == 200, r.text
+    assert [b["id"] for b in r.json()["items"]] == [], r.text
+    r = api.get(
+        f"{PRICING}/price-books", params={"q": book_code, "$filter": "archived eq true"}
+    )
+    assert r.status_code == 200, r.text
+    assert [b["id"] for b in r.json()["items"]] == [book], r.text
+    # The archived book's entries are read-only.
+    r = api.post(
+        f"{PRICING}/price-book-entries/{entry['id']}/prices",
+        json={"price": {"amount": "31.00"}, "eligibility": "all", "effective_from": today},
+        headers=_key(),
+    )
+    assert r.status_code == 409, r.text
+    assert "BOOK_ARCHIVED" in r.text, r.text
+
+    # Products retires the SKU, then archives it.
+    r = api.post(f"{PRODUCTS}/skus/{sku}/retire", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["applied"] is True, r.text
+    r = api.get(f"{PRODUCTS}/skus/{sku}")
+    assert r.status_code == 200, r.text
+    assert r.json()["sku"]["lifecycle"] == "retired", r.text
+    r = api.post(
+        f"{PRODUCTS}/skus/{sku}/archive",
+        headers={"If-Match": r.headers["etag"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["archived_at"] is not None, r.text
+    assert _usage_filtered(api, code) == [], "an archived SKU leaves the list"
+    r = api.get(f"{PRODUCTS}/skus", params={"q": code, "$filter": "archived eq true"})
+    assert r.status_code == 200, r.text
+    assert [s["id"] for s in r.json()["items"]] == [sku], r.text
+    r = api.get(f"{PRODUCTS}/skus/{sku}")
+    assert r.status_code == 200, "a read by id ignores the mark"

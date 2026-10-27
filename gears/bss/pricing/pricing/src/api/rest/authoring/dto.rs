@@ -1,13 +1,15 @@
 //! Pricing authoring wire contracts, with unique `OpenAPI` names and `snake_case` fields. A closed
 //! set on a response is its `enum` (D-439); a request keeps `string`, so its door's code refuses.
 use crate::api::rest::closed_sets::{
-    PricingApprovalKind, PricingBillingTiming, PricingChargeKind, PricingDecisionKind,
-    PricingEligibility, PricingEntryReferenceState, PricingItemReferenceState, PricingModel,
-    PricingPeriod, PricingPlanChange, PricingPriceState, PricingPriceStatus,
-    PricingReferenceOpKind, PricingReferenceOpRefKind, PricingReferenceOpState,
-    PricingRevisionState, PricingSkuEntryStatus, PricingUnitState, PricingVoteOutcome,
+    PricingApprovalKind, PricingBillingTiming, PricingChangeKind, PricingChargeKind,
+    PricingDecisionKind, PricingEligibility, PricingEntryReferenceState, PricingItemReferenceState,
+    PricingModel, PricingPeriod, PricingPlanChange, PricingPriceState, PricingPriceStatus,
+    PricingReferenceOpKind, PricingReferenceOpReason, PricingReferenceOpRefKind,
+    PricingReferenceOpState, PricingRevisionState, PricingSkuEntryStatus, PricingUnitState,
+    PricingVoteOutcome,
 };
 use crate::domain::plan::{self, EffectiveRevision};
+use crate::domain::price::Price;
 use crate::infra::plan_revisions::{effective_revisions, stored_revisions};
 use crate::infra::storage::{RepoError, entity, repo::approval_repo::UnitInstants};
 use std::collections::BTreeMap;
@@ -29,6 +31,15 @@ pub struct PriceBookDto {
     pub created_at: time::OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: time::OffsetDateTime,
+    /// When the book was archived (D-522); null while it is not. The book list hides it unless
+    /// asked `archived eq true`; a read by id, the export and the consumer reads ignore the mark.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub archived_at: Option<time::OffsetDateTime>,
+    /// Who archived it; null while it is not archived.
+    pub archived_by: Option<Uuid>,
+    /// The current name of `archived_by` (D-519); null when no name is available now, and on a
+    /// write answer.
+    pub archived_by_name: Option<String>,
 }
 impl From<entity::price_book::Model> for PriceBookDto {
     fn from(m: entity::price_book::Model) -> Self {
@@ -44,8 +55,22 @@ impl From<entity::price_book::Model> for PriceBookDto {
             version: m.version,
             created_at: m.created_at,
             updated_at: m.updated_at,
+            archived_at: m.archived_at,
+            archived_by: m.archived_by,
+            archived_by_name: None,
         }
     }
+}
+/// `POST /price-books/{id}/unarchive` (D-522): the book, listed again, and the entries still
+/// `released` after the door drove their re-reservations: their SKU refused a new reservation
+/// (retired, say), or Products has not answered yet. Each stays read-only until it is re-reserved.
+#[toolkit_macros::api_dto(response)]
+pub struct PricingPriceBookUnarchiveDto {
+    #[serde(flatten)]
+    pub book: PriceBookDto,
+    /// The entries still `released` when the answer is built; null when they could not be read
+    /// after the unarchive committed (the book's entry list says which).
+    pub released_entries: Option<Vec<Uuid>>,
 }
 #[toolkit_macros::api_dto(response)]
 pub struct PricingPriceBookEntryDto {
@@ -342,6 +367,11 @@ pub struct PricingPriceDto {
     pub dim_value: Option<String>,
     /// The entry's model, read-only (D-427): a price has no model of its own.
     pub model: PricingModel,
+    /// The price's currency, its book's, stored with the price.
+    pub currency: String,
+    /// The currency's scale stored with the price, a JSON integer: the table's scale when the
+    /// price was written or last edited. An approved price keeps it whatever the table says later.
+    pub currency_scale: u8,
     pub price_json: serde_json::Value,
     pub min_fee: Option<String>,
     pub eligibility: PricingEligibility,
@@ -353,12 +383,26 @@ pub struct PricingPriceDto {
     pub paired_price_id: Option<Uuid>,
     pub return_of_price_id: Option<Uuid>,
     pub state: PricingPriceState,
+    /// `set` for a price; `cancel` or `end` for a row that asks to cancel or end the approved
+    /// price `target_price_id` names (D-520, D-521). Such a row carries that price's money
+    /// unchanged and is never a price in force.
+    pub change_kind: PricingChangeKind,
+    /// The approved price a `cancel` or `end` row names; null on a `set` row.
+    pub target_price_id: Option<Uuid>,
+    /// The unit that cancelled this price, when `state` is `cancelled` (D-520).
+    pub cancelled_by_unit_id: Option<Uuid>,
     /// Display state of matrix row 10: an approved price shows where its window stands today.
+    /// A cancelled price shows `cancelled` (D-520). A `cancel` or `end` row shows its state, and
+    /// `superseded` once applied (D-520, D-521).
     pub status: PricingPriceStatus,
     pub pending_unit_id: Option<Uuid>,
     pub approved_by_unit_id: Option<Uuid>,
     pub note: Option<String>,
     pub created_by: Uuid,
+    /// The current name of `created_by` (D-519): its display name, else first and last name, else
+    /// username, from Account Management under the caller's rights; "System" for a system actor.
+    /// Null when no name is available now, and on a write answer.
+    pub created_by_name: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub approved_at: Option<time::OffsetDateTime>,
     pub version: i64,
@@ -368,25 +412,46 @@ pub struct PricingPriceDto {
     pub updated_at: time::OffsetDateTime,
 }
 impl PricingPriceDto {
-    /// A stored price with its entry's model (D-427).
+    /// A stored price with `price`, the row as `price_repo::in_book` decoded it: its entry's model
+    /// (D-427) and its stored currency spec, checked against its book's.
     /// # Errors
-    /// `CorruptRow` for a stored token outside its closed set (D-439).
-    pub fn of(m: entity::price::Model, model: &str) -> Result<Self, RepoError> {
-        Self::at(m, model, time::OffsetDateTime::now_utc().date())
+    /// `CorruptRow` for a stored token outside its closed set (D-439), or when `price` is not
+    /// the row's decoded price.
+    pub fn of(m: entity::price::Model, price: &Price) -> Result<Self, RepoError> {
+        Self::at(m, price, time::OffsetDateTime::now_utc().date())
     }
     /// [`Self::of`] with its display status on `today`, the one day a whole read is dated on
-    /// (D-440).
+    /// (D-440). The DTO reads nothing itself: the money, the fee and the currency spec were judged
+    /// when `price` was decoded, and `price` must be the row's own.
     /// # Errors
-    /// `CorruptRow` for a stored token outside its closed set (D-439).
-    pub fn at(m: entity::price::Model, model: &str, today: time::Date) -> Result<Self, RepoError> {
+    /// `CorruptRow` for a stored token outside its closed set (D-439), or when `price` is not
+    /// the row's decoded price.
+    pub fn at(
+        m: entity::price::Model,
+        price: &Price,
+        today: time::Date,
+    ) -> Result<Self, RepoError> {
         let id = m.id;
+        if price.id != id {
+            return Err(RepoError::CorruptRow(format!(
+                "price {id} is served with the decoded price {}",
+                price.id
+            )));
+        }
         let state = PricingPriceState::stored(&m.state, &format_args!("price {id} state"))?;
-        let status = crate::domain::price::window_display(
-            state.into(),
-            m.effective_from,
-            m.effective_to,
-            today,
-        )
+        let change_kind =
+            PricingChangeKind::stored(&m.change_kind, &format_args!("price {id} change_kind"))?;
+        // D-520, D-521: a cancel or an end has no window of its own.
+        let status = if change_kind == PricingChangeKind::Set {
+            crate::domain::price::window_display(
+                state.into(),
+                m.effective_from,
+                m.effective_to,
+                today,
+            )
+        } else {
+            crate::domain::price::change_display(state.into())
+        }
         .into();
         Ok(Self {
             id,
@@ -394,7 +459,9 @@ impl PricingPriceDto {
             price_book_entry_id: m.price_book_entry_id,
             version_no: m.version_no,
             dim_value: m.dim_value,
-            model: PricingModel::stored(model, &format_args!("price {id} model"))?,
+            model: price.model.into(),
+            currency: price.currency.code().to_owned(),
+            currency_scale: price.currency.scale(),
             price_json: m.price_json,
             min_fee: m.min_fee,
             eligibility: PricingEligibility::stored(
@@ -409,11 +476,15 @@ impl PricingPriceDto {
             paired_price_id: m.paired_price_id,
             return_of_price_id: m.return_of_price_id,
             state,
+            change_kind,
+            target_price_id: m.target_price_id,
+            cancelled_by_unit_id: m.cancelled_by_unit_id,
             status,
             pending_unit_id: m.pending_unit_id,
             approved_by_unit_id: m.approved_by_unit_id,
             note: m.note,
             created_by: m.created_by,
+            created_by_name: None,
             approved_at: m.approved_at,
             version: m.version,
             created_at: m.created_at,
@@ -437,7 +508,7 @@ pub struct PriceBookCreate {
 #[toolkit_macros::api_dto(request)]
 #[derive(Clone)]
 #[serde(deny_unknown_fields)]
-#[allow(
+#[expect(
     clippy::option_option,
     reason = "PATCH distinguishes omission, null clearing, and a new date"
 )]
@@ -451,7 +522,7 @@ pub struct PriceBookPatch {
     #[serde(default, deserialize_with = "nullable_date")]
     pub description: Option<Option<String>>,
 }
-#[allow(
+#[expect(
     clippy::option_option,
     reason = "PATCH distinguishes omission, null clearing, and a new date"
 )]
@@ -459,6 +530,16 @@ fn nullable_date<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Option<Option<String>>, D::Error> {
     <Option<String> as serde::Deserialize>::deserialize(d).map(Some)
+}
+/// [`nullable_date`] for a field the door reads as JSON: present and `null` is `Some(None)`.
+#[expect(
+    clippy::option_option,
+    reason = "PATCH distinguishes omission, null clearing, and a new value"
+)]
+fn nullable_value<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<serde_json::Value>>, D::Error> {
+    <Option<serde_json::Value> as serde::Deserialize>::deserialize(d).map(Some)
 }
 /// One page of a book's entries (D-483), ordered `(sku_id, charge_kind, model, id)`.
 #[toolkit_macros::api_dto(response)]
@@ -528,25 +609,49 @@ pub struct PricingDimensionKey {
 pub struct PricingDimensionRegistry {
     pub items: Vec<PricingDimensionKey>,
 }
+/// One currency of the table (D-537).
+#[toolkit_macros::api_dto(response)]
+pub struct PricingCurrency {
+    /// Three uppercase letters.
+    pub code: String,
+    /// The number of decimal places a new price in this currency uses, as a JSON integer.
+    pub scale: u8,
+    /// True when ISO 4217 defines the code; false for a code that the deployment's
+    /// `currency_scales` config adds.
+    pub iso: bool,
+}
+impl From<&crate::domain::currency::KnownCurrency> for PricingCurrency {
+    fn from(known: &crate::domain::currency::KnownCurrency) -> Self {
+        Self {
+            code: known.spec.code().to_owned(),
+            scale: known.spec.scale(),
+            iso: known.iso,
+        }
+    }
+}
+/// The response of `GET /currencies` (D-537): every currency the table accepts, sorted by code.
+#[toolkit_macros::api_dto(response)]
+pub struct PricingCurrencyTable {
+    pub items: Vec<PricingCurrency>,
+}
 #[toolkit_macros::api_dto(request)]
 #[derive(Clone)]
 #[serde(deny_unknown_fields)]
 pub struct PricingSettingsPut {
     pub default_timing: String,
-    /// `half_up`, `half_even`, `half_down`, `up` or `down` (D-437).
-    pub default_rounding: String,
     pub default_gl: Option<String>,
     pub default_tax_category: Option<String>,
     pub invoice_line_templates: std::collections::BTreeMap<String, String>,
     /// Required (D-438): the currencies a NEW book may take, a full replace; `[]` is any.
     pub currencies: Vec<String>,
+    /// Ignored (D-519): the writer's name that `GET /settings` shows. It is accepted so that a
+    /// read's body without `version`, `updated_at` and `updated_by` stays a PUT body (D-438).
+    #[serde(default)]
+    pub updated_by_name: Option<String>,
 }
 #[toolkit_macros::api_dto(response)]
 pub struct PricingSettingsDto {
     pub default_timing: PricingBillingTiming,
-    /// One of the five modes (D-437) once written through the door; a string, not an enum: no
-    /// CHECK guards the column, and a legacy value reads back as stored (D-439).
-    pub default_rounding: String,
     pub default_gl: Option<String>,
     pub default_tax_category: Option<String>,
     pub invoice_line_templates: serde_json::Value,
@@ -558,6 +663,10 @@ pub struct PricingSettingsDto {
     pub updated_at: Option<time::OffsetDateTime>,
     /// Who wrote them last; null before the first write and on a row written before D-438.
     pub updated_by: Option<Uuid>,
+    /// The current name of `updated_by` (D-519): its display name, else first and last name, else
+    /// username, from Account Management under the caller's rights; "System" for a system actor.
+    /// Null when `updated_by` is null, when no name is available now, and on a write answer.
+    pub updated_by_name: Option<String>,
 }
 
 #[toolkit_macros::api_dto(request)]
@@ -619,6 +728,10 @@ pub struct PricingPlanItemDto {
     pub reference_state: PricingItemReferenceState,
     pub version: i64,
     pub created_by: Uuid,
+    /// The current name of `created_by` (D-519): its display name, else first and last name, else
+    /// username, from Account Management under the caller's rights; "System" for a system actor.
+    /// Null when no name is available now, and on a write answer.
+    pub created_by_name: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -641,6 +754,7 @@ impl TryFrom<entity::plan_item::Model> for PricingPlanItemDto {
             )?,
             version: m.version,
             created_by: m.created_by,
+            created_by_name: None,
             created_at: m.created_at,
             updated_at: m.updated_at,
         })
@@ -704,6 +818,8 @@ pub struct PricingPlanRevisionHeader {
     pub id: Uuid,
     pub rev_no: i32,
     pub book_id: Uuid,
+    /// The book `book_id` names (D-516). `book_id` stays.
+    pub book: PricingBookIdentity,
     /// The state as it reads today (D-447).
     pub state: PricingRevisionState,
     pub available_from: Option<String>,
@@ -713,6 +829,10 @@ pub struct PricingPlanRevisionHeader {
     pub published_at: Option<time::OffsetDateTime>,
     /// Its author (D-461): the one principal who edits it while it is a draft (D-404).
     pub created_by: Uuid,
+    /// The current name of `created_by` (D-519): its display name, else first and last name, else
+    /// username, from Account Management under the caller's rights; "System" for a system actor.
+    /// Null when no name is available now, and on a write answer.
+    pub created_by_name: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
     /// When it was submitted for approval (D-461): the submission of its pending unit, or of the
@@ -726,27 +846,54 @@ pub struct PricingPlanRevisionHeader {
     pub approved_at: Option<time::OffsetDateTime>,
 }
 impl PricingPlanRevisionHeader {
-    /// The header of `m` with its effective state and `published_at` (D-447), and the instants of
-    /// the unit it names among `units` (D-461).
-    #[must_use]
+    /// The header of `m` with its effective state and `published_at` (D-447), the instants of
+    /// the unit it names among `units` (D-461), and the book `books` holds for `m.book_id` (D-516).
+    /// # Errors
+    /// `CorruptRow` when `books` does not hold that book.
     pub fn of(
         m: &entity::plan_revision::Model,
         effective: &EffectiveRevision,
         units: &BTreeMap<Uuid, UnitInstants>,
-    ) -> Self {
+        books: &BTreeMap<Uuid, PricingPlanBook>,
+    ) -> Result<Self, RepoError> {
         let (submitted_at, approved_at) =
             unit_instants(m.pending_unit_id, m.approved_by_unit_id, units);
-        Self {
+        let book = books.get(&m.book_id).ok_or_else(|| {
+            RepoError::CorruptRow(format!("revision {} names lost book {}", m.id, m.book_id))
+        })?;
+        Ok(Self {
             id: m.id,
             rev_no: m.rev_no,
             book_id: m.book_id,
+            book: PricingBookIdentity::from(book),
             state: effective.state.into(),
             available_from: m.available_from.map(|d| d.to_string()),
             published_at: effective.published_at,
             created_by: m.created_by,
+            created_by_name: None,
             created_at: m.created_at,
             submitted_at,
             approved_at,
+        })
+    }
+}
+/// A book named beside its id (D-516): id, code, name and currency. Validity stays on
+/// [`PricingPlanBook`].
+#[toolkit_macros::api_dto(response)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PricingBookIdentity {
+    pub id: Uuid,
+    pub code: String,
+    pub name: String,
+    pub currency: String,
+}
+impl From<&PricingPlanBook> for PricingBookIdentity {
+    fn from(book: &PricingPlanBook) -> Self {
+        Self {
+            id: book.id,
+            code: book.code.clone(),
+            name: book.name.clone(),
+            currency: book.currency.clone(),
         }
     }
 }
@@ -784,16 +931,39 @@ pub struct PricingPlanCurrent {
     pub sku_ids: Vec<Uuid>,
     /// Its author, who edits it while it is a draft (D-404); not the plan's.
     pub created_by: Uuid,
-    /// The book it prices on (D-485): that book's code, name and currency.
+    /// The current name of `created_by` (D-519): its display name, else first and last name, else
+    /// username, from Account Management under the caller's rights; "System" for a system actor.
+    /// Null when no name is available now, and on a write answer.
+    pub created_by_name: Option<String>,
+    /// The book it prices on (D-485, D-515): that book's id, code, name, currency and validity.
     pub book: PricingPlanBook,
 }
-/// The book a plan's current revision prices on (D-485).
+/// The book a plan's current revision prices on (D-485, D-515).
 #[toolkit_macros::api_dto(response)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PricingPlanBook {
+    pub id: Uuid,
     pub code: String,
     pub name: String,
     pub currency: String,
+    /// `YYYY-MM-DD`, or null when the book is open on that side.
+    pub valid_from: Option<String>,
+    /// `YYYY-MM-DD`, exclusive, or null when the book is open on that side.
+    pub valid_until: Option<String>,
+}
+impl PricingPlanBook {
+    /// The book a plan row names (D-515).
+    #[must_use]
+    pub fn of(m: &entity::price_book::Model) -> Self {
+        Self {
+            id: m.id,
+            code: m.code.clone(),
+            name: m.name.clone(),
+            currency: m.currency.clone(),
+            valid_from: m.valid_from.map(|d| d.to_string()),
+            valid_until: m.valid_until.map(|d| d.to_string()),
+        }
+    }
 }
 /// The revision a plan sells today (D-460): its published revision in effect (D-447).
 #[toolkit_macros::api_dto(response)]
@@ -828,6 +998,10 @@ pub struct PricingPlanDto {
     pub published_rev: Option<i32>,
     pub version: i64,
     pub created_by: Uuid,
+    /// The current name of `created_by` (D-519): its display name, else first and last name, else
+    /// username, from Account Management under the caller's rights; "System" for a system actor.
+    /// Null when no name is available now, and on a write answer.
+    pub created_by_name: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -891,6 +1065,7 @@ impl PricingPlanDto {
                 item_count: u32::try_from(sku_ids.len()).unwrap_or(u32::MAX),
                 sku_ids,
                 created_by: row.created_by,
+                created_by_name: None,
                 book,
             })
         } else {
@@ -909,6 +1084,7 @@ impl PricingPlanDto {
             published_rev: plan::published_rev(m.published_rev, &stored, m.id, today),
             version: m.version,
             created_by: m.created_by,
+            created_by_name: None,
             created_at: m.created_at,
             updated_at: m.updated_at,
             last_activity_at: summary.last_activity_at,
@@ -920,8 +1096,8 @@ impl PricingPlanDto {
             revisions: revisions
                 .iter()
                 .zip(&effective)
-                .map(|(r, e)| PricingPlanRevisionHeader::of(r, e, &reading.units))
-                .collect(),
+                .map(|(r, e)| PricingPlanRevisionHeader::of(r, e, &reading.units, &reading.books))
+                .collect::<Result<Vec<_>, _>>()?,
             current,
             in_effect,
         })
@@ -1016,6 +1192,10 @@ pub struct PricingPlanRevisionDto {
     pub version: i64,
     /// The draft's author: the one principal who edits it and its items (D-404).
     pub created_by: Uuid,
+    /// The current name of `created_by` (D-519): its display name, else first and last name, else
+    /// username, from Account Management under the caller's rights; "System" for a system actor.
+    /// Null when no name is available now, and on a write answer.
+    pub created_by_name: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -1086,6 +1266,7 @@ impl PricingPlanRevisionDto {
             published_at: m.published_at,
             version: m.version,
             created_by: m.created_by,
+            created_by_name: None,
             created_at: m.created_at,
             updated_at: m.updated_at,
             submitted_at: None,
@@ -1368,11 +1549,22 @@ pub struct PricingReferenceOpDto {
     #[serde(with = "time::serde::rfc3339")]
     pub next_attempt_at: time::OffsetDateTime,
     pub last_error: Option<String>,
+    /// Why the op releases its reference: `book_archived` for a `release` (D-522); null for every
+    /// other op.
+    pub reason: Option<PricingReferenceOpReason>,
 }
 impl TryFrom<entity::reference_op::Model> for PricingReferenceOpDto {
     type Error = RepoError;
     fn try_from(op: entity::reference_op::Model) -> Result<Self, RepoError> {
         let id = op.op_id;
+        // The work record as the drive reads it: one that does not decode is a corrupt row.
+        let work = crate::infra::reference_work::Work::read(&op)
+            .map_err(|_| RepoError::CorruptRow(format!("op {id} work")))?;
+        let reason = work
+            .reason
+            .as_deref()
+            .map(|token| PricingReferenceOpReason::stored(token, &format_args!("op {id} reason")))
+            .transpose()?;
         Ok(Self {
             op_id: id,
             kind: PricingReferenceOpKind::stored(&op.kind, &format_args!("op {id} kind"))?,
@@ -1387,6 +1579,7 @@ impl TryFrom<entity::reference_op::Model> for PricingReferenceOpDto {
             attempts: op.attempts,
             next_attempt_at: op.next_attempt_at,
             last_error: op.last_error,
+            reason,
         })
     }
 }
@@ -1410,11 +1603,22 @@ pub struct PricingPriceCreate {
     pub dim_value: Option<String>,
     /// Money in the entry's model (D-427); a price carries no model of its own.
     pub price: serde_json::Value,
-    pub min_fee: Option<String>,
+    /// Exact decimal text, a JSON string; a JSON number is 400 `MIN_FEE_INVALID` (D-528).
+    #[schema(value_type = Option<String>)]
+    pub min_fee: Option<serde_json::Value>,
     pub eligibility: String,
     pub effective_from: String,
     pub temporary_until: Option<String>,
     pub note: Option<String>,
+}
+/// `POST /prices/{id}/end` (D-521).
+#[toolkit_macros::api_dto(request)]
+#[derive(Clone, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PricingPriceEnd {
+    /// The new end, `YYYY-MM-DD`, exclusive: after today, after the price's start, and no later
+    /// than its current end.
+    pub effective_to: String,
 }
 #[toolkit_macros::api_dto(request)]
 #[derive(Clone)]
@@ -1427,8 +1631,11 @@ pub struct PricingPricePatch {
     #[serde(default, deserialize_with = "nullable_date")]
     pub dim_value: Option<Option<String>>,
     pub price: Option<serde_json::Value>,
-    #[serde(default, deserialize_with = "nullable_date")]
-    pub min_fee: Option<Option<String>>,
+    /// Exact decimal text, a JSON string, or `null` to clear it; a JSON number is 400
+    /// `MIN_FEE_INVALID` (D-528).
+    #[serde(default, deserialize_with = "nullable_value")]
+    #[schema(value_type = Option<String>)]
+    pub min_fee: Option<Option<serde_json::Value>>,
     pub eligibility: Option<String>,
     /// A temporary draft's start moves with its end; a return's start is its pair's end.
     pub effective_from: Option<String>,
@@ -1449,6 +1656,10 @@ pub struct PricingPriceCreated {
 #[toolkit_macros::api_dto(response)]
 pub struct PricingDecisionDto {
     pub actor: Uuid,
+    /// The current name of `actor` (D-519): its display name, else first and last name, else
+    /// username, from Account Management under the caller's rights; "System" for a system actor.
+    /// Null when no name is available now, and on a write answer.
+    pub actor_name: Option<String>,
     pub generation: i32,
     pub decision: PricingDecisionKind,
     pub note: Option<String>,
@@ -1460,6 +1671,7 @@ impl From<bss_approval::Decision> for PricingDecisionDto {
     fn from(d: bss_approval::Decision) -> Self {
         Self {
             actor: d.actor,
+            actor_name: None,
             generation: d.generation,
             decision: d.verdict.into(),
             note: d.note,
@@ -1487,6 +1699,10 @@ pub struct PricingApprovalUnitDto {
     pub quorum_required: u32,
     pub common_effective_date: Option<String>,
     pub submitted_by: Uuid,
+    /// The current name of `submitted_by` (D-519): its display name, else first and last name, else
+    /// username, from Account Management under the caller's rights; "System" for a system actor.
+    /// Null when no name is available now, and on a write answer.
+    pub submitted_by_name: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub submitted_at: time::OffsetDateTime,
     /// The submitter's note (D-445), the unit shape products shares (P-D-219): the note a plan
@@ -1547,6 +1763,7 @@ impl PricingApprovalUnitDto {
             quorum_required: u.quorum_required,
             common_effective_date: u.common_effective_date.map(|d| d.to_string()),
             submitted_by: u.submitted_by,
+            submitted_by_name: None,
             submitted_at: u.submitted_at,
             submit_note: u.submit_note,
             decided_at: u.decided_at,

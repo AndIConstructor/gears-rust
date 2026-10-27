@@ -107,6 +107,8 @@ fn sku(n: u128, name: &str, code: &str, kind: SkuType, usage_type: Option<&str>)
         created_by: id(0),
         created_at: at,
         updated_at: at,
+        archived_at: None,
+        archived_by: None,
     }
 }
 fn skus() -> Vec<Sku> {
@@ -159,6 +161,7 @@ fn price(entry: u128, v: i32, state: PriceState, from: &str, dim: Option<&str>) 
         version_no: v,
         dim_value: dim.map(str::to_owned),
         model: Model::PerUnit,
+        currency: crate::domain::test_support::spec("EUR", 2),
         price: Some(PriceData::PerUnit { rate: dec("0.10") }),
         min_fee: None,
         eligibility: Eligibility::All,
@@ -319,7 +322,6 @@ fn ctx(name: &str, book: u128, items: Vec<Item>) -> PlanContext {
         quorum: 0,
         defaults: Defaults {
             gl: Some("4000-GEN".into()),
-            rounding: "half-up-2".into(),
             tax_category: Some("standard".into()),
         },
     }
@@ -1091,7 +1093,14 @@ fn descriptors_and_approval_are_information_rows() {
     let d = check(&c, "DESCRIPTORS").unwrap();
     assert!(d.ok && d.info);
     assert!(d.detail.contains("4000-GEN"), "{}", d.detail);
-    assert!(d.detail.contains("half-up-2"), "{}", d.detail);
+    assert!(
+        d.detail.contains("standard"),
+        "the descriptors name the tax category"
+    );
+    assert!(
+        !d.detail.contains("rounding"),
+        "the descriptors name no rounding setting"
+    );
     let a = check(&c, "APPROVAL").unwrap();
     assert!(a.ok && a.info);
     assert_eq!(a.label, "Approval quorum 0");

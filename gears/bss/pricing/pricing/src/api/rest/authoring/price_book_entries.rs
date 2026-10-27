@@ -37,7 +37,7 @@ use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::secure::{AccessScope, DBRunner};
 use toolkit_odata::{
     CursorV1, ODataOrderBy, OrderKey, PageInfo, SortDir,
-    filter::{FieldKind, FilterField},
+    filter::{FieldKind, FilterField, FilterNode, parse_odata_filter},
 };
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
@@ -258,8 +258,12 @@ pub(super) async fn create(
             }
             validate_template(input.invoice_line_override.as_deref())?;
             check_dimension(tx, &receipt_scope, tenant, input.dimension_key.as_deref()).await?;
-            if book_repo::find(tx, &scope, tenant, book).await?.is_none() {
+            let Some(found) = book_repo::find(tx, &scope, tenant, book).await? else {
                 return Err(support::missing().into());
+            };
+            // D-522: an archived book takes no entry.
+            if found.archived_at.is_some() {
+                return Err(support::conflict("BOOK_ARCHIVED").into());
             }
             let reference = Ref {
                 kind: RefKind::Entry,
@@ -278,6 +282,7 @@ pub(super) async fn create(
                 refusal: None,
                 receipt: None,
                 outcome: None,
+                reason: None,
             };
             let op = reference_work::new_op(
                 &ctx,
@@ -317,6 +322,8 @@ pub(super) async fn patch(
     let tenant = ctx.subject_tenant_id();
     let mut m = find(tx, scope, tenant, id).await?;
     support::check_version(version, m.version)?;
+    // D-522: a released entry (its book archived, or not re-reserved since) is not edited.
+    support::writable_entry(tx, &m).await?;
     // The entry is the authorized aggregate; its prices are read tenant-scoped, never through a
     // scope narrowed to the entry's id.
     let prices = price_repo::for_entry(tx, &AccessScope::for_tenant(tenant), tenant, id).await?;
@@ -425,6 +432,7 @@ pub(super) async fn delete(
                 refusal: None,
                 receipt: None,
                 outcome: None,
+                reason: None,
             };
             let op = reference_work::new_op(
                 &ctx,
@@ -494,18 +502,20 @@ fn chain_price(p: &entity::price::Model) -> Result<crate::domain::price::ChainPr
 /// rejected price): the price in force — started on or before the day and not ended, chosen as
 /// resolve chooses a price in force (the latest start, then the latest version) — and the next
 /// price (`domain::price::next_of`), each with its status on the day; an entry with neither has
-/// no key. The door maps the rows; both choices are the domain's. The caller has judged whose
-/// money it may show: every entry given is shown.
+/// no key. Each entry comes with its book's currency, which every shown price must carry. The door
+/// maps the rows; both choices are the domain's. The caller has judged whose money it may show:
+/// every entry given is shown.
 /// # Errors
-/// Storage failures; a stored token outside its closed set is a corrupt row.
+/// Storage failures; a stored token outside its closed set, or a price outside its contract, is a
+/// corrupt row.
 pub(super) async fn headline(
     tx: &impl DBRunner,
     tenant: Uuid,
-    entries: &[&entity::price_book_entry::Model],
+    entries: &[(&entity::price_book_entry::Model, &str)],
     day: time::Date,
 ) -> Result<std::collections::BTreeMap<Uuid, Headline>, DoorError> {
     use crate::infra::storage::RepoError;
-    let ids: Vec<Uuid> = entries.iter().map(|e| e.id).collect();
+    let ids: Vec<Uuid> = entries.iter().map(|(e, _)| e.id).collect();
     let stored =
         price_repo::default_chain(tx, &AccessScope::for_tenant(tenant), tenant, &ids).await?;
     // Each entry's chain by key, grouped once: linear in the book, not entries x prices (PS-38).
@@ -515,20 +525,23 @@ pub(super) async fn headline(
         chains.entry(p.price_book_entry_id).or_default().push(p);
     }
     let mut out = std::collections::BTreeMap::new();
-    for e in entries {
+    for &(e, currency) in entries {
         let model = price_book_entry_repo::model_of(e)?;
         let chain: Vec<&entity::price::Model> = chains.get(&e.id).cloned().unwrap_or_default();
         // Only the approved prices are decoded: they alone can be in force.
         let approved = chain
             .iter()
             .filter(|p| p.state == PriceState::Approved.as_str())
-            .map(|p| price_repo::to_domain(p, model))
+            .map(|p| price_repo::in_book(p, model, currency))
             .collect::<Result<Vec<_>, RepoError>>()?;
         let current = crate::domain::price::own_version_at(&approved, e.id, day, None)
             .and_then(|found| chain.iter().find(|p| p.id == found.id));
         let shown = |p: Option<&&entity::price::Model>| {
-            p.map(|p| super::dto::PricingPriceDto::at((*p).clone(), &e.model, day))
-                .transpose()
+            p.map(|p| {
+                let price = price_repo::in_book(p, model, currency)?;
+                super::dto::PricingPriceDto::at((*p).clone(), &price, day)
+            })
+            .transpose()
         };
         let views = chain
             .iter()
@@ -546,38 +559,41 @@ pub(super) async fn headline(
     }
     Ok(out)
 }
-/// Whether the caller's `price_book` read — `books`, or `None` without that grant — admits the
-/// tenant's `book`: the money's second judgement (D-434), ONE read.
+/// The tenant's `book` when the caller's `price_book` read — `books`, or `None` without that
+/// grant — admits it: the money's second judgement (D-434), ONE read. `None` when the money is not
+/// shown.
 /// # Errors
 /// Storage failures.
-pub(super) async fn shows_money(
+pub(super) async fn money_book(
     tx: &impl DBRunner,
     books: Option<&AccessScope>,
     tenant: Uuid,
     book: Uuid,
-) -> Result<bool, DoorError> {
+) -> Result<Option<entity::price_book::Model>, DoorError> {
     Ok(match books {
-        Some(books) => book_repo::find(tx, books, tenant, book).await?.is_some(),
-        None => false,
+        Some(books) => book_repo::find(tx, books, tenant, book).await?,
+        None => None,
     })
 }
 /// `GET /price-book-entries/{id}` and each item of `GET /price-books/{id}/entries` (D-428,
-/// D-440, D-472): the entries with their usage and, when `shown`, their price in force and their
-/// next price — all dated on `day`, today or the list's `as_of` (D-473), in a fixed number of
-/// statements whatever their number.
+/// D-440, D-472): the entries with their usage and, when `shown` (the currency of the entries'
+/// book, given when their money is shown), their price in force and their next price — all dated
+/// on `day`, today or the list's `as_of` (D-473), in a fixed number of statements whatever their
+/// number.
 /// # Errors
 /// Storage failures; a stored token outside its closed set is a corrupt row.
 pub(super) async fn read(
     tx: &impl DBRunner,
     tenant: Uuid,
     entries: Vec<entity::price_book_entry::Model>,
-    shown: bool,
+    shown: Option<&str>,
     day: time::Date,
 ) -> Result<Vec<super::dto::PricingPriceBookEntryReadDto>, DoorError> {
     let ids: Vec<Uuid> = entries.iter().map(|m| m.id).collect();
     let mut usage = crate::infra::usage::entry_usage(tx, tenant, &ids, day).await?;
-    let mut headlines = if shown {
-        headline(tx, tenant, &entries.iter().collect::<Vec<_>>(), day).await?
+    let mut headlines = if let Some(currency) = shown {
+        let shown: Vec<_> = entries.iter().map(|e| (e, currency)).collect();
+        headline(tx, tenant, &shown, day).await?
     } else {
         std::collections::BTreeMap::new()
     };
@@ -620,13 +636,14 @@ pub(super) async fn prices(
     today: time::Date,
 ) -> Result<super::dto::PricingEntryPriceList, DoorError> {
     let entry = find(tx, scope, tenant, id).await?;
-    if !shows_money(tx, books, tenant, entry.book_id).await? {
+    let Some(book) = money_book(tx, books, tenant, entry.book_id).await? else {
         return Err(support::forbidden_because(
             "PRICE_BOOK_READ_REQUIRED",
             "an entry's prices are money: reading them takes price_book read on its book",
         )
         .into());
-    }
+    };
+    let model = price_book_entry_repo::model_of(&entry)?;
     let mut rows = price_repo::for_entry(tx, &AccessScope::for_tenant(tenant), tenant, id).await?;
     rows.sort_by(|a, b| {
         (&a.dim_value, a.effective_from, a.version_no, a.id).cmp(&(
@@ -638,7 +655,10 @@ pub(super) async fn prices(
     });
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
-        let price = super::dto::PricingPriceDto::at(row, &entry.model, today)?;
+        // Read as every read of a stored price reads it: a price in another currency than its
+        // book's is a corrupt row, never listed.
+        let decoded = price_repo::in_book(&row, model, &book.currency)?;
+        let price = super::dto::PricingPriceDto::at(row, &decoded, today)?;
         if wanted.is_none_or(|w| w.contains(&price.status)) {
             items.push(price);
         }
@@ -665,9 +685,42 @@ pub(super) async fn for_sku(
     query: &SkuEntriesQuery,
     today: time::Date,
 ) -> Result<super::dto::PricingSkuEntryList, DoorError> {
+    let entries = price_book_entry_repo::for_skus(tx, scope, tenant, &[query.sku]).await?;
+    page_entries(present(tx, books, tenant, entries, today).await?, query)
+}
+/// `GET /price-book-entries?$filter=id in (…)` (D-517): the named entries, in id order, at most
+/// 200. An id the tenant does not hold, or the caller's entry scope does not admit, is left out.
+/// Money is the same second judgement as the SKU read (D-434, D-440).
+/// # Errors
+/// Storage failures; an entry whose book is gone is a corrupt row.
+pub(super) async fn for_ids(
+    tx: &impl DBRunner,
+    scope: &AccessScope,
+    books: Option<&AccessScope>,
+    tenant: Uuid,
+    ids: &[Uuid],
+    today: time::Date,
+) -> Result<super::dto::PricingSkuEntryList, DoorError> {
+    let entries = price_book_entry_repo::find_many(tx, scope, tenant, ids).await?;
+    Ok(super::dto::PricingSkuEntryList {
+        items: present(tx, books, tenant, entries, today).await?,
+        page_info: PageInfo {
+            next_cursor: None,
+            prev_cursor: None,
+            limit: ID_LIMIT,
+        },
+    })
+}
+const ID_LIMIT: u64 = 200;
+async fn present(
+    tx: &impl DBRunner,
+    books: Option<&AccessScope>,
+    tenant: Uuid,
+    entries: Vec<entity::price_book_entry::Model>,
+    today: time::Date,
+) -> Result<Vec<super::dto::PricingSkuEntryDto>, DoorError> {
     use crate::infra::storage::RepoError;
     use std::collections::{BTreeMap, BTreeSet};
-    let entries = price_book_entry_repo::for_skus(tx, scope, tenant, &[query.sku]).await?;
     let book_ids: Vec<Uuid> = entries
         .iter()
         .map(|e| e.book_id)
@@ -685,14 +738,14 @@ pub(super) async fn for_sku(
     let mut usage = crate::infra::usage::entry_usage(tx, tenant, &ids, today).await?;
     // The money: only the entries whose book the caller's price_book read admits.
     let mut headlines = if let Some(books) = books {
-        let readable: BTreeSet<Uuid> = book_repo::find_many(tx, books, tenant, &book_ids)
+        let readable: BTreeMap<Uuid, String> = book_repo::find_many(tx, books, tenant, &book_ids)
             .await?
             .into_iter()
-            .map(|b| b.id)
+            .map(|b| (b.id, b.currency))
             .collect();
-        let shown: Vec<&entity::price_book_entry::Model> = entries
+        let shown: Vec<(&entity::price_book_entry::Model, &str)> = entries
             .iter()
-            .filter(|e| readable.contains(&e.book_id))
+            .filter_map(|e| readable.get(&e.book_id).map(|c| (e, c.as_str())))
             .collect();
         headline(tx, tenant, &shown, today).await?
     } else {
@@ -723,7 +776,7 @@ pub(super) async fn for_sku(
             next_price: prices.next,
         });
     }
-    page_entries(items, query)
+    Ok(items)
 }
 
 /// The fields `$orderby` may name (D-486). `id` is the tie-break, not a client key, so it is not
@@ -795,7 +848,15 @@ impl EntryOrder {
     }
 }
 
-/// A parsed `GET /price-book-entries` (D-486). Every refusal is already judged.
+/// A parsed `GET /price-book-entries` (D-486, D-517). Every refusal is already judged.
+#[derive(Clone)]
+pub(super) enum EntriesRead {
+    /// The SKU export (D-486). Boxed so the id-list variant stays small.
+    Sku(Box<SkuEntriesQuery>),
+    /// `id in (…)`, at most 200 distinct ids (D-517).
+    Ids(Vec<Uuid>),
+}
+/// A parsed `GET /price-book-entries?sku_id=` (D-486). Every refusal is already judged.
 #[derive(Clone)]
 pub(super) struct SkuEntriesQuery {
     sku: Uuid,
@@ -812,20 +873,21 @@ pub(super) struct SkuEntriesQuery {
 
 const PAGE_DEFAULT: u64 = 500;
 
-/// The query of `GET /price-book-entries` (D-486), judged before any read. `$orderby` beside a
-/// cursor is 400 `ORDER_WITH_CURSOR` before the cursor is decoded. A `$filter`, `$select`,
-/// `$count` or any other key this read does not take is 400 `QUERY_INVALID`.
+/// The query of `GET /price-book-entries` (D-486, D-517), judged before any read. `$orderby`
+/// beside a cursor is 400 `ORDER_WITH_CURSOR` before the cursor is decoded. `$filter` is accepted
+/// only as `id in (…)`, at most 200 ids, and only instead of `sku_id`. `$select`, `$count` or any
+/// other key this read does not take is 400 `QUERY_INVALID`.
 /// # Errors
 /// 400 `QUERY_INVALID`, `INVALID_ORDERBY_FIELD`, `ORDER_WITH_CURSOR`, `FILTER_MISMATCH` or
 /// `INVALID_CURSOR`.
-pub(super) fn sku_entries_query(uri: &Uri) -> Result<SkuEntriesQuery, CanonicalError> {
+pub(super) fn sku_entries_query(uri: &Uri) -> Result<EntriesRead, CanonicalError> {
     let Query(pairs) = Query::<Vec<(String, String)>>::try_from_uri(uri)
         .map_err(|_| support::invalid("query", "QUERY_INVALID"))?;
     let seen = support::plain_keys(
         &pairs,
         &[
             "sku_id", "book_id", "currency", "q", "status", "changing", "limit", "cursor",
-            "$orderby",
+            "$orderby", "$filter",
         ],
         |_| false,
         |key| format!("`{key}` is not a parameter of this read"),
@@ -839,6 +901,16 @@ pub(super) fn sku_entries_query(uri: &Uri) -> Result<SkuEntriesQuery, CanonicalE
             .find(|(key, _)| key == name)
             .map(|(_, raw)| raw.as_str())
     };
+    if seen.contains(&"$filter") {
+        if seen.len() != 1 {
+            return Err(support::invalid_because(
+                "$filter",
+                "QUERY_INVALID",
+                "`$filter` replaces `sku_id` and takes no other key",
+            ));
+        }
+        return Ok(EntriesRead::Ids(entry_ids(value("$filter").unwrap_or(""))?));
+    }
     let sku = value("sku_id").ok_or_else(|| {
         support::invalid_because("sku_id", "QUERY_INVALID", "`sku_id` is required")
     })?;
@@ -878,7 +950,7 @@ pub(super) fn sku_entries_query(uri: &Uri) -> Result<SkuEntriesQuery, CanonicalE
         }
         None => (requested_order(value("$orderby"))?, None),
     };
-    Ok(SkuEntriesQuery {
+    Ok(EntriesRead::Sku(Box::new(SkuEntriesQuery {
         sku,
         book_ids,
         currency,
@@ -889,7 +961,78 @@ pub(super) fn sku_entries_query(uri: &Uri) -> Result<SkuEntriesQuery, CanonicalE
         order,
         cursor,
         hash,
-    })
+    })))
+}
+
+/// `$filter=id in (…)`, 1 to 200 distinct ids (D-517). Any other shape is 400 `QUERY_INVALID`.
+/// This read takes the raw `$filter` itself, so the `OData` extractor's budget does not run: a
+/// filter longer than its `MAX_FILTER_LEN` is refused here, before the parser sees it.
+fn entry_ids(raw: &str) -> Result<Vec<Uuid>, CanonicalError> {
+    use toolkit::api::odata::MAX_FILTER_LEN;
+    let refuse = |detail: &str| support::invalid_because("$filter", "QUERY_INVALID", detail);
+    if raw.len() > MAX_FILTER_LEN {
+        return Err(refuse(&format!(
+            "`$filter` is at most {MAX_FILTER_LEN} bytes"
+        )));
+    }
+    let node = parse_odata_filter::<EntryIdField>(raw).map_err(|error| {
+        refuse(&format!(
+            "the filter is `id in (...)`, at most {ID_LIMIT} ids: {error}"
+        ))
+    })?;
+    match node {
+        FilterNode::Binary {
+            op: toolkit_odata::filter::FilterOp::Eq,
+            value,
+            ..
+        } => {
+            let toolkit_odata::filter::ODataValue::Uuid(id) = value else {
+                return Err(refuse("the filter is `id eq` one id or `id in (...)`"));
+            };
+            Ok(vec![id])
+        }
+        FilterNode::InList { values, .. } => {
+            if values.len() > usize::try_from(ID_LIMIT).unwrap_or(usize::MAX) {
+                return Err(refuse(&format!(
+                    "`id in (...)` lists at most {ID_LIMIT} ids"
+                )));
+            }
+            let mut ids = BTreeSet::new();
+            for value in values {
+                let toolkit_odata::filter::ODataValue::Uuid(id) = value else {
+                    return Err(refuse("the filter is `id in (...)`, at most 200 ids"));
+                };
+                ids.insert(id);
+            }
+            if ids.is_empty() {
+                return Err(refuse("the filter is `id in (...)`, at most 200 ids"));
+            }
+            Ok(ids.into_iter().collect())
+        }
+        FilterNode::Composite {
+            op: toolkit_odata::filter::FilterOp::Or,
+            ..
+        } => Err(refuse("`or` is not accepted; the filter is `id in (...)`")),
+        _ => Err(refuse("the filter is `id in (...)`, at most 200 ids")),
+    }
+}
+
+/// The one field `$filter` may name (D-517).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum EntryIdField {
+    Id,
+}
+impl FilterField for EntryIdField {
+    const FIELDS: &'static [Self] = &[Self::Id];
+    fn name(&self) -> &'static str {
+        "id"
+    }
+    fn kind(&self) -> FieldKind {
+        FieldKind::Uuid
+    }
+    fn from_name(name: &str) -> Option<Self> {
+        (name == "id").then_some(Self::Id)
+    }
 }
 
 fn book_ids(raw: &str) -> Result<BTreeSet<Uuid>, CanonicalError> {

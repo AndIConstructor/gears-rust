@@ -12,8 +12,8 @@ mod schema_dump;
 
 use bss_pricing::infra::reference_ticker::system_actor;
 use bss_pricing::infra::reference_work::{self, Caller, WallClock};
-use bss_pricing::infra::storage::entity::{price_book, reference_op};
-use bss_pricing::infra::storage::repo::{book_repo, idempotency_repo as idem, reference_op_repo};
+use bss_pricing::infra::storage::entity::reference_op;
+use bss_pricing::infra::storage::repo::{idempotency_repo as idem, reference_op_repo};
 use bss_pricing::module::BssPricingGear;
 use entry_support::{Script, app_for, request, state_on, user_of};
 use pg_support::Pg;
@@ -74,6 +74,8 @@ async fn migrate(pg: &Pg, without: Option<&str>) -> Result<MigrationResult, Migr
             Some(m.name()) != without
                 && m.name() != "m20260930_000018_usage_rating_policy"
                 && !m.name().contains("000021")
+                && !m.name().contains("000022")
+                && !m.name().contains("000023")
         })
         .collect();
     run_migrations_for_testing(&pg.db().await, chain).await
@@ -179,25 +181,18 @@ async fn seed_through_repositories(pg: &Pg) {
         .with_hms(9, 0, 0)
         .unwrap()
         .assume_utc();
-    book_repo::insert(
-        &conn,
-        &scope,
-        price_book::Model {
-            id: BOOK,
-            tenant_id: TENANT,
-            code: "standard".into(),
-            name: "Standard".into(),
-            currency: "EUR".into(),
-            valid_from: None,
-            valid_until: None,
-            description: None,
-            version: 1,
-            created_at: at,
-            updated_at: at,
-        },
+    // The book's table gained the archive mark later (000023, D-522), so the book is written in
+    // the shape this chain holds: as the repository writes it, without those columns.
+    exec(
+        pg,
+        &[format!(
+            "INSERT INTO bss.pricing_price_book (id, tenant_id, code, name, currency, valid_from, \
+             valid_until, description, version, created_at, updated_at) VALUES ('{BOOK}', \
+             '{TENANT}', 'standard', 'Standard', 'EUR', NULL, NULL, NULL, 1, \
+             '2026-09-01T09:00:00Z', '2026-09-01T09:00:00Z')"
+        )],
     )
-    .await
-    .unwrap();
+    .await;
     let op = |op_id, kind: &str, entry, reservation, key: Option<&str>, state: &str| {
         reference_op::Model {
             op_id,
@@ -336,8 +331,8 @@ fn price_row(
     let unit = unit.map_or_else(|| "NULL".to_owned(), u);
     let approved_at = if state == "approved" { "now()" } else { "NULL" };
     format!(
-        "INSERT INTO bss.pricing_price (id,tenant_id,price_book_entry_id,version_no,dim_value,model,price_json,min_fee,eligibility,effective_from,effective_to,keep_for_bound,closed_explicitly,temporary_until,paired_price_id,return_of_price_id,state,pending_unit_id,approved_by_unit_id,note,created_by,approved_at,version,created_at,updated_at) \
-         VALUES ({},{},{},{version_no},NULL,'{model}','{money}'::jsonb,NULL,'all','{from}',NULL,false,false,NULL,NULL,NULL,'{state}',{unit},NULL,'seed',{},{approved_at},1,now(),now())",
+        "INSERT INTO bss.pricing_price (id,tenant_id,price_book_entry_id,version_no,dim_value,model,price_json,currency,currency_scale,min_fee,eligibility,effective_from,effective_to,keep_for_bound,closed_explicitly,temporary_until,paired_price_id,return_of_price_id,state,pending_unit_id,approved_by_unit_id,note,created_by,approved_at,version,created_at,updated_at) \
+         VALUES ({},{},{},{version_no},NULL,'{model}','{money}'::jsonb,'EUR',2,NULL,'all','{from}',NULL,false,false,NULL,NULL,NULL,'{state}',{unit},NULL,'seed',{},{approved_at},1,now(),now())",
         u(Uuid::from_u128(n)),
         u(TENANT),
         u(entry),
@@ -346,7 +341,7 @@ fn price_row(
 }
 
 fn graduated() -> Value {
-    json!({"tiers":[{"up_to":"1000","rate":"0.010"},{"up_to":null,"rate":"0.008"}]})
+    json!({"tiers":[{"up_to":"1000","rate":"0.01"},{"up_to":null,"rate":"0.008"}]})
 }
 
 fn item_row(n: u128, sku: Uuid, entry: Option<Uuid>, treatment: &str, qty: Option<&str>) -> String {
@@ -414,7 +409,7 @@ fn seed_rows() -> Vec<String> {
             SEATS,
             1,
             "flat",
-            &json!({"amount":"10.00"}),
+            &json!({"amount":"10"}),
             "2026-01-01",
             "approved",
             None,
@@ -424,7 +419,7 @@ fn seed_rows() -> Vec<String> {
             SEATS,
             2,
             "flat",
-            &json!({"amount":"12.00"}),
+            &json!({"amount":"12"}),
             "2031-01-01",
             "pending",
             Some(UNIT),
@@ -434,7 +429,7 @@ fn seed_rows() -> Vec<String> {
             SUPPORT,
             1,
             "per_unit",
-            &json!({"rate":"2.00"}),
+            &json!({"rate":"2"}),
             "2026-01-01",
             "approved",
             None,
@@ -737,7 +732,7 @@ async fn postgres_the_migration_locks_both_tables_before_it_judges_the_models() 
             STORAGE,
             9,
             "per_unit",
-            &json!({"rate":"1.00"}),
+            &json!({"rate":"1"}),
             "2032-01-01",
             "rejected",
             None,
@@ -780,7 +775,7 @@ async fn postgres_two_models_on_one_entry_fail_the_migration_and_change_nothing(
                 CALLS,
                 1,
                 "per_unit",
-                &json!({"rate":"1.00"}),
+                &json!({"rate":"1"}),
                 "2026-01-01",
                 "approved",
                 None,
@@ -800,7 +795,7 @@ async fn postgres_two_models_on_one_entry_fail_the_migration_and_change_nothing(
                 SUPPORT,
                 2,
                 "flat",
-                &json!({"amount":"3.00"}),
+                &json!({"amount":"3"}),
                 "2031-01-01",
                 "draft",
                 None,
@@ -853,7 +848,7 @@ async fn postgres_after_the_migration_the_entry_key_takes_the_model() {
                 CALLS,
                 9,
                 "per_unit",
-                &json!({"rate":"1.00"}),
+                &json!({"rate":"1"}),
                 "2031-01-01",
                 "draft",
                 None,

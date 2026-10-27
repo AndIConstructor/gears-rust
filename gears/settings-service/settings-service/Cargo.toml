@@ -1,7 +1,7 @@
 # Created: 2026-08-12 by Virtuozzo International GmbH
 [package]
 name = "cf-gears-settings-service"
-version = "0.1.3"
+version = "0.1.7"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -12,12 +12,15 @@ keywords = ["constructorfabric", "cf-gears", "settings-service"]
 categories = ["web-programming"]
 metadata.docs.rs.all-features = true
 
+[lib]
+name = "cf_gears_settings_service"
+
 [lints]
 workspace = true
 
 [features]
 # `tests/pg_migrations_test.rs`: the migration chain on a real PostgreSQL via
-# testcontainers, Docker required (`make test-settings-service-pg`). Brings the
+# testcontainers, Docker required (`make test-integration LANE=settings-service-pg`). Brings the
 # PostgreSQL driver in for that lane only; the lib leaves the backend to the
 # server that hosts it.
 integration = ["toolkit-db/pg"]
@@ -73,6 +76,7 @@ base64 = { workspace = true }
 secrecy = { workspace = true }
 toolkit-security = { workspace = true }
 toolkit-macros = { workspace = true }
+toolkit-gts = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

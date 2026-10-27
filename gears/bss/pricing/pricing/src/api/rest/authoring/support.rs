@@ -147,6 +147,34 @@ pub fn conflict_because(code: &str, detail: impl Into<String>) -> CanonicalError
         .with_reason(code)
         .create()
 }
+/// D-522: an entry whose reference was released is read-only. While its book is archived the
+/// refusal is 409 `BOOK_ARCHIVED`; an entry an unarchive could not re-reserve (its SKU refused) is
+/// 409 `ENTRY_REFERENCE_RELEASED`. Any other entry passes, with no read.
+/// # Errors
+/// The two refusals above; storage failures.
+pub async fn writable_entry(
+    tx: &impl DBRunner,
+    entry: &crate::infra::storage::entity::price_book_entry::Model,
+) -> Result<(), DoorError> {
+    use crate::domain::price_book_entry::ReferenceState;
+    if entry.reference_state != ReferenceState::Released.as_str() {
+        return Ok(());
+    }
+    let archived = repo::book_repo::find(
+        tx,
+        &AccessScope::for_tenant(entry.tenant_id),
+        entry.tenant_id,
+        entry.book_id,
+    )
+    .await?
+    .is_some_and(|book| book.archived_at.is_some());
+    Err(conflict(if archived {
+        "BOOK_ARCHIVED"
+    } else {
+        "ENTRY_REFERENCE_RELEASED"
+    })
+    .into())
+}
 pub fn missing() -> CanonicalError {
     PricingResource::not_found("Price book not found")
         .with_resource("price_book")
@@ -318,10 +346,23 @@ pub enum DoorError {
     #[error("the vote names another generation; the unit is at {current}")]
     Generation { current: i32 },
 }
+/// What a draft whose currency scale the table changed asks of its author at submit: the draft
+/// is not locked, so the author edits it, which takes today's scale.
+const SCALE_CHANGED_AT_SUBMIT: &str =
+    "the currency scale changed after the price was drafted; edit the draft and submit it again";
+/// The same refusal at apply: the unit locks the draft, so it is withdrawn first.
+const SCALE_CHANGED_AT_APPLY: &str = "the currency scale changed after the price was submitted; \
+     the submitter withdraws the unit, edits the draft and submits it again";
+/// What a draft in a currency the table no longer lists is told: no edit makes it a price.
+const CURRENCY_NOT_LISTED: &str = "the currency table no longer lists the book's currency, so \
+     the book takes no new price and no edit makes this draft one";
 /// Refusals of the shared approval engine and the `prices` subject, with their codes.
 ///
 /// A pure-rule refusal is 400 with its code (D-403); a conflict is 409; separation of duties
-/// and the submitter-only withdraw are 403. Database errors stay typed for the retry loop.
+/// and the submitter-only withdraw are 403. Database errors stay typed for the retry loop. A
+/// draft whose stored currency scale is not the table's today is 409 `CURRENCY_SCALE_CHANGED`,
+/// and a draft in a currency the table no longer lists is 409 `BOOK_CURRENCY_INVALID`, at submit
+/// and at apply alike; each detail says what the caller can do.
 #[must_use]
 pub fn approval_failure(error: bss_approval::ApprovalError) -> DoorError {
     use bss_approval::ApprovalError as A;
@@ -330,26 +371,51 @@ pub fn approval_failure(error: bss_approval::ApprovalError) -> DoorError {
             context: "approval".into(),
             source,
         }),
+        A::InvalidSubmit {
+            code: code @ "CURRENCY_SCALE_CHANGED",
+            detail,
+            ..
+        } => conflict_because(code, format!("{detail}: {SCALE_CHANGED_AT_SUBMIT}")).into(),
+        A::ApplyRefused {
+            code: code @ "CURRENCY_SCALE_CHANGED",
+            detail,
+        } => conflict_because(code, format!("{detail}: {SCALE_CHANGED_AT_APPLY}")).into(),
+        A::InvalidSubmit {
+            code: code @ "BOOK_CURRENCY_INVALID",
+            detail,
+            ..
+        }
+        | A::ApplyRefused {
+            code: code @ "BOOK_CURRENCY_INVALID",
+            detail,
+        } => conflict_because(code, format!("{detail}: {CURRENCY_NOT_LISTED}")).into(),
         A::InvalidSubmit { code, field, .. } => match code {
-            "PRICE_NOT_DRAFT" | "ENTRY_REFERENCE_LOST" | "REVISION_NOT_DRAFT" => {
-                conflict(code).into()
-            }
+            "PRICE_NOT_DRAFT"
+            | "ENTRY_REFERENCE_LOST"
+            // D-522: a released entry's prices, as its doors answer them.
+            | "BOOK_ARCHIVED"
+            | "ENTRY_REFERENCE_RELEASED"
+            | "REVISION_NOT_DRAFT"
+            | "PRICE_NOT_SCHEDULED"
+            | "PRICE_CHANGE_PENDING"
+            | "PRICE_BOUND"
+            | "PRICE_ALREADY_ENDED" => conflict(code).into(),
             "REGISTRY_UNAVAILABLE" => unavailable().into(),
             "PRICE_NOT_FOUND" => missing_what("price").into(),
             "REVISION_NOT_FOUND" => missing_what("plan_revision").into(),
             "ENTRY_NOT_FOUND" => missing_entry().into(),
             _ => invalid(&field, code).into(),
         },
-        A::ApplyRefused { code, detail } => {
-            if code == "REGISTRY_UNAVAILABLE" {
-                unavailable().into()
-            } else {
-                PricingResource::aborted(format!("{code}: {detail}"))
-                    .with_reason("APPLY_REFUSED")
-                    .create()
-                    .into()
-            }
-        }
+        A::ApplyRefused { code, detail } => match code {
+            "REGISTRY_UNAVAILABLE" => unavailable().into(),
+            // D-520: the cancel's own race, a price that started between submit and apply, keeps
+            // its code; every other apply refusal is APPLY_REFUSED naming its cause.
+            "PRICE_ALREADY_STARTED" => conflict_because(code, detail).into(),
+            _ => PricingResource::aborted(format!("{code}: {detail}"))
+                .with_reason("APPLY_REFUSED")
+                .create()
+                .into(),
+        },
         A::SodViolation | A::NotSubmitter => PricingResource::permission_denied()
             .with_reason(error.code())
             .create()
@@ -804,4 +870,71 @@ pub fn header(name: &str) -> toolkit::api::operation_builder::ParamSpec {
     toolkit::api::operation_builder::ParamSpec::header(name)
         .required(true)
         .description("Required authoring precondition")
+}
+/// `If-None-Match` on a list read (D-518). A match is 304; the header is optional.
+#[must_use]
+pub fn if_none_match() -> toolkit::api::operation_builder::ParamSpec {
+    toolkit::api::operation_builder::ParamSpec::header("If-None-Match")
+        .required(false)
+        .description("A weak ETag from an earlier read of this answer, or *. A match is 304.")
+}
+/// The weak `ETag` of the JSON body (D-518). It is not the version a write sends as `If-Match`.
+#[must_use]
+pub fn weak_etag_header() -> toolkit::api::operation_builder::ResponseHeaderSpec {
+    use toolkit::api::operation_builder::{ResponseHeaderSpec, ResponseHeaderType};
+    ResponseHeaderSpec::new(
+        "ETag",
+        "Weak tag of this JSON body",
+        ResponseHeaderType::String,
+    )
+}
+/// `Cache-Control: private, no-cache` (D-518): the browser stores the answer and must revalidate it.
+#[must_use]
+pub fn revalidate_header() -> toolkit::api::operation_builder::ResponseHeaderSpec {
+    use toolkit::api::operation_builder::{ResponseHeaderSpec, ResponseHeaderType};
+    ResponseHeaderSpec::new(
+        "Cache-Control",
+        "private, no-cache",
+        ResponseHeaderType::String,
+    )
+}
+/// `If-None-Match` on a single document that keeps its strong version tag (D-518): the tag a
+/// `PUT` sends back as `If-Match`, compared here by weak comparison.
+#[must_use]
+pub fn if_none_match_version() -> toolkit::api::operation_builder::ParamSpec {
+    toolkit::api::operation_builder::ParamSpec::header("If-None-Match")
+        .required(false)
+        .description("The ETag of an earlier read, or *. A match is 304.")
+}
+/// D-518: a single document revalidates on its strong version tag. `answer` is the read's 200
+/// with that `ETag`. It gains `Cache-Control: private, no-cache`, and it becomes a 304 with an
+/// empty body, the same `ETag` and that `Cache-Control` when an `If-None-Match` of `request`
+/// matches the tag by weak comparison. Any other answer passes through untouched.
+#[must_use]
+pub fn revalidate_version(request: &HeaderMap, mut answer: Response) -> Response {
+    use axum::http::{HeaderValue, header};
+    use bss_rest::conditional_get::{PRIVATE_REVALIDATE, matches_if_none_match};
+    if answer.status() != StatusCode::OK {
+        return answer;
+    }
+    let cache = HeaderValue::from_static(PRIVATE_REVALIDATE.cache_control);
+    answer
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, cache.clone());
+    let Some(tag) = answer.headers().get(header::ETAG).cloned() else {
+        return answer;
+    };
+    let matched = request
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .any(|candidate| matches_if_none_match(Some(candidate), &tag));
+    if !matched {
+        return answer;
+    }
+    let mut not_modified = Response::new(axum::body::Body::empty());
+    *not_modified.status_mut() = StatusCode::NOT_MODIFIED;
+    let headers = not_modified.headers_mut();
+    headers.insert(header::ETAG, tag);
+    headers.insert(header::CACHE_CONTROL, cache);
+    not_modified
 }

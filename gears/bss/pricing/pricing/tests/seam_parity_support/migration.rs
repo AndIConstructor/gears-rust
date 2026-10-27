@@ -68,7 +68,9 @@ pub async fn upgrade(
             !(name.contains("000018")
                 || name.contains("000019")
                 || name.contains("000020")
-                || name.contains("000021"))
+                || name.contains("000021")
+                || name.contains("000022")
+                || name.contains("000023"))
         })
         .collect();
     let applied = run_migrations_for_testing(&db.db(), prior).await.unwrap();
@@ -79,7 +81,12 @@ pub async fn upgrade(
             .any(|s| s == "m20260929_000017_revision_scheduled")
     );
     assert!(!applied.applied_names.iter().any(|s| {
-        s.contains("000018") || s.contains("000019") || s.contains("000020") || s.contains("000021")
+        s.contains("000018")
+            || s.contains("000019")
+            || s.contains("000020")
+            || s.contains("000021")
+            || s.contains("000022")
+            || s.contains("000023")
     }));
     let catalog = Arc::new(p::Catalog::default());
     let sku = catalog.sku(bss_products_sdk::models::SkuType::Usage);
@@ -98,7 +105,7 @@ pub async fn upgrade(
     execute(&raw,"INSERT INTO pricing_plan_revision (id,tenant_id,plan_id,rev_no,book_id,state,version,created_by,created_at,updated_at) VALUES (?,?,?,1,?,'published',1,?,?,?)",vec![revision.into(),tenant.into(),plan_id.into(),book.into(),ctx.subject_id().into(),now.into(),now.into()]).await;
     execute(&raw,"INSERT INTO pricing_price_book_entry (id,tenant_id,book_id,sku_id,charge_kind,model,reservation_id,reference_state,version,created_at,updated_at) VALUES (?,?,?,?,'usage','per_unit',?,'confirmed',1,?,?)",vec![entry.into(),tenant.into(),book.into(),sku.into(),Uuid::new_v4().into(),now.into(),now.into()]).await;
     execute(&raw,"INSERT INTO pricing_plan_item (id,tenant_id,revision_id,sku_id,price_book_entry_id,treatment,reservation_id,reference_state,version,created_by,created_at,updated_at) VALUES (?,?,?,?,?,'paid',?,'confirmed',1,?,?,?)",vec![item.into(),tenant.into(),revision.into(),sku.into(),entry.into(),Uuid::new_v4().into(),ctx.subject_id().into(),now.into(),now.into()]).await;
-    execute(&raw,"INSERT INTO pricing_price (id,tenant_id,price_book_entry_id,version_no,price_json,eligibility,effective_from,state,created_by,version,created_at,updated_at) VALUES (?,?,?,1,?,'all','2026-09-01','approved',?,1,?,?)",vec![price.into(),tenant.into(),entry.into(),json!({"rate":"1"}).into(),ctx.subject_id().into(),now.into(),now.into()]).await;
+    execute(&raw,"INSERT INTO pricing_price (id,tenant_id,price_book_entry_id,version_no,price_json,currency,currency_scale,eligibility,effective_from,state,created_by,version,created_at,updated_at) VALUES (?,?,?,1,?,'EUR',2,'all','2026-09-01','approved',?,1,?,?)",vec![price.into(),tenant.into(),entry.into(),json!({"rate":"1"}).into(),ctx.subject_id().into(),now.into(),now.into()]).await;
     let mut operations = vec![];
     for (kind, id, target) in [
         (
@@ -148,7 +155,9 @@ pub async fn upgrade(
             "m20260930_000018_usage_rating_policy",
             "m20260930_000019_commercial_receipts",
             "m20261002_000020_plan_summary",
-            "m20261002_000021_policy_references_sku"
+            "m20261002_000021_policy_references_sku",
+            "m20261003_000022_price_cancel_and_end",
+            "m20261003_000023_book_archive"
         ]
     );
     let f = p::Fixture::on(db, tenant, dsn, catalog).await;

@@ -2,8 +2,8 @@
 //! exact decimal text, dates as `YYYY-MM-DD`. The consumer goldens freeze them. A closed set is
 //! its `enum` (D-439), with the tokens the goldens carry.
 use crate::api::rest::closed_sets::{
-    PricingChargeKind, PricingEligibility, PricingModel, PricingPeriod, PricingResolveSource,
-    PricingResolvedRevisionState,
+    PricingChargeKind, PricingEligibility, PricingModel, PricingPeriod, PricingPinnedPriceStatus,
+    PricingResolveSource, PricingResolvedRevisionState,
 };
 use uuid::Uuid;
 
@@ -20,13 +20,9 @@ pub struct PricingResolveDto {
     pub state: PricingResolvedRevisionState,
     /// The revision's book.
     pub book_id: Uuid,
-    /// The book's currency.
+    /// The book's currency. Each binding carries its price's own currency spec: the scale is
+    /// stored per price, so prices of one book written under different scales each keep theirs.
     pub currency: String,
-    /// The currency's scale: the number of minor digits money carries.
-    pub currency_minor_digits: u32,
-    /// The tenant's `default_rounding`, as stored: a string, since no CHECK guards the column
-    /// (D-437, D-439).
-    pub rounding_policy: String,
     /// The date resolved, `YYYY-MM-DD`.
     pub date: String,
     /// Every item of the revision, or the one `item_id` names.
@@ -101,6 +97,11 @@ pub struct PricingResolveBindingDto {
     pub dim_used: Option<String>,
     /// The pin the renewal walk started from; null for a signup.
     pub pinned_from: Option<Uuid>,
+    /// The price's currency as stored with the price: its book's.
+    pub currency: String,
+    /// The currency's scale stored with the price: the number of minor digits its money posts
+    /// with, a JSON integer. A later change of the currency table does not change it.
+    pub currency_scale: u8,
     /// The price's money as stored, in the item's model (D-427), amounts as exact decimal text.
     pub price: serde_json::Value,
     /// Exact decimal text.
@@ -119,8 +120,8 @@ pub struct PricingResolveBindingDto {
     pub keep_for_bound: bool,
 }
 /// `GET /prices/{id}`: one approved price as stored, served forever whatever its window (D-422),
-/// with its entry's SKU, charge kind and period and its book's currency. Stored facts only: no
-/// display status or other value computed from today, and no authoring internals.
+/// with its entry's SKU, charge kind and period and its book's currency, or a cancelled one
+/// (D-520). Stored facts only: no value computed from today, and no authoring internals.
 #[toolkit_macros::api_dto(response)]
 pub struct PricingPinnedPriceDto {
     pub price_id: Uuid,
@@ -129,7 +130,10 @@ pub struct PricingPinnedPriceDto {
     pub charge_kind: PricingChargeKind,
     pub period: Option<PricingPeriod>,
     pub book_id: Uuid,
+    /// The price's currency as stored with the price: its book's.
     pub currency: String,
+    /// The currency's scale stored with the price, a JSON integer; never the current table's.
+    pub currency_scale: u8,
     /// The price's place in its entry's order of prices.
     pub version_no: i32,
     /// The value's chain; null for the default chain.
@@ -155,6 +159,12 @@ pub struct PricingPinnedPriceDto {
     pub approved_by_unit_id: Option<Uuid>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub approved_at: Option<time::OffsetDateTime>,
+    /// `cancelled` for a price cancelled before it started, the entry list's token (D-520): a
+    /// stored fact, the same on every day. Absent on an approved price, whose display status
+    /// depends on the day, which this read never computes (D-422). Its own one-value set, so the
+    /// schema offers nothing the read never serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<PricingPinnedPriceStatus>,
 }
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

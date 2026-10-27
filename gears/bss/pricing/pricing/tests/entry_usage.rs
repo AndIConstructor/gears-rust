@@ -31,12 +31,18 @@ async fn price_in(f: &Fixture, entry: Uuid, state: &str, version_no: i32) {
         .await
         .unwrap()
         .unwrap();
+    let book = book_repo::find(&conn, &scope(f), f.ctx.subject_tenant_id(), e.book_id)
+        .await
+        .unwrap()
+        .unwrap();
     let mut p = entry_support::price(&e);
     // The money in the entry's model (D-427): an entry read chooses its price in force from its
-    // approved prices, read as the model's money (D-440).
+    // approved prices, read as the model's money (D-440). The price carries its book's currency,
+    // as every read checks.
     if e.model == "flat" {
-        p.price_json = json!({"amount": "10.00"});
+        p.price_json = json!({"amount": "10"});
     }
+    p.currency = book.currency;
     p.version_no = version_no;
     p.state = state.into();
     p.effective_from = time::Date::from_calendar_date(2031, time::Month::January, 1).unwrap()
@@ -421,6 +427,8 @@ async fn unknown_foreign_and_bundle_skus_answer_zeros_and_each_id_is_answered_on
             version: 1,
             created_at: now,
             updated_at: now,
+            archived_at: None,
+            archived_by: None,
         },
     )
     .await
@@ -568,6 +576,8 @@ async fn the_usage_sets_are_the_skus_whose_usage_counts_entries_and_plans() {
             version: 1,
             created_at: now,
             updated_at: now,
+            archived_at: None,
+            archived_by: None,
         },
     )
     .await

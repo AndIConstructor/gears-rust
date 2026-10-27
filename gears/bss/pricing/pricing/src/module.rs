@@ -93,6 +93,15 @@ impl Gear for BssPricingGear {
             Err(ConfigError::GearNotFound { .. }) => return Ok(()),
             Err(error) => return Err(error).context("bss-pricing: invalid config"),
         };
+        let currency_scales = crate::domain::currency::CurrencyScales::try_new(
+            config.currency_scales,
+        )
+        .with_context(|| {
+            format!(
+                "bss-pricing: invalid currency_scales ({})",
+                crate::domain::currency::CurrencyScalesError::CODE
+            )
+        })?;
         let db = ctx
             .db_required()
             .context("bss-pricing: database is required")?;
@@ -141,8 +150,11 @@ impl Gear for BssPricingGear {
             }
         }
 
-        let state =
-            Arc::new(crate::api::rest::authoring::AuthoringState::new(db, ctx.client_hub()).await?);
+        let state = Arc::new(
+            crate::api::rest::authoring::AuthoringState::new(db, ctx.client_hub())
+                .await?
+                .with_currency_scales(Arc::new(currency_scales)),
+        );
         // D-428, P-D-197: Products' SKU reads carry pricing's usage through this port, which
         // Products resolves at each read (the two gears boot in either order).
         ctx.client_hub()
@@ -254,6 +266,7 @@ impl MigrationTrait for InvalidOutboxMigration {
 // GET /price-books/{id}/export price_book:read false false
 // GET /settings config:read false false
 // PUT /settings config:settings true false
+// GET /currencies config:read false false (D-537)
 // GET /dimension-keys config:read false false
 // PUT /dimension-keys config:settings true false
 
@@ -268,6 +281,8 @@ impl MigrationTrait for InvalidOutboxMigration {
 // POST /price-book-entries/{id}/prices price:author false true
 // PATCH /prices/{id} price:author true false
 // DELETE /prices/{id} price:author true false
+// POST /prices/{id}/cancel price:author false true
+// POST /prices/{id}/end price:author false true
 
 // Run-4 approvals: method | path | resource:action | If-Match | Idempotency-Key
 // POST /prices/{id}/submit price:submit false true

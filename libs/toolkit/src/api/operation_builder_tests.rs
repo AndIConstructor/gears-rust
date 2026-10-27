@@ -469,8 +469,28 @@ fn authenticated() {
         .handler(test_handler)
         .json_response(http::StatusCode::OK, "Success");
 
-    assert!(builder.spec.authenticated);
+    assert_eq!(builder.spec.auth, RouteAuth::Authenticated);
     assert!(!builder.spec.exposed);
+}
+
+#[test]
+fn every_auth_declaration_classifies_as_its_operation_auth() {
+    let authed = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/a")
+        .authenticated()
+        .handler(test_handler)
+        .json_response(http::StatusCode::OK, "OK");
+    assert_eq!(authed.spec.auth, RouteAuth::Authenticated);
+    let anon = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/a")
+        .anonymous()
+        .handler(test_handler)
+        .json_response(http::StatusCode::OK, "OK");
+    assert_eq!(anon.spec.auth, RouteAuth::Anonymous);
+    let platform = OperationBuilder::<Missing, Missing, ()>::post("/tests/v1/a")
+        .platform_authenticated()
+        .no_license_required()
+        .handler(test_handler)
+        .json_response(http::StatusCode::OK, "OK");
+    assert_eq!(platform.spec.auth, RouteAuth::Platform);
 }
 
 #[test]
@@ -480,20 +500,20 @@ fn anonymous_is_internal_by_default() {
         .handler(test_handler)
         .json_response(http::StatusCode::OK, "Success");
 
-    assert!(!builder.spec.authenticated);
+    assert_eq!(builder.spec.auth, RouteAuth::Anonymous);
     assert!(!builder.spec.exposed);
 }
 
 #[test]
 fn exposed_is_independent_of_auth() {
-    // Visibility (`exposed`) and auth (`authenticated`) are orthogonal:
+    // Visibility (`exposed`) and auth (`auth`) are orthogonal:
     // an exposed route may be authenticated or anonymous.
     let authed = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/a")
         .exposed()
         .authenticated()
         .handler(test_handler)
         .json_response(http::StatusCode::OK, "OK");
-    assert!(authed.spec.authenticated);
+    assert_eq!(authed.spec.auth, RouteAuth::Authenticated);
     assert!(authed.spec.exposed);
 
     let anon = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/b")
@@ -501,7 +521,7 @@ fn exposed_is_independent_of_auth() {
         .anonymous()
         .handler(test_handler)
         .json_response(http::StatusCode::OK, "OK");
-    assert!(!anon.spec.authenticated);
+    assert_eq!(anon.spec.auth, RouteAuth::Anonymous);
     assert!(anon.spec.exposed);
 }
 
@@ -514,7 +534,11 @@ fn deprecated_public_maps_to_anonymous_and_exposed() {
         .public()
         .handler(test_handler)
         .json_response(http::StatusCode::OK, "OK");
-    assert!(!op.spec.authenticated, "public route is anonymous");
+    assert_eq!(
+        op.spec.auth,
+        RouteAuth::Anonymous,
+        "public route is anonymous"
+    );
     assert!(op.spec.exposed, "public route is edge-exposed");
 }
 
@@ -826,4 +850,37 @@ fn response_content_types_must_not_contain_parameters() {
             response.content_type
         );
     }
+}
+
+#[test]
+fn an_enum_query_param_carries_its_values_and_leaves_the_others_alone() {
+    let builder = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/test")
+        .query_param_enum("status", false, "which ones", ["open", "closed"])
+        .query_param_typed("limit", false, "how many", "integer")
+        .query_param("cursor", false, "where from");
+
+    let by_name = |name: &str| {
+        builder
+            .spec
+            .params
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("{name} must be declared"))
+            .clone()
+    };
+
+    let status = by_name("status");
+    assert_eq!(status.enum_values, ["open", "closed"]);
+    assert_eq!(
+        status.param_type, "string",
+        "a closed set is still a string; the values are what narrow it"
+    );
+
+    let limit = by_name("limit");
+    assert_eq!(limit.param_type, "integer");
+    assert!(limit.enum_values.is_empty());
+
+    let cursor = by_name("cursor");
+    assert_eq!(cursor.param_type, "string");
+    assert!(cursor.enum_values.is_empty());
 }

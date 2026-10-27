@@ -1,6 +1,9 @@
 //! Scoped price persistence with conditional versions.
 use super::{driver_failure, map_unique, matched};
-use crate::domain::{price::PriceState, price_book_entry::ReferenceState};
+use crate::domain::{
+    price::{ChangeKind, PriceState},
+    price_book_entry::ReferenceState,
+};
 use crate::infra::storage::{RepoError, entity::price as e};
 use sea_orm::sea_query::{Expr, ExprTrait};
 use sea_orm::{ColumnTrait, Condition, EntityTrait, Order, QuerySelect, Set};
@@ -8,6 +11,15 @@ use toolkit_db::secure::{
     AccessScope, DBRunner, SecureEntityExt, SecureInsertExt, SecureUpdateExt,
 };
 use uuid::Uuid;
+/// A `set` row: a price of its chain, not a `cancel` or an `end` that names one (D-520, D-521).
+/// Only these rows are judged, counted, normalised or resolved as prices.
+#[must_use]
+pub fn is_price(m: &e::Model) -> bool {
+    m.change_kind == ChangeKind::Set.as_str()
+}
+fn prices_only() -> sea_orm::sea_query::SimpleExpr {
+    e::Column::ChangeKind.eq(ChangeKind::Set.as_str())
+}
 fn key(tenant: Uuid, id: Uuid) -> Condition {
     Condition::all()
         .add(e::Column::TenantId.eq(tenant))
@@ -32,6 +44,12 @@ pub async fn insert(
             code: "ENTRY_REFERENCE_LOST",
         });
     }
+    // D-522: a released entry (its book archived, or not re-reserved since) takes no price.
+    if entry.reference_state == ReferenceState::Released.as_str() {
+        return Err(RepoError::Conflict {
+            code: "ENTRY_REFERENCE_RELEASED",
+        });
+    }
     let active = e::ActiveModel {
         id: Set(m.id),
         tenant_id: Set(m.tenant_id),
@@ -39,6 +57,8 @@ pub async fn insert(
         version_no: Set(m.version_no),
         dim_value: Set(m.dim_value),
         price_json: Set(m.price_json),
+        currency: Set(m.currency),
+        currency_scale: Set(m.currency_scale),
         min_fee: Set(m.min_fee),
         eligibility: Set(m.eligibility),
         effective_from: Set(m.effective_from),
@@ -49,6 +69,9 @@ pub async fn insert(
         paired_price_id: Set(m.paired_price_id),
         return_of_price_id: Set(m.return_of_price_id),
         state: Set(m.state),
+        change_kind: Set(m.change_kind),
+        target_price_id: Set(m.target_price_id),
+        cancelled_by_unit_id: Set(m.cancelled_by_unit_id),
         pending_unit_id: Set(m.pending_unit_id),
         approved_by_unit_id: Set(m.approved_by_unit_id),
         note: Set(m.note),
@@ -164,7 +187,9 @@ pub async fn list(
         .await
         .map_err(|e| driver_failure("list price".into(), e))
 }
-/// Change business columns only if the caller's version still owns the row.
+/// Change business columns only if the caller's version still owns the row. The caller sets
+/// `currency_scale` to the table's current scale of the price's currency: an edited draft takes
+/// the scale of today (the currency itself never changes).
 /// # Errors
 /// Zero matches is a typed version conflict; database failures preserve their type.
 pub async fn update_draft(
@@ -181,6 +206,7 @@ pub async fn update_draft(
         .scope_with(scope)
         .col_expr(e::Column::DimValue, Expr::value(m.dim_value))
         .col_expr(e::Column::PriceJson, Expr::value(m.price_json))
+        .col_expr(e::Column::CurrencyScale, Expr::value(m.currency_scale))
         .col_expr(e::Column::MinFee, Expr::value(m.min_fee))
         .col_expr(e::Column::Eligibility, Expr::value(m.eligibility))
         .col_expr(e::Column::EffectiveFrom, Expr::value(m.effective_from))
@@ -279,7 +305,8 @@ pub async fn count_by_entry_and_state(
         .filter(
             Condition::all()
                 .add(e::Column::TenantId.eq(tenant))
-                .add(e::Column::PriceBookEntryId.is_in(entries.iter().copied())),
+                .add(e::Column::PriceBookEntryId.is_in(entries.iter().copied()))
+                .add(prices_only()),
         )
         .project_all(runner, |q| {
             q.select_only()
@@ -336,6 +363,7 @@ pub async fn count_by_book_and_state(
         .filter(
             Condition::all()
                 .add(e::Column::TenantId.eq(tenant))
+                .add(prices_only())
                 .add(Expr::col((entry::Entity, entry::Column::TenantId)).eq(tenant))
                 .add(
                     Expr::col((entry::Entity, entry::Column::BookId)).is_in(books.iter().copied()),
@@ -386,6 +414,7 @@ pub async fn count_by_key_and_value(
         .filter(
             Condition::all()
                 .add(e::Column::TenantId.eq(tenant))
+                .add(prices_only())
                 .add(e::Column::DimValue.is_not_null())
                 .add(Expr::col((entry::Entity, entry::Column::TenantId)).eq(tenant))
                 .add(Expr::col((entry::Entity, entry::Column::DimensionKey)).is_not_null()),
@@ -429,6 +458,7 @@ pub async fn default_chain(
                     PriceState::Pending.as_str(),
                     PriceState::Draft.as_str(),
                 ]))
+                .add(prices_only())
                 .add(e::Column::DimValue.is_null()),
         )
         .order_by(e::Column::Id, Order::Asc)
@@ -461,30 +491,87 @@ pub async fn delete_draft(
         .map_err(|e| driver_failure("delete draft".into(), e))?;
     matched(result.rows_affected, "STALE_REVISION")
 }
+/// The currency spec a price was stored with: its code and the scale the currency table gave it
+/// then. A code that is not a currency code or a scale outside 0 to 28 is a corrupt row; the
+/// current table is never read.
+/// # Errors
+/// Returns `CorruptRow` naming the column and the cause.
+pub fn currency_of(m: &e::Model) -> Result<bss_money::CurrencySpec, RepoError> {
+    let corrupt = |column: &str, cause: &str| {
+        RepoError::CorruptRow(format!("price {} {column}: {cause}", m.id))
+    };
+    if !crate::domain::book::currency_code(&m.currency) {
+        return Err(corrupt(
+            "currency",
+            &format!("{:?} is not three uppercase letters", m.currency),
+        ));
+    }
+    let scale = u8::try_from(m.currency_scale).map_err(|_| {
+        corrupt(
+            "currency_scale",
+            &format!("{} is outside 0 to 28", m.currency_scale),
+        )
+    })?;
+    bss_money::CurrencySpec::try_new(m.currency.clone(), scale).map_err(|error| match error {
+        bss_money::MoneyError::ScaleOutOfRange => {
+            corrupt("currency_scale", &format!("{scale} is outside 0 to 28"))
+        }
+        other => corrupt("currency", &other.to_string()),
+    })
+}
+/// The stored columns of a currency spec: its code and its scale.
+#[must_use]
+pub fn currency_columns(spec: &bss_money::CurrencySpec) -> (String, i16) {
+    (spec.code().to_owned(), i16::from(spec.scale()))
+}
 /// Decode a stored price into the pure model, in its ENTRY's model (D-427: a price has no model
 /// of its own; the caller passes `price_book_entry_repo::model_of` of the price's entry). Unknown
-/// vocabulary, or money whose shape is not the entry's model, is a corrupt row.
+/// vocabulary, money whose shape is not the entry's model, a decimal that is not canonical text
+/// within its limit, or a currency spec [`currency_of`] refuses, is a corrupt row. A read that
+/// knows the price's book uses [`in_book`], which also checks the currency against the book's.
 /// # Errors
-/// Returns `CorruptRow` for a stored enum or price shape the model does not know.
+/// Returns `CorruptRow` for a stored enum or price shape the model does not know, for a stored
+/// decimal that `money::decode_stored` or `money::stored_fee` refuses (naming the field and why),
+/// for a stored minimum fee off the increment of the row's own `currency_scale`, or for a stored
+/// currency spec [`currency_of`] refuses.
 pub fn to_domain(
     m: &e::Model,
     model: crate::domain::price_book_entry::Model,
 ) -> Result<crate::domain::price::Price, RepoError> {
     use crate::domain::{money, price};
     let corrupt = |what: &str| RepoError::CorruptRow(format!("price {} {what}", m.id));
+    let currency = currency_of(m)?;
+    // A stored fee is canonical, not negative, and on the increment of the price's own stored
+    // scale (D-527): the door judged it on that scale, so any other value is a corrupt row.
+    let min_fee = m
+        .min_fee
+        .as_deref()
+        .map(|fee| {
+            let value = money::stored_fee(fee).ok_or_else(|| {
+                corrupt(&format!(
+                    "min_fee: {fee:?} is not canonical, non-negative decimal text"
+                ))
+            })?;
+            bss_pricing_sdk::numeric::validate_minimum_fee(value, &currency).map_err(|_| {
+                corrupt(&format!(
+                    "min_fee: {fee} is off the increment of currency_scale {}",
+                    currency.scale()
+                ))
+            })
+        })
+        .transpose()?;
     Ok(price::Price {
         id: m.id,
         price_book_entry_id: m.price_book_entry_id,
         version_no: m.version_no,
         dim_value: m.dim_value.clone(),
         model,
-        price: Some(money::decode(model, m.price_json.clone()).map_err(|_| corrupt("price_json"))?),
-        min_fee: m
-            .min_fee
-            .as_deref()
-            .map(str::parse)
-            .transpose()
-            .map_err(|_| corrupt("min_fee"))?,
+        currency,
+        price: Some(
+            money::decode_stored(model, m.price_json.clone())
+                .map_err(|e| corrupt(&format!("price_json: {e} ({})", e.code())))?,
+        ),
+        min_fee,
         eligibility: m.eligibility.parse().map_err(|_| corrupt("eligibility"))?,
         effective_from: m.effective_from,
         effective_to: m.effective_to,
@@ -494,6 +581,26 @@ pub fn to_domain(
         closed_explicitly: m.closed_explicitly,
         state: m.state.parse().map_err(|_| corrupt("state"))?,
     })
+}
+/// A stored price of a book whose currency is `book_currency`, decoded as [`to_domain`] decodes
+/// it. The price stores a copy of its book's currency, so the copy must equal it. Every read that
+/// serves a stored price, and the approval judge, read the row through here.
+/// # Errors
+/// Every refusal of [`to_domain`], and `CorruptRow` for a price whose currency is not its book's.
+pub fn in_book(
+    m: &e::Model,
+    model: crate::domain::price_book_entry::Model,
+    book_currency: &str,
+) -> Result<crate::domain::price::Price, RepoError> {
+    let price = to_domain(m, model)?;
+    if price.currency.code() != book_currency {
+        return Err(RepoError::CorruptRow(format!(
+            "price {} currency: {} is not its book's {book_currency}",
+            m.id,
+            price.currency.code()
+        )));
+    }
+    Ok(price)
 }
 /// Point a freshly inserted draft at its pair partner, without a version step.
 /// The partner must exist first: the pair reference is a foreign key.
@@ -801,5 +908,76 @@ pub async fn set_window(
         .exec(runner)
         .await
         .map_err(|e| map_unique("re-close price".into(), e))?;
+    matched(result.rows_affected, "STALE_REVISION")
+}
+/// Cancel an approved price at the version the caller read: it becomes `cancelled`, records
+/// the unit that cancelled it and leaves every chain (D-520).
+/// # Errors
+/// A price that is no longer approved at `version` is `STALE_REVISION`; database failures keep
+/// their type.
+pub async fn cancel(
+    runner: &impl DBRunner,
+    scope: &AccessScope,
+    tenant: Uuid,
+    id: Uuid,
+    version: i64,
+    unit: Uuid,
+    now: time::OffsetDateTime,
+) -> Result<(), RepoError> {
+    let result = e::Entity::update_many()
+        .secure()
+        .scope_with(scope)
+        .col_expr(
+            e::Column::State,
+            Expr::value(PriceState::Cancelled.as_str()),
+        )
+        .col_expr(e::Column::CancelledByUnitId, Expr::value(Some(unit)))
+        .col_expr(e::Column::UpdatedAt, Expr::value(now))
+        .col_expr(e::Column::Version, Expr::col(e::Column::Version).add(1_i64))
+        .filter(
+            key(tenant, id)
+                .add(e::Column::Version.eq(version))
+                .add(e::Column::State.eq(PriceState::Approved.as_str())),
+        )
+        .exec(runner)
+        .await
+        .map_err(|e| map_unique("cancel price".into(), e))?;
+    matched(result.rows_affected, "STALE_REVISION")
+}
+/// End an approved price explicitly at `effective_to`, at the version the caller read (D-521):
+/// the end survives every later normalisation unless a successor starts inside it (D-390).
+/// # Errors
+/// A price that is no longer approved at `version` is `STALE_REVISION`; database failures keep
+/// their type.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "tenant identity, version and the two recomputed columns are the write's operands"
+)]
+pub async fn close_explicitly(
+    runner: &impl DBRunner,
+    scope: &AccessScope,
+    tenant: Uuid,
+    id: Uuid,
+    version: i64,
+    effective_to: time::Date,
+    keep_for_bound: bool,
+    now: time::OffsetDateTime,
+) -> Result<(), RepoError> {
+    let result = e::Entity::update_many()
+        .secure()
+        .scope_with(scope)
+        .col_expr(e::Column::EffectiveTo, Expr::value(Some(effective_to)))
+        .col_expr(e::Column::ClosedExplicitly, Expr::value(true))
+        .col_expr(e::Column::KeepForBound, Expr::value(keep_for_bound))
+        .col_expr(e::Column::UpdatedAt, Expr::value(now))
+        .col_expr(e::Column::Version, Expr::col(e::Column::Version).add(1_i64))
+        .filter(
+            key(tenant, id)
+                .add(e::Column::Version.eq(version))
+                .add(e::Column::State.eq(PriceState::Approved.as_str())),
+        )
+        .exec(runner)
+        .await
+        .map_err(|e| map_unique("end price".into(), e))?;
     matched(result.rows_affected, "STALE_REVISION")
 }

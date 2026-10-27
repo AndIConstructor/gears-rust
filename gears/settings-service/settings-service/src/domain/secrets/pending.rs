@@ -1,4 +1,3 @@
-// Created: 2026-09-15 by Virtuozzo International GmbH
 // @cpt-dod:cpt-cf-settings-service-dod-secret-values-stage:p1
 //! A secret staged ahead of the step-up redirect.
 //!
@@ -17,6 +16,7 @@
 use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 use toolkit_db::secure::DBRunner;
+use toolkit_macros::domain_model;
 use toolkit_security::AccessScope;
 use uuid::Uuid;
 
@@ -32,6 +32,7 @@ pub const PENDING_SECRET_TTL: Duration = Duration::minutes(10);
 pub const PENDING_ID_FIELD: &str = "pending_id";
 
 /// A staged secret as the table holds it.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSecret {
     /// The token the caller holds.
@@ -51,6 +52,7 @@ pub struct PendingSecret {
 }
 
 /// What a stage records.
+#[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSecretDraft {
     /// The declaration the value is for.
@@ -144,6 +146,7 @@ pub fn pending_id_of(value: &Value) -> Option<Uuid> {
 }
 
 /// What a batch change must match to claim a row.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Claim<'a> {
     /// The declaration the change writes.

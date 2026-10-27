@@ -24,6 +24,59 @@ async fn approved_money_is_exact_and_authorized() {
     );
 }
 
+/// D-520, amended: the typed read says a cancelled price is cancelled. It stays readable by id with
+/// its money as approved, and it is never the price in force: resolve on a day inside its window
+/// still binds the approved price before it.
+#[tokio::test]
+async fn a_cancelled_price_reads_cancelled_by_id_and_is_never_in_force() {
+    use bss_pricing_sdk::read::{PriceQuery, PriceState};
+    let f = ReadFixture::new().await;
+    let approved = f
+        .provider
+        .price(&f.ctx, f.price_query.clone())
+        .await
+        .unwrap();
+    assert_eq!(approved.state, PriceState::Approved);
+    let cancelled = seam_support::put(
+        &f.fixture,
+        approved.price_book_entry_id,
+        seam_support::Row {
+            price: serde_json::json!({"rate":"0.09"}),
+            from: "2026-09-10",
+            state: "cancelled",
+            version_no: 2,
+            ..seam_support::Row::default()
+        },
+    )
+    .await;
+    let read = f
+        .provider
+        .price(
+            &f.ctx,
+            PriceQuery {
+                price_id: cancelled,
+                ..f.price_query.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(read.state, PriceState::Cancelled);
+    assert_eq!(read.effective_from, seam_support::date("2026-09-10"));
+    match read.model {
+        PriceModel::PerUnit { unit_amount } => assert_eq!(unit_amount.to_string(), "0.09"),
+        other => panic!("unexpected price model: {other:?}"),
+    }
+    assert_eq!(f.resolve_query.date, seam_support::date("2026-09-15"));
+    let resolved = f
+        .provider
+        .resolve(&f.ctx, f.resolve_query.clone())
+        .await
+        .unwrap();
+    let binding = resolved.cells[0].binding.as_ref().unwrap();
+    assert_eq!(binding.price.price_id, approved.price_id);
+    assert_eq!(binding.price.state, PriceState::Approved);
+}
+
 #[tokio::test]
 async fn rest_and_sdk_resolve_the_same_stored_matrix() {
     let f = ReadFixture::new().await;
@@ -485,6 +538,64 @@ async fn current_revision_promotes_due_revision_even_without_ticker() {
         seam_support::written(&f.fixture).await,
         after,
         "switch emits and audits once"
+    );
+}
+
+/// History wins: the typed read serves the scale stored with the price, never the currency
+/// table's, on the price read and on the bound price alike, and REST resolve says the same.
+#[tokio::test]
+async fn the_stored_scale_is_served_whatever_the_table_says() {
+    let f = ReadFixture::new().await;
+    let initial = f
+        .provider
+        .price(&f.ctx, f.price_query.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (initial.currency.code(), initial.currency.scale()),
+        ("EUR", 2),
+        "a EUR price written at the ISO scale"
+    );
+    // A scale the ISO table does not give EUR, as a price stored under another table would carry.
+    update_by_id(
+        &f.fixture,
+        "UPDATE pricing_price SET currency_scale = 4 WHERE id = ?",
+        initial.price_id,
+    )
+    .await;
+    let read = f
+        .provider
+        .price(&f.ctx, f.price_query.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        read.currency.scale(),
+        4,
+        "the price read serves the stored scale"
+    );
+    let resolved = f
+        .provider
+        .resolve(&f.ctx, f.resolve_query.clone())
+        .await
+        .unwrap();
+    let binding = resolved.cells[0].binding.as_ref().unwrap();
+    assert_eq!(
+        binding.price.currency.scale(),
+        4,
+        "the bound price serves the stored scale, the one its invoice line posts at"
+    );
+    let (status, rest) = seam_support::resolve(
+        &f.fixture,
+        &format!(
+            "plan_revision_id={}&date={}",
+            f.resolve_query.revision_id, f.resolve_query.date
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "REST resolves the same matrix");
+    assert_eq!(
+        rest["items"][0]["chains"][0]["binding"]["currency_scale"], 4,
+        "REST serves the stored scale"
     );
 }
 

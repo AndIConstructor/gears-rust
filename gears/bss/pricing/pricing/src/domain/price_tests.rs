@@ -3,7 +3,7 @@ use super::*;
 use crate::domain::{
     money::PriceData,
     price_book_entry::{ChargeKind, Model},
-    test_support::{date, dec},
+    test_support::{date, dec, spec},
 };
 use uuid::Uuid;
 fn price(v: i32, from: &str, dim: Option<&str>, state: PriceState) -> Price {
@@ -13,6 +13,7 @@ fn price(v: i32, from: &str, dim: Option<&str>, state: PriceState) -> Price {
         version_no: v,
         dim_value: dim.map(str::to_owned),
         model: Model::PerUnit,
+        currency: spec("EUR", 2),
         price: Some(PriceData::PerUnit { rate: dec("1") }),
         min_fee: None,
         eligibility: Eligibility::All,
@@ -40,14 +41,7 @@ fn rules(
     siblings: &[Price],
     values: Option<&[String]>,
 ) -> Vec<crate::domain::RuleError> {
-    validate(
-        r,
-        ChargeKind::Usage,
-        values,
-        siblings,
-        date("2026-09-23"),
-        2,
-    )
+    validate(r, ChargeKind::Usage, values, siblings, date("2026-09-23"))
 }
 #[test]
 fn prototype_l45_l47_version_at_ignores_pending() {
@@ -106,7 +100,7 @@ fn prototype_l73_price_missing() {
     r.model = Model::Flat;
     r.price = None;
     assert_eq!(
-        validate(&r, ChargeKind::Recurring, None, &[], date("2026-09-23"), 2)[0].code,
+        validate(&r, ChargeKind::Recurring, None, &[], date("2026-09-23"))[0].code,
         "PRICE_MISSING"
     );
 }
@@ -362,18 +356,40 @@ fn matrix_12_19_closed_end_survives_twice_and_later_default() {
 #[test]
 fn matrix_18_min_fee_is_only_validated() {
     let mut r = price(9, "2026-12-01", None, PriceState::Draft);
-    for fee in ["-1", "1.001", "1.000"] {
-        r.min_fee = Some(dec(fee));
+    for fee in [dec("-1"), dec("1.001"), dec("0.0001"), Decimal::MAX] {
+        r.min_fee = Some(fee);
         assert!(
             rules(&r, &[], None)
                 .iter()
-                .any(|e| e.code == "MIN_FEE_INVALID")
+                .any(|e| e.code == "MIN_FEE_INVALID"),
+            "off the currency increment, negative or over 28 digits"
         );
     }
-    r.min_fee = Some(dec("30"));
-    assert!(rules(&r, &[], None).is_empty());
+    // The increment is judged on the normalized value: trailing zeros are not places.
+    for fee in ["30", "30.00", "1.000", "0.10", "0"] {
+        r.min_fee = Some(dec(fee));
+        assert!(rules(&r, &[], None).is_empty(), "on the currency increment");
+    }
     // `amount_for` takes no fee at all: that the fee is not applied holds by its signature
     // (PT-08), and resolve serves it as stored (tests/read_contract.rs).
+}
+#[test]
+fn the_minimum_fee_is_judged_on_the_price_s_own_scale() {
+    let mut r = price(9, "2026-12-01", None, PriceState::Draft);
+    r.min_fee = Some(dec("1.001"));
+    let refused = |r: &Price| {
+        rules(r, &[], None)
+            .iter()
+            .any(|e| e.code == "MIN_FEE_INVALID")
+    };
+    assert!(refused(&r), "three places at scale 2");
+    r.currency = spec("EUR", 3);
+    assert!(!refused(&r), "three places at the price's stored scale 3");
+    r.min_fee = Some(dec("1.5"));
+    r.currency = spec("JPY", 0);
+    assert!(refused(&r), "one place at scale 0");
+    r.min_fee = Some(dec("2.0"));
+    assert!(!refused(&r), "trailing zeros are not places");
 }
 #[test]
 fn matrix_18_amount_package_and_start_invalid() {
@@ -385,7 +401,7 @@ fn matrix_18_amount_package_and_start_invalid() {
         package_size: dec("0"),
         package_price: dec("5"),
     });
-    assert_eq!(rules(&r, &[], None)[0].code, "PACKAGE_FIELDS_INVALID");
+    assert_eq!(rules(&r, &[], None)[0].code, "AMOUNT_INVALID");
     assert_eq!(
         parse_start("2026-02-30").unwrap_err().code,
         "WINDOW_START_INVALID"
@@ -814,4 +830,126 @@ fn d427_a_return_copies_money_not_a_model() {
         temporary_is_current(&[back], &unit[0], &unit),
         "the model is not compared either"
     );
+}
+/// D-520: a cancelled price leaves its chain, so the predecessor re-opens onto the next
+/// surviving start, or to open-ended when nothing survives.
+#[test]
+fn cancelling_a_scheduled_price_reopens_its_predecessor() {
+    let mut chain = vec![
+        price(1, "2026-01-01", None, PriceState::Approved),
+        price(2, "2026-03-01", None, PriceState::Cancelled),
+        price(3, "2026-05-01", None, PriceState::Approved),
+    ];
+    normalize_windows(&mut chain);
+    assert_eq!(chain[0].effective_to, Some(date("2026-05-01")));
+    assert_eq!(chain[2].effective_to, None);
+    let mut open = vec![
+        price(1, "2026-01-01", None, PriceState::Approved),
+        price(2, "2026-03-01", None, PriceState::Cancelled),
+    ];
+    normalize_windows(&mut open);
+    assert_eq!(open[0].effective_to, None);
+}
+/// D-520: a cancelled price is not an overlap and is never the price in force.
+#[test]
+fn a_cancelled_price_is_outside_overlap_and_in_force() {
+    let cancelled = price(2, "2026-03-01", None, PriceState::Cancelled);
+    let draft = price(9, "2026-03-01", None, PriceState::Draft);
+    let errors = rules(&draft, std::slice::from_ref(&cancelled), None);
+    assert!(
+        !errors.iter().any(|e| e.code == "WINDOW_OVERLAP"),
+        "{errors:?}"
+    );
+    let mut chain = vec![
+        price(1, "2026-01-01", None, PriceState::Approved),
+        cancelled,
+    ];
+    normalize_windows(&mut chain);
+    let entry = chain[0].price_book_entry_id;
+    for day in ["2026-01-01", "2026-03-01", "2026-12-01"] {
+        let in_force = version_at(&chain, entry, date(day), None).unwrap();
+        assert_eq!(in_force.version_no, 1, "{day}");
+        assert_ne!(in_force.state, PriceState::Cancelled);
+    }
+    assert_eq!(
+        status(
+            &price(2, "2026-03-01", None, PriceState::Cancelled),
+            date("2026-04-01")
+        ),
+        "cancelled"
+    );
+}
+/// D-521: an end on or before the current end (the next approved start) is kept; an end
+/// after that current end is `END_DATE_INVALID`.
+#[test]
+fn ending_before_the_next_start_closes_there_and_past_it_is_invalid() {
+    let mut chain = vec![
+        price(1, "2026-01-01", None, PriceState::Approved),
+        price(2, "2026-03-01", None, PriceState::Approved),
+    ];
+    normalize_windows(&mut chain);
+    let ended = end_price(&chain, chain[0].id, date("2026-02-15")).unwrap();
+    assert_eq!(ended.effective_to, Some(date("2026-02-15")));
+    assert!(ended.closed_explicitly);
+    assert_eq!(
+        end_price(&chain, chain[0].id, date("2026-04-15"))
+            .unwrap_err()
+            .code,
+        "END_DATE_INVALID"
+    );
+}
+/// D-521 (review RF-P item 9): an explicitly ended price with no successor keeps its explicit end
+/// as its current end: a second end past it is `END_DATE_INVALID`, one before it is accepted, and
+/// with a successor the sooner of the two bounds it.
+#[test]
+fn an_explicit_end_bounds_a_second_end() {
+    let mut ended = price(1, "2026-01-01", None, PriceState::Approved);
+    ended.effective_to = Some(date("2026-02-25"));
+    ended.closed_explicitly = true;
+    let alone = vec![ended.clone()];
+    assert_eq!(
+        end_price(&alone, ended.id, date("2027-01-01"))
+            .unwrap_err()
+            .code,
+        "END_DATE_INVALID"
+    );
+    assert_eq!(
+        end_price(&alone, ended.id, date("2026-02-26"))
+            .unwrap_err()
+            .code,
+        "END_DATE_INVALID"
+    );
+    let sooner = end_price(&alone, ended.id, date("2026-02-20")).unwrap();
+    assert_eq!(sooner.effective_to, Some(date("2026-02-20")));
+    assert_eq!(
+        end_price(&alone, ended.id, date("2026-02-25"))
+            .unwrap()
+            .effective_to,
+        Some(date("2026-02-25")),
+        "the explicit end itself"
+    );
+    let with_next = vec![
+        ended.clone(),
+        price(2, "2026-02-10", None, PriceState::Approved),
+    ];
+    assert_eq!(
+        end_price(&with_next, ended.id, date("2026-02-20"))
+            .unwrap_err()
+            .code,
+        "END_DATE_INVALID",
+        "a successor inside the explicit end bounds it sooner"
+    );
+}
+/// D-520, D-521: a cancel or end row has no window of its own. It shows its state, and once
+/// applied it is `superseded`, whatever the dates it copied: never a price in force.
+#[test]
+fn a_change_row_shows_its_state_and_superseded_once_applied() {
+    for (state, shown) in [
+        (PriceState::Draft, DisplayStatus::Draft),
+        (PriceState::Pending, DisplayStatus::Pending),
+        (PriceState::Rejected, DisplayStatus::Rejected),
+        (PriceState::Approved, DisplayStatus::Superseded),
+    ] {
+        assert_eq!(change_display(state), shown, "{state:?}");
+    }
 }
