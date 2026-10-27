@@ -1,7 +1,7 @@
 # CodeQL code scanning.
 #
 # Full Rust analysis costs ~1h of runner time (codeql-action has no overlay/incremental
-# mode for Rust), so pull requests run it only when non-test Rust inputs change.
+# mode for Rust), so pull requests run it only when non-test `.rs` files change.
 # Drafts and PRs without Rust, Python or `.github` changes are not scanned at all.
 # Scheduled and manual runs always analyze everything.
 name: "CodeQL Advanced"
@@ -59,10 +59,13 @@ jobs:
             emit true full; exit 0
           fi
 
-          # Rust inputs (incl. `.proto` compiled by build scripts) minus the paths
-          # excluded by `paths-ignore` below (keep both in sync).
-          rust_files="$(grep -E '\.(rs|proto)$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain|^\.cargo/|^\.github/workflows/codeql\.yml$' <<< "$files" || true)"
-          if [[ -n "$rust_files" ]] && grep -Evq '(^|/)(tests|benches)/|_tests?\.rs$|^examples/|^tools/fuzz/' <<< "$rust_files"; then
+          # Only `.rs` sources and this workflow trigger a full Rust scan. Manifests
+          # (Cargo.toml/lock, rust-toolchain, .cargo/, .proto) do not: Rust alerts are
+          # located only in `.rs` files and codeql-action drops alerts outside the PR
+          # diff before upload, so a full scan of such a PR would report nothing either.
+          # The exclusions mirror `paths-ignore` below (keep both in sync).
+          rust_files="$(grep -E '\.rs$|^\.github/workflows/codeql\.yml$' <<< "$files" || true)"
+          if [[ -n "$rust_files" ]] && grep -Evq '(^|/)(tests|benches)/|(^|/|_)tests?\.rs$|(^|/)examples/|^tools/fuzz/' <<< "$rust_files"; then
             emit true full
           elif grep -Eq '\.py$|(^|/)(pyproject\.toml|requirements[^/]*\.txt|poetry\.lock)$|^\.github/' <<< "$files"; then
             emit true stub
@@ -101,7 +104,7 @@ jobs:
       if: env.RUST_STUB == 'true'
       shell: bash
       run: |
-        # No non-test Rust changes: analyze a one-line crate instead of the workspace so
+        # No non-test `.rs` changes: analyze a one-line crate instead of the workspace so
         # the `/language:rust` configuration is still uploaded. Diff-informed analysis
         # reports only alerts on changed lines, so this matches a full scan's outcome.
         mkdir codeql-rust-stub
@@ -121,9 +124,11 @@ jobs:
           paths-ignore:
             - '**/tests/**'
             - '**/benches/**'
+            - '**/tests.rs'
+            - '**/test.rs'
             - '**/*_tests.rs'
             - '**/*_test.rs'
-            - 'examples/**'
+            - '**/examples/**'
             - 'tools/fuzz/**'
 
     - name: Perform CodeQL Analysis
