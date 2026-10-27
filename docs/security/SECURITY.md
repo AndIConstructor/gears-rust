@@ -723,7 +723,10 @@ AuthN, AuthZ, and Tenant Resolver plugins let ISVs bind the tenant plane to thei
    - Local IPC (for example, a Unix socket) is equivalent only when each workload has its own OS identity. File permissions cannot tell apart workloads that share one OS user.
    - If a service mesh terminates mTLS, the application must receive the verified peer identity from the proxy over a trusted path. The proxy must remove any client-supplied copy of that identity.
    - The application port must not be reachable around the proxy. Bind it to localhost or block it with network policy.
-8. **Protect credentials and keys** — use production credential-store and key-management backends, least-privilege access, rotation, and audit rather than static development plugins.
+8. **Protect credentials and keys** — use production credential-store and key-management backends, least-privilege access, rotation, and audit rather than static development plugins. Define revocation explicitly:
+   - Issuing a replacement certificate does not revoke the previous one. Revoke it, and reject renewal for revoked credentials.
+   - Removing a workload from the directory does not block calls to an endpoint it already knows. Revoke its credential as well.
+   - Set a maximum delay for revoked access to stop, including existing connections and streams. The TokenReview cache can accept a revoked token until its cached result expires (30 s by default, 5 min at most). Streams that were authorized when they opened keep running until the service closes them.
 9. **Operationalize telemetry and posture** — retain AuthN/AuthZ/workload/OAGW decisions centrally, alert on failures and anomalies, and integrate runtime posture or step-up signals when the threat model requires them.
 10. **Make validation mandatory** — run Clippy, `cargo gears lint --dylint` (use `--strict` when warning-level rules must fail the build), security/dependency checks, and service-specific security tests in protected CI. Review every `Gears.toml` skip, `dylint.toml` allow-list, lint suppression, and auth-disabled configuration.
 
