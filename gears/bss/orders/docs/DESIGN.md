@@ -9943,9 +9943,8 @@ contract, D-139), read-store-unavailable.
 Authentication is terminated at the inbound gateway and the gear receives an authenticated
 `SecurityContext`; this slice re-implements none of it.
 
-**Selected integration pattern: Pricing.** Reuse Pricing's shared `PolicyEnforcer` integration
-([pricing/src/authz.rs](../../pricing/pricing/src/authz.rs)), registered permission catalog ([pricing/src/gts/permissions.rs](../../pricing/pricing/src/gts/permissions.rs)) and
-PDP-produced database scopes. Orders supplies its own resource/action constants, tenant-axis
+**Selected integration pattern: Pricing.** Reuse Pricing's shared `PolicyEnforcer` integration and resource/action labels
+([pricing/src/authz.rs](../../pricing/pricing/src/authz.rs)) and PDP-produced database scopes. Orders supplies its own resource/action constants, tenant-axis
 properties and business guards. Do not copy Pricing's caller-tenant-only repository predicate
 or treat its permission catalog as proof that the deployed PDP enforces role assignments.
 This selects an integration pattern, not a new Orders policy engine or a new toolkit API.
@@ -10539,7 +10538,7 @@ reassignment between pages, scoped historical-child reads, invalid constraints a
 pagination without duplicate orders or post-query filtering.
 
 **PDP resource–action catalog (normative).** Follow Pricing's separation of object resources
-and grantable actions ([pricing/src/gts/permissions.rs](../../pricing/pricing/src/gts/permissions.rs) and [pricing/src/authz.rs](../../pricing/pricing/src/authz.rs)), not a
+and grantable actions ([pricing/src/authz.rs](../../pricing/pricing/src/authz.rs)), not a
 generic read/write permission covering every operation. The names below are Orders-local
 logical resource/action names; their fully qualified registered labels must be shared by the
 permission catalog and enforcement calls. A grouped matrix row does not imply a single grant.

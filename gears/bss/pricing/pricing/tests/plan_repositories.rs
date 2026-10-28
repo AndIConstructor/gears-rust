@@ -185,18 +185,23 @@ fn db_error(e: &RepoError) -> Option<&sea_orm::DbErr> {
 const RACE_TX_ATTEMPTS: u32 = 10;
 async fn writer(db: Db, work: Work, barrier: Arc<tokio::sync::Barrier>) -> Result<(), RepoError> {
     let mut attempt = 0;
-    db.transaction_with_retry_max(TxConfig::serializable(), RACE_TX_ATTEMPTS, db_error, move |tx| {
-        attempt += 1;
-        let first = attempt == 1;
-        let barrier = Arc::clone(&barrier);
-        let work = Arc::clone(&work);
-        Box::pin(async move {
-            if first {
-                barrier.wait().await;
-            }
-            work(tx).await
-        })
-    })
+    db.transaction_with_retry_max(
+        TxConfig::serializable(),
+        RACE_TX_ATTEMPTS,
+        db_error,
+        move |tx| {
+            attempt += 1;
+            let first = attempt == 1;
+            let barrier = Arc::clone(&barrier);
+            let work = Arc::clone(&work);
+            Box::pin(async move {
+                if first {
+                    barrier.wait().await;
+                }
+                work(tx).await
+            })
+        },
+    )
     .await
 }
 /// Run `work` on two connections to one file at once; exactly one wins and the other sees `code`.

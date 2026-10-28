@@ -486,33 +486,38 @@ async fn writer(
     barrier: Arc<tokio::sync::Barrier>,
 ) -> Result<(), RepoError> {
     let mut attempt = 0;
-    db.transaction_with_retry_max(TxConfig::serializable(), RACE_TX_ATTEMPTS, db_error, move |tx| {
-        attempt += 1;
-        let first = attempt == 1;
-        let scope = scope.clone();
-        let barrier = Arc::clone(&barrier);
-        Box::pin(async move {
-            if first {
-                barrier.wait().await;
-            }
-            reference_op_repo::transition(
-                tx,
-                &scope,
-                id,
-                OpState::Reserving,
-                OpState::Written,
-                &reference_op_repo::TransitionFields {
-                    reservation_id: Some(Uuid::new_v4()),
-                    outcome: None,
-                    attempts: 1,
-                    next_attempt_at: at(10),
-                    last_error: None,
-                    updated_at: at(10),
-                },
-            )
-            .await
-        })
-    })
+    db.transaction_with_retry_max(
+        TxConfig::serializable(),
+        RACE_TX_ATTEMPTS,
+        db_error,
+        move |tx| {
+            attempt += 1;
+            let first = attempt == 1;
+            let scope = scope.clone();
+            let barrier = Arc::clone(&barrier);
+            Box::pin(async move {
+                if first {
+                    barrier.wait().await;
+                }
+                reference_op_repo::transition(
+                    tx,
+                    &scope,
+                    id,
+                    OpState::Reserving,
+                    OpState::Written,
+                    &reference_op_repo::TransitionFields {
+                        reservation_id: Some(Uuid::new_v4()),
+                        outcome: None,
+                        attempts: 1,
+                        next_attempt_at: at(10),
+                        last_error: None,
+                        updated_at: at(10),
+                    },
+                )
+                .await
+            })
+        },
+    )
     .await
 }
 #[tokio::test]

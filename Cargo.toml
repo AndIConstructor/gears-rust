@@ -951,4 +951,5 @@ ignored = [
     "resource-group",
     "tenant-resolver",
     "types-registry",
+    "usage-collector",
 ]
