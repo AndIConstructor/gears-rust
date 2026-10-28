@@ -255,6 +255,23 @@ impl FileService {
     }
 }
 
+/// Delete a backend blob, logging (not failing) on error; a failure leaves an orphan for the
+/// cleanup engine. Shared by `FileService` and `MultipartService`.
+pub(crate) async fn best_effort_blob_delete(
+    backends: &BackendRegistry,
+    metrics: &dyn FileStorageMetricsPort,
+    backend_id: &str,
+    path: &str,
+) {
+    let Ok(backend) = backends.get(backend_id) else {
+        return;
+    };
+    if let Err(err) = backend.delete(path).await {
+        metrics.record_backend_error(backend_id, "delete");
+        tracing::warn!(?err, path, "best-effort backend delete failed");
+    }
+}
+
 /// Map an `Op` to its sidecar path segment.
 ///
 /// `Op::MultipartPart` is rejected: part uploads use a distinct route with part-specific
@@ -284,8 +301,10 @@ pub(super) struct IdempotencyTicket {
     pub(super) version_id: Uuid,
     pub(super) upload_url: String,
     /// The `bind` mode minted into the token at the original `create_file`; a replay re-mints with it.
+    /// `None`: the ticket was written by a binary from before `bind` existed, so the original create
+    /// was manual; a replay skips the mode comparison and re-signs with `bind_on_finalize = false`.
     #[serde(default)]
-    pub(super) auto_bind: bool,
+    pub(super) auto_bind: Option<bool>,
 }
 
 impl From<IdempotencyTicket> for UploadTicket {

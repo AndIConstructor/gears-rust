@@ -103,6 +103,8 @@ pub(crate) fn register_routes(
     .error_403(openapi)
     .error_404(openapi)
     .error_500(openapi)
+    // 503 + `Retry-After`: transient backend fault while checking the stored object.
+    .error_503(openapi)
     .register(router, openapi);
 
     router = OperationBuilder::post(format!(
@@ -147,8 +149,8 @@ pub(crate) fn register_routes(
         // 409: an idempotency key was reused with a different request body.
         .error_409(openapi)
         .error_500(openapi)
-        // 503: transient backend fault in `initiate_multipart` (plans with >=2 parts only;
-        // the single-part path never touches the backend).
+        // 503 + `Retry-After`: transient backend fault in `initiate_multipart` (plans with
+        // >=2 parts only; the single-part path never touches the backend).
         .error_503(openapi)
         .register(router, openapi);
 
@@ -506,7 +508,7 @@ pub(crate) fn register_routes(
         .error_403(openapi)
         .error_404(openapi)
         .error_500(openapi)
-        // 503: transient backend fault in `initiate_multipart`.
+        // 503 + `Retry-After`: transient backend fault in `initiate_multipart`.
         .error_503(openapi)
         .register(router, openapi);
 
@@ -552,6 +554,8 @@ pub(crate) fn register_routes(
     // 400: If-Match precondition failed (see `bind`).
     .error_400(openapi)
     .error_500(openapi)
+    // 503 + `Retry-After`: transient backend fault while assembling the object.
+    .error_503(openapi)
     .register(router, openapi);
 
     router = OperationBuilder::get(format!("{BASE}/files/{{id}}/multipart/{{upload_id}}"))
@@ -595,6 +599,8 @@ pub(crate) fn register_routes(
         .error_404(openapi)
         .error_409(openapi)
         .error_500(openapi)
+        // 503 + `Retry-After`: transient backend fault while aborting the backend upload.
+        .error_503(openapi)
         .register(router, openapi);
 
     router = OperationBuilder::post(format!("{BASE}/files/{{id}}/migrate"))
@@ -617,6 +623,8 @@ pub(crate) fn register_routes(
         .error_404(openapi)
         .error_409(openapi)
         .error_500(openapi)
+        // 503 + `Retry-After`: transient backend fault while copying the content.
+        .error_503(openapi)
         .register(router, openapi);
 
     router = OperationBuilder::post(format!("{BASE}/files/{{id}}/transfer"))

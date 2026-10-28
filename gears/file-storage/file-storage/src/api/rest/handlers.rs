@@ -19,11 +19,12 @@ use toolkit_security::SecurityContext;
 use file_storage_sdk::{CustomMetadataPatch, NewFile, OwnerFilter, OwnerKind};
 
 use super::dto::{
-    BindReq, CreateFileReq, CreateRetentionRuleReq, DownloadTicketDto, EffectivePolicyDto, FileDto,
-    InitiateMultipartReq, MigrateBackendReq, MissingPartDto, MultipartCompleteDto,
-    MultipartCompletingDto, MultipartPartPlanDto, MultipartPlanDto, MultipartStatusDto, PolicyDto,
-    ReceivedPartDto, RetentionRuleDto, SetPolicyReq, StorageDto, TransferOwnershipReq,
-    UpdateMetadataReq, UploadTicketDto, VersionDto,
+    BindModeDto, BindReq, CreateFileReq, CreateRetentionRuleReq, DownloadTicketDto,
+    EffectivePolicyDto, FileDto, InitiateMultipartReq, MigrateBackendReq, MissingPartDto,
+    MultipartCompleteDto, MultipartCompletingDto, MultipartCompletingStateDto,
+    MultipartPartPlanDto, MultipartPlanDto, MultipartStatusDto, PolicyDto, ReceivedPartDto,
+    RetentionRuleDto, SetPolicyReq, StorageDto, TransferOwnershipReq, UpdateMetadataReq,
+    UploadTicketDto, VersionDto,
 };
 use super::listing_query::{FilesKeys, ListingQuery, PageKeys};
 use crate::domain::create_flow::{self, CreateFileOutcome, MultipartIntent};
@@ -121,13 +122,7 @@ pub async fn create_file(
     let owner_kind = req
         .parse_owner_kind()
         .ok_or_else(|| DomainError::validation("owner_kind", "must be 'user' or 'app'"))?;
-    let auto_bind = match req.bind.as_deref() {
-        None | Some("auto") => true,
-        Some("manual") => false,
-        Some(_) => {
-            return Err(DomainError::validation("bind", "must be 'auto' or 'manual'").into());
-        }
-    };
+    let auto_bind = req.bind == BindModeDto::Auto;
     let new = NewFile {
         owner_kind,
         owner_id: req.owner_id,
@@ -518,7 +513,7 @@ pub async fn complete_multipart(
             hash_mode: completed.hash_mode.as_str().to_owned(),
             part_count: completed.part_count,
             manifest: completed.manifest,
-            bind_state: completed.bind_state.as_str().to_owned(),
+            bind_state: completed.bind_state.into(),
             etag: completed.etag,
             current_etag: completed.current_etag,
         })
@@ -528,7 +523,7 @@ pub async fn complete_multipart(
             let mut resp = (
                 StatusCode::ACCEPTED,
                 Json(MultipartCompletingDto {
-                    state: "completing".to_owned(),
+                    state: MultipartCompletingStateDto::Completing,
                     retry_after_secs,
                 }),
             )
@@ -703,13 +698,15 @@ pub async fn finalize_version(
 
     // Surface the auto-bind outcome; the sidecar forwards it on its `PUT` response.
     let mut resp = StatusCode::NO_CONTENT.into_response();
-    let (bound, name, value) = match outcome.bind_state {
-        Some(BindState::Bound) => ("true", "etag", outcome.etag),
-        Some(BindState::Conflict) => ("conflict", "x-fs-current-etag", outcome.current_etag),
-        Some(BindState::Manual) | None => return Ok(resp),
+    // No bind attempted (a `bind: "manual"` upload) is reported as `manual`.
+    let state = outcome.bind_state.unwrap_or(BindState::Manual);
+    let (name, value) = match state {
+        BindState::Bound => ("etag", outcome.etag),
+        BindState::Conflict => ("x-fs-current-etag", outcome.current_etag),
+        BindState::Manual => ("etag", None),
     };
     resp.headers_mut()
-        .insert("x-fs-bound", HeaderValue::from_static(bound));
+        .insert("x-fs-bound", HeaderValue::from_static(state.as_str()));
     if let Some(v) = value
         && let Ok(v) = HeaderValue::from_str(&v)
     {

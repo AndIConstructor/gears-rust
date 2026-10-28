@@ -8,7 +8,7 @@ use toolkit::api::canonical_prelude::CanonicalError;
 use uuid::Uuid;
 
 /// Guards `expected_status` and `all_variant_instances` against a new variant being forgotten.
-const EXPECTED_VARIANT_COUNT: usize = 25;
+const EXPECTED_VARIANT_COUNT: usize = 26;
 
 /// Expected HTTP status per variant, per the canonical-error taxonomy (`status_code()`).
 /// No wildcard arm on purpose.
@@ -36,6 +36,7 @@ fn expected_status(err: &DomainError) -> u16 {
         | DomainError::MultipartPartsMissing { .. }
         | DomainError::VersionedFileMigrationNotSupported { .. } => 409,
         DomainError::QuotaExceeded { .. } => 429,
+        DomainError::BackendUnavailable { .. } => 503,
         DomainError::Database { .. } | DomainError::Backend { .. } | DomainError::InternalError => {
             500
         }
@@ -80,6 +81,10 @@ fn all_variant_instances() -> Vec<DomainError> {
         DomainError::Backend {
             backend_id: "s3".into(),
             message: "put failed".into(),
+        },
+        DomainError::BackendUnavailable {
+            backend_id: "s3".into(),
+            message: "timeout".into(),
         },
         DomainError::UnknownBackend {
             backend_id: "nope".into(),
@@ -176,4 +181,25 @@ fn declared_routes_match_the_pinned_status_table() {
             "{operation_id}'s declared route status must be 400 per the 2.5 fix"
         );
     }
+}
+
+/// A transient backend failure is a `503` carrying `Retry-After: 5` on the wire.
+#[test]
+fn backend_unavailable_maps_to_503_with_retry_after() {
+    use axum::response::IntoResponse;
+
+    let canonical: CanonicalError = DomainError::BackendUnavailable {
+        backend_id: "s3".into(),
+        message: "timeout".into(),
+    }
+    .into();
+    let response = toolkit::api::canonical_prelude::Problem::from(canonical).into_response();
+    assert_eq!(response.status().as_u16(), 503);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .expect("Retry-After header"),
+        "5"
+    );
 }

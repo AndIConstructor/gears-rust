@@ -63,7 +63,7 @@ use uuid::Uuid;
 use file_storage::domain::error::DomainError;
 use file_storage::domain::ports::FileStorageMetricsPort;
 use file_storage::infra::backend::{
-    BackendRegistry, LocalFsBackend, PublishOutcome, S3Backend, StorageBackend,
+    BackendRegistry, LocalFsBackend, PublishOutcome, S3Backend, StorageBackend, classify_io_error,
 };
 use file_storage::infra::content::{hash, range};
 use file_storage::infra::metrics::FileStorageMetricsMeter;
@@ -364,7 +364,7 @@ async fn upload(
 
     let outcome = match publish_upload_body(backend.as_ref(), &claims, body).await {
         Ok(v) => v,
-        Err(rejection) => return (rejection.status, rejection.body).into_response(),
+        Err(rejection) => return rejection.into_response(),
     };
     let (bytes_written, digest, created) = (outcome.bytes_written, outcome.digest, outcome.created);
 
@@ -422,13 +422,43 @@ async fn upload(
     .await
     {
         Ok(echo) => uploaded_response(&echo),
-        // Replay: a control-plane rejection means this PUT took no effect; transport/5xx keep the first-upload status.
-        Err(rejection) if !created && rejection.control_plane_rejected => (
+        Err(rejection) => {
+            finalize_rejection_response(backend.as_ref(), &claims, created, rejection).await
+        }
+    }
+}
+
+/// Client response for a failed finalize.
+///
+/// - `400` (the control plane rejected the content): this request created the object, so it is
+///   deleted best-effort and the client gets `400` with the control plane's message; a corrected
+///   retry then succeeds. On a replay the object is already published, so it is `409`.
+/// - `404` (the version was deleted concurrently) with `created`: the object is deleted and the
+///   client gets `404`.
+/// - Any other status (`401`/`403`/`408`/`429`/`5xx`, transport): `502`, the object is kept
+///   (another sidecar may already have finalized it, e.g. during secret rotation), and a replay
+///   is never turned into `409`.
+async fn finalize_rejection_response(
+    backend: &dyn StorageBackend,
+    claims: &Claims,
+    created: bool,
+    rejection: Rejection,
+) -> Response {
+    match rejection.control_plane_status {
+        Some(StatusCode::BAD_REQUEST) if !created => (
             StatusCode::CONFLICT,
             "content already published for this version",
         )
             .into_response(),
-        Err(rejection) => rejection.into_response(),
+        Some(StatusCode::BAD_REQUEST) => {
+            delete_created_object(backend, claims, "control plane rejected the upload").await;
+            (StatusCode::BAD_REQUEST, rejection.body).into_response()
+        }
+        Some(StatusCode::NOT_FOUND) if created => {
+            delete_created_object(backend, claims, "version no longer exists").await;
+            (StatusCode::NOT_FOUND, "version not found").into_response()
+        }
+        _ => rejection.into_response(),
     }
 }
 
@@ -459,15 +489,24 @@ async fn reject_upload_bad_content(
     created: bool,
     reason: &'static str,
 ) -> Response {
-    if created && let Err(e) = backend.delete(&claims.backend_path).await {
+    if created {
+        delete_created_object(backend, claims, reason).await;
+    }
+    (StatusCode::BAD_REQUEST, reason).into_response()
+}
+
+/// Best-effort delete of the object this request created, after the upload was rejected.
+async fn delete_created_object(backend: &dyn StorageBackend, claims: &Claims, reason: &str) {
+    if let Err(e) = backend.delete(&claims.backend_path).await {
         tracing::warn!(
             error = %e,
             backend_path = %claims.backend_path,
-            "failed to clean up freshly-published object after post-validation failure; \
-             path stays poisoned until orphan reconciliation reclaims it"
+            reason,
+            "failed to clean up freshly-published object after rejection; \
+             the path stays occupied until the object is deleted \
+             (there is no cleanup job yet; deleting the version or file removes it)"
         );
     }
-    (StatusCode::BAD_REQUEST, reason).into_response()
 }
 
 /// A failed upload step: the status and plain-text body the client receives. Kept small
@@ -476,7 +515,10 @@ async fn reject_upload_bad_content(
 struct Rejection {
     status: StatusCode,
     body: Cow<'static, str>,
-    control_plane_rejected: bool,
+    /// Status of the control plane's finalize response, when the failure came from it.
+    control_plane_status: Option<StatusCode>,
+    /// `Retry-After` seconds for a transient failure (`503`).
+    retry_after_secs: Option<u32>,
 }
 
 impl Rejection {
@@ -484,14 +526,42 @@ impl Rejection {
         Self {
             status,
             body: body.into(),
-            control_plane_rejected: false,
+            control_plane_status: None,
+            retry_after_secs: None,
         }
+    }
+}
+
+/// `Retry-After` for a transient backend failure (matches `docs/api.md`).
+const BACKEND_RETRY_AFTER_SECS: u32 = 5;
+
+/// Maps a backend error to the client rejection and logs it: a transient failure
+/// (`DomainError::BackendUnavailable`) is `503` + `Retry-After` at `warn`; anything else is
+/// `500 "backend error"` at `error`. The backend's own text never reaches the client.
+fn backend_failure(e: &DomainError, what: &'static str) -> Rejection {
+    if matches!(e, DomainError::BackendUnavailable { .. }) {
+        tracing::warn!(error = %e, "{what} (transient)");
+        Rejection {
+            retry_after_secs: Some(BACKEND_RETRY_AFTER_SECS),
+            ..Rejection::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "backend temporarily unavailable, retry",
+            )
+        }
+    } else {
+        tracing::error!(error = %e, "{what}");
+        Rejection::new(StatusCode::INTERNAL_SERVER_ERROR, "backend error")
     }
 }
 
 impl IntoResponse for Rejection {
     fn into_response(self) -> Response {
-        (self.status, self.body).into_response()
+        let mut resp = (self.status, self.body).into_response();
+        if let Some(secs) = self.retry_after_secs {
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+        }
+        resp
     }
 }
 
@@ -509,6 +579,29 @@ struct FinalizeEcho {
     bound: Option<String>,
     etag: Option<String>,
     current_etag: Option<String>,
+}
+
+/// Cap on the control plane's `400` body relayed to the client.
+const FINALIZE_REJECTION_BODY_MAX: usize = 1024;
+
+fn truncate_utf8(mut s: String, max: usize) -> String {
+    if s.len() > max {
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+    }
+    s
+}
+
+/// Client-facing text of a control-plane `400`: the `detail` of a problem+json body, else the
+/// raw text.
+fn rejection_detail(body_text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body_text)
+        .ok()
+        .and_then(|v| v.get("detail").and_then(|d| d.as_str().map(str::to_owned)))
+        .unwrap_or_else(|| body_text.to_owned())
 }
 
 async fn interpret_finalize_response(
@@ -538,10 +631,22 @@ async fn interpret_finalize_response(
         body = %body_text,
         "control-plane finalize callback returned error"
     );
-    // Status/body stay in the log: the control plane's raw error must not reach the client.
+    // The control plane's raw error stays in the log, except a `400`: it is the control plane
+    // judging the content (policy size, MIME, uploaded-object check) whose message is
+    // client-actionable and relayed by `upload` (capped). Every other status stays opaque.
+    let body = if status == StatusCode::BAD_REQUEST {
+        Cow::Owned(truncate_utf8(
+            rejection_detail(&body_text),
+            FINALIZE_REJECTION_BODY_MAX,
+        ))
+    } else {
+        Cow::Borrowed("finalize failed")
+    };
     Err(Rejection {
-        control_plane_rejected: status.is_client_error(),
-        ..Rejection::new(StatusCode::BAD_GATEWAY, "finalize failed")
+        status: StatusCode::BAD_GATEWAY,
+        body,
+        control_plane_status: Some(status),
+        retry_after_secs: None,
     })
 }
 
@@ -760,10 +865,10 @@ async fn reject_unconfirmed_replay(
             )
                 .into_response(),
         ),
-        Err(e) => {
-            tracing::error!(error = %e, "reading back the published object for a replay failed");
-            Some((StatusCode::INTERNAL_SERVER_ERROR, "backend error").into_response())
-        }
+        Err(e) => Some(
+            backend_failure(&e, "reading back the published object for a replay failed")
+                .into_response(),
+        ),
     }
 }
 
@@ -772,7 +877,7 @@ async fn stored_digest(backend: &dyn StorageBackend, path: &str) -> Result<[u8; 
     let mut stream = backend.get_stream(path).await?;
     let mut hasher = hash::Hasher::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| DomainError::backend(backend.id(), e.to_string()))?;
+        let chunk = chunk.map_err(|e| classify_io_error(backend.id(), &e))?;
         hasher.update(&chunk);
     }
     Ok(hash::digest_to_array(hasher.finalize()))
@@ -801,13 +906,7 @@ async fn publish_upload_body(
             tracing::error!(error = %e, "upload body stream read failed");
             Err(Rejection::new(StatusCode::BAD_REQUEST, "body read error"))
         }
-        Err(e) => {
-            tracing::error!(error = %e, "backend publish_exclusive failed");
-            Err(Rejection::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "backend error",
-            ))
-        }
+        Err(e) => Err(backend_failure(&e, "backend publish_exclusive failed")),
     }
 }
 
@@ -903,11 +1002,8 @@ async fn write_multipart_part_native(
     {
         Ok((etag, hash)) => Ok((body_len, etag, hex::encode(hash))),
         Err(e) => {
-            tracing::error!(error = %e, part_number, "backend native upload_part failed");
-            Err(Rejection::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "backend error",
-            ))
+            tracing::warn!(part_number, "native upload_part failed");
+            Err(backend_failure(&e, "backend native upload_part failed"))
         }
     }
 }
@@ -942,11 +1038,8 @@ async fn write_multipart_part_offset_object(
             return Err(Rejection::new(StatusCode::BAD_REQUEST, "body read error"));
         }
         Err(e) => {
-            tracing::error!(error = %e, part_number, "backend part write failed");
-            return Err(Rejection::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "backend error",
-            ));
+            tracing::warn!(part_number, "part object write failed");
+            return Err(backend_failure(&e, "backend part write failed"));
         }
     };
 
@@ -1131,8 +1224,7 @@ async fn download(
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "backend existence check failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "backend error").into_response();
+            return backend_failure(&e, "backend existence check failed").into_response();
         }
     }
 
@@ -1158,8 +1250,7 @@ async fn download_range(
     let total = match backend.size(path).await {
         Ok(n) => n,
         Err(e) => {
-            tracing::error!(error = %e, "backend size lookup failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "backend error").into_response();
+            return backend_failure(&e, "backend size lookup failed").into_response();
         }
     };
     let Some((start, end)) = r.resolve(total) else {
@@ -1190,8 +1281,7 @@ async fn download_range(
         }
         Err(e) => {
             // Existence and range were already validated: a genuine I/O fault.
-            tracing::error!(error = %e, "backend get_range failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, "backend error").into_response()
+            backend_failure(&e, "backend get_range failed").into_response()
         }
     }
 }
@@ -1216,10 +1306,7 @@ async fn download_whole(
             }
             resp
         }
-        Err(e) => {
-            tracing::error!(error = %e, "backend get failed after existence check");
-            (StatusCode::INTERNAL_SERVER_ERROR, "backend error").into_response()
-        }
+        Err(e) => backend_failure(&e, "backend get failed after existence check").into_response(),
     }
 }
 

@@ -367,7 +367,24 @@ impl MultipartRepo {
             .all(conn)
             .await
             .map_err(DomainError::from)?;
-        rows.into_iter().map(session_from_model).collect()
+        // One unreadable row must not hide every other expired session from cleanup.
+        Ok(rows
+            .into_iter()
+            .filter_map(|m| {
+                let upload_id = m.upload_id;
+                match session_from_model(m) {
+                    Ok(session) => Some(session),
+                    Err(e) => {
+                        tracing::warn!(
+                            upload_id = %upload_id,
+                            error = ?e,
+                            "skipping unreadable expired multipart session"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect())
     }
 
     /// Whether `file_id` has an active (`in_progress` or `completing`) multipart session.
@@ -436,17 +453,13 @@ fn session_from_model(m: UploadModel) -> Result<MultipartUploadSession, DomainEr
             m.upload_id, m.state
         ))
     })?;
-    let missing = |column: &str| {
-        DomainError::database(format!(
-            "multipart upload {} has no {column} in DB",
-            m.upload_id
-        ))
-    };
-    let backend_id = m.backend_id.clone().ok_or_else(|| missing("backend_id"))?;
+    let backend_id = m.backend_id.clone();
+    // Every binary, old or new, writes sessions under this one layout, so a NULL column (a
+    // session started by an old instance after the migration) resolves to the same path.
     let backend_path = m
         .backend_path
         .clone()
-        .ok_or_else(|| missing("backend_path"))?;
+        .unwrap_or_else(|| crate::domain::storage_layout::backend_path(m.file_id, m.version_id));
     let declared_size = u64::try_from(m.declared_size).unwrap_or(0);
     let part_size = u64::try_from(m.part_size).unwrap_or(0);
     Ok(MultipartUploadSession {

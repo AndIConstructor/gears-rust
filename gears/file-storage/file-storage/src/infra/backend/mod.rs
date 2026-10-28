@@ -23,6 +23,27 @@ pub use in_memory::InMemoryBackend;
 pub use local_fs::LocalFsBackend;
 pub use s3::S3Backend;
 
+/// Classifies an I/O error of backend `backend_id`: timeouts, interruptions, resets and aborted
+/// or truncated transfers are transient (`BackendUnavailable`); the rest is permanent (`Backend`).
+#[must_use]
+pub fn classify_io_error(backend_id: &str, e: &std::io::Error) -> DomainError {
+    use std::io::ErrorKind;
+    if matches!(
+        e.kind(),
+        ErrorKind::TimedOut
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
+    ) {
+        DomainError::backend_unavailable(backend_id, e.to_string())
+    } else {
+        DomainError::backend(backend_id, e.to_string())
+    }
+}
+
 use crate::infra::content::hash_mode::ManifestEntry;
 
 /// One part of a multipart completion: `(part_number, offset, part_hash, backend_etag)`.

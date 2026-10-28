@@ -343,7 +343,7 @@ leave `content_id` untouched at finalize and require the client to make the exis
 activate the uploaded content. Either way the bind **MUST** remain the same optimistic-CAS operation
 (`cpt-cf-file-storage-fr-conditional-requests`): auto-bind either wins the CAS or reports a conflict without failing
 the upload, and the outcome **MUST** be reported back to the caller (`X-FS-Bound` header for single-part,
-`bind_state` field for multipart complete).
+`bind_state` field for multipart complete, with the same closed vocabulary `bound`/`conflict`/`manual`).
 
 **Rationale**: Auto-bind collapses the common "upload then immediately make it live" case from three round trips
 (presign, upload, bind) down to two (presign, upload) without weakening the CAS guarantee a manual bind already

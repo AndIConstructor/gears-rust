@@ -4,6 +4,9 @@ use toolkit::api::canonical_prelude::*;
 
 use crate::domain::error::DomainError;
 
+/// `Retry-After` hint for transient backend failures (see `docs/api.md`).
+const BACKEND_RETRY_AFTER_SECONDS: u64 = 5;
+
 #[resource_error(gts_id!("cf.fstorage.file.object.v1~"))]
 struct FileResourceError;
 
@@ -81,6 +84,20 @@ impl From<DomainError> for CanonicalError {
             } => {
                 tracing::error!(backend_id, message, "storage backend error");
                 CanonicalError::internal("storage backend error").create()
+            }
+            DomainError::BackendUnavailable {
+                backend_id,
+                message,
+            } => {
+                tracing::warn!(
+                    backend_id,
+                    message,
+                    "storage backend temporarily unavailable"
+                );
+                CanonicalError::service_unavailable()
+                    .with_detail("storage backend temporarily unavailable")
+                    .with_retry_after_seconds(BACKEND_RETRY_AFTER_SECONDS)
+                    .create()
             }
             DomainError::Database { .. } => {
                 tracing::error!(error = ?e, "database error");

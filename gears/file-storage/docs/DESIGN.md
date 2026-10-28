@@ -1082,7 +1082,7 @@ control plane's finalize handler performs the pointer swap inline instead of wai
 `bind: "auto"`, which bakes a `bind_on_finalize` claim into the upload token: the finalize callback then also swaps
 `content_id` — in the same transaction as the `pending → available` flip, under a strict `content_id IS NULL` CAS —
 so a single-file upload is just `POST /files` + `PUT`, with no separate `bind`. The `PUT` response reports the
-outcome via fixed headers the sidecar forwards transparently from the finalize response: `X-FS-Bound: true` +
+outcome via fixed headers the sidecar forwards transparently from the finalize response: `X-FS-Bound: bound` +
 `ETag: <new>` on a won CAS, `X-FS-Bound: conflict` + `X-FS-Current-ETag: <current>` on a lost one (e.g. two
 create-tokens minted for one new file — the client resolves with a manual `bind`, no re-upload). This is a
 **deliberate, narrow extension of the signed-URL delegated-authorization model (§4.5, ADR-0003/ADR-0004)**: the
@@ -1285,7 +1285,7 @@ with `404` on its own now-missing parent, rather than being silently cascade-rem
 find it by). `DELETE /files/{id}/versions/{vid}` (§3.3) applies the same lock-then-re-list rule to its own "is
 `vid` the file's only version?" decision when that delete is equivalent to deleting the whole file, and the
 orphan-reclaim sweep (`cleanup-engine`, above) applies it to its own zero-version check before reclaiming a
-versionless `files` row.
+`files` row left without versions.
 
 #### List files (P1)
 
@@ -1401,9 +1401,9 @@ The file row holds **no bytes and no per-content fields** (mime, size, hash, bac
   (`m20260624_000001_p1_initial`), dropped in the same migration
 - `(tenant_id, gts_file_type)` — supports per-type queries
 - partial index on `(created_at, file_id) WHERE content_id IS NULL` — supports the cleanup engine's
-  versionless-orphan-file sweep (a `POST /files` multipart create that crashed between the bare file insert and the
-  pending-version insert; `files_versionless_sweep_idx`, which comes with a later migration together with the cleanup
-  job that uses it)
+  planned sweep of files that never had a version (`files_versionless_sweep_idx`, which comes with a later migration
+  together with the cleanup job that uses it; the sweep itself is not implemented yet, and a composite `POST /files`
+  commits the file and its pending version in one transaction, so it does not produce such rows)
 
 #### Table: `file_versions`
 
@@ -1996,7 +1996,7 @@ mediated by the LMS.
    file still has no content (`content_id IS NULL`), so this path can never replace existing content. The
    outcome goes back to the sidecar in the callback response.
 7. The sidecar returns `200` to the browser once finalize succeeds, forwarding the bind outcome as response
-   headers: `X-FS-Bound: true` + `ETag: <new content ETag>` when the compare-and-set won — the upload is now the
+   headers: `X-FS-Bound: bound` + `ETag: <new content ETag>` when the compare-and-set won — the upload is now the
    file's live content, with no separate `bind` call. The client issues only `POST /files` and the `PUT`; finalize
    is the sidecar's own callback.
 
@@ -2007,7 +2007,7 @@ mediated by the LMS.
 > are already finalized.
 
 **Manual alternative.** With `bind: "manual"` the token carries no `bind_on_finalize` claim, finalize never touches
-`content_id`, and the `PUT` response carries no `X-FS-Bound` header; the LMS backend makes a separate
+`content_id`, and the `PUT` response answers `X-FS-Bound: manual` (no `ETag`); the LMS backend makes a separate
 `POST /files/{id}/bind { version_id }` request to make the upload the file's live content. `If-Match` may be
 omitted on the first bind of a file that has no content yet, and is required to rebind already-bound content
 (otherwise `400`).

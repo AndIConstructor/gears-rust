@@ -3,15 +3,17 @@
 //! 1. `multipart_uploads`: `auto_bind`, completion-lease columns (`lease_owner`, `lease_until`,
 //!    `complete_result`; `state` CHECK widened to admit `completing`), and
 //!    `backend_id`/`backend_path` so expired-session cleanup does not need a reclaimed
-//!    `file_versions` row. `SQLite` cannot alter a CHECK, so the table is rebuilt; child
-//!    `multipart_upload_parts` rows are evacuated first (`DROP TABLE` would cascade them;
+//!    `file_versions` row. Existing sessions are backfilled from their `file_versions` row;
+//!    sessions without a version row (and ones inserted by an old binary after the migration)
+//!    stay NULL and are resolved at read time. `SQLite` cannot alter a CHECK, so the table is
+//!    rebuilt; child `multipart_upload_parts` rows are evacuated first (`DROP TABLE` would cascade them;
 //!    `PRAGMA foreign_keys` cannot be toggled mid-transaction) and the two indexes recreated.
 //! 2. Index `idempotency_keys_file_idx` (FK-cascade index for replay lookup and cascade delete).
 //! 3. `file_versions.bound_on_finalize`: lets an idempotent finalize retry report the bind
 //!    outcome without re-reading `files.content_id`.
 //!
 //! `down()` reverses all three; `completing` rows are folded into `aborted` first (the narrow
-//! CHECK cannot hold them); `backend_id`/`backend_path` are dropped without backfill.
+//! CHECK cannot hold them); `backend_id`/`backend_path` are dropped (a repeated `up()` backfills them).
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::ConnectionTrait;
@@ -41,6 +43,12 @@ ALTER TABLE multipart_uploads
     ADD COLUMN IF NOT EXISTS backend_id text NULL;
 ALTER TABLE multipart_uploads
     ADD COLUMN IF NOT EXISTS backend_path text NULL;
+-- Sessions created before this migration: copy the pair from their version row.
+UPDATE multipart_uploads mu
+   SET backend_id = fv.backend_id, backend_path = fv.backend_path
+  FROM file_versions fv
+ WHERE fv.file_id = mu.file_id AND fv.version_id = mu.version_id
+   AND mu.backend_id IS NULL;
 
 -- Part 2: FK-cascade index (see the module doc).
 CREATE INDEX IF NOT EXISTS idempotency_keys_file_idx
@@ -54,6 +62,9 @@ ALTER TABLE file_versions
 // SQLite rebuild (create-copy-drop-rename); see the module doc.
 const SQLITE_UP: &str = r"
 CREATE TABLE multipart_upload_parts_backup AS SELECT * FROM multipart_upload_parts;
+-- Without an FK cascade (`PRAGMA foreign_keys` off) the part rows would survive the DROP
+-- below and the re-insert from the backup would fail on the primary key.
+DELETE FROM multipart_upload_parts;
 
 CREATE TABLE multipart_uploads_new (
     upload_id              TEXT  PRIMARY KEY NOT NULL,
@@ -79,12 +90,14 @@ CREATE TABLE multipart_uploads_new (
 INSERT INTO multipart_uploads_new (
     upload_id, file_id, version_id, backend_upload_handle, state,
     declared_mime, mime_validated, declared_size, part_size,
-    created_at, expires_at
+    backend_id, backend_path, created_at, expires_at
 )
 SELECT mu.upload_id, mu.file_id, mu.version_id, mu.backend_upload_handle, mu.state,
        mu.declared_mime, mu.mime_validated, mu.declared_size, mu.part_size,
-       mu.created_at, mu.expires_at
-FROM multipart_uploads mu;
+       fv.backend_id, fv.backend_path, mu.created_at, mu.expires_at
+FROM multipart_uploads mu
+LEFT JOIN file_versions fv
+       ON fv.file_id = mu.file_id AND fv.version_id = mu.version_id;
 DROP TABLE multipart_uploads;
 ALTER TABLE multipart_uploads_new RENAME TO multipart_uploads;
 
@@ -136,6 +149,9 @@ DROP INDEX IF EXISTS idempotency_keys_file_idx;
 ALTER TABLE file_versions DROP COLUMN bound_on_finalize;
 
 CREATE TABLE multipart_upload_parts_backup AS SELECT * FROM multipart_upload_parts;
+-- Without an FK cascade (`PRAGMA foreign_keys` off) the part rows would survive the DROP
+-- below and the re-insert from the backup would fail on the primary key.
+DELETE FROM multipart_upload_parts;
 
 CREATE TABLE multipart_uploads_old (
     upload_id              TEXT  PRIMARY KEY NOT NULL,
@@ -162,10 +178,8 @@ SELECT upload_id, file_id, version_id, backend_upload_handle,
        declared_mime, mime_validated, declared_size, part_size,
        created_at, expires_at
 FROM multipart_uploads;
--- backend_id/backend_path are dropped along with the other four columns this
--- migration added -- up()'s copy is not mirrored in reverse (no rebuild reads
--- them back out of file_versions); the round trip is schema-equivalence
--- only, not data preservation of these two columns.
+-- backend_id/backend_path are simply dropped along with the other four columns this
+-- migration added; a repeated up() backfills them again from file_versions.
 DROP TABLE multipart_uploads;
 ALTER TABLE multipart_uploads_old RENAME TO multipart_uploads;
 

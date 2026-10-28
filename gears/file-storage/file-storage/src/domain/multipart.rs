@@ -60,11 +60,31 @@ pub struct MultipartUploadSession {
     pub lease_until: Option<OffsetDateTime>,
     /// Persisted `StoredCompleteResult` JSON once `Completed`; a re-complete replays it.
     pub complete_result: Option<String>,
-    pub backend_id: String,
+    /// `None` for a session written by a binary from before the upload-flow migration and not
+    /// backfilled (no version row); resolved as version, then this field, then the default
+    /// backend (see [`MultipartUploadSession::resolve_backend_id`]).
+    pub backend_id: Option<String>,
     /// Backend object path; lets expired-session cleanup work after the `file_versions` row is gone.
     pub backend_path: String,
     pub created_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
+}
+
+impl MultipartUploadSession {
+    /// Backend this session targets: the version row's backend, else the session's stored one,
+    /// else `default_id` (logged, since it is a guess).
+    #[must_use]
+    pub fn resolve_backend_id(&self, version_backend_id: Option<&str>, default_id: &str) -> String {
+        if let Some(id) = version_backend_id.or(self.backend_id.as_deref()) {
+            return id.to_owned();
+        }
+        tracing::warn!(
+            upload_id = %self.upload_id,
+            default_backend = default_id,
+            "multipart session has no stored backend and no version row; using the default backend"
+        );
+        default_id.to_owned()
+    }
 }
 
 /// Outcome of `complete_multipart_upload`: finished, or another caller holds the lease (`202`).
@@ -230,6 +250,11 @@ impl BindDecision {
 /// `bound_on_finalize` flag (a retry must not turn `Bound` into `Conflict`), a manual upload
 /// never reports a bind outcome, and an auto-bind upload that lost the CAS reads the live pointer
 /// (`Bound` if the file now points at this version, else `Conflict` with the current `ETag`).
+///
+/// The auto-bind CAS is a strict `content_id IS NULL` and the pointer never goes back to NULL,
+/// so `auto_bind` without `bound_on_finalize` and an empty pointer means no bind ever ran (a
+/// binary without auto-bind finished the upload in the mixed-version window): `Manual`, and the
+/// client binds itself. `Conflict` therefore always carries the current `ETag`.
 #[must_use]
 pub fn replay_bind_state(
     file_id: Uuid,
@@ -240,7 +265,8 @@ pub fn replay_bind_state(
 ) -> (BindState, Option<String>, Option<String>) {
     let decision = if bound_on_finalize {
         BindDecision::Bound
-    } else if !auto_bind {
+    } else if !auto_bind || content_id.is_none() {
+        // Manual upload, or auto-bind that never ran (see above): the client binds itself.
         BindDecision::Manual
     } else if content_id == Some(version_id) {
         BindDecision::Bound
@@ -440,6 +466,30 @@ mod tests {
         assert_eq!(round_up_to(1, u64::MAX), Some(u64::MAX));
         assert_eq!(round_up_to(7, 5), Some(10));
         assert_eq!(round_up_to(10, 5), Some(10));
+    }
+
+    #[test]
+    fn replay_bind_state_auto_bind_without_bind_and_empty_pointer_is_manual() {
+        let (file_id, version_id) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let (state, etag, current) = replay_bind_state(file_id, None, version_id, false, true);
+        assert_eq!(state, BindState::Manual);
+        assert_eq!(etag, None);
+        assert_eq!(current, None);
+
+        // Existing cases stay as they were.
+        let (state, etag, _) =
+            replay_bind_state(file_id, Some(version_id), version_id, false, true);
+        assert_eq!(state, BindState::Bound);
+        assert!(etag.is_some());
+        let (state, etag, current) =
+            replay_bind_state(file_id, Some(Uuid::from_u128(3)), version_id, false, true);
+        assert_eq!(state, BindState::Conflict);
+        assert_eq!(etag, None);
+        assert!(current.is_some());
+        let (state, _, _) = replay_bind_state(file_id, None, version_id, true, true);
+        assert_eq!(state, BindState::Bound);
+        let (state, _, _) = replay_bind_state(file_id, None, version_id, false, false);
+        assert_eq!(state, BindState::Manual);
     }
 
     #[test]

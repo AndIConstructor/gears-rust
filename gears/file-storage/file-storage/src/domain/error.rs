@@ -56,6 +56,11 @@ pub enum DomainError {
     #[error("Storage backend '{backend_id}' error: {message}")]
     Backend { backend_id: String, message: String },
 
+    /// 503 — transient backend failure (network, timeout, overload / 5xx, lost race of a concurrent
+    /// object change); the caller may retry. Permanent failures stay `Backend` (500).
+    #[error("Storage backend '{backend_id}' temporarily unavailable: {message}")]
+    BackendUnavailable { backend_id: String, message: String },
+
     #[error("Unknown storage backend: '{backend_id}'")]
     UnknownBackend { backend_id: String },
 
@@ -191,6 +196,13 @@ impl DomainError {
 
     pub fn backend(backend_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Backend {
+            backend_id: backend_id.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn backend_unavailable(backend_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::BackendUnavailable {
             backend_id: backend_id.into(),
             message: message.into(),
         }

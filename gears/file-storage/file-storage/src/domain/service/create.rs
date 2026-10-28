@@ -76,6 +76,148 @@ impl FileService {
         }
     }
 
+    /// Gts type and `WRITE` authorization (no file id yet): the first gate of every create path.
+    async fn authorize_create(
+        &self,
+        ctx: &SecurityContext,
+        new: &NewFile,
+    ) -> Result<(), DomainError> {
+        Self::validate_gts_type(&new.gts_file_type)?;
+        self.authorizer
+            .authorize(ctx, actions::WRITE, &new.gts_file_type, None)
+            .await?;
+        Ok(())
+    }
+
+    /// Policy gates of a create: allowed MIME, the size ceiling and the metadata limits. Quota is
+    /// checked by the caller: single-part uses the pessimistic `effective_max`, multipart the
+    /// declared size.
+    async fn validate_create_policy(
+        &self,
+        ctx: &SecurityContext,
+        new: &NewFile,
+        initial_meta: &[(String, String)],
+    ) -> Result<Option<u64>, DomainError> {
+        let policy = self
+            .get_effective_policy_internal(ctx.subject_tenant_id(), new.owner_id)
+            .await?;
+        PolicyResolver::check_allowed_mime(&policy, &new.mime_type)?;
+        let effective_max = PolicyResolver::compute_effective_max_bytes(
+            &policy,
+            &new.mime_type,
+            self.backends
+                .default_backend()
+                .capabilities()
+                .max_size_bytes,
+        );
+        PolicyResolver::check_metadata_limits(&policy, initial_meta)?;
+        Ok(effective_max)
+    }
+
+    fn initial_metadata(new: &NewFile) -> Vec<(String, String)> {
+        new.custom_metadata
+            .iter()
+            .map(|e| (e.key.clone(), e.value.clone()))
+            .collect()
+    }
+
+    /// Everything that can reject a create before its first write, for paths without an
+    /// idempotency replay (the composite create): authorization, then policy. Single-part
+    /// [`Self::create_file`] runs the two halves around the idempotency replay instead.
+    pub(crate) async fn validate_create_inputs(
+        &self,
+        ctx: &SecurityContext,
+        new: &NewFile,
+    ) -> Result<(), DomainError> {
+        self.authorize_create(ctx, new).await?;
+        let meta = Self::initial_metadata(new);
+        self.validate_create_policy(ctx, new, &meta).await?;
+        Ok(())
+    }
+
+    /// Commit the file, its first pending version, metadata, `file.created` event and audit row in
+    /// one transaction (plus the idempotency record, if any), then report usage `+1`.
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_new_file(
+        &self,
+        ctx: &SecurityContext,
+        new: &NewFile,
+        file_id: Uuid,
+        version_id: Uuid,
+        backend_id: &str,
+        backend_path: &str,
+        now: OffsetDateTime,
+        idempotency: Option<IdempotencyInsert>,
+    ) -> Result<(), DomainError> {
+        let tenant_id = ctx.subject_tenant_id();
+        let owner_id = new.owner_id;
+        let audit = Self::audit_ok(
+            ctx,
+            Some(file_id),
+            AuditOperation::Create,
+            serde_json::json!({ "version_id": version_id, "gts_file_type": new.gts_file_type }),
+        );
+        let event = Some(Self::make_file_event(
+            tenant_id,
+            owner_id,
+            file_id,
+            "file.created",
+            serde_json::json!({ "version_id": version_id, "gts_file_type": new.gts_file_type }),
+        ));
+        self.store
+            .create_file_with_pending_version_and_event(
+                new,
+                file_id,
+                version_id,
+                tenant_id,
+                backend_id,
+                backend_path,
+                now,
+                audit,
+                event,
+                idempotency,
+            )
+            .await?;
+
+        // Fire-and-forget usage report.
+        self.report_usage(UsageDelta {
+            tenant_id,
+            owner_id,
+            bytes_delta: 0, // bytes unknown at creation; finalize_upload updates the backend
+            file_count_delta: 1,
+        });
+        Ok(())
+    }
+
+    /// Composite `POST /files` (multipart plan): commit the file and its pending version in one
+    /// transaction, with no idempotency record and no quota check (the caller validated the plan,
+    /// including the quota for the declared size). Returns `(file_id, version_id)`.
+    #[tracing::instrument(skip_all)]
+    pub async fn create_file_with_pending_version(
+        &self,
+        ctx: &SecurityContext,
+        new: &NewFile,
+    ) -> Result<(Uuid, Uuid), DomainError> {
+        let now = OffsetDateTime::now_utc();
+        let file_id = Uuid::now_v7();
+        let version_id = Uuid::now_v7();
+        let backend_id = self.backends.default_backend().id().to_owned();
+        let backend_path = Self::backend_path(file_id, version_id);
+        self.commit_new_file(
+            ctx,
+            new,
+            file_id,
+            version_id,
+            &backend_id,
+            &backend_path,
+            now,
+            None,
+        )
+        .await?;
+        self.metrics.record_operation("create_file", "ok");
+        Ok((file_id, version_id))
+    }
+
     /// `POST /files`: create a file and presign the first content upload.
     /// An optional `idempotency_key` deduplicates retried requests.
     ///
@@ -93,12 +235,12 @@ impl FileService {
         let owner_id = new.owner_id;
         let owner_kind_str = new.owner_kind.as_str().to_owned();
 
+        // Authorize BEFORE consulting the idempotency record, so a replay (which returns a
+        // live signed URL) always clears the caller's current grants.
+        self.authorize_create(ctx, &new).await?;
+        let initial_meta = Self::initial_metadata(&new);
+
         // Computed once: the replay comparison and the fresh insert must use the same hash.
-        let initial_meta: Vec<(String, String)> = new
-            .custom_metadata
-            .iter()
-            .map(|e| (e.key.clone(), e.value.clone()))
-            .collect();
         let request_hash = crate::domain::idempotency::compute_request_hash(
             &owner_kind_str,
             owner_id,
@@ -107,14 +249,6 @@ impl FileService {
             &new.mime_type,
             &initial_meta,
         );
-
-        // Authorize BEFORE consulting the idempotency record, so a replay (which returns a
-        // live signed URL) always clears the caller's current grants.
-        Self::validate_gts_type(&new.gts_file_type)?;
-        let _scope = self
-            .authorizer
-            .authorize(ctx, actions::WRITE, &new.gts_file_type, None)
-            .await?;
 
         // Stored record is bound to its creating subject; a mismatch is `Forbidden`, not a fresh create.
         if let Some(ref key) = idempotency_key
@@ -135,44 +269,19 @@ impl FileService {
             return Ok(ticket);
         }
 
-        let policy = self
-            .get_effective_policy_internal(tenant_id, owner_id)
+        // Policy checks for a fresh create; a replay (above) re-checks the current policy itself.
+        let effective_max = self
+            .validate_create_policy(ctx, &new, &initial_meta)
             .await?;
-
-        PolicyResolver::check_allowed_mime(&policy, &new.mime_type)?;
-
-        let backend = self.backends.default_backend();
-        let effective_max = PolicyResolver::compute_effective_max_bytes(
-            &policy,
-            &new.mime_type,
-            backend.capabilities().max_size_bytes,
-        );
-
-        PolicyResolver::check_metadata_limits(&policy, &initial_meta)?;
-
         self.check_quota(tenant_id, owner_id, effective_max, "create_file")
             .await?;
 
         let now = OffsetDateTime::now_utc();
         let file_id = Uuid::now_v7();
         let version_id = Uuid::now_v7();
+        let backend = self.backends.default_backend();
         let backend_id = backend.id().to_owned();
         let backend_path = Self::backend_path(file_id, version_id);
-
-        let audit = Self::audit_ok(
-            ctx,
-            Some(file_id),
-            AuditOperation::Create,
-            serde_json::json!({ "version_id": version_id, "gts_file_type": new.gts_file_type }),
-        );
-
-        let event = Some(Self::make_file_event(
-            tenant_id,
-            owner_id,
-            file_id,
-            "file.created",
-            serde_json::json!({ "version_id": version_id, "gts_file_type": new.gts_file_type }),
-        ));
 
         // `sign_url` has no DB dependency, so the ticket and the idempotency replay body
         // are built first and persisted atomically in the create transaction.
@@ -203,7 +312,7 @@ impl FileService {
                 file_id: ticket.file_id,
                 version_id: ticket.version_id,
                 upload_url: ticket.upload_url.clone(),
-                auto_bind,
+                auto_bind: Some(auto_bind),
             })
             .unwrap_or_default();
             let expires_at = now
@@ -224,28 +333,17 @@ impl FileService {
             }
         });
 
-        self.store
-            .create_file_with_pending_version_and_event(
-                &new,
-                file_id,
-                version_id,
-                tenant_id,
-                &backend_id,
-                &backend_path,
-                now,
-                audit,
-                event,
-                idempotency,
-            )
-            .await?;
-
-        // Fire-and-forget usage report.
-        self.report_usage(UsageDelta {
-            tenant_id,
-            owner_id,
-            bytes_delta: 0, // bytes unknown at creation; finalize_upload updates the backend
-            file_count_delta: 1,
-        });
+        self.commit_new_file(
+            ctx,
+            &new,
+            file_id,
+            version_id,
+            &backend_id,
+            &backend_path,
+            now,
+            idempotency,
+        )
+        .await?;
 
         self.metrics.record_operation("create_file", "ok");
         Ok(ticket)
@@ -285,7 +383,9 @@ impl FileService {
         let stored: IdempotencyTicket = serde_json::from_str(&record.response_body)
             .map_err(|_| DomainError::database("failed to deserialize idempotency body"))?;
 
-        if stored.auto_bind != auto_bind {
+        if let Some(stored_mode) = stored.auto_bind
+            && stored_mode != auto_bind
+        {
             return Err(DomainError::conflict(IDEMPOTENCY_BODY_MISMATCH));
         }
 
@@ -344,7 +444,7 @@ impl FileService {
                 ..UploadConstraints::default()
             },
             None,
-            stored.auto_bind,
+            stored.auto_bind.unwrap_or(false),
         )?;
         self.metrics.record_operation("create_file", "replayed");
         Ok(Some(UploadTicket {
@@ -352,132 +452,6 @@ impl FileService {
             version_id: stored.version_id,
             upload_url,
         }))
-    }
-
-    /// Create the file row only (no pending version, no URL) for the merged `POST /files` path;
-    /// same gates as [`Self::create_file`]. Returns the new `file_id`.
-    #[tracing::instrument(skip_all)]
-    pub async fn create_file_bare(
-        &self,
-        ctx: &SecurityContext,
-        new: NewFile,
-    ) -> Result<Uuid, DomainError> {
-        let tenant_id = ctx.subject_tenant_id();
-        let owner_id = new.owner_id;
-
-        Self::validate_gts_type(&new.gts_file_type)?;
-        let _scope = self
-            .authorizer
-            .authorize(ctx, actions::WRITE, &new.gts_file_type, None)
-            .await?;
-
-        let policy = self
-            .get_effective_policy_internal(tenant_id, owner_id)
-            .await?;
-        PolicyResolver::check_allowed_mime(&policy, &new.mime_type)?;
-        let backend = self.backends.default_backend();
-        let effective_max = PolicyResolver::compute_effective_max_bytes(
-            &policy,
-            &new.mime_type,
-            backend.capabilities().max_size_bytes,
-        );
-        let initial_meta: Vec<(String, String)> = new
-            .custom_metadata
-            .iter()
-            .map(|e| (e.key.clone(), e.value.clone()))
-            .collect();
-        PolicyResolver::check_metadata_limits(&policy, &initial_meta)?;
-        self.check_quota(tenant_id, owner_id, effective_max, "create_file")
-            .await?;
-
-        let now = OffsetDateTime::now_utc();
-        let file_id = Uuid::now_v7();
-
-        let audit = Self::audit_ok(
-            ctx,
-            Some(file_id),
-            AuditOperation::Create,
-            serde_json::json!({ "gts_file_type": new.gts_file_type }),
-        );
-        let event = Some(Self::make_file_event(
-            tenant_id,
-            owner_id,
-            file_id,
-            "file.created",
-            serde_json::json!({ "gts_file_type": new.gts_file_type }),
-        ));
-
-        self.store
-            .create_file_with_event(&new, file_id, tenant_id, now, audit, event)
-            .await?;
-
-        self.report_usage(UsageDelta {
-            tenant_id,
-            owner_id,
-            bytes_delta: 0,
-            file_count_delta: 1,
-        });
-
-        self.metrics.record_operation("create_file", "ok");
-        Ok(file_id)
-    }
-
-    /// Compensating action for the merged path: deletes the version-less file row
-    /// [`Self::create_file_bare`] committed when multipart initiate fails. Best-effort (logged);
-    /// leftovers are reclaimed by `CleanupEngine::sweep_versionless_files`.
-    pub async fn compensate_failed_multipart_initiate(&self, ctx: &SecurityContext, file_id: Uuid) {
-        let scope = AccessScope::allow_all();
-        let file = match self.store.get_file(&scope, file_id).await {
-            Ok(Some(f)) => f,
-            Ok(None) => return, // already gone somehow -- nothing to compensate
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    %file_id,
-                    "failed to load file for multipart-initiate compensation"
-                );
-                return;
-            }
-        };
-        let audit = Self::audit_ok(
-            ctx,
-            Some(file_id),
-            AuditOperation::OrphanReconcile,
-            serde_json::json!({ "reason": "multipart_initiate_failed" }),
-        );
-        let event = Some(Self::make_file_event(
-            file.tenant_id,
-            file.owner_id,
-            file_id,
-            "file.deleted",
-            serde_json::json!({ "reason": "multipart_initiate_failed" }),
-        ));
-        match self
-            .store
-            .delete_orphan_file_with_event(file_id, audit, event)
-            .await
-        {
-            Ok(true) => {
-                self.report_usage(UsageDelta {
-                    tenant_id: file.tenant_id,
-                    owner_id: file.owner_id,
-                    bytes_delta: 0,
-                    file_count_delta: -1,
-                });
-            }
-            Ok(false) => {
-                // Guard declined (a version now exists) or a sweep already removed it.
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    %file_id,
-                    "failed to compensate orphan file after multipart-initiate failure -- \
-                     CleanupEngine's sweep_versionless_files phase will reclaim it once it \
-                     ages past orphan_grace_secs"
-                );
-            }
-        }
     }
 
     /// `POST /files/{id}/versions`: presign a new content version (bound later via `bind`).

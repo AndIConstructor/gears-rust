@@ -337,6 +337,15 @@ impl MultipartStore for Store {
     ) -> Result<bool, DomainError> {
         Store::delete_version(self, file_id, version_id, audit).await
     }
+
+    async fn delete_orphan_file_with_event(
+        &self,
+        file_id: Uuid,
+        audit: crate::domain::audit::AuditEntry,
+        event: Option<crate::domain::audit::FileEvent>,
+    ) -> Result<bool, DomainError> {
+        Store::delete_orphan_file_with_event(self, file_id, audit, event).await
+    }
 }
 
 #[async_trait]

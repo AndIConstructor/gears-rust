@@ -1,5 +1,5 @@
 //! Shared `POST /files` orchestration for the REST handler and the SDK local client: single-part
-//! vs. merged create+plan multipart path, with orphan-file compensation when initiate fails.
+//! vs. merged create+plan multipart path (file and pending version in one transaction).
 
 use uuid::Uuid;
 
@@ -30,8 +30,11 @@ pub enum CreateFileOutcome {
 /// `POST /files`: create a file and presign its first content upload.
 ///
 /// No `multipart` intent (or a one-part plan) yields a single pending version
-/// ([`CreateFileOutcome::SinglePart`]). With 2+ parts it creates the bare file row and returns
-/// [`CreateFileOutcome::Multipart`]; a failed initiate deletes the orphaned row first.
+/// ([`CreateFileOutcome::SinglePart`]). With 2+ parts every check (authorization, MIME and size
+/// policy, plan, quota for the declared size) runs before the first write; then the file, its
+/// pending version and `file.created` are committed in one transaction, the session is opened for
+/// that version, and [`CreateFileOutcome::Multipart`] is returned. A failed session open removes
+/// the version and the file again.
 ///
 /// `idempotency_key` is rejected with a `multipart` intent (the stored record fits only a
 /// single-part ticket).
@@ -54,28 +57,31 @@ pub async fn create_file(
         // One-part plans fall through to the single-part path.
         let (_, planned_parts) = compute_plan(mp.declared_size, mp.preferred_part_size, None)?;
         if planned_parts.len() >= 2 {
-            let mime_type = new.mime_type.clone();
-            let file_id = file_svc.create_file_bare(ctx, new).await?;
-            let plan = match multipart_svc
-                .initiate_multipart_upload(
+            // Everything that can reject the request runs before the first write.
+            file_svc.validate_create_inputs(ctx, &new).await?;
+            let validated = multipart_svc
+                .validate_multipart_plan(
                     ctx,
-                    file_id,
-                    &mime_type,
+                    new.owner_id,
+                    &new.mime_type,
                     mp.declared_size,
                     mp.preferred_part_size,
+                )
+                .await?;
+            let (file_id, version_id) =
+                file_svc.create_file_with_pending_version(ctx, &new).await?;
+            let plan = multipart_svc
+                .open_session_for_created_file(
+                    ctx,
+                    new.owner_id,
+                    file_id,
+                    version_id,
+                    &new.mime_type,
+                    mp.declared_size,
+                    validated,
                     auto_bind,
                 )
-                .await
-            {
-                Ok(plan) => plan,
-                Err(e) => {
-                    // Otherwise the bare file would stay a version-less orphan.
-                    file_svc
-                        .compensate_failed_multipart_initiate(ctx, file_id)
-                        .await;
-                    return Err(e);
-                }
-            };
+                .await?;
             return Ok(CreateFileOutcome::Multipart { file_id, plan });
         }
     }

@@ -169,18 +169,28 @@ impl S3Backend {
         format!("/{key}")
     }
 
+    /// Timeouts, connect failures, request dispatch and body-read failures are transient;
+    /// builder, redirect, decode and the like are configuration or protocol errors.
     fn transport_err(&self, e: &reqwest::Error) -> DomainError {
-        DomainError::backend(&self.id, e.to_string())
+        self.classified(is_transient_transport(e), e.to_string())
     }
 
     /// Maps a non-2xx response to a `DomainError`, using the S3 XML error body if present
     /// (HEAD responses have none).
     fn s3_error(&self, status: StatusCode, body: &[u8]) -> DomainError {
-        match parse_error_body(body) {
-            Some((code, message)) => {
-                DomainError::backend(&self.id, format!("S3 error {status} ({code}): {message}"))
-            }
-            None => DomainError::backend(&self.id, format!("S3 error {status}")),
+        let message = match parse_error_body(body) {
+            Some((code, message)) => format!("S3 error {status} ({code}): {message}"),
+            None => format!("S3 error {status}"),
+        };
+        let code = parse_error_body(body).map(|(code, _)| code);
+        self.classified(is_transient_s3(status, code.as_deref()), message)
+    }
+
+    fn classified(&self, transient: bool, message: String) -> DomainError {
+        if transient {
+            DomainError::backend_unavailable(&self.id, message)
+        } else {
+            DomainError::backend(&self.id, message)
         }
     }
 
@@ -198,9 +208,12 @@ impl S3Backend {
 
     /// Like `send_and_check` for a create-exclusive write: `Ok(true)` = created, `Ok(false)` = `412`
     /// (object already existed, untouched). Any other non-2xx is an error.
+    ///
+    /// `exclusive` says the request carried `If-None-Match`: only then is a `409` the lost race.
     async fn send_and_check_created(
         &self,
         req: reqwest::RequestBuilder,
+        exclusive: bool,
     ) -> Result<bool, DomainError> {
         let resp = req.send().await.map_err(|e| self.transport_err(&e))?;
         let status = resp.status();
@@ -209,6 +222,11 @@ impl S3Backend {
             Ok(true)
         } else if status == StatusCode::PRECONDITION_FAILED {
             Ok(false)
+        } else if exclusive && status == StatusCode::CONFLICT {
+            // `ConditionalRequestConflict`: a concurrent DELETE of the key finished before this
+            // conditional write; the outcome is unknown, so it is a transient failure, not
+            // `created: false`.
+            Err(self.classified(true, conflict_message(status, &body)))
         } else {
             Err(self.s3_error(status, &body))
         }
@@ -222,12 +240,18 @@ impl S3Backend {
         // Every signed header must also be sent with the signed value, or S3 rejects the signature.
         action.headers_mut().insert("if-none-match", "*");
         let url = action.sign(SIGN_DURATION);
-        self.send_and_check_created(self.http.put(url).header("if-none-match", "*").body(bytes))
-            .await
+        self.send_and_check_created(
+            self.http.put(url).header("if-none-match", "*").body(bytes),
+            true,
+        )
+        .await
     }
 
     fn head_error(&self, path: &str, status: StatusCode) -> DomainError {
-        DomainError::backend(&self.id, format!("HEAD {path} failed: {status}"))
+        self.classified(
+            is_transient_status(status),
+            format!("HEAD {path} failed: {status}"),
+        )
     }
 
     /// POSTs `CompleteMultipartUpload` for `parts` (sorted by part number). Never re-reads the
@@ -265,7 +289,7 @@ impl S3Backend {
         if exclusive {
             req = req.header("if-none-match", "*");
         }
-        self.send_and_check_created(req).await
+        self.send_and_check_created(req, exclusive).await
     }
 
     /// Shared core of `put_stream` and `publish_exclusive`. Streams into `path`: below `multipart_threshold_bytes` the object is buffered and
@@ -509,7 +533,7 @@ impl StorageBackend for S3Backend {
 
         let stream = resp
             .bytes_stream()
-            .map(|r| r.map_err(std::io::Error::other));
+            .map(|r| r.map_err(|e| body_read_io_error(&e)));
         Ok(Box::pin(stream))
     }
 
@@ -722,8 +746,25 @@ impl StorageBackend for S3Backend {
             .bucket
             .abort_multipart_upload(Some(&self.credentials), key, upload_handle)
             .sign(SIGN_DURATION);
-        self.send_and_check(self.http.delete(url)).await?;
-        Ok(())
+        let resp = self
+            .http
+            .delete(url)
+            .send()
+            .await
+            .map_err(|e| self.transport_err(&e))?;
+        let status = resp.status();
+        let body = resp.bytes().await.map_err(|e| self.transport_err(&e))?;
+        if status.is_success() {
+            Ok(())
+        } else if status == StatusCode::NOT_FOUND
+            && parse_error_body(&body).is_some_and(|(code, _)| code == "NoSuchUpload")
+        {
+            // `NoSuchUpload`: the handle was already consumed (completed) or aborted.
+            tracing::debug!(path, "abort_multipart: upload handle already gone");
+            Ok(())
+        } else {
+            Err(self.s3_error(status, &body))
+        }
     }
 
     /// `ListObjectsV2`, following continuation tokens until the listing is complete.
@@ -770,6 +811,52 @@ impl StorageBackend for S3Backend {
         let url = action.sign(SIGN_DURATION);
         self.send_and_check(self.http.get(url)).await.map(|_| ())
     }
+}
+
+/// Message for a `409` on a conditional write.
+fn conflict_message(status: StatusCode, body: &[u8]) -> String {
+    let detail = parse_error_body(body).map_or_else(String::new, |(code, message)| {
+        format!(" ({code}): {message}")
+    });
+    format!("S3 error {status}{detail}; conditional write lost a race with a concurrent change")
+}
+
+/// HTTP statuses S3 uses for transient overload / server trouble (`SlowDown` is 503).
+fn is_transient_status(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 500 | 502 | 503 | 504)
+}
+
+/// Transient by status or by S3 error code (`RequestTimeout` arrives as a `400`).
+fn is_transient_s3(status: StatusCode, code: Option<&str>) -> bool {
+    is_transient_status(status)
+        || matches!(
+            code,
+            Some(
+                "SlowDown"
+                    | "RequestTimeout"
+                    | "OperationAborted"
+                    | "InternalError"
+                    | "ServiceUnavailable"
+            )
+        )
+}
+
+/// I/O error for a failed response-body read: a timeout or dropped connection keeps a transient
+/// kind so the consumer classifies it as `BackendUnavailable`.
+fn body_read_io_error(e: &reqwest::Error) -> std::io::Error {
+    let kind = if e.is_timeout() {
+        std::io::ErrorKind::TimedOut
+    } else if e.is_connect() || e.is_body() || e.is_request() {
+        std::io::ErrorKind::ConnectionReset
+    } else {
+        std::io::ErrorKind::Other
+    };
+    std::io::Error::new(kind, e.to_string())
+}
+
+/// Transient transport failure: timeout, connect, request dispatch or body read.
+fn is_transient_transport(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect() || e.is_request() || e.is_body()
 }
 
 /// A single parsed `ListObjectsV2` response page.

@@ -109,18 +109,18 @@ section keeps only the behavior the schema does not express.
 - **Single-part bind outcome headers.** For a file created with `bind: "auto"` (the default),
   the finalize also binds the first content under a strict `content_id IS NULL` CAS, and the sidecar's `200` `PUT`
   response forwards the outcome transparently as fixed headers — the single-part half of the ONE bind-state model it
-  shares with `complete`'s `bind_state`: `X-FS-Bound: true` + `ETag: <new content etag>` (bound), or
+  shares with `complete`'s `bind_state`, spelled identically (`bound`, `conflict`, `manual`):
+  `X-FS-Bound: bound` + `ETag: <new content etag>`, or
   `X-FS-Bound: conflict` + `X-FS-Current-ETag: <current etag>` (CAS lost — e.g. two create-tokens on one new file;
-  the version is `available`, resolve with a manual `bind` using that ETag as `If-Match`, no re-upload). No headers
-  for `bind: "manual"` uploads. **Client rule:** the *absence* of `X-FS-Bound` on the `PUT` response means "not
-  bound" — a `bind: "manual"` upload, or an instance that does not auto-bind (e.g. an older instance during a
-  rolling update) — and the client must then call `POST /files/{id}/bind` itself; a `200` alone never implies the
-  version was bound. An honest `PUT` retry (lost response) is idempotent: `publish_exclusive` is
+  the version is `available`, resolve with a manual `bind` using that ETag as `If-Match`, no re-upload). A
+  `bind: "manual"` upload answers `X-FS-Bound: manual` with no `ETag`. **Client rule:** only `X-FS-Bound: bound`
+  means the version was bound; on `manual` (and on `conflict`) the client must call `POST /files/{id}/bind` itself,
+  and a `200` alone never implies the version was bound. An honest `PUT` retry (lost response) is idempotent: `publish_exclusive` is
   replay-safe and finalize converges an already-`available` version with matching size/hash to the same headers —
   never a 409 — **regardless of the upload's bind mode**: the sidecar publishes every single-part upload through the
   same replay-safe path whether or not the token carries the auto-bind claim, so a `bind: "manual"` retry converges
-  exactly like an auto-bind one, simply with no `X-FS-Bound`/`ETag` headers to report (as on the first call). An
-  auto-bind retry that WON the CAS on its original call replays that exact `X-FS-Bound: true` + `ETag` outcome, even
+  exactly like an auto-bind one, simply answering `X-FS-Bound: manual` with no `ETag` (as on the first call). An
+  auto-bind retry that WON the CAS on its original call replays that exact `X-FS-Bound: bound` + `ETag` outcome, even
   if the file's content has legitimately moved on to a different version since — never the current pointer's
   `conflict`, which would contradict what the original call already returned. An auto-bind retry that LOST the CAS
   follows the current pointer instead: `bound` while the file points at this version (e.g. after a manual bind of it),
@@ -340,6 +340,10 @@ parts plan (sizes/offsets) with **one signed URL per part** pointing at the side
 (initiate `P2-1`, complete `P2-3`, abort `P2-4`, introspect/resume `P2-5`) are in the generated OpenAPI; the part
 upload `P2-2` is a `PUT` to the per-part signed URL on the sidecar and is not in OpenAPI.
 
+`DELETE /files/{id}/multipart/{upload_id}` (`P2-4`, abort) discards the session and its pending version; if the file then
+has no versions and no bound content, the file is deleted too (like `DELETE` of its only version), including for a
+session opened by a separate `POST /files/{id}/multipart`.
+
 Notes:
 - `P2-1` (`initiate`) always targets the backend registry's **default** backend (`FileStorageConfig::default_backend_id`,
   or `local-fs` if unset — see `operations.md`); there is no per-request target-backend choice, unlike `migrate`. That
@@ -446,14 +450,13 @@ are meant to be backstopped by a cleanup job (not running yet). The complete per
 catalog for both upload paths is [concurrency-and-failure-model.md](./concurrency-and-failure-model.md).
 
 **Wire-spelling stability (`bind_state` / `state`).** `bind_state` (`"bound"`/`"conflict"`/`"manual"`) and the
-multipart session's `state` field (`"in_progress"`/`"completing"`/`"completed"`/`"aborted"`) are stable string
-values, not integers to be renumbered — the spellings above are exhaustive today, but a future release **may add** a
-new value to either set as a backward-compatible, additive change (removing or repurposing an existing value would
-instead be breaking and would require a new API version). A client **MUST** treat any `bind_state`/`state` value it
-does not recognize as "not yet resolved, re-check" — re-`GET`/re-`complete` and read the fresh response — rather
-than as an error, the same posture already required for a recognized `"completing"`. The single-part `X-FS-Bound`
-header carries the same three-value bind-state model (spelled `true`/`conflict`, with no header at all standing in
-for `manual`) and is covered by the same stability contract.
+multipart session's `state` field (`"in_progress"`/`"completing"`/`"completed"`/`"aborted"`) are closed sets of
+string values, published as `enum`s in `api.json`: the spellings above are exhaustive, and adding, removing or
+repurposing a value within `/v1` is a breaking change that requires a new API version. The single-part
+`X-FS-Bound` header uses the very same three values as `bind_state` (`bound`/`conflict`/`manual`) — there is no
+second vocabulary and no header-less outcome. The create request's `bind` field is a closed enum too (`"auto"` or
+`"manual"`); any other value is rejected while the body is deserialized, with the toolkit's usual `422` for a body
+that does not match the schema.
 
 **One-part plans degenerate to `whole-sha256`** (ADR-0006 single-part amendment): when the plan had exactly one
 part, `hash_mode` is `"whole-sha256"`, `content_hash` is plain `sha256(object bytes)` (identical to the single
@@ -534,14 +537,12 @@ worker, so rules can be stored but nothing deletes files (see `docs/operations.m
 
 `POST /files/{id}/migrate` (`204`) migrates a file's content to a different configured storage backend, preserving
 the file's identity (`file_id` unchanged). **Non-versioned files only** — a file with more than one `file_versions` row is rejected
-(`VersionedFileMigrationNotSupported`, `409`). The version must already be `available` (`409` otherwise). A per-version
-migration lease is acquired first — a second migration attempt of the same version while one is already in progress
-gets `409 Conflict` immediately, before any backend is touched. The content then streams straight from the source
-backend into the destination, with its hash re-verified incrementally on the same pass; the verdict is only known
-once the destination has received the whole stream, and the version's backend pointer is only ever repointed (CAS,
-also gated on the lease) once that verification has passed. The whole attempt runs under a `migrate_timeout_secs`
-time budget; exceeding it fails with a retryable `503` + `Retry-After` — see
-[backend-migration.md](./features/backend-migration.md) for the full failure/cleanup contract. Migrating
+(`VersionedFileMigrationNotSupported`, `409`). The version must already be `available` (`409` otherwise). The content
+is read from the source backend in full and its hash re-verified before anything is written to the destination (a
+mismatch is `400`, with no destination write); the version's backend pointer is then repointed (CAS) only after the
+destination write succeeded. A concurrent migration of the same version loses the CAS and gets `409`. A
+transient backend failure (`BackendUnavailable`) surfaces as `503` + `Retry-After`; see
+[backend-migration.md](./features/backend-migration.md) for the failure/cleanup contract. Migrating
 onto a non-durable backend (e.g. a dev/test `memory` backend) additionally requires the caller's `ADMIN_POLICY`
 authorization scope, not just `WRITE`, since it risks silent data loss on the next restart.
 
@@ -854,8 +855,7 @@ access or carry substantially more per-request state in the token than it does t
   - `bind`: the target `version_id`'s upload has not been finalized yet.
   - `delete_version` (`DELETE /files/{id}/versions/{version_id}`): attempting to delete the file's current version
     (bind another version first).
-  - `migrate` (`POST /files/{id}/migrate`): the version is not yet finalized, another migration attempt of the same
-    version already holds its migration lease, a destination path already claimed by a concurrently-committed
+  - `migrate` (`POST /files/{id}/migrate`): the version is not yet finalized, a destination path already claimed by a concurrently-committed
     migration, or a concurrent migration to a different target already won the CAS race.
   - multipart `complete`/`abort`: the session is not `in_progress` (e.g. completing an already-aborted upload), one
     or more planned parts have not been reported yet (`MultipartPartsMissing`; the error detail lists the missing
@@ -903,8 +903,7 @@ access or carry substantially more per-request state in the token than it does t
     with the length already resolved by the caller's earlier `stat`/`HeadObject` — a transient read race, not a
     fault (see "P1 — Sidecar" above). Carries `Retry-After: 1`; the recovery is a plain retry.
   - any storage-backend call (control plane or sidecar) failing with a **transient** backend fault — network,
-    timeout, backend overload/5xx, the losing side of a concurrent object change, or `POST /files/{id}/migrate`
-    exceeding its own `migrate_timeout_secs` budget (`DomainError::BackendUnavailable`,
+    timeout, backend overload/5xx, or the losing side of a concurrent object change (`DomainError::BackendUnavailable`,
     per `docs/arch/errors/categories/14-service-unavailable.md`). Carries `retry_after_seconds` in the response body
     and a matching `Retry-After: 5` header; the recovery is a plain retry once that window has elapsed. Distinct
     from `502` (control-plane callback failure) and `500` (a **permanent** backend fault — bad config, a protocol
@@ -923,7 +922,8 @@ access or carry substantially more per-request state in the token than it does t
   above (`FS_SIDECAR_FINALIZE_TIMEOUT_SECS`/`FS_SIDECAR_FINALIZE_CONNECT_TIMEOUT_SECS`) for the retry/timeout
   configuration and the decision between `200`, `409`, and `502` on a replayed `PUT`.
 
-`422 Unprocessable Entity`, `415 Unsupported Media Type`, and `507 Insufficient Storage` are not used anywhere in this
-gear: an `expected_hash` mismatch and an invalid GTS file type both map to `400`; a magic-bytes MIME mismatch
+`415 Unsupported Media Type` and `507 Insufficient Storage` are not used anywhere in this gear, and `422` only
+comes from the toolkit's body extractor (a body that does not match the schema: unknown field, unknown enum value such
+as `bind: "bogus"`) — the gear's own errors never use it: an `expected_hash` mismatch and an invalid GTS file type both map to `400`; a magic-bytes MIME mismatch
 (`DomainError::MimeMismatch`) also maps to `400` (`invalid_argument`); and the storage-quota-exceeded case maps to
 `429`, not `507`.

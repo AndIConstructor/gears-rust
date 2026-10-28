@@ -317,6 +317,15 @@ pub trait MultipartStore: Send + Sync {
         version_id: Uuid,
         audit: AuditEntry,
     ) -> Result<bool, DomainError>;
+
+    /// Delete an orphan `files` row, re-verifying **in the same transaction** that it has zero
+    /// versions and a `NULL` `content_id`. Returns `true` if removed.
+    async fn delete_orphan_file_with_event(
+        &self,
+        file_id: Uuid,
+        audit: AuditEntry,
+        event: Option<FileEvent>,
+    ) -> Result<bool, DomainError>;
 }
 
 /// Persistence port for the policy administration service.

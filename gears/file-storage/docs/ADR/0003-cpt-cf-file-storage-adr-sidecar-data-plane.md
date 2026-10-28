@@ -209,7 +209,8 @@ emergency revocation is the platform auth module's token revocation, not the URL
   backend-agnostic `exists`-then-write fallback would necessarily be the same non-atomic TOCTOU this
   paragraph closes, so the trait does not offer one) — every backend implements its own atomic write.
   `LocalFsBackend` (`std::fs::hard_link`, which atomically
-  fails `AlreadyExists` if the target already exists) and `InMemoryBackend` (a single mutex guarding
+  fails `AlreadyExists` if the target already exists; its root must therefore be on a filesystem that supports
+  hard links, which the sidecar's readiness probe verifies) and `InMemoryBackend` (a single mutex guarding
   both the check and the insert) each override it with a fully atomic, provider-independent
   implementation; `S3Backend` **overrides** it with an atomic conditional write (`If-None-Match: *`
   on the terminal `PutObject`/`CompleteMultipartUpload`, mapping S3's `412 Precondition Failed` to a

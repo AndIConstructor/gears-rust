@@ -9,6 +9,7 @@ use uuid::Uuid;
 use file_storage_sdk::{CustomMetadataEntry, File, FileVersion, OwnerKind};
 
 use crate::domain::etag;
+use crate::domain::multipart::BindState;
 use crate::domain::policy::{
     AgeRetention, EffectivePolicy, InactivityRetention, MetadataLimits, MetadataRetention,
     MimeSizeOverride, PolicyBody, RetentionRuleBody, SizeLimits, StoredPolicy, StoredRetentionRule,
@@ -109,8 +110,51 @@ pub struct CreateFileReq {
     /// Bind mode for the first content: `"auto"` (default; the upload itself binds under a
     /// `content_id IS NULL` CAS) or `"manual"` (an explicit `POST /files/{id}/bind`
     /// afterwards). Not part of the idempotency request hash.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bind: Option<String>,
+    #[serde(default)]
+    #[schema(default = BindModeDto::default)]
+    pub bind: BindModeDto,
+}
+
+/// Bind mode of `POST /files`: `auto` (default) or `manual`. Closed set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum BindModeDto {
+    /// The upload itself binds the first content under a `content_id IS NULL` CAS.
+    #[default]
+    Auto,
+    /// The client binds explicitly via `POST /files/{id}/bind`.
+    Manual,
+}
+
+/// Bind outcome of an upload; the same closed vocabulary is used by the single-part
+/// `X-FS-Bound` response header and the multipart `complete` `bind_state` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(request, response)]
+pub enum BindStateDto {
+    /// Auto-bind won the CAS; `etag` is the new content `ETag`.
+    Bound,
+    /// Auto-bind lost the CAS; the upload succeeded and `current_etag` is the `If-Match`
+    /// for a manual rebind.
+    Conflict,
+    /// The client binds explicitly.
+    Manual,
+}
+
+impl From<BindState> for BindStateDto {
+    fn from(s: BindState) -> Self {
+        match s {
+            BindState::Bound => Self::Bound,
+            BindState::Conflict => Self::Conflict,
+            BindState::Manual => Self::Manual,
+        }
+    }
+}
+
+/// State carried by the `202` body of `complete`: always `completing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[toolkit_macros::api_dto(response)]
+pub enum MultipartCompletingStateDto {
+    Completing,
 }
 
 impl CreateFileReq {
@@ -678,11 +722,11 @@ pub struct MultipartCompleteDto {
     /// plan (`whole-sha256` has no manifest).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
-    /// Bind outcome, same model as the single-part `X-FS-Bound` header: `"bound"` (`etag`
-    /// is the new content `ETag`), `"conflict"` (auto-bind lost its CAS; the upload
-    /// succeeded and `current_etag` is the `If-Match` for a manual rebind), or `"manual"`
-    /// (the client binds explicitly).
-    pub bind_state: String,
+    /// Bind outcome, the same closed vocabulary as the single-part `X-FS-Bound` header:
+    /// `bound` (`etag` is the new content `ETag`), `conflict` (auto-bind lost its CAS; the
+    /// upload succeeded and `current_etag` is the `If-Match` for a manual rebind), or
+    /// `manual` (the client binds explicitly).
+    pub bind_state: BindStateDto,
     /// Content `ETag` after a successful bind (`bind_state == "bound"` only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
@@ -696,8 +740,8 @@ pub struct MultipartCompleteDto {
 #[derive(Debug, Clone)]
 #[toolkit_macros::api_dto(response)]
 pub struct MultipartCompletingDto {
-    /// Always `"completing"`.
-    pub state: String,
+    /// Always `completing`.
+    pub state: MultipartCompletingStateDto,
     pub retry_after_secs: u64,
 }
 

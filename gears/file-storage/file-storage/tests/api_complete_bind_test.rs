@@ -79,7 +79,7 @@ async fn finalize_via_handler(
     .into_response()
 }
 
-/// A `bind_on_finalize` finalize through the real handler sets `x-fs-bound: true` and the new
+/// A `bind_on_finalize` finalize through the real handler sets `x-fs-bound: bound` and the new
 /// `ETag`; a second pending version of the same file then loses the `content_id IS NULL` CAS, still
 /// finalizes, and the handler answers `x-fs-bound: conflict` + `x-fs-current-etag` of the winner.
 #[tokio::test]
@@ -113,7 +113,7 @@ async fn finalize_version_bind_claim_reports_bound_headers_then_conflict_headers
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     assert_eq!(
         resp.headers().get("x-fs-bound").expect("x-fs-bound header"),
-        "true"
+        "bound"
     );
     let file = store
         .get_file(&AccessScope::allow_all(), ticket.file_id)
@@ -169,6 +169,58 @@ async fn finalize_version_bind_claim_reports_bound_headers_then_conflict_headers
     );
 }
 
+/// A manual (no bind on finalize) finalize still reports the outcome: `x-fs-bound: manual`, no
+/// `ETag` and no `x-fs-current-etag`.
+#[tokio::test]
+async fn finalize_version_without_bind_claim_reports_manual_header() {
+    let issuer = Arc::new(Issuer::generate(3600).expect("issuer"));
+    let Stack { svc, backend, .. } = stack(&issuer).await;
+    let ctx = ctx(Uuid::now_v7());
+    let ticket = svc
+        .create_file(&ctx, new_file("complete-manual.bin"), None, false)
+        .await
+        .unwrap();
+    let bytes = Bytes::from_static(b"manual bind");
+    let path = backend_path(ticket.file_id, ticket.version_id);
+    backend.put(&path, bytes.clone()).await.unwrap();
+
+    let claims = put_claims(ticket.file_id, ticket.version_id, path.clone(), false);
+    let token = issuer
+        .issue(claims, time::OffsetDateTime::now_utc())
+        .expect("issue token");
+    let mut headers = HeaderMap::new();
+    headers.insert("x-fs-token", token.parse().expect("valid header value"));
+    headers.insert(
+        "x-fs-internal-token",
+        "test-internal-secret".parse().expect("valid header value"),
+    );
+    let req = FinalizeUploadReq {
+        size: i64::try_from(bytes.len()).unwrap(),
+        hash_hex: hex::encode(hash::sha256(&bytes)),
+    };
+    let resp = handlers::finalize_version(
+        Extension(Arc::clone(&svc)),
+        Extension(Arc::new(svc.verifier())),
+        Extension(Arc::new(FinalizeAuth::new(
+            "test-internal-secret".to_owned(),
+            time::Duration::ZERO,
+        ))),
+        Path((ticket.file_id, ticket.version_id)),
+        headers,
+        Json(req),
+    )
+    .await
+    .expect("finalize succeeds")
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.headers().get("x-fs-bound").expect("x-fs-bound header"),
+        "manual"
+    );
+    assert!(resp.headers().get(header::ETAG).is_none());
+    assert!(resp.headers().get("x-fs-current-etag").is_none());
+}
+
 /// A 2-part auto-bind upload completed through the handler; each `MultipartCompleteDto` field is
 /// cross-checked against the persisted rows rather than hardcoded hash bytes.
 #[tokio::test]
@@ -184,9 +236,10 @@ async fn complete_multipart_completed_returns_200_with_full_dto() {
     } = stack(&issuer).await;
     let ctx = ctx(Uuid::now_v7());
     let file_id = svc
-        .create_file_bare(&ctx, new_file("complete-bind.bin"))
+        .create_file(&ctx, new_file("complete-bind.bin"), None, false)
         .await
-        .unwrap();
+        .unwrap()
+        .file_id;
 
     // 5 MiB + 5 bytes at a 5 MiB part size -> exactly 2 parts, so composite hash mode/manifest are
     // set.
@@ -285,9 +338,10 @@ async fn complete_multipart_while_lease_held_returns_202_with_matching_retry_aft
     } = stack(&issuer).await;
     let ctx = ctx(Uuid::now_v7());
     let file_id = svc
-        .create_file_bare(&ctx, new_file("complete-bind.bin"))
+        .create_file(&ctx, new_file("complete-bind.bin"), None, false)
         .await
-        .unwrap();
+        .unwrap()
+        .file_id;
 
     let plan = msvc
         .initiate_multipart_upload(&ctx, file_id, "application/octet-stream", 5, None, false)

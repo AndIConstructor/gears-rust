@@ -482,10 +482,13 @@ impl CleanupEngine {
             .flatten();
 
         // Version row first, then the session's stored pair.
-        let (backend_id, backend_path) = ver.as_ref().map_or_else(
-            || (session.backend_id.clone(), session.backend_path.clone()),
-            |v| (v.backend_id.clone(), v.backend_path.clone()),
+        let backend_id = session.resolve_backend_id(
+            ver.as_ref().map(|v| v.backend_id.as_str()),
+            self.backends.default_id(),
         );
+        let backend_path = ver
+            .as_ref()
+            .map_or_else(|| session.backend_path.clone(), |v| v.backend_path.clone());
         self.backend_abort_multipart_best_effort(
             &backend_id,
             &backend_path,

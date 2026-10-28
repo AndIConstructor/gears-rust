@@ -151,6 +151,50 @@ fn new_file(owner: Uuid, mime: &str) -> NewFile {
     }
 }
 
+/// A replay re-mints a live upload URL, so `replay_idempotency_key` re-checks the CURRENT policy
+/// (as on `47f9efd31`): once the MIME is forbidden the retry is rejected, and no second file is made.
+#[tokio::test]
+async fn idempotent_replay_rechecks_current_mime_policy() {
+    let (svc, psvc, _dp, _store) = build_service(None).await;
+    let ctx = ctx(Uuid::now_v7());
+    let owner = Uuid::now_v7();
+    let key = Some("retry-after-policy".to_owned());
+
+    let first = svc
+        .create_file(&ctx, new_file(owner, "image/png"), key.clone(), false)
+        .await
+        .expect("first create");
+    let same = svc
+        .create_file(&ctx, new_file(owner, "image/png"), key.clone(), false)
+        .await
+        .expect("replay under an unchanged policy");
+    assert_eq!(
+        (same.file_id, same.version_id),
+        (first.file_id, first.version_id)
+    );
+
+    psvc.set_policy(
+        &ctx,
+        PolicyScope::Tenant,
+        None,
+        PolicyBody {
+            allowed_mime_types: vec!["text/*".to_owned()],
+            ..PolicyBody::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let err = svc
+        .create_file(&ctx, new_file(owner, "image/png"), key, false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::PolicyMimeNotAllowed { .. }),
+        "got {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn create_file_with_disallowed_mime_is_rejected() {
     let (svc, psvc, _dp, _store) = build_service(None).await;

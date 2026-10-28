@@ -210,6 +210,18 @@ impl StackBuilder {
         self
     }
 
+    /// Quota client for both services (single-part create and multipart plan checks).
+    pub fn quota(mut self, quota: Arc<dyn QuotaClient>) -> Self {
+        self.quota = Some(quota);
+        self
+    }
+
+    /// Usage reporter for both services.
+    pub fn usage_reporter(mut self, reporter: Arc<dyn UsageReporter>) -> Self {
+        self.usage_reporter = Some(reporter);
+        self
+    }
+
     pub fn url_ttl_secs(mut self, secs: i64) -> Self {
         self.cfg.default_url_ttl_secs = secs;
         self
@@ -256,14 +268,14 @@ impl StackBuilder {
             Arc::clone(&issuer),
             Arc::clone(&authorizer),
             cfg.clone(),
-            self.quota,
+            self.quota.clone(),
             self.usage_reporter.clone(),
         ));
         let mut msvc = MultipartService::new(
             Arc::clone(&multipart_store),
             backends.clone(),
             Arc::clone(&authorizer),
-            None,
+            self.quota,
             Arc::clone(&issuer),
             cfg.sidecar_base_url.clone(),
             cfg.default_url_ttl_secs,

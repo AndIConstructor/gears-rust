@@ -14,7 +14,9 @@ use crate::domain::error::DomainError;
 use crate::domain::etag;
 use crate::domain::policy::PolicyResolver;
 use crate::domain::ports::AutoBindOnFinalize;
-use crate::domain::service::{FileService, FinalizeByTokenOutcome, VersionRef};
+use crate::domain::service::{
+    FileService, FinalizeByTokenOutcome, VersionRef, best_effort_blob_delete,
+};
 use crate::infra::backend::StorageBackend;
 use crate::infra::content::mime::{
     MIME_SNIFF_PREFIX_BYTES, enforce_size_ceiling_for_validated_mime, validate_and_resolve_mime,
@@ -707,12 +709,6 @@ impl FileService {
     /// Delete a backend blob, logging (not failing) on error; a failure leaves an orphan
     /// for the cleanup engine.
     pub(super) async fn best_effort_blob_delete(&self, backend_id: &str, path: &str) {
-        let Ok(backend) = self.backends.get(backend_id) else {
-            return;
-        };
-        if let Err(err) = backend.delete(path).await {
-            self.metrics.record_backend_error(backend_id, "delete");
-            tracing::warn!(?err, path, "best-effort backend delete failed");
-        }
+        best_effort_blob_delete(&self.backends, self.metrics.as_ref(), backend_id, path).await;
     }
 }

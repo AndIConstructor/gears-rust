@@ -21,14 +21,14 @@ use crate::domain::etag;
 use crate::domain::multipart::{
     BindDecision, CompletedMultipartUpload, DEFAULT_MIN_PART_SIZE, MAX_PART_SIZE, MissingPart,
     MultipartCompleteOutcome, MultipartPart, MultipartPartPlan, MultipartPlan,
-    MultipartUploadSession, MultipartUploadState, MultipartUploadStatus, ReceivedPart,
-    StoredCompleteResult, compute_plan,
+    MultipartUploadSession, MultipartUploadState, MultipartUploadStatus, RawPartEntry,
+    ReceivedPart, StoredCompleteResult, compute_plan,
 };
 use crate::domain::policy::{PolicyResolver, PolicyScope};
 use crate::domain::ports::{
     AutoBindOnFinalize, FileStorageMetricsPort, MultipartFinishSnapshot, MultipartStore,
 };
-use crate::infra::backend::BackendRegistry;
+use crate::infra::backend::{BackendRegistry, StorageBackend};
 use crate::infra::content::mime::{
     MIME_SNIFF_PREFIX_BYTES, enforce_size_ceiling_for_validated_mime, validate_and_resolve_mime,
 };
@@ -42,6 +42,15 @@ const COMPLETE_POLL_RETRY_SECS: u64 = 2;
 
 /// Quota metric name (same platform metric as in `service.rs`).
 const QUOTA_METRIC_NAME: &str = gts_id!("cf.qe.metric.type.v1~cf.qe.metric.file_storage_bytes.v1");
+
+/// A multipart plan that passed [`MultipartService::validate_multipart_plan`]: the chosen part
+/// size and the `(part_number, offset, size)` entries, ready to open a session with.
+#[allow(unknown_lints, de0309_must_have_domain_model)]
+#[derive(Debug, Clone)]
+pub struct ValidatedMultipartPlan {
+    chosen_part_size: u64,
+    raw_parts: Vec<RawPartEntry>,
+}
 
 /// Diff the plan's expected part numbers against the reported parts, returning the missing
 /// ones in ascending order.
@@ -241,31 +250,25 @@ impl MultipartService {
         }
     }
 
-    /// Best-effort compensation when session persistence fails after the backend handle and
-    /// pending version row were created: abort the handle and delete the row. Errors are
-    /// logged, the caller's original error is returned, and leftovers are reclaimed by the
-    /// cleanup sweep.
-    async fn compensate_failed_session_create(
+    /// Remove a pending version that will never get a session (failed session open, user abort),
+    /// and then the file itself if that left it without versions and without content (the
+    /// composite-create case; a file that has other versions or a bound content stays). The file
+    /// goes through the guarded in-transaction orphan delete and gets the `file.deleted` event,
+    /// an audit row and usage `-1`, the same as deleting the only version of a file.
+    ///
+    /// `Err` only for the version delete (a DB error the caller may propagate or log); a failing
+    /// file delete is logged, since the version row is already gone and the file is unusable.
+    #[allow(clippy::too_many_arguments)]
+    async fn discard_version_and_orphan_file(
         &self,
         ctx: &SecurityContext,
-        upload_id: Uuid,
+        tenant_id: Uuid,
+        owner_id: Uuid,
         file_id: Uuid,
         version_id: Uuid,
-        backend_path: &str,
-        backend_handle: &str,
-    ) {
-        let backend = self.backends.default_backend();
-        if let Err(abort_err) = backend.abort_multipart(backend_path, backend_handle).await {
-            self.metrics
-                .record_backend_error(backend.id(), "abort_multipart");
-            tracing::warn!(
-                ?abort_err,
-                %upload_id,
-                "best-effort backend abort failed after session persistence error"
-            );
-        }
-        if let Err(del_err) = self
-            .store
+        reason: &str,
+    ) -> Result<(), DomainError> {
+        self.store
             .delete_version(
                 file_id,
                 version_id,
@@ -273,20 +276,45 @@ impl MultipartService {
                     ctx,
                     Some(file_id),
                     AuditOperation::DeleteVersion,
-                    serde_json::json!({
-                        "version_id": version_id,
-                        "reason": "multipart_session_create_failed"
-                    }),
+                    serde_json::json!({ "version_id": version_id, "reason": reason }),
                 ),
             )
+            .await?;
+
+        let audit = Self::audit_ok(
+            ctx,
+            Some(file_id),
+            AuditOperation::OrphanReconcile,
+            serde_json::json!({ "reason": reason }),
+        );
+        let event = Some(FileEvent {
+            tenant_id,
+            owner_id,
+            file_id,
+            event_type: "file.deleted".to_owned(),
+            payload: serde_json::json!({ "reason": reason }),
+        });
+        match self
+            .store
+            .delete_orphan_file_with_event(file_id, audit, event)
             .await
         {
-            tracing::warn!(
-                ?del_err,
-                %upload_id,
-                "best-effort pending-version delete failed after session persistence error"
-            );
+            Ok(true) => self.report_usage(UsageDelta {
+                tenant_id,
+                owner_id,
+                bytes_delta: 0,
+                file_count_delta: -1,
+            }),
+            // The guard declined (other versions or bound content) or the file is already gone.
+            Ok(false) => {}
+            Err(err) => tracing::warn!(
+                ?err,
+                %file_id,
+                "failed to delete the file left without versions; it stays until the cleanup \
+                 job for version-less files exists"
+            ),
         }
+        Ok(())
     }
 
     /// Mint one signed per-part upload URL. `exp` is chosen by the caller: a fresh full TTL
@@ -335,31 +363,22 @@ impl MultipartService {
         ))
     }
 
-    /// `POST /files/{id}/multipart`: validate, pre-register a `pending` version, create the
-    /// backend session and return the exact parts plan with one signed sidecar URL per part.
+    /// Checks of a multipart plan that do not depend on a file row: backend `multipart_native`,
+    /// the `preferred_part_size` range, the allowed MIME, the declared size against the effective
+    /// limit, the plan itself and the storage quota for the declared size. Runs before the first
+    /// write on both entry points. The caller authorizes the request (it knows whether a file
+    /// exists yet).
     ///
     /// Gates: MIME not allowed `415`, declared size over the effective max `413`, storage
     /// quota `507`. The complete-time total-size check remains as defence-in-depth.
-    ///
-    /// `auto_bind`: `complete` binds the finalized version itself (only the merged `POST /files` path).
-    #[tracing::instrument(skip_all)]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn initiate_multipart_upload(
+    pub(crate) async fn validate_multipart_plan(
         &self,
         ctx: &SecurityContext,
-        file_id: Uuid,
+        owner_id: Uuid,
         declared_mime: &str,
         declared_size: u64,
         preferred_part_size: Option<u64>,
-        auto_bind: bool,
-    ) -> Result<MultipartPlan, DomainError> {
-        let prefetch = Self::tenant_scope(ctx);
-        let file = self.store.require_file(&prefetch, file_id).await?;
-        let _scope = self
-            .authorizer
-            .authorize(ctx, actions::WRITE, &file.gts_file_type, Some(file_id))
-            .await?;
-
+    ) -> Result<ValidatedMultipartPlan, DomainError> {
         let backend = self.backends.default_backend();
         if !backend.capabilities().multipart_native {
             return Err(DomainError::multipart_not_supported(backend.id()));
@@ -382,7 +401,7 @@ impl MultipartService {
         // Policy gates against the declared total size.
         let tenant_id = ctx.subject_tenant_id();
         let policy = self
-            .get_effective_policy_internal(tenant_id, file.owner_id)
+            .get_effective_policy_internal(tenant_id, owner_id)
             .await?;
         PolicyResolver::check_allowed_mime(&policy, declared_mime)?;
         let effective_max = PolicyResolver::compute_effective_max_bytes(
@@ -402,16 +421,186 @@ impl MultipartService {
         }
 
         // Quota check against the declared size, not the pessimistic `effective_max`.
-        self.check_quota_bytes(tenant_id, file.owner_id, declared_size)
+        self.check_quota_bytes(tenant_id, owner_id, declared_size)
+            .await?;
+
+        // `BackendCapabilities` exposes no minimum part size, so `DEFAULT_MIN_PART_SIZE` applies.
+        let (chosen_part_size, raw_parts) = compute_plan(declared_size, preferred_part_size, None)?;
+
+        Ok(ValidatedMultipartPlan {
+            chosen_part_size,
+            raw_parts,
+        })
+    }
+
+    /// `POST /files/{id}/multipart`: validate, pre-register a `pending` version, create the
+    /// backend session and return the exact parts plan with one signed sidecar URL per part.
+    /// See [`Self::validate_multipart_plan`] for the gates.
+    ///
+    /// `auto_bind`: `complete` binds the finalized version itself (only the merged `POST /files` path).
+    #[tracing::instrument(skip_all)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn initiate_multipart_upload(
+        &self,
+        ctx: &SecurityContext,
+        file_id: Uuid,
+        declared_mime: &str,
+        declared_size: u64,
+        preferred_part_size: Option<u64>,
+        auto_bind: bool,
+    ) -> Result<MultipartPlan, DomainError> {
+        let prefetch = Self::tenant_scope(ctx);
+        let file = self.store.require_file(&prefetch, file_id).await?;
+        let _scope = self
+            .authorizer
+            .authorize(ctx, actions::WRITE, &file.gts_file_type, Some(file_id))
+            .await?;
+
+        let validated = self
+            .validate_multipart_plan(
+                ctx,
+                file.owner_id,
+                declared_mime,
+                declared_size,
+                preferred_part_size,
+            )
             .await?;
 
         let now = OffsetDateTime::now_utc();
-        let upload_id = Uuid::now_v7();
         let version_id = Uuid::now_v7();
+        let backend = self.backends.default_backend();
+        self.store
+            .insert_pending_version(
+                file_id,
+                version_id,
+                declared_mime,
+                backend.id(),
+                &Self::backend_path(file_id, version_id),
+                now,
+            )
+            .await?;
+
+        self.open_session_or_discard(
+            ctx,
+            file.tenant_id,
+            file.owner_id,
+            file_id,
+            version_id,
+            declared_mime,
+            declared_size,
+            validated,
+            auto_bind,
+            now,
+        )
+        .await
+    }
+
+    /// Composite `POST /files`, second half: the file and its pending version were committed
+    /// together; open the session for that version. Any failure removes the pending version and
+    /// the file (see [`Self::discard_version_and_orphan_file`]), so no version-less file stays.
+    #[tracing::instrument(skip_all)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_session_for_created_file(
+        &self,
+        ctx: &SecurityContext,
+        owner_id: Uuid,
+        file_id: Uuid,
+        version_id: Uuid,
+        declared_mime: &str,
+        declared_size: u64,
+        validated: ValidatedMultipartPlan,
+        auto_bind: bool,
+    ) -> Result<MultipartPlan, DomainError> {
+        self.open_session_or_discard(
+            ctx,
+            ctx.subject_tenant_id(),
+            owner_id,
+            file_id,
+            version_id,
+            declared_mime,
+            declared_size,
+            validated,
+            auto_bind,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+    }
+
+    /// [`Self::open_session`], discarding the pending version (and an orphaned file) on failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_session_or_discard(
+        &self,
+        ctx: &SecurityContext,
+        tenant_id: Uuid,
+        owner_id: Uuid,
+        file_id: Uuid,
+        version_id: Uuid,
+        declared_mime: &str,
+        declared_size: u64,
+        validated: ValidatedMultipartPlan,
+        auto_bind: bool,
+        now: OffsetDateTime,
+    ) -> Result<MultipartPlan, DomainError> {
+        match self
+            .open_session(
+                file_id,
+                version_id,
+                declared_mime,
+                declared_size,
+                validated,
+                auto_bind,
+                now,
+            )
+            .await
+        {
+            Ok(plan) => Ok(plan),
+            Err(err) => {
+                if let Err(del_err) = self
+                    .discard_version_and_orphan_file(
+                        ctx,
+                        tenant_id,
+                        owner_id,
+                        file_id,
+                        version_id,
+                        "multipart_session_create_failed",
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        ?del_err,
+                        %file_id,
+                        %version_id,
+                        "best-effort pending-version delete failed after multipart initiate error"
+                    );
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// Open the backend session for an existing `pending` version and persist it. If the session
+    /// row cannot be written, the backend handle is aborted (best effort); the pending version is
+    /// the caller's to discard.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_session(
+        &self,
+        file_id: Uuid,
+        version_id: Uuid,
+        declared_mime: &str,
+        declared_size: u64,
+        validated: ValidatedMultipartPlan,
+        auto_bind: bool,
+        now: OffsetDateTime,
+    ) -> Result<MultipartPlan, DomainError> {
+        let ValidatedMultipartPlan {
+            chosen_part_size,
+            raw_parts,
+        } = validated;
+        let backend = self.backends.default_backend();
+        let upload_id = Uuid::now_v7();
         let backend_path = Self::backend_path(file_id, version_id);
         let backend_id = backend.id().to_owned();
 
-        // Computed before any side effect; `checked_add`/`.max(1)` are defense in depth.
         let session_expires_at = now
             .checked_add(time::Duration::seconds(self.session_ttl_secs.max(1)))
             .ok_or_else(|| {
@@ -425,23 +614,48 @@ impl MultipartService {
                 DomainError::database("signed-URL TTL overflowed computing the part URL expiry")
             })?;
 
-        // `BackendCapabilities` exposes no minimum part size, so `DEFAULT_MIN_PART_SIZE` applies.
-        let (chosen_part_size, raw_parts) = compute_plan(declared_size, preferred_part_size, None)?;
-
-        self.store
-            .insert_pending_version(
-                file_id,
-                version_id,
-                declared_mime,
-                &backend_id,
-                &backend_path,
-                now,
-            )
-            .await?;
-
         let backend_handle = backend.initiate_multipart(&backend_path).await?;
 
-        // On failure, compensate so the backend handle and pending row are not orphaned.
+        // One signed URL per part, each carrying the exact `size` claim the sidecar enforces.
+        // All parts share one request id so the sidecar's report-part callbacks correlate.
+        let exp = url_expires_at.unix_timestamp();
+        let request_id = Uuid::now_v7().to_string();
+        let mut parts = Vec::new();
+        for (part_number, offset, size) in raw_parts {
+            let upload_url = match self.mint_part_url(
+                file_id,
+                version_id,
+                &backend_id,
+                &backend_path,
+                upload_id,
+                &backend_handle,
+                part_number,
+                offset,
+                size,
+                exp,
+                &request_id,
+                now,
+            ) {
+                Ok(url) => url,
+                Err(err) => {
+                    self.abort_fresh_handle(
+                        backend.as_ref(),
+                        &backend_path,
+                        &backend_handle,
+                        upload_id,
+                    )
+                    .await;
+                    return Err(err);
+                }
+            };
+            parts.push(MultipartPartPlan {
+                part_number,
+                offset,
+                size,
+                upload_url,
+            });
+        }
+
         if let Err(err) = self
             .store
             .create_multipart_upload(
@@ -460,44 +674,9 @@ impl MultipartService {
             )
             .await
         {
-            self.compensate_failed_session_create(
-                ctx,
-                upload_id,
-                file_id,
-                version_id,
-                &backend_path,
-                &backend_handle,
-            )
-            .await;
+            self.abort_fresh_handle(backend.as_ref(), &backend_path, &backend_handle, upload_id)
+                .await;
             return Err(err);
-        }
-
-        // One signed URL per part, each carrying the exact `size` claim the sidecar enforces.
-        // All parts share one request id so the sidecar's report-part callbacks correlate.
-        let exp = url_expires_at.unix_timestamp();
-        let request_id = Uuid::now_v7().to_string();
-        let mut parts = Vec::new();
-        for (part_number, offset, size) in raw_parts {
-            let upload_url = self.mint_part_url(
-                file_id,
-                version_id,
-                &backend_id,
-                &backend_path,
-                upload_id,
-                &backend_handle,
-                part_number,
-                offset,
-                size,
-                exp,
-                &request_id,
-                now,
-            )?;
-            parts.push(MultipartPartPlan {
-                part_number,
-                offset,
-                size,
-                upload_url,
-            });
         }
 
         self.metrics
@@ -510,6 +689,25 @@ impl MultipartService {
             parts,
             expires_at: url_expires_at,
         })
+    }
+
+    /// Best-effort abort of a backend handle opened by `open_session` that will not be used.
+    async fn abort_fresh_handle(
+        &self,
+        backend: &dyn StorageBackend,
+        backend_path: &str,
+        backend_handle: &str,
+        upload_id: Uuid,
+    ) {
+        if let Err(abort_err) = backend.abort_multipart(backend_path, backend_handle).await {
+            self.metrics
+                .record_backend_error(backend.id(), "abort_multipart");
+            tracing::warn!(
+                ?abort_err,
+                %upload_id,
+                "best-effort backend abort failed after multipart session setup error"
+            );
+        }
     }
 
     /// Token-authenticated sidecar callback recording a successfully written part.
@@ -670,7 +868,6 @@ impl MultipartService {
                 )),
             };
         }
-        let takeover = session.state == MultipartUploadState::Completing;
 
         // Whether ANY `If-Match` was supplied (already validated), so the embedded bind CAS may target
         // the observed pointer; with none, complete must not get an unconditional bind either.
@@ -679,15 +876,8 @@ impl MultipartService {
         let svc = Arc::clone(self);
         let ctx = ctx.clone();
         let handle = tokio::spawn(async move {
-            svc.assemble_and_finish(
-                &ctx,
-                file,
-                session,
-                lease_owner,
-                takeover,
-                if_match_was_supplied,
-            )
-            .await
+            svc.assemble_and_finish(&ctx, file, session, lease_owner, if_match_was_supplied)
+                .await
         });
         match handle.await {
             Ok(result) => result.map(MultipartCompleteOutcome::Completed),
@@ -792,19 +982,11 @@ impl MultipartService {
         file: file_storage_sdk::File,
         session: MultipartUploadSession,
         lease_owner: String,
-        takeover: bool,
         if_match_was_supplied: bool,
     ) -> Result<CompletedMultipartUpload, DomainError> {
         let upload_id = session.upload_id;
         let result = self
-            .assemble_and_finish_inner(
-                ctx,
-                &file,
-                &session,
-                &lease_owner,
-                takeover,
-                if_match_was_supplied,
-            )
+            .assemble_and_finish_inner(ctx, &file, &session, &lease_owner, if_match_was_supplied)
             .await;
         if result.is_err()
             && let Err(release_err) = self
@@ -824,36 +1006,28 @@ impl MultipartService {
         file: &file_storage_sdk::File,
         session: &MultipartUploadSession,
         lease_owner: &str,
-        takeover: bool,
         if_match_was_supplied: bool,
     ) -> Result<CompletedMultipartUpload, DomainError> {
         let file_id = file.file_id;
         let upload_id = session.upload_id;
 
-        // Already-finalized fast path, even without `takeover` (a completer may have died after the
-        // finalize committed); re-assembling would hit a consumed backend handle.
+        // Already-finalized fast path (a completer may have died after the finalize committed);
+        // re-assembling would hit a consumed backend handle.
         if let Some(v) = self.store.get_version(file_id, session.version_id).await?
             && v.status == file_storage_sdk::VersionStatus::Available
         {
-            // The winner wrote `complete_result` in the transaction that made the version available;
-            // re-read the session so the replay serves that snapshot verbatim.
-            let fresh = self
-                .store
-                .get_multipart_upload(upload_id)
-                .await?
-                .ok_or_else(|| DomainError::multipart_upload_not_found(upload_id))?;
-            let completed = self.replay_completed(file_id, &fresh).await?;
-            self.finish_session(ctx, session, lease_owner, &completed)
-                .await?;
-            return Ok(completed);
+            return self
+                .replay_finished_version(ctx, file_id, session, lease_owner)
+                .await;
         }
 
         let parts = self.store.list_multipart_parts(upload_id).await?;
 
         let version = self.store.get_version(file_id, session.version_id).await?;
-        let backend_id = version
-            .as_ref()
-            .map_or_else(|| session.backend_id.clone(), |v| v.backend_id.clone());
+        let backend_id = session.resolve_backend_id(
+            version.as_ref().map(|v| v.backend_id.as_str()),
+            self.backends.default_id(),
+        );
         let backend = self.backends.get(&backend_id)?;
         let backend_path = session.backend_path.clone();
 
@@ -922,8 +1096,11 @@ impl MultipartService {
             .await
         {
             Ok(assembled) => assembled,
-            Err(assemble_err) if takeover => {
-                // Takeover: the backend handle may be consumed; derive (manifest, root) from the part rows.
+            Err(assemble_err) => {
+                // The assembly may already have succeeded in an earlier attempt (a lost response, or
+                // a failure after it that released the lease), which consumed the backend handle.
+                // The path is unique per version and the part rows fix the manifest, so an existing
+                // object is that assembly: derive (manifest, root) from the part rows.
                 let object_exists = backend.exists(&backend_path).await.unwrap_or(false);
                 if !object_exists {
                     return Err(assemble_err);
@@ -941,7 +1118,6 @@ impl MultipartService {
                 let root = manifest.root();
                 (manifest, root)
             }
-            Err(e) => return Err(e),
         };
         // ADR-0006: a one-part plan is `whole-sha256` with no manifest row and `part_count` NULL.
         let single_part = parts.len() == 1;
@@ -1111,6 +1287,28 @@ impl MultipartService {
         Ok(result)
     }
 
+    /// The version is already `Available`: a finalize committed earlier. Serve the winner's
+    /// snapshot and close the session under this lease.
+    async fn replay_finished_version(
+        &self,
+        ctx: &SecurityContext,
+        file_id: Uuid,
+        session: &MultipartUploadSession,
+        lease_owner: &str,
+    ) -> Result<CompletedMultipartUpload, DomainError> {
+        // The winner wrote `complete_result` in the transaction that made the version available;
+        // re-read the session so the replay serves that snapshot verbatim.
+        let fresh = self
+            .store
+            .get_multipart_upload(session.upload_id)
+            .await?
+            .ok_or_else(|| DomainError::multipart_upload_not_found(session.upload_id))?;
+        let completed = self.replay_completed(file_id, &fresh).await?;
+        self.finish_session(ctx, session, lease_owner, &completed)
+            .await?;
+        Ok(completed)
+    }
+
     /// Handle a lost finalize CAS (fenced by `status = 'pending'`, not lease ownership). If the
     /// version is `Available`, a taken-over completer won: converge by finishing the session.
     /// Otherwise the pending row is gone (abort or cleanup): a real error.
@@ -1126,17 +1324,9 @@ impl MultipartService {
         if let Some(v) = converged_version
             && v.status == file_storage_sdk::VersionStatus::Available
         {
-            // The winner wrote `complete_result` in the transaction that made the version available;
-            // re-read the session so the replay serves that snapshot verbatim.
-            let fresh = self
-                .store
-                .get_multipart_upload(upload_id)
-                .await?
-                .ok_or_else(|| DomainError::multipart_upload_not_found(upload_id))?;
-            let completed = self.replay_completed(file_id, &fresh).await?;
-            self.finish_session(ctx, session, lease_owner, &completed)
-                .await?;
-            return Ok(completed);
+            return self
+                .replay_finished_version(ctx, file_id, session, lease_owner)
+                .await;
         }
         Err(DomainError::conflict(format!(
             "multipart upload {upload_id}: version row was removed before completion"
@@ -1156,8 +1346,9 @@ impl MultipartService {
         )
     }
 
-    /// Terminal `completing -> completed` for the takeover/converge paths; the main path does this
-    /// inside `finalize_multipart_version`.
+    /// Terminal `completing -> completed` for the paths that find the version already finalized
+    /// (replay, converge) or lose the terminal CAS inside the finalize transaction; the main path
+    /// does this inside `finalize_multipart_version`.
     async fn finish_session(
         &self,
         ctx: &SecurityContext,
@@ -1229,7 +1420,10 @@ impl MultipartService {
         // Skip the version lookup when no URL will be minted.
         let backend_id = if can_resume {
             let version = self.store.get_version(file_id, session.version_id).await?;
-            version.map_or_else(|| session.backend_id.clone(), |v| v.backend_id)
+            session.resolve_backend_id(
+                version.as_ref().map(|v| v.backend_id.as_str()),
+                self.backends.default_id(),
+            )
         } else {
             String::new()
         };
@@ -1331,9 +1525,10 @@ impl MultipartService {
         }
 
         let version = self.store.get_version(file_id, session.version_id).await?;
-        let backend_id = version
-            .as_ref()
-            .map_or_else(|| session.backend_id.clone(), |v| v.backend_id.clone());
+        let backend_id = session.resolve_backend_id(
+            version.as_ref().map(|v| v.backend_id.as_str()),
+            self.backends.default_id(),
+        );
         let backend = self.backends.get(&backend_id)?;
         let backend_path = session.backend_path.clone();
 
@@ -1359,31 +1554,30 @@ impl MultipartService {
             ));
         }
 
-        // DB errors propagate; an already-missing row (`false`) is the desired end state.
-        self.store
-            .delete_version(
-                file_id,
-                session.version_id,
-                Self::audit_ok(
-                    ctx,
-                    Some(file_id),
-                    AuditOperation::DeleteVersion,
-                    serde_json::json!({ "version_id": session.version_id, "reason": "multipart_abort" }),
-                ),
-            )
-            .await?;
+        // DB errors propagate; an already-missing row (`false`) is the desired end state. The file
+        // goes too when this was its only version (composite create) and it has no content; the
+        // guard keeps a file with other versions.
+        self.discard_version_and_orphan_file(
+            ctx,
+            file.tenant_id,
+            file.owner_id,
+            file_id,
+            session.version_id,
+            "multipart_abort",
+        )
+        .await?;
 
         Ok(())
     }
 
     /// Delete a backend blob, logging on error; a failed delete leaves an orphan for cleanup.
     async fn best_effort_blob_delete(&self, backend_id: &str, path: &str) {
-        let Ok(backend) = self.backends.get(backend_id) else {
-            return;
-        };
-        if let Err(err) = backend.delete(path).await {
-            self.metrics.record_backend_error(backend_id, "delete");
-            tracing::warn!(?err, path, "best-effort backend delete failed");
-        }
+        crate::domain::service::best_effort_blob_delete(
+            &self.backends,
+            self.metrics.as_ref(),
+            backend_id,
+            path,
+        )
+        .await;
     }
 }
