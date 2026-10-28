@@ -414,7 +414,6 @@ cluster = { package = "cf-gears-cluster", version = "0.3.0", path = "gears/syste
 api-gateway = { package = "cf-gears-api-gateway", version = "0.6.0", path = "gears/system/api-gateway" }
 # Concrete plugins needed to link a standalone-mode binary.
 static-authn-plugin = { package = "cf-gears-static-authn-plugin", version = "0.3.19", path = "gears/system/authn-resolver/plugins/static-authn-plugin" }
-firebase-authn-plugin = { package = "cf-gears-firebase-authn-plugin", version = "0.1.0", path = "gears/system/authn-resolver/plugins/firebase-authn-plugin" }
 static-authz-plugin = { package = "cf-gears-static-authz-plugin", version = "0.1.39", path = "gears/system/authz-resolver/plugins/static-authz-plugin" }
 standalone-cluster-plugin = { package = "cf-gears-standalone-cluster-plugin", version = "0.2.9", path = "gears/system/cluster/plugins/standalone-cluster-plugin" }
 
