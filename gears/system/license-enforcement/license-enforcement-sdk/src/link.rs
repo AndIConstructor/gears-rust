@@ -12,6 +12,11 @@ pub enum LinkError {
     Many(usize),
 }
 
+/// Returns the single item, or [`LinkError`] if there are zero or several.
+///
+/// # Errors
+///
+/// [`LinkError::None`] for zero items, [`LinkError::Many`] for more than one.
 pub fn exactly_one<T>(items: impl IntoIterator<Item = T>) -> Result<T, LinkError> {
     let mut items = items.into_iter();
     let first = items.next().ok_or(LinkError::None)?;
