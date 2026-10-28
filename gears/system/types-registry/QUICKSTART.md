@@ -64,7 +64,9 @@ the existing example server from the repository root:
 
 ```bash
 .venv/bin/python tools/scripts/run_e2e.py --suite types-registry --dry-run
-cargo run -p cf-gears-example-server --no-default-features \
+APP__SERVER__HOME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/types-registry-quickstart.XXXXXX")" \
+APP__GEARS__API_GATEWAY__CONFIG__INTERNAL_AUTH__SECRET="${E2E_INTERNAL_TOKEN:-e2e-internal-token}" \
+  cargo run -p cf-gears-example-server --no-default-features \
   --features static-tenants,static-authn,static-authz -- \
   --config target/e2e-local-types-registry.yaml
 
@@ -73,7 +75,7 @@ TYPES_REGISTRY_INTERNAL="http://127.0.0.1:8086"
 BASE="$TYPES_REGISTRY_INTERNAL"
 PLATFORM="$BASE/types-registry/v2/platform"
 TENANT="$BASE/types-registry/v2"
-INTERNAL_TOKEN="e2e-internal-token"
+INTERNAL_TOKEN="${E2E_INTERNAL_TOKEN:-e2e-internal-token}"
 TOKEN="e2e-token-tenant-a"
 ```
 
@@ -81,6 +83,10 @@ The preparation command generates the focused YAML and prints the build/test com
 without running them. The configuration binds the registry to SQLite and configures
 the gateway's internal-token authenticator and static tenant AuthN. Platform calls
 send only the internal token; tenant reads send only the bearer.
+
+The server command uses a fresh data directory, keeping this walkthrough separate
+from databases left by other branches. If setting `E2E_INTERNAL_TOKEN`, export the
+same value in both terminals before running these commands.
 
 Run the existing HTTP scenarios with `make e2e-local SUITE=types-registry`.
 
@@ -410,7 +416,53 @@ Deletion requires a positive `expected_resource_version`. Invalid values return
 `400`; mismatches become asynchronous `precondition_failed` outcomes. `If-Match`
 is rejected.
 
-Batch deletion accepts either key form and returns outcomes in request order, each echoing
+For the batch example, create a separate live schema and its instance: the preceding
+single deletion has already tombstoned `event.v1~`. Submit both prerequisites together:
+
+```bash
+RECEIPT=$(curl -fsS -X POST "$PLATFORM/entities" \
+  -H "X-ToolKit-Internal-Token: $INTERNAL_TOKEN" \
+  -H "Idempotency-Key: register-batch-delete-example-1" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "items": [
+          {
+            "gts_id": "gts.cf.core.example.batch_event.v1~",
+            "content": {
+              "$id": "gts://gts.cf.core.example.batch_event.v1~",
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "type": "object",
+              "properties": { "email": { "type": "string" } }
+            }
+          },
+          {
+            "gts_id": "gts.cf.core.example.batch_event.v1~cf.core.example.first.v1",
+            "content": { "email": "first@example.com" }
+          }
+        ]
+      }')
+OPERATION_ID=$(printf '%s' "$RECEIPT" |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["operation_id"])')
+
+# Admission is asynchronous. Wait at most 60 polls before checking both outcomes.
+for attempt in {1..60}; do
+  OPERATION=$(curl -fsS "$PLATFORM/operations/$OPERATION_ID" \
+    -H "X-ToolKit-Internal-Token: $INTERNAL_TOKEN") || break
+  STATUS=$(printf '%s' "$OPERATION" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+  [ "$STATUS" = completed ] && break
+  sleep 1
+done
+printf '%s' "$OPERATION" | python3 -c 'import json,sys
+op = json.load(sys.stdin)
+if (op["status"] != "completed" or len(op["items"]) != 2
+    or any(i["status"] != "succeeded" or i["resource_version"] != 1 for i in op["items"])):
+    raise SystemExit("Prerequisite admission failed or timed out: " + json.dumps(op))
+print("Both batch-deletion prerequisites are active at version 1")'
+```
+
+Continue only after both prerequisite items succeed. Batch deletion accepts either
+key form and returns outcomes in request order, each echoing
 its `entity_key`, a Registry Reference in lowercase hyphenated form. Two keys of one entity
 are a duplicate and refuse the batch. This one deletes an Instance by its identifier and its
 Type Schema by its Registry Reference; the worker deletes the dependant first:
@@ -422,8 +474,8 @@ curl -s -X POST "$PLATFORM/entities:batchDelete" \
   -H "Content-Type: application/json" \
   -d '{
         "items": [
-          { "entity_key": "gts.cf.core.example.event.v1~cf.core.example.first.v1", "expected_resource_version": 1 },
-          { "entity_key": "d226dd5b-14c8-56da-a718-9cf29becaba1", "expected_resource_version": 1 }
+          { "entity_key": "gts.cf.core.example.batch_event.v1~cf.core.example.first.v1", "expected_resource_version": 1 },
+          { "entity_key": "13ee6458-e7aa-5fcd-991e-85ff32ad8dde", "expected_resource_version": 1 }
         ]
       }'
 ```

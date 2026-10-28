@@ -23,7 +23,7 @@ and dependent refresh. Both must be positive. Closure accounting is per document
 candidate overlay; the resolved-size budget applies to the canonical bytes of each effective
 artifact. Exceeding either refuses the candidate without committing partial state.
 
-The executable list uses task IDs **T1–T45**, plus the inserted **T34a** AM request-context reads (P33), **T35a** SDK payload-validation and **T35b** mock Type Schema admission tasks. T1–T34 and T34a are complete (35 of 48); **T35–T45 plus T35a/T35b are the 13 remaining tasks**. T34a follows T34, and T35a and T35b follow T35, without renumbering existing work. Task status, acceptance criteria and recorded evidence are preserved; task references are synchronized with this numbering. The next task is T35 (tenant REST and both resolving clients).
+The executable list uses task IDs **T1–T45**, plus the inserted **T34a** AM request-context reads (P33), **T35a** SDK payload-validation and **T35b** mock Type Schema admission tasks. The foundation delivers T1–T31 and T33–T35 (**34 of 48 complete**). **14 tasks remain:** T32, T34a, T35a/T35b and T36–T45. T32 and T34a are pending in the [consumer-migration follow-up](https://github.com/aviator5/gears-rust/pull/1); the next SDK task is T35a, after its released-GTS prerequisite. The original numeric sequence below describes dependencies, while these two PRs deliver the foundation before consumer migration. Historical migration-branch evidence is retained in `todo.md` and does not establish completion at this foundation head.
 
 ## Decisions and task numbering
 
@@ -308,7 +308,7 @@ collapsed into `invalid_schema`.
 | Two pods of one release with different configuration publish different content | Low — last writer wins until the rollout ends | Accepted (C11); only a newer release orders them |
 | An older pod serves against a newer contract after a restart or rollback | Medium — the same exposure every rolling update already has | Superseded is ready with a warning and a metric (D21); the release's N−1 obligation and mixed-version tests (T45) carry compatibility; a stricter opt-in is deferred to P1 (O6) |
 | Independent old/new catalogues during migration | **High** — a new writer can disappear from an old reader | P28 gates local publication on database seeding. P29 migrates the complete AM/IdP/TR group in one merge and audits external readers/writers; no fallback or mirrored writes. Unrelated workflows remain legacy until T38, and v1/v2 routes never straddle stores |
-| DB revisions land before reverse-impact refresh and compatibility | Medium | T12 documents the staging window; minor-bearing Type Schema revisions and effective `skip_compatibility_check` are refused, and remaining embedded consumers stay legacy until T38; T32 already proves the real AM group. Checkpoints 3 and 4 must close T15/T18 before cutover |
+| DB revisions land before reverse-impact refresh and compatibility | Medium | T12 documents the staging window; minor-bearing Type Schema revisions and effective `skip_compatibility_check` are refused, and remaining embedded consumers stay legacy until T38; T32 must prove the real AM group in the consumer-migration follow-up. Checkpoints 3 and 4 must close T15/T18 before cutover |
 | Read latency increases as consumers move from memory to the database | Medium | T32 accepts uncached reads for the early local handoff and adds no private memo. D3 materializes artifacts; T36 supplies the shared SDK cache before the remaining T38 fleet cutover |
 | A cached entry can be stale inside its freshness window | Low | DESIGN §3.3's sanctioned trade, and now bounded further: T27's validators let T36 revalidate rather than guess, `fresh` gives an authoritative read, `0s` disables the window, and invalidation is immediate on an observed terminal outcome |
 | The validator field reaches the SDK models after consumers have migrated | **High** — a second migration across 20+ gears | T27 computes the validator in Phase 6 and T29 carries it in the models from the start, before T38 moves any consumer (P9, P21) |
@@ -328,9 +328,9 @@ collapsed into `invalid_schema`.
 
 ## Sequence
 
-**Accepted queue (P32): sequential, in numeric order.** Completed phases retain their status and evidence; T31–T34a are complete and the next implementation task is **T35**.
+**Accepted queue (P32), adjusted for the PR split.** T31 and T33–T35 are complete in the foundation. T32 and T34a remain pending in the consumer-migration follow-up; the next SDK task is **T35a**. Checkpoint 7A still requires the consumer migration and its verification. Historical results below are attributed to their migration branch, not to this foundation.
 
-1. Phase 7: T31 → T32 → T33 → T34 → T34a → T35 → T35a → T35b → T36 → T37 (Checkpoint 7A) → T38 (Checkpoint 7). T29/T30 are complete; T33 remains its own toolkit pull request. T35a delegates to the released GTS snapshot helper; any required GTS/spec migration is a separate prerequisite. T35b prepares valid fixtures before enabling mock Type Schema validation and needs no new upstream helper.
+1. Phase 7: T31 → T32 → T33 → T34 → T34a → T35 → T35a → T35b → T36 → T37 (Checkpoint 7A) → T38 (Checkpoint 7). T29/T30 are complete; T33 is already merged in toolkit PR #5256. T35a delegates to the released GTS snapshot helper; any required GTS/spec migration is a separate prerequisite. T35b prepares valid fixtures before enabling mock Type Schema validation and needs no new upstream helper.
 2. Phase 8: T39 → T40 → T41 (Checkpoint 8A) → T42 → T43 (Checkpoint 8).
 3. Phase 9: T44 → T45 (Checkpoint 9).
 
