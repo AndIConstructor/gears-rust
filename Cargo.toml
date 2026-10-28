@@ -373,7 +373,6 @@ toolkit-security = { package = "cf-gears-toolkit-security", version = "0.11.0", 
 toolkit-stable-hash = { package = "cf-gears-toolkit-stable-hash", version = "0.1.0", path = "libs/toolkit-stable-hash" }
 toolkit-transport-grpc = { package = "cf-gears-toolkit-transport-grpc", version = "0.9.0", path = "libs/toolkit-transport-grpc" }
 toolkit-taskward = { package = "cf-gears-toolkit-taskward", version = "0.1.0", path = "libs/toolkit-taskward" }
-toolkit-durable-execution = { package = "cf-gears-toolkit-durable-execution", version = "0.1.0", path = "libs/toolkit-durable-execution" }
 toolkit-utils = { package = "cf-gears-toolkit-utils", version = "0.7.2", path = "libs/toolkit-utils" }
 toolkit-onnx-runtime = { package = "cf-gears-toolkit-onnx-runtime", version = "0.1.0", path = "libs/ai/toolkit-onnx-runtime" }
 rustls-corecrypto-provider = { package = "cf-gears-rustls-corecrypto-provider", version = "0.1.3", path = "libs/rustls-corecrypto-provider" }
@@ -463,11 +462,6 @@ bss-orders-sdk = { package = "cf-gears-bss-orders-sdk", path = "gears/bss/orders
 # crate is a release artifact yet.
 bss-approvals-sdk = { package = "cf-gears-bss-approvals-sdk", path = "gears/bss/approvals/approvals-sdk" }
 bss-approvals = { package = "cf-gears-bss-approvals", path = "gears/bss/approvals/approvals" }
-# NFKC for the products registry's `normalized(name)`, the operand of its
-# uniqueness index. Already in the tree transitively; taken as a direct
-# dependency because the normalization must be identical on both engines and
-# std offers neither NFKC nor full casefold.
-unicode-normalization = "0.1"
 bss-rate-provider-sdk = { package = "cf-gears-bss-rate-provider-sdk", version = "0.1.10", path = "gears/bss/rate-provider/rate-provider-sdk" }
 coord = { package = "cf-gears-bss-coord", path = "gears/bss/libs/coord" }
 bss-approval = { package = "cf-gears-bss-approval", path = "gears/bss/libs/approval" }

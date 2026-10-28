@@ -43,7 +43,6 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-retry = { workspace = true }
-tokio-util = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 # SecretString for config credentials (redacted Debug + zeroize); `serde` enables

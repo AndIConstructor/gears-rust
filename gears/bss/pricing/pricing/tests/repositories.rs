@@ -476,6 +476,9 @@ fn db_error(e: &RepoError) -> Option<&sea_orm::DbErr> {
         _ => None,
     }
 }
+/// The default budget of 3 can run out on a loaded CI runner while the loser
+/// keeps hitting `SQLITE_BUSY` instead of the conflict this race is meant to show.
+const RACE_TX_ATTEMPTS: u32 = 10;
 async fn writer(
     db: Db,
     scope: AccessScope,
@@ -483,7 +486,7 @@ async fn writer(
     barrier: Arc<tokio::sync::Barrier>,
 ) -> Result<(), RepoError> {
     let mut attempt = 0;
-    db.transaction_with_retry(TxConfig::serializable(), db_error, move |tx| {
+    db.transaction_with_retry_max(TxConfig::serializable(), RACE_TX_ATTEMPTS, db_error, move |tx| {
         attempt += 1;
         let first = attempt == 1;
         let scope = scope.clone();
