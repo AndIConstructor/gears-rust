@@ -111,7 +111,6 @@ figment = { workspace = true }
 sqlx = { workspace = true, optional = true }
 # Unconditional: the transactional outbox pipeline is always compiled in.
 tokio-util = { workspace = true }
-futures-util = { workspace = true }
 toolkit-taskward = { workspace = true }
 
 [[example]]

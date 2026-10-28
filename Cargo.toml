@@ -373,7 +373,6 @@ toolkit-security = { package = "cf-gears-toolkit-security", version = "0.12.0", 
 toolkit-stable-hash = { package = "cf-gears-toolkit-stable-hash", version = "0.2.0", path = "libs/toolkit-stable-hash" }
 toolkit-transport-grpc = { package = "cf-gears-toolkit-transport-grpc", version = "0.9.1", path = "libs/toolkit-transport-grpc" }
 toolkit-taskward = { package = "cf-gears-toolkit-taskward", version = "0.1.1", path = "libs/toolkit-taskward" }
-toolkit-durable-execution = { package = "cf-gears-toolkit-durable-execution", version = "0.1.0", path = "libs/toolkit-durable-execution" }
 toolkit-utils = { package = "cf-gears-toolkit-utils", version = "0.7.3", path = "libs/toolkit-utils" }
 toolkit-onnx-runtime = { package = "cf-gears-toolkit-onnx-runtime", version = "0.2.0", path = "libs/ai/toolkit-onnx-runtime" }
 rustls-corecrypto-provider = { package = "cf-gears-rustls-corecrypto-provider", version = "0.1.4", path = "libs/rustls-corecrypto-provider" }
@@ -415,7 +414,6 @@ cluster = { package = "cf-gears-cluster", version = "0.3.0", path = "gears/syste
 api-gateway = { package = "cf-gears-api-gateway", version = "0.6.0", path = "gears/system/api-gateway" }
 # Concrete plugins needed to link a standalone-mode binary.
 static-authn-plugin = { package = "cf-gears-static-authn-plugin", version = "0.3.19", path = "gears/system/authn-resolver/plugins/static-authn-plugin" }
-firebase-authn-plugin = { package = "cf-gears-firebase-authn-plugin", version = "0.1.0", path = "gears/system/authn-resolver/plugins/firebase-authn-plugin" }
 static-authz-plugin = { package = "cf-gears-static-authz-plugin", version = "0.1.39", path = "gears/system/authz-resolver/plugins/static-authz-plugin" }
 standalone-cluster-plugin = { package = "cf-gears-standalone-cluster-plugin", version = "0.2.9", path = "gears/system/cluster/plugins/standalone-cluster-plugin" }
 
@@ -463,11 +461,6 @@ bss-orders-sdk = { package = "cf-gears-bss-orders-sdk", path = "gears/bss/orders
 # crate is a release artifact yet.
 bss-approvals-sdk = { package = "cf-gears-bss-approvals-sdk", path = "gears/bss/approvals/approvals-sdk" }
 bss-approvals = { package = "cf-gears-bss-approvals", path = "gears/bss/approvals/approvals" }
-# NFKC for the products registry's `normalized(name)`, the operand of its
-# uniqueness index. Already in the tree transitively; taken as a direct
-# dependency because the normalization must be identical on both engines and
-# std offers neither NFKC nor full casefold.
-unicode-normalization = "0.1"
 bss-rate-provider-sdk = { package = "cf-gears-bss-rate-provider-sdk", version = "0.2.0", path = "gears/bss/rate-provider/rate-provider-sdk" }
 coord = { package = "cf-gears-bss-coord", path = "gears/bss/libs/coord" }
 bss-approval = { package = "cf-gears-bss-approval", path = "gears/bss/libs/approval" }
@@ -957,4 +950,5 @@ ignored = [
     "resource-group",
     "tenant-resolver",
     "types-registry",
+    "usage-collector",
 ]
