@@ -14,12 +14,13 @@
 //!   emits nothing, and the debit that crosses it emits the one
 //!   `period-rollover`;
 //! - a read takes no row lock: it finishes while a debit holds the Quota row,
-//!   and a debit is not refused while a read is in flight.
+//!   and a debit is not refused while a read is in flight;
+//! - a page issues as many statements for twenty Quotas as for two.
 //!
 //! Requires Docker. Run with
 //! `cargo test -p cf-gears-quota-enforcement-storage-plugin --features postgres --test snapshot_integration_pg`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -526,6 +527,44 @@ fn gated_evaluator() -> (Arc<TransactionEvaluator>, GateHandle) {
     )
 }
 
+/// Counts the statements `sqlx` reports while it dispatches for one future.
+#[derive(Clone, Default)]
+struct Statements(Arc<AtomicUsize>);
+
+impl Statements {
+    /// `op`'s output and the statements it issued.
+    async fn during<T>(op: impl std::future::Future<Output = T>) -> (T, usize) {
+        use tracing::instrument::WithSubscriber as _;
+        let counter = Self::default();
+        let out = op
+            .with_subscriber(tracing::Dispatch::new(counter.clone()))
+            .await;
+        (out, counter.0.load(Ordering::SeqCst))
+    }
+}
+
+impl tracing::Subscriber for Statements {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target() == "sqlx::query"
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 fn of(page: &PageResult<QuotaSnapshot>, id: QuotaId) -> &QuotaSnapshot {
     page.items
         .iter()
@@ -790,5 +829,35 @@ async fn a_debit_is_not_refused_while_a_read_is_in_flight() {
     assert_eq!(of(&page, second).consumed, 0);
     assert_eq!(h.periods(first).await[0].consumed, 7);
     assert_eq!(h.periods(second).await[0].consumed, 5);
+    h.down().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_page_issues_as_many_statements_for_twenty_quotas_as_for_two() {
+    let h = PgHarness::up().await;
+    let holders: Vec<String> = (0..10).map(|i| format!("u{i}")).collect();
+    for holder in &holders {
+        h.create(consumption(tenant(), holder, 100)).await;
+        h.create(allocation(tenant(), holder, 100)).await;
+    }
+    let pairs: Vec<ApplicableQuotas> = holders
+        .iter()
+        .map(|holder| applicable(tenant(), holder))
+        .collect();
+    let (ctx, scope) = (ctx(), scope());
+    let read = |pairs| {
+        h.store
+            .bulk_read_quota_snapshot(&ctx, &scope, pairs, PageRequest::first(100))
+    };
+
+    let (two, small) = Statements::during(read(&pairs[..1])).await;
+    let (twenty, large) = Statements::during(read(&pairs)).await;
+    assert_eq!(two.expect("read").items.len(), 2);
+    assert_eq!(twenty.expect("read").items.len(), 20);
+    assert!(small > 0, "the counter sees the read's statements");
+    assert_eq!(
+        large, small,
+        "a page's statements do not grow with its Quotas"
+    );
     h.down().await;
 }

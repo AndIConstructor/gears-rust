@@ -11,28 +11,37 @@
 //!    snapshot every later read sees: a Quota row, its counter row and the
 //!    expired holds that correct the counter all come from one state.
 //! 2. One clock reading, shared by every Quota on the page.
-//! 3. The snapshots. A consumption Quota whose current window has no row yet
-//!    reads that window as zero; the next mutating operation creates the row.
+//! 3. The snapshots, from three statements per thousand Quotas whatever the
+//!    page holds: their current period rows, their allocation rows, and the
+//!    expired holds those rows still owe. A consumption Quota whose current
+//!    window has no row yet reads that window as zero; the next mutating
+//!    operation creates the row.
 //!
 //! A read writes nothing and takes no row lock (I3), so it never waits on a
 //! writer and a writer never waits on it. On `PostgreSQL` the transaction is
 //! also `READ ONLY`, so a write on this path fails rather than slipping in.
 
+use std::collections::HashMap;
+
 use quota_enforcement_sdk::{
-    ApplicableQuotas, PageRequest, PageResult, QuotaId, QuotaSnapshot, QuotaType, StorageError,
+    ApplicableQuotas, PageRequest, PageResult, Quota, QuotaId, QuotaSnapshot, QuotaType,
+    StorageError,
 };
 use time::OffsetDateTime;
 use toolkit_db::secure::{DBRunner, TxAccessMode, TxConfig, TxIsolationLevel};
 use toolkit_security::AccessScope;
 
-use super::consumption_store::{
-    LockedCounter, SqlConsumptionStore, TxError, lift, snapshot_of_locked,
-};
+use uuid::Uuid;
+
+use super::consumption_store::{LockedCounter, SqlConsumptionStore, TxError, lift, snapshot_from};
 use super::cursor;
-use super::entity::quota;
 use super::quota_mapping;
 use super::repo::consumption_counter_repo as counter_repo;
+use super::repo::lease_repo;
 use super::repo::quota_repo::{self, SnapshotPair};
+
+/// Quota ids one statement binds: far below every backend's parameter limit.
+const IDS_PER_STATEMENT: usize = 1_000;
 
 /// A page the transaction read: its snapshots, in `quota_id` order, and
 /// whether more rows follow.
@@ -186,31 +195,81 @@ async fn read_in_tx(
     }
     // Read after the page query, so the snapshot is fixed first.
     let now = now_of();
-    let mut snapshots = Vec::with_capacity(rows.len());
-    for row in &rows {
+    let quotas = rows
+        .into_iter()
+        .map(quota_mapping::row_to_quota)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut snapshots = Vec::with_capacity(quotas.len());
+    for chunk in quotas.chunks(IDS_PER_STATEMENT) {
         // @cpt-begin:cpt-cf-quota-enforcement-flow-snapshot-read:p1:inst-snp-assemble
-        snapshots.push(assemble(tx, scope, row, now).await?);
+        snapshots.extend(assemble(tx, scope, chunk, now).await?);
         // @cpt-end:cpt-cf-quota-enforcement-flow-snapshot-read:p1:inst-snp-assemble
     }
     Ok(Page { snapshots, more })
 }
 
-/// One Quota's snapshot.
+/// The snapshots of `quotas`, in their order, from at most three statements.
 async fn assemble(
     tx: &impl DBRunner,
     scope: &AccessScope,
-    row: &quota::Model,
+    quotas: &[Quota],
     now: OffsetDateTime,
-) -> Result<QuotaSnapshot, TxError> {
-    let quota = quota_mapping::row_to_quota(row.clone())?;
-    let counter = if quota.quota_type == QuotaType::Consumption {
-        let latest = counter_repo::find_latest(tx, scope, quota.id.as_uuid()).await?;
-        LockedCounter::consumption(&quota, latest, now)
-    } else {
-        let row = counter_repo::find_allocation(tx, scope, quota.id.as_uuid()).await?;
-        LockedCounter::allocation(row.map(|row| row.in_flight))
+) -> Result<Vec<QuotaSnapshot>, TxError> {
+    let ids_of = |kind: QuotaType| -> Vec<Uuid> {
+        quotas
+            .iter()
+            .filter(|quota| quota.quota_type == kind)
+            .map(|quota| quota.id.as_uuid())
+            .collect()
     };
-    snapshot_of_locked(tx, scope, &quota, &counter, now).await
+    let (consumption, allocation) = (
+        ids_of(QuotaType::Consumption),
+        ids_of(QuotaType::Allocation),
+    );
+    let mut current = HashMap::new();
+    if !consumption.is_empty() {
+        for row in counter_repo::find_current_of(tx, scope, &consumption, now).await? {
+            current.insert(row.quota_id, row);
+        }
+    }
+    let mut in_flight = HashMap::new();
+    if !allocation.is_empty() {
+        for row in counter_repo::find_allocations_of(tx, scope, &allocation).await? {
+            in_flight.insert(row.quota_id, row.in_flight);
+        }
+    }
+    let counters: Vec<LockedCounter> = quotas
+        .iter()
+        .map(|quota| {
+            let id = quota.id.as_uuid();
+            if quota.quota_type == QuotaType::Consumption {
+                LockedCounter::consumption(quota, current.remove(&id), now)
+            } else {
+                LockedCounter::allocation(in_flight.get(&id).copied())
+            }
+        })
+        .collect();
+
+    // A read may not write (I3), so it subtracts the expired holds nobody has
+    // returned yet rather than returning them (I4).
+    let ids: Vec<Uuid> = quotas.iter().map(|quota| quota.id.as_uuid()).collect();
+    let periods: Vec<Uuid> = counters
+        .iter()
+        .filter_map(LockedCounter::period_id)
+        .collect();
+    let mut owed: HashMap<(Uuid, Option<Uuid>), u64> = HashMap::new();
+    for hold in lease_repo::unreturned_expired_holds_of(tx, scope, &ids, &periods, now).await? {
+        let sum = owed.entry((hold.quota_id, hold.period_id)).or_default();
+        *sum = sum.saturating_add(u64::try_from(hold.held_amount).unwrap_or(0));
+    }
+    Ok(quotas
+        .iter()
+        .zip(&counters)
+        .map(|(quota, counter)| {
+            let key = (quota.id.as_uuid(), counter.period_id());
+            snapshot_from(quota, counter, owed.get(&key).copied().unwrap_or(0), now)
+        })
+        .collect())
 }
 
 #[cfg(test)]

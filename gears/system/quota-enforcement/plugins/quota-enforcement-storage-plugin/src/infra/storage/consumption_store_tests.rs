@@ -1199,6 +1199,45 @@ async fn an_expired_hold_stops_counting_against_capacity_before_any_sweep() {
 }
 
 #[tokio::test]
+async fn a_read_subtracts_only_expired_holds_from_both_kinds_of_quota() {
+    let h = Harness::up().await;
+    let allocation = h.allocation_quota("u1", Some(100)).await;
+    let consumption = h.consumption_quota("u2", Some(100), Vec::new()).await;
+
+    for (subject, key) in [("u1", "r1"), ("u2", "r2")] {
+        h.acquire(subject, 30, TTL, &write(OperationType::Reserve, key, 1))
+            .await
+            .expect("the first hold");
+    }
+    h.set_now(DAY_ONE + time::Duration::minutes(30));
+    for (subject, key) in [("u1", "r3"), ("u2", "r4")] {
+        h.acquire(subject, 20, TTL, &write(OperationType::Reserve, key, 2))
+            .await
+            .expect("the second hold");
+    }
+    // The first holds have expired, the second have not.
+    h.set_now(DAY_ONE + time::Duration::minutes(80));
+
+    let both = ApplicableQuotas {
+        subjects: vec![user("u1"), user("u2")],
+        ..applicable("u1")
+    };
+    let page = h
+        .store
+        .read_quota_snapshot(&ctx(), &scope_for(tenant()), &both)
+        .await
+        .expect("snapshot");
+    let consumed = |id| {
+        page.iter()
+            .find(|snapshot| snapshot.quota_id == id)
+            .map(|snapshot| snapshot.consumed)
+    };
+    assert_eq!(consumed(allocation), Some(20));
+    assert_eq!(consumed(consumption), Some(20));
+    h.down().await;
+}
+
+#[tokio::test]
 async fn the_first_writer_returns_an_expired_hold_and_a_later_sweep_moves_nothing() {
     // The sequence a read-side correction alone gets wrong: a credit that
     // floors, a debit after it, and only then the sweeper. Returning the hold
