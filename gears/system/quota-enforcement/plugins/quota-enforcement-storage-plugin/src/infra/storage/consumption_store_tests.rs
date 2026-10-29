@@ -550,7 +550,7 @@ async fn thresholds_fire_upward_once_and_a_credit_does_not_rearm_them() {
 }
 
 #[tokio::test]
-async fn a_snapshot_read_materializes_the_current_row_and_settles_nothing() {
+async fn a_snapshot_read_emits_nothing_and_the_next_mutation_settles() {
     let h = Harness::up().await;
     let id = h.consumption_quota("u1", Some(100), Vec::new()).await;
     h.debit("u1", 10, &write(OperationType::Debit, "k1", 1))

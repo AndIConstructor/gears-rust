@@ -3370,6 +3370,13 @@ on behalf of a tenant administrator)
   carry per subscription tier, and pushes the new cap back to QE via `update_quota`. QE remains carry-policy-free.
   Decision criterion: a concrete carry use case from a licensing-tier requirement, observed in production. — owner:
   Platform Engineering — target resolution: deferred — production feedback.
+- **Period-rollover events for idle Quotas**: period boundaries are detected lazily, so a `period-rollover` event is
+  emitted only when a mutating operation reaches a Quota after its boundary; a period in which a Quota saw no mutation
+  produces no event, and snapshot reads do not open periods. Do consumers (Quota Manager, billing) need an event for
+  every active Quota at every boundary, idle ones included? If so, emission needs a mechanism independent of
+  operations on individual Quotas, for example a scheduled boundary pass over active Quotas. Decision criterion: a
+  consumer that needs the closing figures of idle periods. — owner: Platform Engineering — target resolution: P2
+  design discussion.
 - **Cap-clamp for batch-style admission (P3)**: workloads that admit "70 of the 100 instances I requested" are not
   modeled in P1 — every Quota is `enforcement_mode = hard`. If concrete batch admission use cases emerge (LLM token
   batches with partial-response semantics, scheduler bulk admissions), introduce `enforcement_mode = hard-with-clamp`

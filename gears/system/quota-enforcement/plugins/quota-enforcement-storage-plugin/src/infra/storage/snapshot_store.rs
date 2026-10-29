@@ -3,8 +3,8 @@
 //!
 //! # One transaction per read
 //!
-//! A read selects its Quota rows, assembles their snapshots and creates the
-//! period rows it may create in one transaction, in that order:
+//! A read selects its Quota rows and assembles their snapshots in one
+//! transaction, in that order:
 //!
 //! 1. The Quota rows, under the caller's scope. On `PostgreSQL` the
 //!    transaction is `REPEATABLE READ`, so this first statement fixes the
@@ -12,46 +12,27 @@
 //!    expired holds that correct the counter all come from one state.
 //! 2. One clock reading, shared by every Quota on the page.
 //! 3. The snapshots. A consumption Quota whose current window has no row yet
-//!    reads that window as zero, which is exactly what the row the read is
-//!    about to create holds.
-//! 4. Last, just before commit, the rows the I3 exception permits: the
-//!    current window's row of each active consumption Quota within its
-//!    validity window that lacks one. Nothing is settled and no event is
-//!    emitted; closing the elapsed period belongs to the mutating operation
-//!    that crosses the boundary. A Quota outside its window gets no row.
+//!    reads that window as zero; the next mutating operation creates the row.
 //!
-//! Creating the rows last keeps the window in which a writer's own insert of
-//! the same period could wait on this transaction down to the commit itself.
-//!
-//! # Retry
-//!
-//! The whole read runs again when the backend reports contention: a
-//! `PostgreSQL` serialization failure (for example a conflicting period row
-//! committed after this snapshot) or deadlock, or `SQLite`'s `SQLITE_BUSY` /
-//! `SQLITE_BUSY_SNAPSHOT` (a transaction that read first cannot upgrade to
-//! write after another connection committed). Reads are idempotent, so a
-//! retry is safe; a read that keeps failing surfaces as unavailable.
+//! A read writes nothing and takes no row lock (I3), so it never waits on a
+//! writer and a writer never waits on it. On `PostgreSQL` the transaction is
+//! also `READ ONLY`, so a write on this path fails rather than slipping in.
 
 use quota_enforcement_sdk::{
     ApplicableQuotas, PageRequest, PageResult, QuotaId, QuotaSnapshot, QuotaType, StorageError,
 };
-use sea_orm::DbErr;
 use time::OffsetDateTime;
-use toolkit_db::DbError;
-use toolkit_db::secure::{DBRunner, ScopeError, TxConfig, TxIsolationLevel};
+use toolkit_db::secure::{DBRunner, TxAccessMode, TxConfig, TxIsolationLevel};
 use toolkit_security::AccessScope;
 
 use super::consumption_store::{
-    LockedCounter, SqlConsumptionStore, TxError, lift, snapshot_of_locked, window_of,
+    LockedCounter, SqlConsumptionStore, TxError, lift, snapshot_of_locked,
 };
 use super::cursor;
 use super::entity::quota;
 use super::quota_mapping;
 use super::repo::consumption_counter_repo as counter_repo;
 use super::repo::quota_repo::{self, SnapshotPair};
-
-/// Attempts one read gets before its contention error is returned.
-const READ_ATTEMPTS: u32 = 3;
 
 /// A page the transaction read: its snapshots, in `quota_id` order, and
 /// whether more rows follow.
@@ -137,7 +118,7 @@ impl SqlConsumptionStore {
         // @cpt-end:cpt-cf-quota-enforcement-algo-snapshot-pagination:p1:inst-spg-return
     }
 
-    /// Run the read's one transaction, again on contention.
+    /// Run the read's one transaction.
     async fn read_page(
         &self,
         scope: &AccessScope,
@@ -146,18 +127,14 @@ impl SqlConsumptionStore {
         limit: Option<u32>,
     ) -> Result<Page, TxError> {
         let clock = std::sync::Arc::clone(&self.clock);
+        let scope = scope.clone();
         self.db
-            .transaction_with_retry_max(
+            .transaction_ref_mapped_with_config(
                 TxConfig {
                     isolation: Some(TxIsolationLevel::RepeatableRead),
-                    access_mode: None,
+                    access_mode: Some(TxAccessMode::ReadOnly),
                 },
-                READ_ATTEMPTS,
-                db_err_of,
                 move |tx| {
-                    let scope = scope.clone();
-                    let pairs = pairs.clone();
-                    let clock = std::sync::Arc::clone(&clock);
                     Box::pin(async move {
                         read_in_tx(tx, &scope, &pairs, after, limit, || clock()).await
                     })
@@ -185,8 +162,7 @@ fn pair_of(applicable: &ApplicableQuotas) -> SnapshotPair {
     }
 }
 
-/// One attempt: select, read the clock, assemble, then create the permitted
-/// rows.
+/// One attempt: select, read the clock, assemble.
 async fn read_in_tx(
     tx: &impl DBRunner,
     scope: &AccessScope,
@@ -211,63 +187,30 @@ async fn read_in_tx(
     // Read after the page query, so the snapshot is fixed first.
     let now = now_of();
     let mut snapshots = Vec::with_capacity(rows.len());
-    let mut missing = Vec::new();
     for row in &rows {
         // @cpt-begin:cpt-cf-quota-enforcement-flow-snapshot-read:p1:inst-snp-assemble
-        let (snapshot, needs_row) = assemble(tx, scope, row, now).await?;
-        snapshots.push(snapshot);
+        snapshots.push(assemble(tx, scope, row, now).await?);
         // @cpt-end:cpt-cf-quota-enforcement-flow-snapshot-read:p1:inst-snp-assemble
-        if needs_row {
-            missing.push(row);
-        }
     }
-    // @cpt-begin:cpt-cf-quota-enforcement-flow-snapshot-read:p1:inst-snp-lazy-if
-    // @cpt-begin:cpt-cf-quota-enforcement-flow-snapshot-read:p1:inst-snp-lazy
-    for row in missing {
-        let quota = quota_mapping::row_to_quota(row.clone())?;
-        counter_repo::insert_current_period_of(tx, scope, row, &window_of(&quota, now), now)
-            .await?;
-    }
-    // @cpt-end:cpt-cf-quota-enforcement-flow-snapshot-read:p1:inst-snp-lazy
-    // @cpt-end:cpt-cf-quota-enforcement-flow-snapshot-read:p1:inst-snp-lazy-if
     Ok(Page { snapshots, more })
 }
 
-/// One Quota's snapshot, and whether the read may create its current row:
-/// an active consumption Quota within its validity window whose current
-/// window has no row yet.
+/// One Quota's snapshot.
 async fn assemble(
     tx: &impl DBRunner,
     scope: &AccessScope,
     row: &quota::Model,
     now: OffsetDateTime,
-) -> Result<(QuotaSnapshot, bool), TxError> {
+) -> Result<QuotaSnapshot, TxError> {
     let quota = quota_mapping::row_to_quota(row.clone())?;
-    if quota.quota_type == QuotaType::Consumption {
+    let counter = if quota.quota_type == QuotaType::Consumption {
         let latest = counter_repo::find_latest(tx, scope, quota.id.as_uuid()).await?;
-        let current = latest
-            .as_ref()
-            .is_some_and(|row| row.period_start <= now && now < row.period_end);
-        let valid = quota
-            .validity_window
-            .is_none_or(|window| window.contains(now));
-        let counter = LockedCounter::consumption(&quota, latest, now);
-        let snapshot = snapshot_of_locked(tx, scope, &quota, &counter, now).await?;
-        Ok((snapshot, valid && !current))
+        LockedCounter::consumption(&quota, latest, now)
     } else {
         let row = counter_repo::find_allocation(tx, scope, quota.id.as_uuid()).await?;
-        let counter = LockedCounter::allocation(row.map(|row| row.in_flight));
-        let snapshot = snapshot_of_locked(tx, scope, &quota, &counter, now).await?;
-        Ok((snapshot, false))
-    }
-}
-
-/// The database error inside a read's failure, for the contention check.
-fn db_err_of(error: &TxError) -> Option<&DbErr> {
-    match error {
-        TxError::Scope(ScopeError::Db(db)) | TxError::Db(DbError::Sea(db)) => Some(db),
-        _ => None,
-    }
+        LockedCounter::allocation(row.map(|row| row.in_flight))
+    };
+    snapshot_of_locked(tx, scope, &quota, &counter, now).await
 }
 
 #[cfg(test)]
