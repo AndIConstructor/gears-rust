@@ -2005,7 +2005,7 @@ sequenceDiagram
     else metric is registered (QuotaGated or Direct)
         QMS ->> QMS: validate registered concrete subject projection<br/>require configured-catalogue membership<br/>validate derivation + metric admission + quota.metadata<br/>snapshot accepted contract id/version
         QMS ->> SP: BEGIN tx + create_quota(ctx, quota)
-        Note over SP: 1. INSERT into `quotas` (server-assigned UUIDv7 quota_id, status='active')<br/>2. INSERT corresponding counter row(s) — `quota_allocation_counters` for allocation type, lazy `quota_consumption_counters` row created on first evaluate for consumption<br/>3. Enqueue quota-changed (change_kind='created') in outbox<br/>4. Append operation_log entry<br/>5. COMMIT
+        Note over SP: 1. INSERT into `quotas` (server-assigned UUIDv7 quota_id, status='active')<br/>2. INSERT corresponding counter row(s) — `quota_allocation_counters` for allocation type, lazy `quota_consumption_counters` row created by the first mutating operation for consumption<br/>3. Enqueue quota-changed (change_kind='created') in outbox<br/>4. Append operation_log entry<br/>5. COMMIT
         SP -->> QMS: QuotaId
         QMS -->> Op: 201 + Quota body
         opt metric mode is Direct
