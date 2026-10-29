@@ -33,6 +33,11 @@ pub mod precondition {
     /// Replacement or supersession cannot carry a binding. One violation per
     /// binding; its `description` names the grant.
     pub const BINDING_WITHOUT_SUCCESSOR: &str = "binding_without_successor";
+    /// The evidence that the imported evidence replaces is not in the store.
+    pub const REPLACED_EVIDENCE_MISSING: &str = "replaced_evidence_missing";
+    /// Other evidence already replaced the evidence that the imported evidence
+    /// replaces.
+    pub const EVIDENCE_ALREADY_REPLACED: &str = "evidence_already_replaced";
 }
 
 /// `field_violations[].reason` values of `InvalidArgument`.

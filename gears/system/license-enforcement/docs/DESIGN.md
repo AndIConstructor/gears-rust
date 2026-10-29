@@ -82,7 +82,7 @@ of its parent.
 | `cpt-cf-license-enforcement-fr-grant-conditions` | Conditions are constraints over the subject and resource `metadata` of the check. The evaluator defines their form (`cpt-cf-license-enforcement-adr-compile-time-evaluator`). Grant management validates them through the evaluator against the registered contract schema. A check evaluates them through the evaluator at a bounded cost. An absent attribute denies. |
 | `cpt-cf-license-enforcement-fr-type-references` | Write paths resolve every type id through types-registry: existence, derivation from the licensing base types, and admission by the resource contract. The check path compares the stored ids by their GTS derivation chain and never calls the registry (§3.1). |
 | `cpt-cf-license-enforcement-fr-grant-model` | One grant entity (§3.1) serves roots and sub-grants, so the check, the lifecycle, and delegation work on one shape. Each grant has one binding and at most one live child, and this keeps the count of licensed subjects a count of rows (I2, I3 in §3.1). |
-| `cpt-cf-license-enforcement-fr-admission-plugin` | Root grants come only from the admission boundary (`cpt-cf-license-enforcement-component-admission`), which hosts the one plugin that the binary links (`cpt-cf-license-enforcement-adr-compile-time-admission`). Evidence is the input from which the plugin admits root grants. An intake is a way for evidence to reach the plugin: `issue` takes grant parameters from an authorized caller, and `import` takes evidence bytes that the plugin parses. The boundary stores the evidence and the roots that it names in one transaction. It rejects evidence that is already admitted. The plugin rejects evidence that is older than the evidence that it replaces. The management API rejects a create operation for an intake that the plugin does not declare (§3.3). |
+| `cpt-cf-license-enforcement-fr-admission-plugin` | Root grants come only from the admission boundary (`cpt-cf-license-enforcement-component-admission`), which hosts the one plugin that the binary links (`cpt-cf-license-enforcement-adr-compile-time-admission`). Evidence is the input from which the plugin admits root grants. An intake is a way for evidence to reach the plugin: `issue` takes grant parameters from an authorized caller, and `import` takes evidence bytes that the plugin parses. The boundary stores the evidence and the roots that it names in one transaction. It rejects evidence that is already admitted, and evidence that replaces evidence that is not in the store or that other evidence already replaced. The plugin rejects evidence that is older than the evidence that it replaces. The management API rejects a create operation for an intake that the plugin does not declare (§3.3). |
 | `cpt-cf-license-enforcement-fr-grant-lifecycle` | A grant stores one of four states and changes it only through explicit operations of the grant service (`cpt-cf-license-enforcement-component-grant-service`, §3.1). Expiry, grace, and the end of grace are derived at evaluation from time. A descendant denies through the state of its root (`cpt-cf-license-enforcement-principle-derived-usability`). |
 | `cpt-cf-license-enforcement-fr-subject-binding` | A grant holds one binding: none, a subject, or a delegated sub-grant (§3.1). The bind and unbind operations of the grant service change it. A binding fixed at admission never changes (I8 in §3.1). |
 | `cpt-cf-license-enforcement-fr-delegation` | Delegation in the grant service creates one sub-grant per parent in one transaction, groups them as one delegation, and binds each parent to its child (§3.1, §3.6). The recipient must be a descendant as tenant-resolver reports it, and each sub-grant is a subset of its parent (I4 in §3.1). Return and recall reverse it. |
@@ -336,7 +336,8 @@ through, an optional replay key, an optional external id, and the evidence that 
 replay key, and the gear rejects a second evidence with the same key. For the `issue` intake, the replay key is the
 tenant and the idempotency token of the request. The external id is the id that the evidence carries, and the plugin
 reads it from the evidence. The plugin names the evidence that it replaces by the external id of that evidence. The
-gear finds it by this id and rejects the new evidence when there is none. These fields come from
+gear finds it by this id and rejects the new evidence when there is none, or when other evidence already replaced it.
+Thus each new evidence replaces the latest one, and a correction cannot skip an update. These fields come from
 `cpt-cf-license-enforcement-fr-admission-plugin` and `cpt-cf-license-enforcement-fr-signed-artifact`.
 
 **Audit event.** An audit event records one lifecycle transition, binding, delegation, import, or rejection at
@@ -614,10 +615,11 @@ candidate tenant as `tenant-resolver` returns it.
 
 - **Why**: The single entry through which root grants come to exist.
 - **Scope**: At init, finds the one `GrantAdmissionPluginV1` that the binary links, and does not start with zero or
-  more. Exposes the intakes that the plugin declares. Gives the plugin access to its `PluginMaterial` through
-  `ctx`. On admission, it:
-  - rejects evidence that is already admitted, and evidence that replaces evidence that the store does not hold. The
-    plugin rejects evidence that is older than the evidence that it replaces, for example by a version mark in its
+  more. Exposes the intakes that the plugin declares. Gives the plugin read access to its `PluginMaterial` through
+  `material`. On admission, it:
+  - rejects evidence that is already admitted, evidence that replaces evidence that the store does not hold, and
+    evidence that replaces evidence that other evidence already replaced. The plugin rejects evidence that is older
+    than the evidence that it replaces, for example by a version mark in its
     material.
   - rejects a root whose holder is not the tenant of `SecurityContext` or its descendant.
   - returns to the grant service the evidence, the roots that it names, and the plugin material, or the rejection
@@ -681,23 +683,25 @@ variants, and the resolver treats them as fail-closed. A denial is a decision, n
 
 - `intakes()` declares which of `issue` and `import` the plugin serves. `issue` takes grant and pack parameters from
   an authorized caller. `import` takes evidence bytes that the plugin parses.
-- `admit(input, ctx)` returns the evidence and the root grants that it names, with the holder tenant of each, its own
-  material to keep, or a typed rejection. A plugin can verify the input before it admits it.
-- `verify(root_id, evidence, ctx)` runs at each evaluation for the root of the selected candidate. The plugin finds
-  the root with this id in the evidence. If the evidence does not name this id exactly once, the plugin denies with
-  `duplicated`. The form of the arguments is a decision of the implementation. `verify` returns one of these:
+- `admit(input, instant, material)` returns the evidence and the root grants that it names, with the holder tenant of
+  each, its own material to keep, or a typed rejection. A plugin can verify the input before it admits it.
+- `verify(root_id, evidence, instant, material)` runs at each evaluation for the root of the selected candidate. The
+  plugin finds the root with this id in the evidence. If the evidence does not name this id exactly once, the plugin 
+  denies with `duplicated`. The form of the arguments is a decision of the implementation. `verify` returns one 
+  of these:
   - verified. A plugin that verifies its evidence adds the root fields from that evidence. A plugin with a trusted
     store adds no fields, and the check uses the stored fields.
   - a revocation state of the root: suspended or terminated.
-  - a denial reason.
-- `ctx` gives the plugin read access to its own `PluginMaterial`. `admit` and `verify` return the material to write,
-  and the gear writes it: for `admit`, in the transaction of the admission; for `verify`, after it returns, for example
-  the clock high-water mark (`cpt-cf-license-enforcement-fr-clock-defense`). A write can name the value that the key
-  must hold, and the gear applies it only then. On a mismatch, the admission fails as a conflict, and a write after
-  `verify` is dropped. Thus a mark or a version that the plugin raises from the value that it read never goes back
-  under concurrent checks or imports. A failed write after `verify` does not change the decision, and the gear logs
-  it. The plugin decides how it stores this material. The check path changes
-  no grant.
+  - a denial reason of the plugin: `signature_invalid`, `key_untrusted`, `stale`, `clock_rollback`, or `duplicated`.
+- `instant` is the time of the admission, or of the check, where it is the instant that the evaluator gets. The plugin
+  checks freshness and the clock mark against it and does not read the system clock.
+- `material` gives the plugin read access to its own `PluginMaterial`. `admit` and `verify` return the material to
+  write, and the gear writes it: for `admit`, in the transaction of the admission; for `verify`, after it returns, for 
+  example the clock high-water mark (`cpt-cf-license-enforcement-fr-clock-defense`). A write can name the value 
+  that the key must hold, and the gear applies it only then. On a mismatch, the admission fails as a conflict, 
+  and a write after `verify` is dropped. Thus a mark or a version that the plugin raises from the value that it read 
+  never goes back under concurrent checks or imports. A failed write after `verify` does not change the decision, 
+  and the gear logs it. The plugin decides how it stores this material. The check path changes no grant.
 - `health()`.
 
 The plugin is a separate crate that depends only on the SDK. It registers itself at link time. The trait version is
@@ -745,6 +749,7 @@ idempotency token and may carry `expected_version`. Verb availability per actor 
 | `AdmissionConflict`              | `aborted`             | a concurrent admission changed the plugin material that `admit` read. The caller retries the request with the same idempotency token.                                                                                                      |
 | `IdempotencyConflict`            | `already_exists`      | same token, different payload                                                                                                                                                                                                              |
 | `EvidenceRejected(reason)`       | `invalid_argument`    | plugin rejects: verification failure, replay, version regression                                                                                                                                                                           |
+| `EvidenceChainBroken`            | `failed_precondition` | the evidence that new evidence replaces is not in the store, or other evidence already replaced it                                                                                                                                         |
 | `EvaluationTimeout`              | `deadline_exceeded`   | the wall-clock guard of condition evaluation expires during a check or check-explain. The resolver fails closed. It is not a decision.                                                                                                     |
 | `IntakeNotServed`                | `unimplemented`       | the operation needs an intake that the linked plugin does not declare                                                                                                                                                                      |
 | `DependencyUnavailable`          | `service_unavailable` | PDP, registry, tenant-resolver, or store cannot answer. The module refuses the operation.                                                                                                                                                  |
@@ -799,7 +804,7 @@ sequenceDiagram
     end
     loop candidates that pass, until one passes verification
         C ->> AD: verify(root id, root evidence)
-        AD ->> V: verify(root id, root evidence, ctx)
+        AD ->> V: verify(root id, root evidence, instant, material)
         V -->> AD: verified (+ root fields) | revocation state | denial reason
         AD -->> C: result
         C ->> C: apply the verify result (§3.1, step 3)
@@ -891,7 +896,7 @@ sequenceDiagram
         G ->> TR: resolve types and contract schemas
         G ->> E: validate(conditions, schema)
         G ->> AD: admit(params)
-        AD ->> PL: admit(params, ctx)
+        AD ->> PL: admit(params, instant, material)
         PL -->> AD: evidence + roots
         AD -->> G: evidence + roots
         G ->> S: tx: evidence, pack, grants, idempotency, audit outbox
@@ -927,7 +932,7 @@ sequenceDiagram
     P -->> API: permit + constraints
     API ->> G: import(bytes)
     G ->> AD: admit(bytes)
-    AD ->> PL: admit(bytes, ctx)
+    AD ->> PL: admit(bytes, instant, material)
     PL -->> AD: evidence + roots | plugin material | rejection
     AD -->> G: result
     G ->> S: tx: evidence, roots, plugin material, supersession, idempotency, audit outbox (or the rejection)
@@ -954,7 +959,7 @@ the stored models and the fields that the design needs. It is not a complete sch
     Both indexes cover only grants that are not terminated, and include the end of the window.
 - **Packs.** Id, holder tenant, version.
 - **Evidence.** Id, plugin id, intake, the exact bytes that the plugin admitted, replay key, external id, replaced
-  evidence. The replay key and the external id are each unique per plugin.
+  evidence. The replay key, the external id, and the replaced evidence are each unique per plugin.
 - **Idempotency records.** Tenant and token as key, payload hash, stored response, expiry at the end of the
   idempotency window.
 - **Plugin material.** Plugin id and key as key, and a value that only the plugin interprets. The retention sweeper

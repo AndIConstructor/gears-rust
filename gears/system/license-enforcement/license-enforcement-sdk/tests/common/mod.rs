@@ -27,6 +27,7 @@ impl GrantAdmissionPluginV1 for StubPlugin {
     async fn admit(
         &self,
         _input: AdmissionInput,
+        _instant: OffsetDateTime,
         _material: &dyn PluginMaterial,
     ) -> Result<Admission, AdmissionError> {
         Ok(Admission::default())
@@ -36,6 +37,7 @@ impl GrantAdmissionPluginV1 for StubPlugin {
         &self,
         _root_id: GrantId,
         _evidence: &StoredEvidence,
+        _instant: OffsetDateTime,
         _material: &dyn PluginMaterial,
     ) -> Result<Verification, PluginFault> {
         Ok(Verification::new(VerifyOutcome::Verified(None)))

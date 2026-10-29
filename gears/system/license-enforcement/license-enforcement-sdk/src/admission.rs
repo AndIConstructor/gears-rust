@@ -8,6 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::ids::{EvidenceId, GrantId};
@@ -196,7 +197,10 @@ pub struct NewEvidence {
     /// this evidence by it in `replaces`.
     pub external_id: Option<String>,
     /// `external_id` of the evidence that this evidence replaces. The gear
-    /// finds that evidence by it and rejects this one when there is none.
+    /// finds that evidence by it and rejects this one when there is none
+    /// ([`REPLACED_EVIDENCE_MISSING`](crate::error::precondition::REPLACED_EVIDENCE_MISSING)),
+    /// or when other evidence already replaced it
+    /// ([`EVIDENCE_ALREADY_REPLACED`](crate::error::precondition::EVIDENCE_ALREADY_REPLACED)).
     pub replaces: Option<String>,
 }
 
@@ -368,7 +372,35 @@ pub enum VerifyOutcome {
     /// The root is revoked by the plugin's material.
     Revoked(RevocationState),
     /// Denied.
-    Denied(DenialReason),
+    Denied(PluginDenial),
+}
+
+/// Why [`GrantAdmissionPluginV1::verify`] denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PluginDenial {
+    /// The signature is missing, malformed, or fails.
+    SignatureInvalid,
+    /// The signing key is not trusted.
+    KeyUntrusted,
+    /// The evidence is past its freshness.
+    Stale,
+    /// The clock is behind a mark that the plugin keeps.
+    ClockRollback,
+    /// The evidence does not name the root exactly once.
+    Duplicated,
+}
+
+impl From<PluginDenial> for DenialReason {
+    fn from(denial: PluginDenial) -> Self {
+        match denial {
+            PluginDenial::SignatureInvalid => Self::SignatureInvalid,
+            PluginDenial::KeyUntrusted => Self::KeyUntrusted,
+            PluginDenial::Stale => Self::Stale,
+            PluginDenial::ClockRollback => Self::ClockRollback,
+            PluginDenial::Duplicated => Self::Duplicated,
+        }
+    }
 }
 
 /// What [`GrantAdmissionPluginV1::verify`] returns.
@@ -483,8 +515,9 @@ pub trait GrantAdmissionPluginV1: Send + Sync {
     /// The intakes that the plugin serves.
     fn intakes(&self) -> Intakes;
 
-    /// Admit evidence: return the evidence, the roots that it names, and the
-    /// material to keep.
+    /// Admit evidence at `instant`: return the evidence, the roots that it
+    /// names, and the material to keep. The plugin checks freshness and the
+    /// clock mark against `instant`, not against the system clock.
     ///
     /// # Errors
     ///
@@ -493,12 +526,15 @@ pub trait GrantAdmissionPluginV1: Send + Sync {
     async fn admit(
         &self,
         input: AdmissionInput,
+        instant: OffsetDateTime,
         material: &dyn PluginMaterial,
     ) -> Result<Admission, AdmissionError>;
 
-    /// Verify the root `root_id` at an evaluation. Called for the selected
-    /// candidate only. If `evidence` does not name `root_id` exactly once, the
-    /// outcome is [`VerifyOutcome::Denied`] with [`DenialReason::Duplicated`].
+    /// Verify the root `root_id` at the evaluation `instant`, the instant that
+    /// the evaluator gets. Called for the selected candidate only. The plugin
+    /// checks freshness and the clock mark against `instant`, not against the
+    /// system clock. If `evidence` does not name `root_id` exactly once, the
+    /// outcome is [`VerifyOutcome::Denied`] with [`PluginDenial::Duplicated`].
     ///
     /// # Errors
     ///
@@ -507,6 +543,7 @@ pub trait GrantAdmissionPluginV1: Send + Sync {
         &self,
         root_id: GrantId,
         evidence: &StoredEvidence,
+        instant: OffsetDateTime,
         material: &dyn PluginMaterial,
     ) -> Result<Verification, PluginFault>;
 

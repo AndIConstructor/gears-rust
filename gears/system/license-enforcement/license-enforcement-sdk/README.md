@@ -18,7 +18,7 @@ registration for the gear. Each verb on a grant, a pack, or a delegation is its 
 route, for example `bind_grant` is `POST /grants/{id}/bind`:
 
 ```json
-{ "subject": { "type": "gts.cf.core.lic.subj.v1~cf.core.lic.tenant.v1~", "id": "u1" },
+{ "subject": { "type": "gts.cf.core.lic.subj.v1~cf.core.lic.tenant.v1~", "id": "550e8400-e29b-41d4-a716-446655440000" },
   "idempotency_token": "8b1c…", "expected_version": 4 }
 ```
 

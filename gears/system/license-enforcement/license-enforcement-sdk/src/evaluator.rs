@@ -48,7 +48,44 @@ pub enum Evaluation {
     /// The candidate passes in its grace period.
     PassInGrace,
     /// The candidate fails.
-    Deny(DenialReason),
+    Deny(EvaluatorDenial),
+}
+
+/// Why [`GrantEvaluatorV1::evaluate`] denied a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EvaluatorDenial {
+    /// The root or the candidate awaits acceptance.
+    AwaitingAcceptance,
+    /// The root or the candidate is suspended.
+    Suspended,
+    /// The root or the candidate is terminated.
+    Terminated,
+    /// The window has not started.
+    NotYetValid,
+    /// The window ended and there is no grace period.
+    Expired,
+    /// The grace period ended.
+    GraceExpired,
+    /// A condition is false, or its attribute is absent.
+    ConditionUnmet,
+    /// Condition evaluation exceeded the per-check budget.
+    ConditionBudgetExceeded,
+}
+
+impl From<EvaluatorDenial> for DenialReason {
+    fn from(denial: EvaluatorDenial) -> Self {
+        match denial {
+            EvaluatorDenial::AwaitingAcceptance => Self::AwaitingAcceptance,
+            EvaluatorDenial::Suspended => Self::Suspended,
+            EvaluatorDenial::Terminated => Self::Terminated,
+            EvaluatorDenial::NotYetValid => Self::NotYetValid,
+            EvaluatorDenial::Expired => Self::Expired,
+            EvaluatorDenial::GraceExpired => Self::GraceExpired,
+            EvaluatorDenial::ConditionUnmet => Self::ConditionUnmet,
+            EvaluatorDenial::ConditionBudgetExceeded => Self::ConditionBudgetExceeded,
+        }
+    }
 }
 
 /// Rules cannot be evaluated.

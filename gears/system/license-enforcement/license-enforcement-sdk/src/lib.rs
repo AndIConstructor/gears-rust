@@ -28,13 +28,14 @@ pub mod rest;
 pub use admission::{
     Admission, AdmissionError, AdmissionInput, AdmissionPluginRegistration, AdmittedRoot,
     CallerIdentity, Expect, GrantAdmissionPluginV1, Intake, Intakes, MaterialError, MaterialWrite,
-    NewEvidence, PluginFault, PluginInfo, PluginMaterial, RejectionReason, RevocationState,
-    RootFields, StoredEvidence, Verification, VerifyOutcome, linked_admission_plugin,
+    NewEvidence, PluginDenial, PluginFault, PluginInfo, PluginMaterial, RejectionReason,
+    RevocationState, RootFields, StoredEvidence, Verification, VerifyOutcome,
+    linked_admission_plugin,
 };
 pub use contract::{LicenseEnforcementApi, license_enforcement_api_ir};
 pub use evaluator::{
-    BindingFilter, Evaluation, EvaluationError, EvaluatorRegistration, GrantEvaluatorV1,
-    linked_evaluator,
+    BindingFilter, Evaluation, EvaluationError, EvaluatorDenial, EvaluatorRegistration,
+    GrantEvaluatorV1, linked_evaluator,
 };
 pub use gts::{RecipientProjectionV1, RecipientStatus};
 pub use ids::{DelegationId, EvidenceId, GrantId, PackId};
