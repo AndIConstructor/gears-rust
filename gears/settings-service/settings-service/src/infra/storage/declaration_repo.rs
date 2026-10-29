@@ -25,7 +25,7 @@ use crate::infra::storage::declaration_odata_mapper::DeclarationODataMapper;
 use crate::infra::storage::entity::declaration::{self, Entity as DeclarationEntity};
 use crate::infra::storage::entity::tenant_permission;
 use crate::infra::storage::listing::list_counted;
-use crate::infra::storage::search_repo::{Dialect, SearchRepo};
+use crate::infra::storage::text_match::{Dialect, TextMatch};
 use crate::infra::storage::value_repo;
 use settings_service_sdk::odata::DeclarationFilterField;
 
@@ -588,7 +588,7 @@ impl DeclarationRepository for DeclarationRepo {
             } else {
                 Dialect::Sqlite
             };
-            let text = SearchRepo::with_dialect(dialect).declaration_text_matches(
+            let text = TextMatch::new(dialect).declaration_text_matches(
                 narrowing.needle,
                 narrowing.corpus,
                 visibility,

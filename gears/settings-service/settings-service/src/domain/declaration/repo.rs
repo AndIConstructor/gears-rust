@@ -17,7 +17,7 @@ use crate::domain::category::DomainVisibility;
 use crate::domain::declaration::kinds::{DataClassification, DeclarationStatus};
 use crate::domain::error::DomainError;
 use crate::domain::odata::Listing;
-use crate::domain::search::{Corpus, Needle};
+use crate::domain::search::needle::{Corpus, Needle};
 
 /// A declaration as the domain sees it.
 ///
