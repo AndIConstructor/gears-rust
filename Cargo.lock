@@ -3417,6 +3417,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-license-enforcement-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "cf-gears-license-resolver-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-contract",
+ "cf-gears-toolkit-gts",
+ "cf-gears-toolkit-http",
+ "cf-gears-toolkit-odata",
+ "cf-gears-toolkit-odata-macros",
+ "cf-gears-toolkit-security",
+ "gts",
+ "inventory",
+ "schemars 1.2.3",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "cf-gears-license-resolver"
 version = "0.1.7"
 dependencies = [
