@@ -11,8 +11,6 @@ use authn_resolver as _;
 use authz_resolver as _;
 #[cfg(feature = "credstore")]
 use credstore as _;
-#[cfg(feature = "durable-execution")]
-use durable_execution as _;
 #[cfg(all(feature = "file-parser", not(feature = "oop-example")))]
 use file_parser as _;
 #[cfg(feature = "file-storage")]
@@ -130,3 +128,14 @@ use policy_engine as _;
 
 #[cfg(feature = "bss-approvals")]
 use bss_approvals as _;
+
+#[cfg(feature = "bss-orders")]
+use bss_orders as _;
+// Orders' required Event Broker gear (and, through it, the cluster gear) plus the plugins its
+// standalone deployment selects.
+#[cfg(feature = "bss-orders")]
+use event_broker as _;
+#[cfg(feature = "bss-orders")]
+use sqlite_event_broker_plugin as _;
+#[cfg(feature = "bss-orders")]
+use standalone_cluster_plugin as _;

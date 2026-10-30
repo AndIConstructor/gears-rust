@@ -179,8 +179,11 @@ fn database_section() -> Value {
 }
 
 /// A context over `section` (the whole `gears.oagw` value) and `hub`, with the
-/// handle the runtime's DB phase would attach, if any.
+/// handle the runtime's DB phase would attach, if any. Also installs the
+/// crypto provider the runtime bootstrap would have (`init` builds the
+/// upstream engine, whose TLS config fails closed without one under `fips`).
 fn context(section: Value, db: Option<Db>, hub: Arc<ClientHub>) -> GearCtx {
+    crate::domain::test_support::ensure_crypto_provider();
     let ctx = GearCtx::new(
         OutboundApiGatewayGear::MODULE_NAME,
         Uuid::new_v4(),
@@ -234,6 +237,21 @@ async fn without_database_config_init_keeps_memory_storage_and_warns() {
     let ctx = context(json!({ "config": {} }), None, wired_hub());
     init(&ctx).await.expect("init without a database");
     logs_assert(assert_warned_once_about_memory);
+}
+
+/// `AuthZ` is a consumed contract, wired after `init` (locally or remotely), so
+/// `init` must not look it up.
+#[tokio::test]
+async fn init_does_not_need_authz_in_the_hub() {
+    let hub = Arc::new(ClientHub::new());
+    hub.register::<dyn TenantResolverClient>(Arc::new(MockTenantResolverClient::single_tenant()));
+    hub.register::<dyn CredStoreClientV1>(Arc::new(MockCredStoreClient::empty()));
+    hub.register::<dyn TypesRegistryClient>(Arc::new(AcceptingTypesRegistry(
+        MockTypesRegistryClient::new(),
+    )));
+    init(&context(json!({ "config": {} }), None, hub))
+        .await
+        .expect("init without AuthZ in the hub");
 }
 
 /// ADR-0018: PERS-BOOT-002.

@@ -51,17 +51,16 @@ env:
   # label needs repo rights we don't assume. Changing this string orphans any
   # currently-open issue (it would be left open and a new one filed).
   SHEAR_ISSUE_TITLE: 'Unused deps (nightly) failed'
-  # sccache release installed by mozilla-actions/sccache-action. Without a
-  # `version` the action queries the GitHub releases API on every job, which
-  # exhausted the installation rate limit during a Dependabot burst (2026-10-14).
-  # Dependabot does not track this value: bump it by hand, together with every
-  # other workflow that sets it (`grep -rn SCCACHE_VERSION .github/workflows`).
-  SCCACHE_VERSION: v0.18.0
 
 jobs:
   shear:
     name: Unused Deps (cargo-shear)
     runs-on: ubuntu-latest
+    # sccache S3 keys: read-write on main, read-only elsewhere. See .github/actions/sccache.
+    # No environment until the S3_BUCKET variable is set, so the job runs without one.
+    environment:
+      name: ${{ vars.S3_BUCKET != '' && (github.ref == 'refs/heads/main' && 'ci-cache-write' || 'ci-cache-read') || '' }}
+      deployment: false
     # Measured ~57m. Generous headroom on purpose: a false timeout costs the
     # only signal of the day and stays invisible for another 24h, while an
     # over-long cap on a genuinely hung job costs runner minutes once.
@@ -83,7 +82,7 @@ jobs:
           persist-credentials: false
 
       - name: Install protoc
-        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: protoc@3.34.1
 
@@ -96,31 +95,26 @@ jobs:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}
 
       - name: Cache Cargo/target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-bin: false
           cache-targets: false
           shared-key: nightly-${{ runner.os }}-${{ env.RUSTUP_TOOLCHAIN_NIGHTLY }}-shear
 
-      - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      # Only main writes to the cache. See .github/actions/sccache.
+      - name: Set up sccache
+        uses: ./.github/actions/sccache
         with:
-          version: ${{ env.SCCACHE_VERSION }}
-
-      - name: Probe sccache & set RUSTC_WRAPPER
-        shell: bash
-        run: |
-          if sccache --start-server >/dev/null 2>&1; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          else
-            echo "sccache failed, falling back to plain rustc"
-          fi
+          s3-endpoint: ${{ vars.S3_ENDPOINT }}
+          s3-region: ${{ vars.S3_REGION }}
+          s3-bucket: ${{ vars.S3_BUCKET }}
+          s3-access-key-id: ${{ secrets.S3_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.S3_SECRET_ACCESS_KEY }}
 
       # Keep this version in sync with SHEAR_VERSION in gears-rust.mk, so a local
       # `make shear` and this job reach the same verdict.
       - name: Install cargo-shear
-        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-shear@1.13.1
 
