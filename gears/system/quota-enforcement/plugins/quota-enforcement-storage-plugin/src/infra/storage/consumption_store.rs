@@ -44,7 +44,7 @@ use super::repo::{
 };
 use crate::domain::ports::Actor;
 use crate::infra::outbox::{
-    AttemptWakes, EnqueueError, NotificationEnqueuer, NotificationOutbox, SettleWakes,
+    AttemptWakes, EnqueueError, NotificationEnqueuer, NotificationOutbox, settling,
 };
 
 const LOG_TARGET: &str = "qe.storage";
@@ -1635,16 +1635,17 @@ impl crate::domain::ports::ConsumptionStore for SqlConsumptionStore {
                 let scope = scope.clone();
                 let events = events.to_vec();
                 let mutation = OwnedMutation::of(mutation);
-                self.db
-                    .transaction_ref_mapped(move |tx| {
+                settling(
+                    wakes,
+                    self.db.transaction_ref_mapped(move |tx| {
                         Box::pin(async move {
                             Self::debit_in_tx(
                                 tx, &scope, &mutation, &events, &actor, &clock, &enqueuer,
                             )
                             .await
                         })
-                    })
-                    .settling(wakes)
+                    }),
+                )
             })
             .await;
             match result {
@@ -1714,8 +1715,9 @@ impl crate::domain::ports::ConsumptionStore for SqlConsumptionStore {
                 let scope = scope.clone();
                 let events = events.to_vec();
                 let idempotency = idempotency.clone();
-                self.db
-                    .transaction_ref_mapped(move |tx| {
+                settling(
+                    wakes,
+                    self.db.transaction_ref_mapped(move |tx| {
                         Box::pin(async move {
                             let scope = &scope;
                             let events: &[NotificationEvent] = &events;
@@ -1872,8 +1874,8 @@ impl crate::domain::ports::ConsumptionStore for SqlConsumptionStore {
                                 expires_at,
                             }))
                         })
-                    })
-                    .settling(wakes)
+                    }),
+                )
             })
             .await;
             match result {
@@ -1954,8 +1956,9 @@ impl crate::domain::ports::ConsumptionStore for SqlConsumptionStore {
                 let idempotency = idempotency.clone();
                 let target = target.clone();
                 let discovered = discovered.clone();
-                self.db
-                    .transaction_ref_mapped(move |tx| {
+                settling(
+                    wakes,
+                    self.db.transaction_ref_mapped(move |tx| {
                         Box::pin(async move {
                             let env = RollbackEnv {
                                 actor: &actor,
@@ -1973,8 +1976,8 @@ impl crate::domain::ports::ConsumptionStore for SqlConsumptionStore {
                             )
                             .await
                         })
-                    })
-                    .settling(wakes)
+                    }),
+                )
             })
             .await;
             match result {
