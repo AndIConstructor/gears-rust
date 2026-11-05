@@ -15,6 +15,15 @@ pub struct PooledToken {
 }
 
 impl PooledToken {
+    /// The first 12 hex digits of the token's SHA-256; `None` without a token.
+    pub fn label(&self) -> Option<&str> {
+        self.fingerprint.as_ref().map(TokenFingerprint::short)
+    }
+
+    pub fn is_dropped(&self) -> bool {
+        self.dropped.load(Ordering::Acquire)
+    }
+
     /// Take this token out of the pool after GitHub answered `401` to it, so
     /// the request can be retried with another token. `false` for the entry
     /// without a token, whose `401` stays an error.
@@ -77,11 +86,7 @@ impl TokenPool {
 
     pub async fn pick(&self, graphql: bool) -> Option<&PooledToken> {
         let mut picked: Option<(&PooledToken, (u8, i64))> = None;
-        for pooled in self
-            .tokens
-            .iter()
-            .filter(|pooled| !pooled.dropped.load(Ordering::Acquire))
-        {
+        for pooled in self.tokens.iter().filter(|pooled| !pooled.is_dropped()) {
             let rank = rank(pooled.controller.readiness(graphql).await);
             if picked.is_none_or(|(_, best)| rank < best) {
                 picked = Some((pooled, rank));

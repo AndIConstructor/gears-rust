@@ -219,6 +219,23 @@ pub fn register_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Rou
 /// Split from [`register_routes`] only to stay under the 200-line cap; the two
 /// halves are one registration pass.
 fn register_session_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
+    router = OperationBuilder::get("/github-mirror/v1/rate-limit")
+        .operation_id("github_mirror.v1.get_rate_limit")
+        .summary("Each pool token's GitHub quota, per rate-limit resource")
+        .tag(API_TAG)
+        .authenticated()
+        .require_license_features::<License>([])
+        .handler(handlers::get_rate_limit)
+        .json_response_with_schema::<dto::RateLimitDto>(
+            openapi,
+            StatusCode::OK,
+            "One entry per token and GitHub resource",
+        )
+        .error_401(openapi)
+        .error_403(openapi)
+        .error_500(openapi)
+        .register(router, openapi);
+
     router = OperationBuilder::get("/github-mirror/v1/sessions")
         .operation_id("github_mirror.v1.list_sync_sessions")
         .summary("List sync sessions, newest first")

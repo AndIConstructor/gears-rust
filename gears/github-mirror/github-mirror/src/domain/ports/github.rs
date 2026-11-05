@@ -64,6 +64,8 @@ impl ForceMode {
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RateLimitQuota {
+    /// The first 12 hex digits of the token's SHA-256; `None` without a token.
+    pub token: Option<String>,
     /// `core`, `graphql`, `search`, and whatever else GitHub lists.
     pub resource: String,
     pub limit: u64,

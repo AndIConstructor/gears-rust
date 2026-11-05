@@ -29,10 +29,11 @@ use super::dto::{
     AuthenticatedUserDto, BranchDto, CacheClearedDto, CheckRunDto, CheckRunsPageDto, CommentDto,
     CommitCommentDto, CommitDto, CommitFileDto, CommitStatsDto, CommitStatusDto, ContributorDto,
     DeploymentDto, GithubMirrorHealthDto, IssueDto, IssueEventDto, IssueReactionDto,
-    IssueTimelineEventDto, LabelDto, MilestoneDto, PullRequestDto, PullRequestFileDto, ReleaseDto,
-    RepoDto, RepoSyncStatusDto, ResumeAcceptedDto, ResumeFailureDto, ReviewCommentDto, ReviewDto,
-    ReviewThreadDto, SyncAcceptedDto, SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto,
-    WorkflowRunDto, WorkflowRunsPageDto,
+    IssueTimelineEventDto, LabelDto, MilestoneDto, PullRequestDto, PullRequestFileDto,
+    RateLimitDto, RateLimitQuotaDto, ReleaseDto, RepoDto, RepoSyncStatusDto, ResumeAcceptedDto,
+    ResumeFailureDto, ReviewCommentDto, ReviewDto, ReviewThreadDto, SyncAcceptedDto,
+    SyncSessionDto, TagDto, WorkflowJobDto, WorkflowJobsPageDto, WorkflowRunDto,
+    WorkflowRunsPageDto,
 };
 
 const DEFAULT_PER_PAGE: u64 = 30;
@@ -991,6 +992,17 @@ pub async fn get_sync_session(
 ) -> ApiResult<JsonBody<SyncSessionDto>> {
     let session = svc.get_session(&ctx, id).await?;
     Ok(Json(SyncSessionDto::from(session)))
+}
+
+/// The quota of every token in the pool, per GitHub rate-limit resource.
+pub async fn get_rate_limit(
+    Extension(ctx): Extension<SecurityContext>,
+    Extension(svc): Extension<Arc<ConcreteService>>,
+) -> ApiResult<JsonBody<RateLimitDto>> {
+    let quotas = svc.rate_limit(&ctx).await?;
+    Ok(Json(RateLimitDto {
+        quotas: quotas.into_iter().map(RateLimitQuotaDto::from).collect(),
+    }))
 }
 
 /// List the caller's sync sessions, with `OData` filtering and paging.

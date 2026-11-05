@@ -533,6 +533,72 @@ impl GithubClient {
             .map_err(|_| DomainError::internal("the GitHub client already has a token source"))
     }
 
+    /// `pooled`'s quotas, or `None` when the token is out of the pool or GitHub
+    /// answers `401` to it, which drops it.
+    async fn token_rate_limit(
+        &self,
+        pooled: &PooledToken,
+    ) -> Result<Option<Vec<RateLimitQuota>>, DomainError> {
+        if pooled.is_dropped() {
+            return Ok(None);
+        }
+        let url = format!("{}/rate_limit", self.api_base_url.trim_end_matches('/'));
+        let mut request = self
+            .http
+            .get(&url)
+            .header("Accept", ACCEPT_JSON)
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
+        if let Some(token) = &pooled.token {
+            request = request.bearer_auth(token.expose());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| DomainError::internal(format!("GET /rate_limit failed: {e}")))?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && pooled.drop_from_pool() {
+            return Ok(None);
+        }
+        let body: serde_json::Value = response
+            .error_for_status()
+            .map_err(|e| DomainError::internal(format!("GET /rate_limit failed: {e}")))?
+            .json()
+            .await
+            .map_err(|e| DomainError::internal(format!("GET /rate_limit decode failed: {e}")))?;
+        let resources = body
+            .get("resources")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| DomainError::internal("GET /rate_limit answered without resources"))?;
+        let mut quotas: Vec<RateLimitQuota> = resources
+            .iter()
+            .map(|(resource, pool)| RateLimitQuota {
+                token: pooled.label().map(str::to_owned),
+                resource: resource.clone(),
+                limit: pool
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                remaining: pool
+                    .get("remaining")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                used: pool
+                    .get("used")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                reset_at: pool
+                    .get("reset")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|secs| Utc.timestamp_opt(secs, 0).single()),
+            })
+            .collect();
+        quotas.sort_by_key(|quota| match quota.resource.as_str() {
+            "core" => (0, String::new()),
+            "graphql" => (1, String::new()),
+            other => (2, other.to_owned()),
+        });
+        Ok(Some(quotas))
+    }
+
     async fn pool(&self) -> Result<&TokenPool, DomainError> {
         self.pool
             .get_or_try_init(|| async {
@@ -3558,54 +3624,19 @@ impl GithubPort for GithubClient {
     }
 
     async fn rate_limit(&self) -> Result<Vec<RateLimitQuota>, DomainError> {
-        let url = format!("{}/rate_limit", self.api_base_url.trim_end_matches('/'));
-        let mut request = self
-            .http
-            .get(&url)
-            .header("Accept", ACCEPT_JSON)
-            .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
-        if let Some(token) = &self.pool().await?.first().token {
-            request = request.bearer_auth(token.expose());
+        let mut quotas = Vec::new();
+        let mut answered = false;
+        for pooled in self.pool().await?.iter() {
+            if let Some(token_quotas) = self.token_rate_limit(pooled).await? {
+                answered = true;
+                quotas.extend(token_quotas);
+            }
         }
-        let body: serde_json::Value = request
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|e| DomainError::internal(format!("GET /rate_limit failed: {e}")))?
-            .json()
-            .await
-            .map_err(|e| DomainError::internal(format!("GET /rate_limit decode failed: {e}")))?;
-        let resources = body
-            .get("resources")
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| DomainError::internal("GET /rate_limit answered without resources"))?;
-        let mut quotas: Vec<RateLimitQuota> = resources
-            .iter()
-            .map(|(resource, pool)| RateLimitQuota {
-                resource: resource.clone(),
-                limit: pool
-                    .get("limit")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                remaining: pool
-                    .get("remaining")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                used: pool
-                    .get("used")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                reset_at: pool
-                    .get("reset")
-                    .and_then(serde_json::Value::as_i64)
-                    .and_then(|secs| Utc.timestamp_opt(secs, 0).single()),
-            })
-            .collect();
-        quotas.sort_by_key(|quota| match quota.resource.as_str() {
-            "core" => (0, String::new()),
-            "graphql" => (1, String::new()),
-            other => (2, other.to_owned()),
-        });
+        if !answered {
+            return Err(DomainError::AccessLost(
+                "GitHub answered 401 Unauthorized to every token in the pool".to_owned(),
+            ));
+        }
         Ok(quotas)
     }
 }

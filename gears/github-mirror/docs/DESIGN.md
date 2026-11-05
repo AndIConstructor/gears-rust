@@ -276,6 +276,7 @@ Response store with compression and a content hash, in `gm_http_cache` or, with 
 | `POST /sync/resume` | Re-queue repositories still `in_progress` (optionally one, `?repo=owner/name`) |
 | `GET /sessions`, `GET /sessions/{id}` | Session list and one session: status, progress, error, summary |
 | `GET /sync-status` | Per-repository run status; filter `status=in_progress\|complete` |
+| `GET /rate-limit` | Each pool token's GitHub quota (REST, GraphQL and the other resources), named by the first 12 hex digits of the token's SHA-256 |
 | `DELETE /cache` | Clear the caller's cached responses for `?owner=` or `?repo=owner/name`; shared public-repository entries stay, and a sync with `force=true` re-fetches them |
 | `GET /repos` | Mirrored repositories |
 | `GET /repos/{owner}/{name}/commits/{sha}/files`, `GET /repos/{owner}/{name}/pulls/{number}/threads` | Data GitHub's REST paths do not serve in this shape |
