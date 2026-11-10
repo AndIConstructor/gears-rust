@@ -33,8 +33,7 @@ use crate::infra::github::compression::MAX_BODY_BYTES;
 use crate::infra::github::metrics::{GithubRequestMetrics, Outcome};
 use crate::infra::github::pagination::parse_link_next;
 use crate::infra::github::rate_limit::{
-    AuthoritativeQuota, ControllerRegistry, PooledToken, QuotaProbe, RateLimitController,
-    RateLimitHeaders, TokenPool,
+    AuthoritativeQuota, ControllerRegistry, PooledToken, QuotaProbe, RateLimitHeaders, TokenPool,
 };
 use crate::redact::redacted_word;
 
@@ -639,12 +638,23 @@ impl GithubClient {
     async fn admit(
         &self,
         api: GithubApi,
-        telemetry: &SessionTelemetry,
-        cancel: &CancellationToken,
+        options: &FetchOptions,
     ) -> Result<(Admission<'_>, SemaphorePermit<'_>), DomainError> {
+        let telemetry = &options.telemetry;
+        let cancel = &options.cancel;
         let pool = self.pool().await?;
         loop {
-            let Some(pooled) = pool.pick(api == GithubApi::Graphql).await else {
+            let picked = pool
+                .pick(
+                    api == GithubApi::Graphql,
+                    options.public_repo.get().copied(),
+                    &options.token_access,
+                )
+                .await;
+            let Some(pooled) = picked else {
+                if pool.iter().any(|pooled| !pooled.is_dropped()) {
+                    return Err(DomainError::NotFound);
+                }
                 return Err(DomainError::AccessLost(
                     "GitHub answered 401 Unauthorized to every token in the pool".to_owned(),
                 ));
@@ -738,20 +748,108 @@ impl GithubClient {
     /// Feed a response's rate-limit headers to the token's controller.
     async fn observe(
         &self,
-        controller: &RateLimitController,
+        pooled: &PooledToken,
         headers: &reqwest::header::HeaderMap,
         status: reqwest::StatusCode,
     ) -> RateLimitHeaders {
+        pooled.note_scopes(
+            headers
+                .get("x-oauth-scopes")
+                .and_then(|value| value.to_str().ok()),
+        );
         let mut seen = RateLimitHeaders::parse(
             headers
                 .iter()
                 .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v))),
         );
         seen.is_secondary_rate_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
-        controller
+        pooled
+            .controller
             .observe(&seen, status.as_u16(), self.max_cap)
             .await;
         seen
+    }
+
+    /// After a `404` on `url`: whether GitHub hides the repository from
+    /// `pooled` and another token is left to retry with. A `404` on a public
+    /// repository, or from a token already shown it, is a real one. For a URL
+    /// below the repository, the token is asked for the repository itself,
+    /// so a deleted issue does not count a token out.
+    async fn should_retry_not_found(
+        &self,
+        url: &str,
+        pooled: &PooledToken,
+        options: &FetchOptions,
+    ) -> bool {
+        let Some(label) = pooled.label() else {
+            return false;
+        };
+        let access = &options.token_access;
+        if options.public_repo.get() == Some(&true) || access.sees(label) == Some(true) {
+            return false;
+        }
+        let Some(repo_url) = self.repo_url(url) else {
+            return false;
+        };
+        if repo_url != url.split('?').next().unwrap_or(url).trim_end_matches('/') {
+            match self.repo_visible_to_token(&repo_url, pooled).await {
+                Some(true) => {
+                    access.shown(label);
+                    return false;
+                }
+                Some(false) => {}
+                None => return false,
+            }
+        }
+        if access.hidden(label) {
+            tracing::warn!(
+                token = label,
+                "GitHub answered 404 to a pool token for a repository it may not see; \
+                 this run leaves the token out for that repository"
+            );
+        }
+        self.pool.get().is_some_and(|pool| {
+            pool.iter().any(|other| {
+                !other.is_dropped()
+                    && other
+                        .label()
+                        .is_some_and(|other| access.sees(other) != Some(false))
+            })
+        })
+    }
+
+    /// `{api}/repos/{owner}/{name}` for a URL on that repository.
+    fn repo_url(&self, url: &str) -> Option<String> {
+        let parsed = url::Url::parse(url).ok()?;
+        let mut segments = parsed.path_segments()?;
+        segments.by_ref().find(|segment| *segment == "repos")?;
+        let owner = segments.next()?;
+        let name = segments.next()?;
+        Some(format!(
+            "{}/repos/{owner}/{name}",
+            self.api_base_url.trim_end_matches('/')
+        ))
+    }
+
+    /// Whether GitHub shows the repository at `repo_url` to `pooled`; `None`
+    /// when it gives no clear answer.
+    async fn repo_visible_to_token(&self, repo_url: &str, pooled: &PooledToken) -> Option<bool> {
+        let mut request = self
+            .http
+            .get(repo_url)
+            .header("Accept", ACCEPT_JSON)
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
+        if let Some(token) = &pooled.token {
+            request = request.bearer_auth(token.expose());
+        }
+        let status = request.send().await.ok()?.status();
+        if status.is_success() {
+            Some(true)
+        } else if status == reqwest::StatusCode::NOT_FOUND {
+            Some(false)
+        } else {
+            None
+        }
     }
 
     /// Sleep before retrying a limit that gave the controller nothing to park
@@ -910,9 +1008,7 @@ impl GithubClient {
         // A retry gives them up first: a request asleep on a backoff is not
         // in flight.
         let (body, etag, last_modified, next_page, _admission, _permit, mut line) = loop {
-            let (admission, permit) = self
-                .admit(GithubApi::Rest, &options.telemetry, &options.cancel)
-                .await?;
+            let (admission, permit) = self.admit(GithubApi::Rest, options).await?;
             let (outcome, took) = self
                 .send(
                     self.conditional_request(url, cached.as_ref(), admission.pooled.token.as_ref()),
@@ -938,7 +1034,7 @@ impl GithubClient {
 
             let status = response.status();
             let seen = self
-                .observe(&admission.pooled.controller, response.headers(), status)
+                .observe(admission.pooled, response.headers(), status)
                 .await;
             if status == reqwest::StatusCode::UNAUTHORIZED && admission.pooled.drop_from_pool() {
                 self.count(
@@ -952,6 +1048,28 @@ impl GithubClient {
                 drop(permit);
                 drop(admission);
                 continue;
+            }
+            if status == reqwest::StatusCode::NOT_FOUND
+                && self
+                    .should_retry_not_found(url, admission.pooled, options)
+                    .await
+            {
+                self.count(
+                    &options.telemetry,
+                    &sent,
+                    status.as_u16(),
+                    Outcome::Failed,
+                    took,
+                    &seen,
+                );
+                drop(permit);
+                drop(admission);
+                continue;
+            }
+            if (status.is_success() || status == reqwest::StatusCode::NOT_MODIFIED)
+                && let Some(label) = admission.pooled.label()
+            {
+                options.token_access.shown(label);
             }
             if status.is_server_error() && upstream_attempt < UPSTREAM_RETRIES {
                 self.count(
@@ -1259,7 +1377,7 @@ impl GithubClient {
         // GraphQL shares the REST ceilings: both spend the same token's
         // budget, though the controller only reads the core budget headers.
         let (body, _admission, _permit, mut line) = loop {
-            let (admission, permit) = self.admit(GithubApi::Graphql, telemetry, cancel).await?;
+            let (admission, permit) = self.admit(GithubApi::Graphql, options).await?;
             if let Some(wait) = admission.pooled.controller.graphql_wait().await {
                 drop(permit);
                 drop(admission);
@@ -1293,7 +1411,7 @@ impl GithubClient {
 
             let status = response.status();
             let seen = self
-                .observe(&admission.pooled.controller, response.headers(), status)
+                .observe(admission.pooled, response.headers(), status)
                 .await;
             if status == reqwest::StatusCode::UNAUTHORIZED && admission.pooled.drop_from_pool() {
                 self.count(

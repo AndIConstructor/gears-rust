@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use strum::IntoEnumIterator;
 
@@ -93,9 +93,44 @@ pub struct FetchOptions {
     pub cancel: CancellationToken,
     pub telemetry: Arc<SessionTelemetry>,
     pub public_repo: Arc<OnceLock<bool>>,
+    /// Which pool tokens this run saw the repository shown to or hidden from.
+    pub token_access: Arc<RepoTokenAccess>,
     /// Tasks in flight inside this run, when the caller narrows the gear's
     /// `max_concurrent_tasks` for it.
     pub max_concurrent_tasks: Option<std::num::NonZeroUsize>,
+}
+
+/// What one run learned about which pool tokens can see its repository, by
+/// token label. It starts empty for every run, since access changes between
+/// runs: a token can be given or refused a private repository at any time.
+#[domain_model]
+#[derive(Debug, Default)]
+pub struct RepoTokenAccess {
+    seen: Mutex<HashMap<String, bool>>,
+}
+
+impl RepoTokenAccess {
+    /// `Some(true)` once GitHub showed the repository to `token`,
+    /// `Some(false)` once it answered `404` for it, `None` before either.
+    #[must_use]
+    pub fn sees(&self, token: &str) -> Option<bool> {
+        self.lock().get(token).copied()
+    }
+
+    pub fn shown(&self, token: &str) {
+        if self.sees(token) != Some(true) {
+            self.lock().insert(token.to_owned(), true);
+        }
+    }
+
+    /// `true` the first time, so the caller logs the token once.
+    pub fn hidden(&self, token: &str) -> bool {
+        self.lock().insert(token.to_owned(), false) != Some(false)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, bool>> {
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// A top-level listing the sync can reconcile deletions for.

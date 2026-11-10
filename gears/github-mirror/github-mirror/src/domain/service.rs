@@ -4723,6 +4723,7 @@ impl Service {
             cancel: cancel.clone(),
             telemetry: Arc::clone(telemetry),
             public_repo: Arc::default(),
+            token_access: Arc::default(),
             max_concurrent_tasks: job.max_concurrent_tasks,
         };
         let stop_beating = CancellationToken::new();
@@ -5054,6 +5055,7 @@ impl Service {
             FetchOptions {
                 cancel: cancel.clone(),
                 public_repo: Arc::default(),
+                token_access: Arc::default(),
                 ..options.clone()
             },
         ));

@@ -1,17 +1,19 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use toolkit_utils::SecretString;
 use tracing::warn;
 
 use super::controller::{RateLimitController, Readiness};
 use super::registry::{ControllerRegistry, TokenFingerprint};
+use crate::domain::ports::github::RepoTokenAccess;
 
 pub struct PooledToken {
     pub token: Option<SecretString>,
     pub controller: Arc<RateLimitController>,
     fingerprint: Option<TokenFingerprint>,
     dropped: AtomicBool,
+    scopes: OnceLock<Option<Vec<String>>>,
 }
 
 impl PooledToken {
@@ -22,6 +24,31 @@ impl PooledToken {
 
     pub fn is_dropped(&self) -> bool {
         self.dropped.load(Ordering::Acquire)
+    }
+
+    /// Keep the scopes from the token's first answer: a classic token lists
+    /// them in `X-OAuth-Scopes`, a fine-grained or app token sends no such
+    /// header, and its access is only learned from a repository's answers.
+    pub fn note_scopes(&self, header: Option<&str>) {
+        if self.fingerprint.is_none() {
+            return;
+        }
+        self.scopes.get_or_init(|| {
+            header.map(|header| {
+                header
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|scope| !scope.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+        });
+    }
+
+    /// `false` only for a classic token whose scopes are known and lack
+    /// `repo`, the scope a private repository needs.
+    pub fn may_read_private(&self) -> bool {
+        !matches!(self.scopes.get(), Some(Some(scopes)) if !scopes.iter().any(|scope| scope == "repo"))
     }
 
     /// Take this token out of the pool after GitHub answered `401` to it, so
@@ -55,6 +82,7 @@ impl TokenPool {
                     controller: Arc::new(RateLimitController::new()),
                     fingerprint: None,
                     dropped: AtomicBool::new(false),
+                    scopes: OnceLock::new(),
                 }],
             };
         }
@@ -69,6 +97,7 @@ impl TokenPool {
                         controller,
                         fingerprint: Some(fingerprint),
                         dropped: AtomicBool::new(false),
+                        scopes: OnceLock::new(),
                     }
                 })
                 .collect(),
@@ -84,9 +113,43 @@ impl TokenPool {
         self.tokens.iter()
     }
 
-    pub async fn pick(&self, graphql: bool) -> Option<&PooledToken> {
+    /// The token for the next request on a repository that is `public`
+    /// (`None` before the run knows). Tokens GitHub hid the repository from
+    /// are left out. On a repository that may be private it prefers tokens
+    /// whose scopes allow it, and for GraphQL, which answers a hidden
+    /// repository with a partial `null` rather than `404`, tokens already
+    /// shown the repository; when no token fits, it falls back to the rest.
+    pub async fn pick(
+        &self,
+        graphql: bool,
+        public: Option<bool>,
+        access: &RepoTokenAccess,
+    ) -> Option<&PooledToken> {
+        let open: Vec<&PooledToken> = self
+            .tokens
+            .iter()
+            .filter(|pooled| !pooled.is_dropped())
+            .filter(|pooled| {
+                pooled
+                    .label()
+                    .is_none_or(|label| access.sees(label) != Some(false))
+            })
+            .collect();
+        let fitting: Vec<&PooledToken> = open
+            .iter()
+            .copied()
+            .filter(|pooled| public != Some(false) || pooled.may_read_private())
+            .filter(|pooled| {
+                !graphql
+                    || public == Some(true)
+                    || pooled
+                        .label()
+                        .is_none_or(|label| access.sees(label) == Some(true))
+            })
+            .collect();
+        let candidates = if fitting.is_empty() { open } else { fitting };
         let mut picked: Option<(&PooledToken, (u8, i64))> = None;
-        for pooled in self.tokens.iter().filter(|pooled| !pooled.is_dropped()) {
+        for pooled in candidates {
             let rank = rank(pooled.controller.readiness(graphql).await);
             if picked.is_none_or(|(_, best)| rank < best) {
                 picked = Some((pooled, rank));
