@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use toolkit_security::AccessScope;
@@ -270,11 +270,11 @@ fn fallback_delay(attempt: u32) -> std::time::Duration {
 
 /// Releases the token's in-flight slot when dropped, so an admitted request
 /// counts against its controller exactly as long as it is in flight.
-struct Admission<'a> {
-    pooled: &'a PooledToken,
+struct Admission {
+    pooled: Arc<PooledToken>,
 }
 
-impl Drop for Admission<'_> {
+impl Drop for Admission {
     fn drop(&mut self) {
         self.pooled.controller.release();
     }
@@ -398,8 +398,15 @@ pub(crate) trait TokenSource: Send + Sync {
     -> Result<Vec<SecretString>, DomainError>;
 }
 
-fn token_pool(http: &reqwest::Client, api_base_url: &str, tokens: Vec<SecretString>) -> TokenPool {
-    let pool = TokenPool::new(tokens, &ControllerRegistry::new());
+type TenantPools = HashMap<Option<uuid::Uuid>, Arc<tokio::sync::OnceCell<Arc<TokenPool>>>>;
+
+fn token_pool(
+    http: &reqwest::Client,
+    api_base_url: &str,
+    registry: &ControllerRegistry,
+    tokens: Vec<SecretString>,
+) -> TokenPool {
+    let pool = TokenPool::new(tokens, registry);
     for pooled in pool.iter() {
         pooled.controller.set_quota_probe(Arc::new(RateLimitProbe {
             http: http.clone(),
@@ -430,7 +437,9 @@ pub struct GithubClient {
     http: reqwest::Client,
     api_base_url: String,
     api_origin: url::Origin,
-    pool: tokio::sync::OnceCell<TokenPool>,
+    tokens: Vec<SecretString>,
+    pools: Mutex<TenantPools>,
+    registry: ControllerRegistry,
     token_source: OnceLock<Arc<dyn TokenSource>>,
     cache: Arc<dyn HttpCache>,
     /// Ceiling on requests in flight, shared by every sync using this client.
@@ -503,16 +512,13 @@ impl GithubClient {
                 redacted_word(&api_base_url)
             )));
         }
-        let pool = if tokens.is_empty() {
-            tokio::sync::OnceCell::new()
-        } else {
-            tokio::sync::OnceCell::new_with(Some(token_pool(&http, &api_base_url, tokens)))
-        };
         Ok(Self {
             http,
             api_base_url,
             api_origin,
-            pool,
+            tokens,
+            pools: Mutex::default(),
+            registry: ControllerRegistry::new(),
             token_source: OnceLock::new(),
             cache,
             permits: Semaphore::new(DEFAULT_MAX_CONCURRENT_REQUESTS),
@@ -599,16 +605,28 @@ impl GithubClient {
         Ok(Some(quotas))
     }
 
-    async fn pool(&self) -> Result<&TokenPool, DomainError> {
-        self.pool
-            .get_or_try_init(|| async {
-                let tokens = match self.token_source.get() {
-                    Some(source) => source.tokens(None).await?,
-                    None => Vec::new(),
-                };
-                Ok(token_pool(&self.http, &self.api_base_url, tokens))
-            })
-            .await
+    async fn pool(&self, tenant_id: Option<uuid::Uuid>) -> Result<Arc<TokenPool>, DomainError> {
+        let cell = Arc::clone(
+            self.pools
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(tenant_id)
+                .or_default(),
+        );
+        cell.get_or_try_init(|| async {
+            let tokens = match self.token_source.get() {
+                Some(source) => source.tokens(tenant_id).await?,
+                None => self.tokens.clone(),
+            };
+            Ok(Arc::new(token_pool(
+                &self.http,
+                &self.api_base_url,
+                &self.registry,
+                tokens,
+            )))
+        })
+        .await
+        .map(Arc::clone)
     }
 
     #[must_use]
@@ -640,10 +658,10 @@ impl GithubClient {
         &self,
         api: GithubApi,
         options: &FetchOptions,
-    ) -> Result<(Admission<'_>, SemaphorePermit<'_>), DomainError> {
+    ) -> Result<(Admission, SemaphorePermit<'_>), DomainError> {
         let telemetry = &options.telemetry;
         let cancel = &options.cancel;
-        let pool = self.pool().await?;
+        let pool = self.pool(Some(options.tenant_id)).await?;
         loop {
             let picked = pool
                 .pick(
@@ -671,7 +689,9 @@ impl GithubClient {
                 }
                 () = cancel.cancelled() => return Err(DomainError::Cancelled),
             }
-            let admission = Admission { pooled };
+            let admission = Admission {
+                pooled: Arc::clone(&pooled),
+            };
             let permit = tokio::select! {
                 permit = self.permits.acquire() => permit
                     .map_err(|e| DomainError::internal(format!("request semaphore closed: {e}")))?,
@@ -809,7 +829,7 @@ impl GithubClient {
                  this run leaves the token out for that repository"
             );
         }
-        self.pool.get().is_some_and(|pool| {
+        self.pool(Some(options.tenant_id)).await.is_ok_and(|pool| {
             pool.iter().any(|other| {
                 !other.is_dropped()
                     && other
@@ -1035,7 +1055,7 @@ impl GithubClient {
 
             let status = response.status();
             let seen = self
-                .observe(admission.pooled, response.headers(), status)
+                .observe(&admission.pooled, response.headers(), status)
                 .await;
             if status == reqwest::StatusCode::UNAUTHORIZED && admission.pooled.drop_from_pool() {
                 self.count(
@@ -1052,7 +1072,7 @@ impl GithubClient {
             }
             if status == reqwest::StatusCode::NOT_FOUND
                 && self
-                    .should_retry_not_found(url, admission.pooled, options)
+                    .should_retry_not_found(url, &admission.pooled, options)
                     .await
             {
                 self.count(
@@ -1412,7 +1432,7 @@ impl GithubClient {
 
             let status = response.status();
             let seen = self
-                .observe(admission.pooled, response.headers(), status)
+                .observe(&admission.pooled, response.headers(), status)
                 .await;
             if status == reqwest::StatusCode::UNAUTHORIZED && admission.pooled.drop_from_pool() {
                 self.count(
@@ -1488,7 +1508,7 @@ impl GithubClient {
                 GraphqlRead::Unread(e) => return Err(ReadFailure::Transport(e).into_error()),
                 GraphqlRead::RateLimited { delay, .. } if attempt < RATE_LIMIT_RETRIES => {
                     report_graphql_budget(attempt, delay);
-                    let pooled = admission.pooled;
+                    let pooled = Arc::clone(&admission.pooled);
                     drop(permit);
                     drop(admission);
                     pooled.controller.hold_graphql(delay).await;
@@ -3849,7 +3869,7 @@ impl GithubPort for GithubClient {
     async fn rate_limit(&self) -> Result<Vec<RateLimitQuota>, DomainError> {
         let mut quotas = Vec::new();
         let mut answered = false;
-        for pooled in self.pool().await?.iter() {
+        for pooled in self.pool(None).await?.iter() {
             if let Some(token_quotas) = self.token_rate_limit(pooled).await? {
                 answered = true;
                 quotas.extend(token_quotas);

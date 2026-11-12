@@ -69,7 +69,7 @@ impl PooledToken {
 }
 
 pub struct TokenPool {
-    tokens: Vec<PooledToken>,
+    tokens: Vec<Arc<PooledToken>>,
 }
 
 impl TokenPool {
@@ -77,13 +77,13 @@ impl TokenPool {
     pub fn new(tokens: Vec<SecretString>, registry: &ControllerRegistry) -> Self {
         if tokens.is_empty() {
             return Self {
-                tokens: vec![PooledToken {
+                tokens: vec![Arc::new(PooledToken {
                     token: None,
                     controller: Arc::new(RateLimitController::new()),
                     fingerprint: None,
                     dropped: AtomicBool::new(false),
                     scopes: OnceLock::new(),
-                }],
+                })],
             };
         }
         Self {
@@ -92,13 +92,13 @@ impl TokenPool {
                 .map(|token| {
                     let fingerprint = TokenFingerprint::of(token.expose());
                     let controller = registry.get_or_insert(fingerprint.clone());
-                    PooledToken {
+                    Arc::new(PooledToken {
                         token: Some(token),
                         controller,
                         fingerprint: Some(fingerprint),
                         dropped: AtomicBool::new(false),
                         scopes: OnceLock::new(),
-                    }
+                    })
                 })
                 .collect(),
         }
@@ -110,7 +110,7 @@ impl TokenPool {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &PooledToken> {
-        self.tokens.iter()
+        self.tokens.iter().map(Arc::as_ref)
     }
 
     /// The token for the next request on a repository that is `public`
@@ -124,8 +124,8 @@ impl TokenPool {
         graphql: bool,
         public: Option<bool>,
         access: &RepoTokenAccess,
-    ) -> Option<&PooledToken> {
-        let open: Vec<&PooledToken> = self
+    ) -> Option<Arc<PooledToken>> {
+        let open: Vec<&Arc<PooledToken>> = self
             .tokens
             .iter()
             .filter(|pooled| !pooled.is_dropped())
@@ -135,7 +135,7 @@ impl TokenPool {
                     .is_none_or(|label| access.sees(label) != Some(false))
             })
             .collect();
-        let fitting: Vec<&PooledToken> = open
+        let fitting: Vec<&Arc<PooledToken>> = open
             .iter()
             .copied()
             .filter(|pooled| public != Some(false) || pooled.may_read_private())
@@ -148,18 +148,20 @@ impl TokenPool {
             })
             .collect();
         let candidates = if fitting.is_empty() { open } else { fitting };
-        let mut picked: Option<(&PooledToken, (u8, i64))> = None;
+        let mut picked: Option<(&Arc<PooledToken>, Rank)> = None;
         for pooled in candidates {
             let rank = rank(pooled.controller.readiness(graphql).await);
             if picked.is_none_or(|(_, best)| rank < best) {
                 picked = Some((pooled, rank));
             }
         }
-        picked.map(|(pooled, _)| pooled)
+        picked.map(|(pooled, _)| Arc::clone(pooled))
     }
 }
 
-fn rank(readiness: Readiness) -> (u8, i64) {
+type Rank = (u8, i64);
+
+fn rank(readiness: Readiness) -> Rank {
     match readiness {
         Readiness::Now(spare) => (0, -i64::from(spare)),
         Readiness::Later(Some(at)) => (1, at.timestamp_millis()),

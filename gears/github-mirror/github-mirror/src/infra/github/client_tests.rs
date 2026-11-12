@@ -96,7 +96,7 @@ async fn a_backoff_set_while_a_request_waits_for_its_permit_holds_that_request_b
         ..RateLimitHeaders::default()
     };
     client
-        .pool()
+        .pool(Some(options.tenant_id))
         .await
         .expect("the pool exists once admit has run")
         .first()
