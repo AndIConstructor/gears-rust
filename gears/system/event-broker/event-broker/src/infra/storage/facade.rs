@@ -38,7 +38,7 @@ use crate::domain::error::{DomainError, ErrorCode};
 use crate::domain::idempotency::{IdempotencyGuard, ProducerIdempotencyOutcome, PublishEnqueue};
 use crate::domain::ingest::{
     ProducerCursors, ProducerMode, ProducerRecord, ProducerRegistration, ProducerRegistry,
-    ProducerTopicCursors,
+    ProducerTopicCursors, SyncTrace,
 };
 use crate::domain::model::{ConsumerGroup, ConsumerGroupKind, Cursor};
 use crate::domain::producer_reset::ProducerResetScope;
@@ -209,9 +209,9 @@ impl Storage {
 
     fn cache(&self) -> Result<&ClusterCacheV1, DomainError> {
         if self.cache.get().is_none() {
-            // Same reason the publish path logs its refusal: without a line
-            // here, a request served in the startup window leaves no server-
-            // side trace of why it was turned away.
+            // Logged here as well as where a request's error becomes a `503`:
+            // the background consumer-group sweeper reaches `cache()` too, and
+            // this line names the startup window whichever caller hit it.
             tracing::warn!("request refused: the cluster cache is not wired yet");
         }
         self.cache
@@ -489,9 +489,9 @@ impl Storage {
         // conditions for the caller, so they are reported as an unavailable
         // storage path rather than an internal failure.
         let Some(outbox) = self.outbox.get() else {
-            // Worth a line even though the caller gets a `503`: this is the
-            // one refusal that means the instance was advertised before it
-            // could serve, and it is otherwise invisible from the server side.
+            // Its own line although the `503` mapping logs the same reason:
+            // this is the one refusal that means the instance was advertised
+            // before it could serve, so it reads as such in the log.
             tracing::warn!("publish refused: the ingest outbox pipeline is not running yet");
             return Err(DomainError::StorageUnavailable {
                 reason: "the ingest outbox pipeline is not running yet".to_owned(),
@@ -728,14 +728,14 @@ impl RoutingMarkers for Storage {
 }
 
 impl SyncWaitRegistry for Storage {
-    fn subscribe(&self, trace: Uuid) -> Box<dyn SyncWait> {
+    fn subscribe(&self, trace: SyncTrace) -> Box<dyn SyncWait> {
         // The ingest outbox owns the trace machinery. If it is not wired yet
         // the publish's own `check_and_enqueue` fails with a `503` before the
         // wait is ever awaited, so an unsubscribed waiter is only ever dropped.
         let subscription = self
             .outbox
             .get()
-            .and_then(|outbox| outbox.subscribe(&trace.to_string()).ok());
+            .and_then(|outbox| outbox.subscribe(&trace.id().to_string()).ok());
         Box::new(TraceWaiter { subscription })
     }
 }

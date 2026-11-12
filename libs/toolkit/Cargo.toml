@@ -1,6 +1,6 @@
 [package]
 name = "cf-gears-toolkit"
-version = "0.12.1"
+version = "0.13.1"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -18,10 +18,17 @@ name = "toolkit"
 [lints]
 workspace = true
 
+# `toolkit-http` is never named in code: the `fips` feature enables it only to
+# forward `toolkit-http/fips`.
+[package.metadata.cargo-shear]
+ignored = ["toolkit-http"]
+
 [features]
 # Enable the runner and the runtime integration by default.
 default = ["otel", "db"]
 coverage_nightly = []
+# Fixture helpers for downstream gear tests; enable only in dev-dependencies.
+test-support = []
 # Use the facade's per-OS policy for TLS and application primitives.
 fips = ["toolkit-security/fips", "dep:toolkit-http", "toolkit-http/fips"]
 

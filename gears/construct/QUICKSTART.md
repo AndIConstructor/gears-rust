@@ -18,6 +18,7 @@ Record intake for connectors and the profile read for applications and agents. A
 - `GET /construct/v1/subjects/{subject_id}/export`: all of a subject's data in the caller's tenant as a JSON attachment, for the data protection officer
 - `POST` and `GET /construct/v1/subjects/{subject_id}/review-requests`: the subject flags one of its facts as incorrect (`{fact_id, comment}`) and lists its requests; a fact under an open request is not served to applications and agents, and no record or agent changes it
 - `GET /construct/v1/admin/review-requests` and `POST …/admin/review-requests/{request_id}/resolution`: a reviewer lists the tenant's open requests and resolves one as `rejected` (with a `reason`), `deleted`, or `corrected` (with `property` and `value`); a correction needs `processing.run_without_sensitive_data_checks`, like record processing
+- `GET` and `POST /construct/v1/admin/subjects/{subject_id}/facts`, `PUT` and `DELETE …/facts/{fact_id}`: a tenant administrator reads a subject's facts and adds (`{property, value}`), edits (`{property, value}`, the fact's own property) or deletes one; an edit or a delete of a fact under review closes its request; an add and an edit need `processing.run_without_sensitive_data_checks`, like a correction
 - Construct declares its permissions as GTS permission instances: send records, read profiles, manage facts, read or change one's own personalization settings, read, delete or flag one's own facts, resolve review requests, and export a subject's data. The tenant grants each in its policy engine
 
 Full API documentation: <http://127.0.0.1:8087/cf/docs>
@@ -26,65 +27,23 @@ The example server uses the gateway prefix `/cf`. This comes from `gears.api-gat
 
 ## Run it locally
 
-The gear is in this repository under `gears/construct`, and it is not built into the example server. To try it on your machine, link it into the example server for a local run, without committing the change.
+The gear is in this repository under `gears/construct`. The example server links it with its graph storage and the single-user plugins, and `config/quickstart.yaml` already holds their configuration.
 
-1. In `apps/cf-gears-example-server/Cargo.toml`, add the dependency and the feature:
-
-   ```toml
-   construct = ["dep:construct"]
-   ```
-
-   ```toml
-   construct = { package = "cf-gears-construct", path = "../../gears/construct/construct", optional = true }
-   ```
-
-2. In `apps/cf-gears-example-server/src/registered_gears.rs`, link the crate:
-
-   ```rust
-   #[cfg(feature = "construct")]
-   use construct as _;
-   ```
-
-3. Construct needs graph storage, which needs PostgreSQL 16 or later with the `vector` extension. For a local run, start one in Docker:
+1. Construct needs graph storage, which needs PostgreSQL 16 or later with the `vector` extension (pgvector 0.8 or later). Start one in Docker:
 
    ```bash
    docker run -d --name graph-storage-pg -e POSTGRES_PASSWORD=graph -e POSTGRES_DB=graph_storage -p 5432:5432 pgvector/pgvector:pg17
    ```
 
-4. In `config/quickstart.yaml`, under `database.servers:`, add the PostgreSQL server:
-
-   ```yaml
-   pg_graph:
-     engine: "postgres"
-     host: "localhost"
-     port: 5432
-     user: "postgres"
-     password: "graph"
-   ```
-
-   and under `gears:`, add graph storage's and the gear's sections:
-
-   ```yaml
-   graph-storage:
-     database:
-       server: "pg_graph"
-       dbname: "graph_storage"
-     config:
-       embedding_dimension: 384
-       embedding_provider: fake  # local run only; see graph storage's README for onnx or remote
-   construct:
-     database:
-       server: "sqlite_users"
-       file: "construct.db"
-   ```
-
-   The `fake` provider needs no model files. Its vectors rank nothing, which is fine here: Construct reads and writes facts by key and does not search by vector.
-
-5. Start the server:
+2. Start the server:
 
    ```bash
-   cargo run --bin cf-gears-example-server --no-default-features --features construct,graph-storage,static-tenants,static-authn,static-authz -- --config config/quickstart.yaml run
+   make run GEAR=construct
    ```
+
+   The first build compiles the whole workspace and takes a while.
+
+The config sets up `pg_graph` under `database.servers`, a `graph-storage` section with `embedding_provider: fake`, and a `construct` section, so the DSN above is the one the gear reads. The `fake` provider needs no model files. Its vectors rank nothing, which is fine here: Construct reads and writes facts by key and does not search by vector.
 
 The log shows `Applying migration gear="construct"` for `initial_001`, `m002_subject_settings`, `m003_record_ids`, `m004_record_ids_key_only` and `m005_review_requests`, after graph storage's own migrations. The types registry is part of every example server, so the record types are there.
 
@@ -120,7 +79,7 @@ gears:
       profile_category_check: per_category   # required with processing_identity; one_call only for a policy plugin that answers with category constraints
 ```
 
-The model is called through OAGW, so a server with a `model` needs OAGW too: in the example server, add `oagw` to the features of the start command above (`--features construct,graph-storage,oagw,...`). Without it every model call fails as unavailable (`no OAGW client in ClientHub`), and no record is processed.
+The model is called through OAGW, so a server with a `model` needs OAGW too: in the example server, add `oagw` to the features: `make run GEAR=construct GEAR_SERVER_EXTRA_FEATURES_construct=oagw`. Without it every model call fails as unavailable (`no OAGW client in ClientHub`), and no record is processed.
 
 An unknown key, a value in `connectors_off`, `processing_identity` or `trusted_connectors` that is not a UUID, a zero queue capacity, worker count, model round count or token count in `processing` (zero reruns is allowed), a queue capacity above 100000, more than 256 workers, more than 10 reruns, more than 64 model rounds, more than 1000000 tokens per record, a model call timeout under 1 second or above 600 seconds, the nil UUID as `processing_identity`, a processing identity without `profile_category_check` or `profile_category_check` without a processing identity, an entity kind that is not one of identity, role, skill or preference, a confidence floor outside 0 to 1, a step cap outside 1 to 10000, a value cap outside 1 to 100000, a model upstream alias that is not 1 to 63 letters, digits, `-` or `_`, starting with a letter or digit, or a model name that is not 1 to 128 printable characters with no space, stops the gear from starting. The processing identity needs graph storage's read, write, delete and type registration permissions, and the settings read, in every tenant.
 

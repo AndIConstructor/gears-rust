@@ -18,7 +18,7 @@ use toolkit::api::canonical_prelude::CanonicalError;
 use toolkit_security::{PlatformSecurityContext, SecurityContext};
 use uuid::Uuid;
 
-use super::pipeline::assemble;
+use super::pipeline::{MANAGE_BUDGET, assemble};
 use crate::config::{CategoryCheckConfig, ConstructConfig};
 use crate::domain::model_client::{
     ModelClient, ModelError, ModelOutput, ModelRequest, ModelResponse, ToolCall, Usage,
@@ -193,6 +193,32 @@ async fn a_record_is_planned_checked_admitted_written_read_back_and_deleted_by_i
 }
 
 /// A model whose call panics; it counts its calls.
+#[tokio::test]
+async fn manage_facts_gets_the_manage_budget() {
+    let db = inmem_db().await;
+    let cfg = ConstructConfig {
+        processing_identity: Some(Uuid::new_v4()),
+        processing: unchecked_processing(),
+        profile_category_check: Some(CategoryCheckConfig::OneCall),
+        ..ConstructConfig::default()
+    }
+    .validated()
+    .unwrap();
+
+    let pipeline = assemble(
+        &cfg,
+        Some(adds_a_skill()),
+        fake_graph_storage(),
+        Arc::new(settings_service(&db, Arc::new(AllowResolver), true)),
+        Arc::new(crate::test_support::MemoryReviews::default()),
+        PolicyEnforcer::new(Arc::new(AllowResolver)),
+    )
+    .expect("the pipeline assembles");
+
+    assert!(pipeline.worker.is_some(), "processing is wired");
+    assert_eq!(pipeline.manage.budget, MANAGE_BUDGET);
+}
+
 #[derive(Default)]
 struct Panics(std::sync::atomic::AtomicUsize);
 
@@ -631,5 +657,58 @@ async fn a_correction_needs_the_opt_in_to_store_values_unchecked() {
     assert!(
         with.is_ok(),
         "with the opt-in it runs; the fact is not in graph storage, so it closes as deleted: {with:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_administrators_add_needs_the_opt_in_to_store_values_unchecked() {
+    use crate::domain::error::DomainError;
+
+    let db = inmem_db().await;
+    let add = |unchecked: bool| {
+        let db = db.clone();
+        async move {
+            let cfg = ConstructConfig {
+                processing_identity: Some(Uuid::new_v4()),
+                processing: crate::config::ProcessingConfig {
+                    run_without_sensitive_data_checks: unchecked,
+                    ..crate::config::ProcessingConfig::default()
+                },
+                profile_category_check: Some(CategoryCheckConfig::OneCall),
+                ..ConstructConfig::default()
+            }
+            .validated()
+            .unwrap();
+            let pipeline = assemble(
+                &cfg,
+                None,
+                fake_graph_storage(),
+                Arc::new(settings_service(&db, Arc::new(AllowResolver), true)),
+                Arc::new(crate::test_support::MemoryReviews::default()),
+                PolicyEnforcer::new(Arc::new(AllowResolver)),
+            )
+            .unwrap();
+            pipeline
+                .admin_facts
+                .add(
+                    &crate::test_support::context_of(Uuid::new_v4(), Uuid::new_v4()),
+                    Uuid::new_v4(),
+                    "skills",
+                    &json!({ "name": "Go" }),
+                )
+                .await
+        }
+    };
+
+    let without = add(false).await;
+    let with = add(true).await;
+
+    assert!(
+        matches!(without, Err(DomainError::NotConfigured(_))),
+        "{without:?}"
+    );
+    assert!(
+        !matches!(with, Err(DomainError::NotConfigured(_))),
+        "with the opt-in the add runs: {with:?}"
     );
 }

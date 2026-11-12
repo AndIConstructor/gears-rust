@@ -9,7 +9,7 @@ use std::time::Duration;
 use axum::extract::Request;
 use axum::response::Response;
 use toolkit::api::canonical_prelude::CanonicalError;
-use toolkit::directory::{DirectoryClient, DirectoryNotFound};
+use toolkit::directory::DirectoryClient;
 use toolkit_canonical_errors::Http;
 use toolkit_http_proxy::{ProxyClient, ProxyClientConfig};
 
@@ -22,10 +22,11 @@ use crate::config::MAX_REQUEST_BODY_BYTES;
 /// duration. It also bounds the wait for the *response head*, so it must sit
 /// above the two things a dispatched route can legitimately hold before its
 /// first byte: the consumer SDK's ~50s stream self-heal window
-/// (`DESIGN.md:1825`) and - sending nothing until it resolves - a synchronous
-/// `Prefer: wait=N` publish, capped at
-/// `config::checks::MAX_CLUSTER_INGEST_WAIT_SECS` (60s) on a `cluster_ingest`
-/// upstream. 90s keeps a ~30s margin over that cap for the enqueue and response.
+/// (`DESIGN.md:1825`) - the binding constraint - and - sending nothing until it
+/// resolves - a synchronous `Prefer: wait=N` publish, capped at
+/// `config::checks::MAX_PUBLISH_WAIT_SECS` (20s) on an ingest upstream. 90s
+/// clears the self-heal window with margin, and the publish cap sits well under
+/// it.
 const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Bound on the TCP connect to a resolved instance. Unlike the idle-read
@@ -133,10 +134,10 @@ impl Role {
 }
 
 /// Resolves an instance of `role` via `DirectoryService` and forwards `req`
-/// to it. Both failure cases (no instance registered, resolved instance
-/// unreachable, or the directory itself unavailable) construct a
-/// `CanonicalError::ServiceUnavailable` with a distinguishing `detail`
-/// (design.md D10) - no retry in either path.
+/// to it. Every failure (no instance registered, the directory itself
+/// unavailable, or the resolved instance unreachable) answers the generic
+/// `CanonicalError::ServiceUnavailable` body; which one it was, with the role
+/// and the underlying error, goes to a `warn` log line - no retry in any path.
 ///
 /// # Errors
 /// Returns `CanonicalError::ServiceUnavailable` when no `role` instance is
@@ -159,17 +160,7 @@ pub async fn forward(
         .await
         .map_err(|err| {
             tracing::warn!(error = %err, gear = name, "directory resolution failed");
-            if err.downcast_ref::<DirectoryNotFound>().is_some() {
-                CanonicalError::service_unavailable()
-                    .with_detail(format!("no {name} instance registered"))
-                    .create()
-            } else {
-                CanonicalError::service_unavailable()
-                    .with_detail(format!(
-                        "service discovery unavailable for {name} instances"
-                    ))
-                    .create()
-            }
+            CanonicalError::service_unavailable().create()
         })?;
 
     proxy_client::proxy(
@@ -188,9 +179,7 @@ pub async fn forward(
                     .with_override(Http::status_code(413))
                     .create()
             }
-            _ => CanonicalError::service_unavailable()
-                .with_detail(format!("resolved {name} instance unreachable"))
-                .create(),
+            _ => CanonicalError::service_unavailable().create(),
         }
     })
 }
