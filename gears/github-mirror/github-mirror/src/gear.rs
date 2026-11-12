@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use async_trait::async_trait;
@@ -50,31 +51,52 @@ const SERVICE_SUBJECT_TYPE: &str = toolkit_gts::gts_id!("cf.core.security.subjec
 struct CredstoreTokens {
     credstore: Arc<dyn CredStoreClientV1>,
     secrets: Vec<(GithubTokenSecret, SecretRef)>,
+    tenant_secrets: HashMap<Uuid, Vec<(GithubTokenSecret, SecretRef)>>,
 }
 
 impl CredstoreTokens {
-    fn new(ctx: &GearCtx, secrets: Vec<GithubTokenSecret>) -> anyhow::Result<Self> {
+    fn new(
+        ctx: &GearCtx,
+        secrets: Vec<GithubTokenSecret>,
+        tenant_secrets: HashMap<Uuid, Vec<GithubTokenSecret>>,
+    ) -> anyhow::Result<Self> {
         let credstore = ctx
             .client_hub()
             .get::<dyn CredStoreClientV1>()
             .map_err(|e| anyhow::anyhow!("failed to get the credential store: {e}"))?;
-        let secrets = secrets
+        let tenant_secrets = tenant_secrets
             .into_iter()
-            .map(|secret| {
-                let key = SecretRef::new(secret.key.clone())
-                    .map_err(|e| anyhow::anyhow!("invalid github_token_secret key: {e}"))?;
-                Ok((secret, key))
-            })
+            .map(|(tenant_id, secrets)| Ok((tenant_id, secret_refs(secrets)?)))
             .collect::<anyhow::Result<_>>()?;
-        Ok(Self { credstore, secrets })
+        Ok(Self {
+            credstore,
+            secrets: secret_refs(secrets)?,
+            tenant_secrets,
+        })
     }
+}
+
+fn secret_refs(
+    secrets: Vec<GithubTokenSecret>,
+) -> anyhow::Result<Vec<(GithubTokenSecret, SecretRef)>> {
+    secrets
+        .into_iter()
+        .map(|secret| {
+            let key = SecretRef::new(secret.key.clone())
+                .map_err(|e| anyhow::anyhow!("invalid github_token_secret key: {e}"))?;
+            Ok((secret, key))
+        })
+        .collect()
 }
 
 #[async_trait]
 impl TokenSource for CredstoreTokens {
-    async fn tokens(&self) -> Result<Vec<SecretString>, DomainError> {
+    async fn tokens(&self, tenant_id: Option<Uuid>) -> Result<Vec<SecretString>, DomainError> {
+        let secrets = tenant_id
+            .and_then(|tenant_id| self.tenant_secrets.get(&tenant_id))
+            .unwrap_or(&self.secrets);
         let mut tokens = Vec::new();
-        for (secret, key) in &self.secrets {
+        for (secret, key) in secrets {
             tokens.extend(
                 github_token(self.credstore.as_ref(), secret, key)
                     .await
@@ -191,10 +213,17 @@ impl Gear for GithubMirrorGear {
         };
         let client = GithubClient::with_cache(cfg.api_base_url.clone(), None, http_cache)?
             .with_max_concurrent_requests(cfg.max_concurrent_requests);
-        if !cfg.github_token_secret.is_empty() {
+        let tenant_secrets: HashMap<Uuid, Vec<GithubTokenSecret>> = cfg
+            .tenants
+            .iter()
+            .filter(|(_, tenant)| !tenant.github_token_secret.is_empty())
+            .map(|(tenant_id, tenant)| (*tenant_id, tenant.github_token_secret.clone()))
+            .collect();
+        if !cfg.github_token_secret.is_empty() || !tenant_secrets.is_empty() {
             client.set_token_source(Arc::new(CredstoreTokens::new(
                 ctx,
                 cfg.github_token_secret,
+                tenant_secrets,
             )?))?;
         }
         let github: Arc<dyn GithubPort> = Arc::new(client);

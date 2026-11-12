@@ -74,6 +74,8 @@ pub struct GithubMirrorConfig {
 pub struct TenantConfig {
     #[serde(default)]
     pub cache_max_age_days: Option<NonZeroU64>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub github_token_secret: Vec<GithubTokenSecret>,
 }
 
 /// Repositories synced at once when the config says nothing: enough to keep
@@ -171,10 +173,12 @@ impl GithubMirrorConfig {
         }
         // A token would travel in cleartext over plain `http`. Loopback is
         // allowed so a local mock server still works without TLS.
-        if parsed.scheme() == "http"
-            && !self.github_token_secret.is_empty()
-            && !is_loopback(&parsed)
-        {
+        let any_token = !self.github_token_secret.is_empty()
+            || self
+                .tenants
+                .values()
+                .any(|tenant| !tenant.github_token_secret.is_empty());
+        if parsed.scheme() == "http" && any_token && !is_loopback(&parsed) {
             return Err(crate::domain::error::DomainError::Validation {
                 field: "api_base_url".to_owned(),
                 message: format!(

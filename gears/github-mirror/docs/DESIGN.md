@@ -588,6 +588,7 @@ Configuration (`config` of the gear):
 | `cache_max_age_days` | none; cached responses are kept until cleared |
 | `cache_dir` | none; cached responses go to `gm_http_cache` |
 | `tenants.<tenant_id>.cache_max_age_days` | `cache_max_age_days` |
+| `tenants.<tenant_id>.github_token_secret` | the gear-wide `github_token_secret` |
 
 At the start of each sync the gear deletes the syncing tenant's `gm_http_cache` rows whose `fetched_at` is older than that tenant's `cache_max_age_days`, and the shared public-repository rows older than the gear-wide `cache_max_age_days`. A `304` does not rewrite a row, so `fetched_at` is the time of the last `200`. A delete that fails is logged and the sync goes on.
 

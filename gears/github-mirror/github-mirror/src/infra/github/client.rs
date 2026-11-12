@@ -394,7 +394,8 @@ fn cache_partition(options: &FetchOptions) -> (AccessScope, uuid::Uuid) {
 /// Where the client gets its GitHub tokens the first time it needs them.
 #[async_trait]
 pub(crate) trait TokenSource: Send + Sync {
-    async fn tokens(&self) -> Result<Vec<SecretString>, DomainError>;
+    async fn tokens(&self, tenant_id: Option<uuid::Uuid>)
+    -> Result<Vec<SecretString>, DomainError>;
 }
 
 fn token_pool(http: &reqwest::Client, api_base_url: &str, tokens: Vec<SecretString>) -> TokenPool {
@@ -602,7 +603,7 @@ impl GithubClient {
         self.pool
             .get_or_try_init(|| async {
                 let tokens = match self.token_source.get() {
-                    Some(source) => source.tokens().await?,
+                    Some(source) => source.tokens(None).await?,
                     None => Vec::new(),
                 };
                 Ok(token_pool(&self.http, &self.api_base_url, tokens))
